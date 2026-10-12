@@ -1,0 +1,30 @@
+{
+  "name": "@sip/viewer-app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Vite + React SPA: browse pivot cases, run recordings, the triage queue, and run-set comparisons.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/viewer-core": "workspace:*",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@sip/contracts": "workspace:*",
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
+    "@vitejs/plugin-react": "6.1.0",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}

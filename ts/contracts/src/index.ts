@@ -7,7 +7,7 @@
  * decoding, encoding, canonical formatting and pure readings of the format (a
  * call key's Call-ID, a document's step order, a cell's main error); a contract
  * question is answered by the Rust file the module doc names, never by this
- * package. The report formats (`CompareReport`) are owned here and published
+ * package. The report formats (`CompareReport`, `RunReport`) are owned here and published
  * as JSON Schema with a `schema_version`.
  *
  * The mirrors ship as namespaces because the formats deliberately reuse names —
@@ -41,6 +41,7 @@ export * as MustFail from "./must-fail.js"
 export * as Pivot from "./pivot.js"
 export * as Placement from "./placement.js"
 export * as Postcondition from "./postcondition.js"
+export * as RunReport from "./run-report.js"
 export * as Rules from "./rules.js"
 export * as Schedules from "./schedules.js"
 export * as Seq from "./seq.js"

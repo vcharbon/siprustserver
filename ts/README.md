@@ -1,17 +1,21 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Five packages, four of them one layer each of the same stack:
+A pnpm workspace. Seven packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
-| `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, pure readings of those formats (call key, step order, a cell's main error), and the report formats the tooling publishes (`sip.compare/1`, its JSON Schema under `contracts/schemas/`) |
+| `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, pure readings of those formats (call key, step order, a cell's main error), and the report formats the tooling publishes (`sip.compare/1`, `sip.run-report/1`, their JSON Schemas under `contracts/schemas/`) |
 | `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) — the ONLY package that knows subprocesses exist |
 | `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, and case assembly |
 | `driver/` | `@sip/driver` | the campaign orchestrator: cells in, one `campaign.json` out, exit code is the verdict |
 | `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
+| `viewer-core/` | `@sip/viewer-core` | the callflow viewer's core: pivot types generated from the Rust schema, the pure ladder layouts, their SVG components, the run-bundle and capture-flows readers, and the text export |
+| `viewer-app/` | `@sip/viewer-app` | the viewer's Vite + React SPA over a deployment's server: cases, runs, the triage queue and study, and the compare and run report pages over the report formats |
 
-Dependencies point one way only: `driver → pipeline → toolchain → contracts`, and
-`store → contracts`. A policy package never imports the store: what it reads of
+Dependencies point one way only: `driver → pipeline → toolchain → contracts`,
+`store → contracts`, and `viewer-app → viewer-core` (the app reads the report
+formats' types from `contracts`, nothing else). The viewer's server is the
+deployment's: it serves the app's build and the documents the app draws. A policy package never imports the store: what it reads of
 a run reaches it as contract vocabulary.
 
 The store's tests build and drop their own databases on a postgres server:

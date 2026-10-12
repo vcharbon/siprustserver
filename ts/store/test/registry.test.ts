@@ -9,7 +9,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { describe, expect, it } from "vitest"
-import { decodeRegistrySync, disposition, isFinal, ticketStateOfText } from "../src/registry.js"
+import { decodeRegistrySync, disposition, isFinal } from "../src/registry.js"
 
 const SAMPLE = path.join(import.meta.dirname, "fixtures", "registry.sample.json")
 const registry = decodeRegistrySync(JSON.parse(fs.readFileSync(SAMPLE, "utf8")) as unknown)
@@ -34,21 +34,6 @@ describe("the sample registry", () => {
     const narrowed = Object.values(registry).filter((r) => r.cases !== undefined)
     expect(narrowed.length).toBe(1)
     expect(narrowed[0].verdict).toBe("cut")
-  })
-})
-
-describe("the ticket-state read", () => {
-  it("reads the leading token of the Status: line, case-insensitively, ignoring trailing notes", () => {
-    expect(ticketStateOfText("# t\n\nStatus: needs-triage\n")).toBe("open")
-    expect(ticketStateOfText("Status: claimed")).toBe("open")
-    expect(ticketStateOfText("Status: resolved (2026-08-25)")).toBe("closed")
-    expect(ticketStateOfText("Status: DONE 2026-08-24 (638cac6)")).toBe("closed")
-    expect(ticketStateOfText("Status: wontfix — superseded")).toBe("wontfix")
-  })
-
-  it("treats a missing file as missing and a file with no Status line as open", () => {
-    expect(ticketStateOfText(undefined)).toBe("missing")
-    expect(ticketStateOfText("# a ticket with no state yet")).toBe("open")
   })
 })
 

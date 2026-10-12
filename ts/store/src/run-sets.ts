@@ -42,6 +42,8 @@ export interface RunRow {
   readonly sweepId: number | null
   readonly jobId: number | null
   readonly startedAt: string
+  /** When it finished; null for a run still open or never closed. */
+  readonly finishedAt: string | null
   readonly cases: number
   readonly failed: number
   /** What the lane's post-run cleanup gate found on a batch its cells ran in; null where clean or not judged. */
@@ -222,12 +224,13 @@ export const layer = Layer.effect(
         sweep_id: string | null
         job_id: string | null
         started_at: Date
+        finished_at: Date | null
         cases: number
         failed: number
         cleanup: string | null
       }>`
         SELECT r.id, r.capture, r.lane, r.set_kind, r.status, r.env, r.branch, r.components,
-               r.sweep_id, r.job_id, r.started_at, r.cases, r.failed, r.cleanup
+               r.sweep_id, r.job_id, r.started_at, r.finished_at, r.cases, r.failed, r.cleanup
         FROM runs r
         WHERE ${where(selector)}
         ORDER BY r.id DESC
@@ -245,6 +248,7 @@ export const layer = Layer.effect(
         sweepId: row.sweep_id === null ? null : Number(row.sweep_id),
         jobId: row.job_id === null ? null : Number(row.job_id),
         startedAt: row.started_at.toISOString(),
+        finishedAt: row.finished_at === null ? null : row.finished_at.toISOString(),
         cases: Number(row.cases),
         failed: Number(row.failed),
         cleanup: row.cleanup

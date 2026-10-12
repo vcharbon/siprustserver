@@ -4,6 +4,8 @@ packages:
   - "pipeline"
   - "driver"
   - "store"
+  - "viewer-core"
+  - "viewer-app"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false

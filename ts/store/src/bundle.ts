@@ -3,7 +3,8 @@
  *
  * The bundle is self-describing: `campaign.json` names the cells and whether
  * each passed, and every cell carries the `pivot.json` it actually ran, its
- * `verdict.json`, its `classification.json` and its `rfc.json`. So the same reader serves the
+ * `verdict.json`, its `classification.json` and its `rfc.json` — a cell that
+ * wrote no `pivot.json` records the document its run-spec asked for. So the same reader serves the
  * live recorder, the day-one seed and the rebuild — the DB never learns
  * anything the bundle did not already prove.
  *
@@ -78,6 +79,23 @@ const readJson = (file: string): Effect.Effect<unknown, never, FileSystem.FileSy
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null ? value as Record<string, unknown> : null
+
+/**
+ * The document a cell was asked to replay where it wrote no `pivot.json`: the
+ * one its run-spec (`specs/<cell>.run-spec.json`) names — a v3 file, or a case
+ * directory holding `scenario.json`; null where the spec names nothing that reads.
+ */
+const askedDocument = Effect.fn("Bundle.askedDocument")(function*(runDir: string, cellDir: string) {
+  const spec = asRecord(yield* readJson(path.join(runDir, "specs", `${cellDir}.run-spec.json`)))
+  const target = typeof spec?.["case"] === "string" ? spec["case"] as string : undefined
+  if (target === undefined) return null
+  const fs = yield* FileSystem.FileSystem
+  const isDir = yield* fs.stat(target).pipe(
+    Effect.map((info) => info.type === "Directory"),
+    Effect.orElseSucceed(() => false)
+  )
+  return yield* readJson(isDir ? path.join(target, "scenario.json") : target)
+})
 
 /** The gating count `rfc.json` states; null where the cell wrote none or was not audited. */
 const rfcGatingOf = (rfc: Record<string, unknown> | null): number | null => {
@@ -196,7 +214,9 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
     const verdict = dir === undefined ? null : asRecord(yield* readJson(path.join(dir, "verdict.json")))
     const classification = dir === undefined ? null : asRecord(yield* readJson(path.join(dir, "classification.json")))
     const rfc = dir === undefined ? null : asRecord(yield* readJson(path.join(dir, "rfc.json")))
-    const document = dir === undefined ? null : yield* readJson(path.join(dir, "pivot.json"))
+    const document = dir === undefined
+      ? null
+      : (yield* readJson(path.join(dir, "pivot.json"))) ?? (yield* askedDocument(runDir, cell.dir!))
     const caseId = cell.cell?.case ??
       (typeof verdict?.["case"] === "string" ? verdict["case"] as string : undefined)
     if (caseId === undefined) continue

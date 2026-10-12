@@ -10,7 +10,7 @@
  * means whole-capture scope.
  *
  * The verdict alone discriminates finality: `expected` / `never-fix` are FINAL,
- * `cut` / `replay` / `bug` are PENDING and must carry a `ticket` path. There is
+ * `cut` / `replay` / `bug` are PENDING and must carry a `ticket`. There is
  * no separate `kind` field to drift out of sync with the verdict.
  *
  * EVIDENCE is provenance, not build input: a run-bundle path (typically under a
@@ -51,7 +51,7 @@ export interface FinalRecord extends Schema.Schema.Type<typeof FinalRecord> {}
 /** Capture suppressed while the linked ticket is open; re-queues on close. */
 export const PendingRecord = Schema.Struct({
   verdict: Schema.Literals(["cut", "replay", "bug"]),
-  /** Repo-relative ticket path. */
+  /** The ticket the record waits on, as the deployment's tracker names it. */
   ticket: Schema.String,
   ...common
 })
@@ -72,7 +72,8 @@ export const isFinal = (record: RegistryRecord): record is FinalRecord =>
  * re-queue the capture — a verdict whose ticket vanished is unproven, so the
  * re-queue on `missing` is deliberate, not a degraded mode. `wontfix` keeps the
  * capture suppressed and proposes converting the record to a final `never-fix`;
- * the conversion itself is human-confirmed, never automatic.
+ * the conversion itself is human-confirmed, never automatic. Reading a ticket's
+ * state off its tracker is the deployment's.
  */
 export const TicketState = Schema.Literals(["open", "closed", "wontfix", "missing"])
 export type TicketState = typeof TicketState.Type
@@ -82,28 +83,12 @@ export const Disposition = Schema.Literals(["excluded", "suppressed", "requeue",
 export type Disposition = typeof Disposition.Type
 
 /**
- * The ticket's `Status:` line, resolved to a state. Only the line's leading
- * token decides, case-insensitively: real ticket files append dates and notes
- * after it (`Status: resolved (2026-08-25)`), and equality matching would read
- * every one of those as open. `undefined` text means the ticket file itself is
- * gone.
- */
-export const ticketStateOfText = (text: string | undefined): TicketState => {
-  if (text === undefined) return "missing"
-  const line = text.split("\n").find((candidate) => candidate.trimStart().toLowerCase().startsWith("status:"))
-  const token = line?.split(":", 2)[1]?.trim().split(/[\s(]/, 1)[0]?.toLowerCase() ?? ""
-  if (token === "resolved" || token === "done" || token === "closed") return "closed"
-  if (token === "wontfix") return "wontfix"
-  return "open"
-}
-
-/**
  * The checker: no record means the capture is takeable, a final record excludes
  * it permanently, and a pending one rides its ticket — suppressed while the
  * ticket is open (or wontfix, awaiting its conversion), re-queued once it
  * closes or goes missing. Pure on purpose: the caller reads the registry and
- * the ticket file, so the same ruling serves the viewer, the sweep, and any
- * script without this package touching a filesystem.
+ * the ticket's state, so the same ruling serves the viewer, the sweep, and any
+ * script without this package touching a filesystem or a tracker.
  */
 export const disposition = (
   record: RegistryRecord | undefined,

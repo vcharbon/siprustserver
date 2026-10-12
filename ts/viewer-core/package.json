@@ -1,0 +1,40 @@
+{
+  "name": "@sip/viewer-core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Generic callflow viewer core: schema-generated pivot types, pure ladder layout, SVG components, run-bundle parsing.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./layout": "./src/layout/index.ts",
+    "./recording": "./src/recording/index.ts",
+    "./components": "./src/components/index.ts",
+    "./ladder.css": "./src/components/ladder.css",
+    "./schema/pivot-v3.schema.json": "./schema/pivot-v3.schema.json",
+    "./flows": "./src/flows/index.ts",
+    "./http": "./src/http/index.ts",
+    "./pivot": "./src/generated/pivot-v3.ts",
+    "./exclusion": "./src/exclusion/index.ts",
+    "./text": "./src/text/index.ts"
+  },
+  "scripts": {
+    "regen-types": "tsx scripts/regen-types.ts",
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
+    "json-schema-to-typescript": "15.0.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

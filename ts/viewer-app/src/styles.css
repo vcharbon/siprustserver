@@ -1,0 +1,1929 @@
+:root {
+  --bg: #ffffff;
+  --fg: #16181d;
+  --muted: #6b7280;
+  --rule: #e2e5ea;
+  --accent: #7a5af8;
+  --matched: #059669;
+  --missing: #dc2626;
+  --extra: #d97706;
+  font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 14px;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.app-nav {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--rule);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 2;
+}
+
+.brand {
+  font-weight: 700;
+}
+
+.page {
+  padding: 18px 20px 60px;
+}
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.page-head h1 {
+  font-size: 19px;
+  margin: 0 0 4px;
+}
+
+.page-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 2px 0;
+}
+
+.path {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.error {
+  color: var(--missing);
+  font-size: 13px;
+}
+
+button,
+select {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+h2 {
+  font-size: 15px;
+  margin: 22px 0 8px;
+}
+
+h3 {
+  font-size: 13px;
+  margin: 12px 0 6px;
+}
+
+.listing {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.listing th,
+.listing td {
+  text-align: left;
+  padding: 5px 10px 5px 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+.listing th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.row-matched td:nth-child(2) {
+  color: var(--matched);
+}
+
+.row-missing td:nth-child(2) {
+  color: var(--missing);
+  font-weight: 600;
+}
+
+.row-extra td:nth-child(2) {
+  color: var(--extra);
+  font-weight: 600;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 20px;
+  margin-top: 14px;
+}
+
+.split-side {
+  border-left: 1px solid var(--rule);
+  padding-left: 16px;
+  max-height: calc(100vh - 160px);
+  overflow: auto;
+}
+
+.ladder-pane-head h2 {
+  margin: 4px 0;
+}
+
+/* The ladder's own controls, above it: copy-as-text, and whatever joins it. */
+.ladder-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0 0 6px;
+}
+
+.ladder-scroll {
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  max-height: calc(100vh - 210px);
+}
+
+.warnings {
+  margin: 6px 0;
+  padding-left: 18px;
+  color: var(--extra);
+  font-size: 12px;
+}
+
+.json-view {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.json-view-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.json-view-actions {
+  display: flex;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #f6f7f9;
+  border-bottom: 1px solid var(--rule);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.json-view pre {
+  margin: 0;
+  padding: 10px;
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The case↔run cross-link: a run and the case it replayed are one click apart. */
+.related {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.related-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+
+.related-link {
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.related-link:hover {
+  border-color: var(--accent);
+}
+
+/* A recorded datagram: the SIP message reads as SIP, its record reads beside it. */
+.sip-view {
+  margin-bottom: 12px;
+}
+
+.sip-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-bottom: 6px;
+}
+
+.sip-meta-item {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+
+.sip-meta-key {
+  color: var(--muted);
+  margin-right: 5px;
+}
+
+.sip-view-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  background: #f6f7f9;
+  border: 1px solid var(--rule);
+  border-radius: 8px 8px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sip-message {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--rule);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  max-height: 520px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sip-start-line {
+  font-weight: 700;
+}
+
+.sip-header-name {
+  color: var(--accent);
+}
+
+.sip-header-sep {
+  color: var(--muted);
+}
+
+.sip-body {
+  color: var(--matched);
+}
+
+/* A hex dump's columns only line up unwrapped. */
+.sip-hex {
+  white-space: pre;
+  color: var(--matched);
+}
+
+.sip-record {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sip-record summary {
+  cursor: pointer;
+}
+
+.sip-record pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg);
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.compare-launcher {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* The study's one-line count: the calls, and how the run ruled on them. */
+.run-counts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+
+.counts .tag {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+}
+
+.tag.matched {
+  color: var(--matched);
+}
+
+.tag.missing {
+  color: var(--missing);
+}
+
+.tag.extra {
+  color: var(--extra);
+}
+
+/* Origin split: authored cases and captured ones are two populations. */
+.origin-section {
+  border-left: 3px solid var(--rule);
+  padding-left: 12px;
+  margin-top: 22px;
+}
+
+.origin-section.origin-authored {
+  border-left-color: #7a5af8;
+}
+
+.origin-section.origin-capture {
+  border-left-color: #0e7490;
+}
+
+.origin-badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 10px;
+  font-size: 12px;
+  border: 1px solid currentColor;
+}
+
+.origin-badge.origin-authored {
+  color: #7a5af8;
+  background: #f2eefe;
+}
+
+.origin-badge.origin-capture {
+  color: #0e7490;
+  background: #e2f2f6;
+}
+
+.origin-badge.origin-unknown {
+  color: var(--muted);
+}
+
+/* Source side by side: the pivot's reading next to the capture's bytes. */
+.source-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  margin-top: 12px;
+  align-items: start;
+}
+
+.source-grid > div > h3 {
+  margin-top: 0;
+}
+
+.source-pane .ladder-scroll {
+  max-height: calc(100vh - 420px);
+}
+
+.source-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* A narrowing in force, and the one click that lifts it. */
+.source-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.source-pane .fv-capture-legend {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.source-pane .raw {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.config-note {
+  border-top: 1px solid var(--rule);
+  margin-top: 30px;
+}
+
+/* The run verdict: a failure, a declared RFC violation and an informative
+   finding must never read alike. */
+.verdict-status {
+  font-weight: 600;
+  margin: 0 0 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+}
+
+.verdict-status.verdict-ok {
+  color: var(--matched);
+}
+
+.verdict-status.verdict-failed {
+  color: var(--missing);
+}
+
+/* Green-as-negative: a run that PASSED BY FAILING exactly as its document
+   declared. Amber, so it reads as neither of the other two. */
+.verdict-status.verdict-ok-negative {
+  color: var(--extra);
+}
+
+.verdict-section {
+  border-left: 3px solid var(--rule);
+  padding: 2px 0 2px 10px;
+  margin-bottom: 12px;
+}
+
+.verdict-section h4 {
+  font-size: 12px;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.verdict-violations {
+  border-left-color: var(--extra);
+  background: #fdf6ec;
+}
+
+.verdict-violations h4 {
+  color: var(--extra);
+}
+
+.verdict-failures {
+  border-left-color: var(--missing);
+}
+
+.verdict-failures h4 {
+  color: var(--missing);
+}
+
+/* A declared failure: the case's own subject matter, like a declared RFC
+   violation, so it sits in the same amber and never in the failure red. */
+.verdict-declared {
+  border-left-color: var(--extra);
+  border-left-style: double;
+  background: #fdf6ec;
+}
+
+.verdict-declared h4 {
+  color: var(--extra);
+}
+
+.verdict-declared-outcome {
+  padding-left: 12px;
+}
+
+/* Except when the run did not produce it: reality stopped failing, and that is
+   this case failing. */
+.verdict-declared-absent {
+  color: var(--missing);
+}
+
+/* A carried divergence is a real wire difference the negative case did not turn
+   on: dashed like an informative finding, amber like the declaration it rides
+   with, and never the failure red. */
+.verdict-tolerated {
+  border-left-style: dashed;
+  border-left-color: var(--extra);
+}
+
+.verdict-tolerated h4 {
+  color: var(--extra);
+}
+
+/* A script the first delta ended, and the close that ended its call instead:
+   what did NOT run is neither a failure nor a pass, so it reads muted rather
+   than red. */
+.verdict-abandoned {
+  border-left-style: dashed;
+  border-left-color: var(--muted);
+}
+
+.verdict-abandoned h4 {
+  color: var(--muted);
+}
+
+/* The post-run RFC audit. A gating finding is the cell's cause of death, so it
+   takes the failure red; the rest are recorded and failed on by nobody, so they
+   are dashed and muted and can never be mistaken for it. */
+.rfc-audit-gating {
+  border-left-color: var(--missing);
+}
+
+.rfc-audit-gating h4 {
+  color: var(--missing);
+}
+
+.rfc-audit-advisory,
+.rfc-audit-clean {
+  border-left-style: dashed;
+  border-left-color: var(--muted);
+}
+
+.rfc-audit-advisory h4,
+.rfc-audit-clean h4 {
+  color: var(--muted);
+}
+
+.rfc-badge {
+  font-size: 10.5px;
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-right: 6px;
+  white-space: nowrap;
+  border: 1px solid currentColor;
+}
+
+.rfc-badge-gating {
+  color: var(--missing);
+  background: #fdecec;
+  font-weight: 600;
+}
+
+.rfc-badge-bound {
+  color: var(--extra);
+  background: #fdf6ec;
+}
+
+.rfc-badge-advisory {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.rfc-badge-relayed {
+  color: var(--muted);
+}
+
+/* Dashed, never red: an informative finding is a real miss the run did not
+   turn on. */
+.verdict-informative {
+  border-left-style: dashed;
+  border-left-color: var(--muted);
+}
+
+.verdict-informative h4 {
+  color: var(--muted);
+}
+
+.verdict-row {
+  margin: 3px 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.verdict-tag,
+.verdict-class {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-right: 6px;
+  white-space: nowrap;
+}
+
+.verdict-tag {
+  background: #f0f1f4;
+  color: var(--fg);
+}
+
+.verdict-class {
+  border: 1px dashed var(--muted);
+  color: var(--muted);
+}
+
+.verdict-detail {
+  color: var(--muted);
+  word-break: break-word;
+}
+
+/* An excluded entry — the pipeline refused to cut a case here. Amber, never
+   red: a refusal is a decision the pipeline made on purpose, not a failure. */
+.origin-section.origin-excluded {
+  border-left-color: var(--extra);
+}
+
+.origin-badge.origin-excluded,
+.exclusion-badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 10px;
+  font-size: 12px;
+  border: 1px solid currentColor;
+  color: var(--extra);
+  background: #fdf6ec;
+}
+
+.exclusion-badge {
+  margin-right: 8px;
+  vertical-align: middle;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.excluded-listing tr.origin-excluded td {
+  background: #fffbf4;
+}
+
+.exclusion-reason {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--extra);
+}
+
+.exclusion-pane {
+  max-width: 62rem;
+}
+
+.exclusion-record {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--extra);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 14px 0;
+  background: #fffdfa;
+}
+
+.exclusion-record h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.exclusion-line {
+  font-size: 12.5px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.exclusion-record code {
+  font-size: 11.5px;
+  background: #f0f1f4;
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-right: 6px;
+  word-break: break-all;
+}
+
+.exclusion-evidence td {
+  font-size: 11.5px;
+  vertical-align: top;
+}
+
+.mono {
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+}
+
+.break {
+  word-break: break-all;
+}
+
+/* An excluded case has no ladder to put beside its capture, so the capture
+   takes the whole width rather than sharing it with an empty column. */
+.source-only {
+  margin-top: 12px;
+}
+
+.source-only > div > h3 {
+  margin-top: 0;
+}
+
+/* Triage: dispositions, registry verdicts, ticket states, confrontation classes.
+   Colour says what a row means for the queue: green = takeable, grey = handled. */
+.tag {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  white-space: nowrap;
+}
+
+.study-page h1 .tag,
+.triage-listing .tag {
+  margin-right: 8px;
+}
+
+.tag.disposition-untriaged {
+  color: var(--missing);
+  border-color: var(--missing);
+}
+
+.tag.disposition-requeue {
+  color: var(--extra);
+  border-color: var(--extra);
+}
+
+.tag.disposition-suppressed {
+  color: var(--accent);
+}
+
+.tag.disposition-excluded {
+  color: var(--muted);
+}
+
+tr.disposition-excluded td,
+tr.disposition-suppressed td,
+tr.status-passing td {
+  opacity: 0.65;
+}
+
+/* Green rows: shown when the reader asks for the lane whole, never coloured as
+   work that is waiting for somebody. */
+.tag.status-passing {
+  color: var(--matched);
+  border-color: var(--matched);
+}
+
+/* The queue's question, as controls: lane, how much of it, which captures. */
+.queue-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.queue-filters .row-cap {
+  width: 72px;
+}
+
+.tag.verdict-cut,
+.tag.verdict-replay,
+.tag.verdict-bug {
+  color: var(--extra);
+}
+
+.tag.verdict-expected,
+.tag.verdict-never-fix {
+  color: var(--matched);
+}
+
+.tag.ticket-open {
+  color: var(--accent);
+}
+
+.tag.ticket-closed {
+  color: var(--matched);
+}
+
+.tag.ticket-wontfix,
+.tag.ticket-missing {
+  color: var(--missing);
+}
+
+.tag.class-accepted {
+  color: var(--matched);
+}
+
+.tag.class-known-bug {
+  color: var(--accent);
+}
+
+.tag.class-unlisted {
+  color: var(--extra);
+}
+
+.tag.class-unknown {
+  color: var(--missing);
+}
+
+tr.class-unlisted td,
+tr.class-unknown td {
+  background: color-mix(in srgb, var(--missing) 6%, transparent);
+}
+
+.copy-ref {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.triage-listing td {
+  vertical-align: top;
+}
+
+.study-record {
+  margin: 10px 0;
+}
+
+.study-record summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+/* The never-fix shortcut: a reason picked, the record previewed, one copy. */
+.study-ignore {
+  margin: 10px 0;
+}
+
+.study-ignore summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.ignore-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}
+
+.ignore-note {
+  flex: 1 1 320px;
+  min-width: 220px;
+}
+
+.ignore-preview {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.row-actions {
+  white-space: nowrap;
+}
+
+.row-actions .copy-ref {
+  margin-right: 6px;
+}
+
+.rerun-log {
+  display: block;
+  margin-top: 6px;
+}
+
+.rerun-log pre {
+  max-height: 240px;
+  overflow: auto;
+}
+
+/* Triage study panes: the capture, the replay and the cut case JSON, each one
+   put away on its own so a wide capture never crowds the other two. */
+.pane-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 10px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pane-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.study-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.study-panes[data-open="2"] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.study-panes[data-open="3"] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.7fr);
+}
+
+.study-pane {
+  min-width: 0;
+}
+
+/* A pane that reads as prose rather than as a ladder spans the whole row. */
+.study-pane.wide {
+  grid-column: 1 / -1;
+}
+
+.study-pane-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.study-pane-head h3 {
+  margin: 0 0 4px;
+}
+
+.study-pane .ladder-scroll {
+  max-height: calc(100vh - 320px);
+}
+
+/* The outcome line: the verdict first, then what the deltas cost. */
+.outcome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.delta-chips,
+.failed-steps {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tag.failed-step {
+  color: var(--missing);
+  border-color: var(--missing);
+  background: color-mix(in srgb, var(--missing) 10%, transparent);
+  font-weight: 600;
+}
+
+.queue-why {
+  min-width: 260px;
+}
+
+/* The call column: the case, the number it dialled, its shape. */
+.call-cell {
+  min-width: 160px;
+}
+
+.call-cell div {
+  font-size: 11px;
+}
+
+tr.call-skipped td {
+  opacity: 0.65;
+}
+
+/* The main error, as a chip that sets the matching filter. Colour says what
+   kind of error it is: red = a charged RFC finding, amber = the replay died,
+   red outline = another failure or a bad body, purple = the cut refused the call. */
+.tag.main-error {
+  font-weight: 600;
+}
+
+button.tag.main-error {
+  cursor: pointer;
+  font-family: inherit;
+  background: transparent;
+}
+
+.tag.main-error .cite,
+.facet .cite {
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.tag.error-rfc {
+  color: var(--missing);
+  border-color: var(--missing);
+  background: color-mix(in srgb, var(--missing) 10%, transparent);
+}
+
+.tag.error-died {
+  color: var(--extra);
+  border-color: var(--extra);
+  background: color-mix(in srgb, var(--extra) 10%, transparent);
+}
+
+.tag.error-failure,
+.tag.error-bad-body {
+  color: var(--missing);
+  border-color: var(--missing);
+}
+
+.tag.error-refused {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The other reasons a refused call was refused under, after its first; a bad
+   body beside a main error that names another cause. */
+.tag.error-refused.also,
+.tag.error-bad-body.also {
+  font-size: 11px;
+  font-weight: 400;
+  padding: 1px 6px;
+  margin-left: 4px;
+}
+
+button.tag.error-rfc:hover,
+button.tag.error-failure:hover,
+button.tag.error-bad-body:hover {
+  background: color-mix(in srgb, var(--missing) 20%, transparent);
+}
+
+button.tag.error-died:hover {
+  background: color-mix(in srgb, var(--extra) 20%, transparent);
+}
+
+button.tag.error-refused:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* The chip row: per rule, per expected message, per refusal, each with its
+   count over the scope. The active chip is the filter in force. */
+.facets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 12px;
+}
+
+.facet-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.facet-label {
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 60px;
+}
+
+.facet {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.facet:hover {
+  border-color: var(--accent);
+}
+
+.facet .count {
+  margin-left: 6px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.facet.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-weight: 600;
+}
+
+.facet.active .count {
+  color: inherit;
+}
+
+.facet.excluded {
+  color: var(--muted);
+  border-style: dashed;
+  text-decoration: line-through;
+}
+
+/* An inline-block takes no strike from its parent: the count stays readable. */
+.facet.excluded .count {
+  display: inline-block;
+  text-decoration: none;
+}
+
+.queue-why .delta-chips .tag {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+/* Generator annotations: the detector roster, then the plain diagnostics. */
+.case-flags { margin: 0.5rem 0 1rem; }
+.case-flags h3 { margin: 0.75rem 0 0.25rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.7; }
+.flag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+.flag { display: flex; gap: 0.5rem; align-items: baseline; font-size: 0.85rem; }
+.flag code { flex: 0 0 auto; padding: 0 0.3rem; border-radius: 3px; background: var(--chip-bg, #2a2a2a); }
+.flag.detected code { background: #2f5d3a; }
+.flag.detected-none code { background: #3a3a3a; }
+.flag.detection-unavailable code { background: #5d4a2f; }
+.flag-detail { opacity: 0.8; }
+
+/* A cell the driver declined to run: the lane the document declares blocked. */
+.skipped-note { margin: 0.5rem 0; padding: 0.6rem 0.8rem; border-left: 3px solid #5d4a2f; background: rgba(93, 74, 47, 0.15); font-size: 0.9rem; }
+.skipped-note code { padding: 0 0.3rem; border-radius: 3px; background: var(--chip-bg, #2a2a2a); }
+
+/* Three ladders, equal width: the study is a confrontation of all three, and a
+   narrowed third column is the one nobody reads. */
+.study-panes[data-open="3"] {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* The selected message, kept above its OWN ladder: reading a delta means
+   holding the capture's bytes and the replay's side by side, which one shared
+   panel at the foot of the page cannot do. */
+.pane-detail {
+  position: sticky;
+  top: 44px;
+  z-index: 1;
+  margin: 6px 0;
+  padding: 6px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--bg);
+  max-height: 42vh;
+  overflow: auto;
+}
+
+.pane-detail .sip-message,
+.pane-detail pre {
+  max-height: 30vh;
+}
+
+.study-pane .ladder-scroll {
+  max-height: calc(100vh - 260px);
+}
+
+/* The step name is the cross-reference: it takes the ladders to the message. */
+.step-link {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* A body row carries a whole document per side: shown as written, scrolling in its cell. */
+.confrontation-listing .body-text {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+}
+
+.confrontation-listing tr.row-focused > td {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.focus-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.confrontation-section {
+  margin-top: 18px;
+}
+
+/* One chip per call the capture produced, each its own address. */
+.call-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.call-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+}
+
+.call-chip.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* The delta sheet scrolls in its own box: a focused row must never take the
+   page with it, or the ladders it rules on leave the screen. */
+.confrontation-scroll {
+  position: relative;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+
+.own-run .tag {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+/* The "died at" chip is a control wherever the step can be reached. */
+a.tag.failed-step,
+button.tag.failed-step {
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--missing);
+}
+
+a.tag.failed-step:hover,
+button.tag.failed-step:hover {
+  background: color-mix(in srgb, var(--missing) 20%, transparent);
+  text-decoration: none;
+}
+
+/* A capture the current cut refuses: stated before any older ladder. */
+.refused-note {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--extra);
+  background: color-mix(in srgb, var(--extra) 8%, transparent);
+}
+
+.refused-note h3 {
+  margin: 0 0 4px;
+}
+
+/* When something happened, beside what happened. */
+.age {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.call-chip .call-step {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.tag.muted {
+  color: var(--muted);
+}
+
+/* A finding's step, in the verdict pane: an address, not prose. */
+.verdict-step {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  margin: 0 4px;
+}
+
+button.verdict-step {
+  padding: 0 2px;
+}
+
+/* The rules view. Colour says what a row means for the roster: a rule firing on
+   a cell that passed is a defect; a zero is a finding; everything else is quiet. */
+.rules-filters {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.rule-family {
+  margin: 24px 0;
+}
+
+.rule-family h2 {
+  font-size: 14px;
+  margin: 0 0 2px;
+}
+
+.rule-listing .rule-mark {
+  width: 14px;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+.rule-listing .rule-id {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  white-space: nowrap;
+}
+
+.rule-listing .rule-count {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rule-samples {
+  font-size: 11px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rule-buckets,
+.rule-lanes {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-left: 6px;
+}
+
+/* A rule nothing exercised is the reading this page exists for: never dimmed. */
+tr.rule-unexercised td {
+  background: color-mix(in srgb, var(--extra) 8%, transparent);
+}
+
+tr.rule-declared-zero td {
+  opacity: 0.6;
+}
+
+tr.rule-unrostered td {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.rule-fired {
+  color: var(--missing);
+  font-weight: 600;
+}
+
+.tag.rule-unfalsifiable {
+  color: var(--muted);
+}
+
+.rule-population {
+  max-width: 90ch;
+}
+
+/* A subset chip, never a class of its own: it overlaps the counts beside it. */
+.tag.class-shape,
+.tag.class-blessed {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.rule-listing .rule-tier {
+  white-space: nowrap;
+}
+
+/* The SIP profile a case is replayed under (CasePage). A defaulted half is
+   muted, a detected one stands out: the difference is the whole read. */
+.case-profile { margin: 0.75rem 0; }
+.case-profile h3 { margin: 0 0 0.35rem; font-size: 0.85rem; text-transform: lowercase; }
+.profile-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
+.profile-list .profile {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem;
+  padding: 0.35rem 0.5rem; border: 1px solid var(--line, #d7d7d7); border-radius: 4px;
+}
+.profile-list .profile.defaulted { opacity: 0.75; }
+.profile-call { font-weight: 600; }
+.profile-list code { background: var(--chip, #eee); border-radius: 3px; padding: 0.05rem 0.3rem; }
+.profile-list code.on { background: #ffe6a8; font-weight: 600; }
+.profile-list code.unstated { opacity: 0.6; font-style: italic; }
+.profile-source { font-size: 0.8rem; opacity: 0.7; }
+.profile-evidence { flex-basis: 100%; margin: 0.2rem 0 0 0.5rem; padding-left: 1rem; font-size: 0.8rem; opacity: 0.85; }
+
+/* The mock's own answers for a case: one block per ledger entry, the answer
+   rendered exactly as the cut wrote it, the list folded past a few entries. */
+.profile-list .ledger-entry { display: block; }
+.ledger-head { display: flex; gap: 0.35rem; align-items: baseline; margin-bottom: 0.2rem; }
+.ledger-head:empty { display: none; }
+.ledger-fold > summary { cursor: pointer; }
+
+/* The capture drop zone: pcaps dropped here enter the replay population. */
+.drop-captures {
+  margin: 12px 0;
+}
+
+.drop-zone {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border: 1px dashed var(--rule);
+  border-radius: 6px;
+}
+
+.drop-zone.over {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.drop-zone label.copy-ref {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.drop-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.drop-item {
+  padding: 3px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* The HTTP exchange as one run replayed it: a head line per request, its
+   payloads folded until a reader opens them. */
+.exchange-payload { margin: 0.15rem 0 0 0.5rem; font-size: 0.8rem; }
+.exchange-payload summary { cursor: pointer; opacity: 0.75; }
+.exchange-payload .ledger-answer { margin-top: 0.25rem; max-height: 22rem; overflow: auto; }
+
+/* The replay control: the filter bar, the ticked rows or the captures whole
+   previewed and then created as one request per lane, with a job over each. */
+.request-builder {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+.request-builder.collapsed {
+  padding: 0;
+  border: none;
+}
+
+.request-builder .count {
+  margin-left: 4px;
+  color: var(--muted);
+}
+
+.request-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.request-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+.request-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.request-row .row-cap {
+  width: 72px;
+}
+
+.request-line {
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.request-notes {
+  margin: 0 0 6px;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.request-preview,
+.request-created {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rule);
+  font-size: 12px;
+}
+
+.request-captures {
+  margin: 4px 0;
+  padding-left: 18px;
+  max-height: 14rem;
+  overflow: auto;
+}
+
+.request-lane {
+  margin: 4px 0;
+}
+
+/* A long capture list folds behind its count; the refused ones lead it. */
+.request-fold > summary {
+  cursor: pointer;
+}
+
+.whole-first {
+  margin-top: 6px;
+}
+
+.job-links {
+  display: inline-flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.job-link {
+  white-space: nowrap;
+}
+
+/* The tick column: a row ticked is a cell of the next request. */
+.triage-listing .tick {
+  width: 20px;
+  text-align: center;
+}
+
+/* A state that asks for work is amber, as a stale cut is. */
+.tag.state-stale {
+  color: var(--extra);
+  border-color: var(--extra);
+}
+
+/* The source list's add-by-path form and the retire confirmation. */
+.add-by-path {
+  margin: 10px 0;
+  font-size: 12px;
+}
+
+.add-by-path summary {
+  cursor: pointer;
+}
+
+.add-by-path textarea {
+  display: block;
+  width: 100%;
+  max-width: 60rem;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.retire-confirm {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.copy-ref.danger {
+  color: var(--missing);
+  border-color: var(--missing);
+}
+
+.sources-listing td {
+  vertical-align: top;
+}
+
+/* The jobs page: three groups, a progress bar per row, the live log. */
+.jobs-group {
+  margin: 14px 0 22px;
+}
+
+.jobs-group h2 {
+  font-size: 15px;
+  margin: 0 0 6px;
+}
+
+.jobs-listing td {
+  vertical-align: top;
+}
+
+.jobs-listing .progress-cell {
+  min-width: 220px;
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.progress.compact {
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.progress-bar {
+  display: flex;
+  height: 10px;
+  width: 260px;
+  max-width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--rule) 40%, transparent);
+}
+
+.progress.compact .progress-bar {
+  width: 120px;
+  height: 8px;
+}
+
+.job-progress .progress-bar {
+  width: 520px;
+  height: 14px;
+}
+
+.progress-bar > span {
+  display: block;
+  height: 100%;
+}
+
+.progress-passed {
+  background: var(--matched);
+}
+
+.progress-failed {
+  background: var(--missing);
+}
+
+.progress-skipped {
+  background: var(--extra);
+}
+
+.progress-landed {
+  background: var(--accent);
+}
+
+.progress-gone {
+  background: var(--muted);
+  opacity: 0.5;
+}
+
+.progress-counts {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.waiting {
+  color: var(--extra);
+}
+
+.job-actions {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.job-facts {
+  margin: 4px 0;
+}
+
+.job-progress {
+  margin: 10px 0 18px;
+}
+
+.log-tail {
+  margin: 6px 0 18px;
+}
+
+.log-tail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.log-tail-text {
+  max-height: 480px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--rule) 25%, transparent);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.job-hook {
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.job-hook summary {
+  cursor: pointer;
+}
+
+.job-hook .log-tail-text {
+  max-height: 240px;
+}
+
+.jobs-cells td {
+  vertical-align: top;
+}
+
+.row-features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.row-features .facet {
+  font-size: 0.75rem;
+}
+
+.call-lanes {
+  margin: 0.5rem 0;
+}
+
+.call-lanes .counts .tag {
+  margin-right: 0.25rem;
+}
+
+.call-lanes-table tr.current-lane {
+  background: var(--rule);
+}
+
+/* The delta sheet: each line's samples sit in a nested table, step · captured · replayed. */
+.delta-samples {
+  border-collapse: collapse;
+  width: 100%;
+  table-layout: fixed;
+}
+
+.delta-samples td:first-child {
+  width: 3.5em;
+}
+
+.delta-samples td {
+  padding: 1px 6px 1px 0;
+  vertical-align: top;
+  border: none;
+}
+
+.delta-samples tr + tr td {
+  border-top: 1px dotted var(--rule);
+}
+
+.deltas-listing > tbody > tr > td:nth-child(2) {
+  min-width: 20em;
+}
+
+.deltas-listing > tbody > tr > td:nth-child(4) {
+  min-width: 12em;
+}
+
+/* Run-set comparison and run report: forms, sides, counts, and the three
+   ladders of a call side by side as the text export renders them. */
+.selector-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 16px;
+}
+
+.selector-form input:not([type="checkbox"]) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  min-width: 14rem;
+}
+
+.compare-headline,
+.report-headline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.compare-sides th,
+.compare-counts th {
+  white-space: nowrap;
+}
+
+.compare-call {
+  border-top: 1px solid var(--rule);
+  padding: 6px 0;
+}
+
+.compare-call > summary {
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.compare-cell {
+  margin: 4px 0 4px 16px;
+}
+
+.compare-ladders {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.compare-ladder h4 {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ladder-text {
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow: auto;
+  max-height: 32rem;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.report-summary-note {
+  padding: 8px 12px;
+  border: 1px solid var(--extra);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--extra) 8%, transparent);
+}
+
+@media (max-width: 900px) {
+  .compare-ladders {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

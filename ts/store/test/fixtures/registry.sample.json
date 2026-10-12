@@ -19,7 +19,7 @@
   },
   "trace_0003.pcap.gz": {
     "verdict": "bug",
-    "ticket": "tickets/90.md",
+    "ticket": "tracker/90",
     "decided_on": "2026-01-10",
     "evidence": {
       "bundle": "work/triage/trace_0003/run2",
@@ -29,7 +29,7 @@
   },
   "trace_0004.pcap.gz": {
     "verdict": "cut",
-    "ticket": "tickets/91.md",
+    "ticket": "tracker/91",
     "cases": ["trace_0004.pcap.gz-cut2"],
     "decided_on": "2026-01-10",
     "evidence": {

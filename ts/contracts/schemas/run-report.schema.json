@@ -1,0 +1,629 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Run report",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "sip.run-report/1"
+      ]
+    },
+    "selector": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "runs",
+        "summaries"
+      ]
+    },
+    "headline": {
+      "type": "string"
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "capture": {
+            "type": "string"
+          },
+          "lane": {
+            "type": "string"
+          },
+          "setKind": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "code": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "sha": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "sha"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "sweepId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "jobId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cases": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "citedBy": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "capture",
+          "lane",
+          "setKind",
+          "status",
+          "env",
+          "branch",
+          "code",
+          "sweepId",
+          "jobId",
+          "startedAt",
+          "finishedAt",
+          "cases",
+          "failed",
+          "citedBy"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "total": {
+      "type": "integer"
+    },
+    "side": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "integer"
+        },
+        "cells": {
+          "type": "integer"
+        },
+        "lanes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "envs": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "shas": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            "required": [
+              "name",
+              "shas"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "laneHashes": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "sweeps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "universe": {
+                "type": "string"
+              },
+              "selection": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "captures": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "universe",
+              "selection",
+              "captures"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "selector",
+        "runs",
+        "cells",
+        "lanes",
+        "envs",
+        "branches",
+        "components",
+        "laneHashes",
+        "sweeps"
+      ],
+      "additionalProperties": false
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "calls": {
+          "type": "integer"
+        },
+        "passed": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "calls",
+        "passed",
+        "failed",
+        "skipped"
+      ],
+      "additionalProperties": false
+    },
+    "calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "capture": {
+            "type": "string"
+          },
+          "caseId": {
+            "type": "string"
+          },
+          "cell": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "integer"
+              },
+              "lane": {
+                "type": "string"
+              },
+              "env": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "branch": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "code": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "sha": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "sha"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "verdict": {
+                "type": "string"
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "repeats": {
+                "type": "object",
+                "properties": {
+                  "runs": {
+                    "type": "integer"
+                  },
+                  "passed": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "runs",
+                  "passed"
+                ],
+                "additionalProperties": false
+              },
+              "skipped": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "failedStep": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mainError": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "rfc",
+                          "died",
+                          "failure",
+                          "bad-body",
+                          "refused"
+                        ]
+                      },
+                      "rule": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "rfc": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "step": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "expected": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "detail": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "rule",
+                      "rfc",
+                      "step",
+                      "expected",
+                      "detail"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "bless": {
+                "type": "string",
+                "enum": [
+                  "clean",
+                  "known-bug",
+                  "unlisted",
+                  "unknown",
+                  "unmeasured"
+                ]
+              },
+              "accepted": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "knownBugs": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "rule": {
+                          "type": "string"
+                        },
+                        "ticket": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "records": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "rule",
+                        "ticket",
+                        "records"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "links": {
+                "type": "object",
+                "properties": {
+                  "study": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "study",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "run",
+              "lane",
+              "env",
+              "branch",
+              "code",
+              "verdict",
+              "passed",
+              "repeats",
+              "skipped",
+              "failedStep",
+              "mainError",
+              "bless",
+              "accepted",
+              "knownBugs",
+              "ladder",
+              "links"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "capture",
+          "caseId",
+          "cell"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "selector",
+    "source",
+    "headline",
+    "runs",
+    "total",
+    "side",
+    "counts",
+    "calls"
+  ],
+  "additionalProperties": false
+}
