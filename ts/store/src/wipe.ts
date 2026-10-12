@@ -294,16 +294,16 @@ export const layer = Layer.effect(
         if (reasons.length > 0) return yield* new Refused({ reasons })
         const has = yield* tables
         yield* sql`DELETE FROM runs r WHERE NOT ${keptBy(request, has.pins)}`
-        // The cascade takes capture_cuts, cut_cases, cut_refusals and cut_refusal_calls.
-        yield* sql`DELETE FROM preps`
-        yield* sql`DELETE FROM ledger_rows`
-        yield* sql`DELETE FROM case_assets`
-        yield* sql`DELETE FROM cases`
-        // The cascade takes flows_legs.
-        yield* sql`DELETE FROM flows_documents`
+        // Every cut and all the content only cuts reference, emptied at once: a
+        // row-by-row delete pays a foreign-key probe per case into tables it
+        // just emptied, and the case documents stay.
+        yield* sql`
+          TRUNCATE preps, capture_cuts, cut_cases, cut_refusals, cut_refusal_calls,
+                   ledger_rows, case_assets, cases, flows_legs, flows_documents
+        `
         return planned
       }))
-      yield* sql`VACUUM ANALYZE runs, case_results, run_rule_hits, flows_legs, case_assets, cut_cases, cut_refusals`
+      yield* sql`VACUUM ANALYZE runs, case_results, run_rule_hits`
       return done
     })
 
