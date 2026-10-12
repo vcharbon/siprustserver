@@ -145,13 +145,17 @@ A non-INVITE response answers a client transaction only its sender holds
 
 A caller that heard the worker's 100 sends no retransmission that could re-place
 its call, so a worker that dies before its state reaches the backup leaves the
-caller to its own timers, as on a direct path. For a new call that window runs
-from the 100 through the routing decision's answer (bounded by the decision
-deadline) plus one replication stream hop
-(`failover-harness/tests/it/new_call_replication_window.rs`). Its in-dialog
+caller's INVITE with no final from the platform: its client transaction is
+`Proceeding`, which runs no Timer B, and only the caller's own application timer
+ends it. For a new call that window runs from the 100 through the routing
+decision's answer (bounded by the decision deadline) plus one replication stream
+hop (`failover-harness/tests/it/new_call_replication_window.rs`). Its in-dialog
 twin is a round whose relay has not replicated yet: the callee's answer takes
 the call over on a replica that holds no transaction for it, reaches no one,
-and the copy releases itself (`reinvite_round_not_yet_replicated.rs`).
+and the copy releases itself; each retransmitted answer (§13.3.1.4) takes the
+call over again until the callee's ladder ends, and the survivor, holding no
+round, ends no pending re-INVITE with a 487 (§15.1.2)
+(`reinvite_round_not_yet_replicated.rs`).
 
 Coverage: `sip-proxy/tests/it/stateless_final_response_contract.rs` pins both halves
 (no proxy 100 + the downstream 100, 18x and 200 relayed; blackhole → zero
