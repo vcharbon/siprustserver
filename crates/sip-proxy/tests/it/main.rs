@@ -9,6 +9,7 @@
 mod common;
 
 mod health_probe_late_reply;
+mod ingress_trust;
 mod load_balancer;
 mod load_balancer_routing;
 mod options_e2e;

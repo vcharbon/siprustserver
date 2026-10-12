@@ -303,10 +303,13 @@ mod tests {
     }
 
     #[test]
-    fn stamping_leaves_a_received_another_hop_recorded() {
+    fn stamping_replaces_a_received_the_sender_wrote() {
         let stamped = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;received=192.0.2.7")
             .stamped_from("198.51.100.4", 33000);
-        assert_eq!(stamped.received(), Some("192.0.2.7"));
+        assert_eq!(stamped.received(), Some("198.51.100.4"));
+        let same_host = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;received=evil.example")
+            .stamped_from("10.0.0.1", 33000);
+        assert_eq!(same_host.response_target(), ("10.0.0.1", 5060));
     }
 
     #[test]
