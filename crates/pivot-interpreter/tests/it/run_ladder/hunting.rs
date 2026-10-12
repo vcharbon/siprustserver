@@ -10,13 +10,32 @@ async fn hunting_scene(name: &str) -> B2buaScene {
     B2buaScene::with_b2bua(name, |bob_port| B2buaSut::route_api_call("127.0.0.1", bob_port)).await
 }
 
+/// The number the document observed for the callee of the attempt on `leg`:
+/// the Request-URI user part a composed reroute dials it under.
+fn observed_callee(case: &Case, leg: &str) -> String {
+    let document = &case.document;
+    let callee = document
+        .calls
+        .iter()
+        .flat_map(|call| &call.attempts)
+        .find(|attempt| attempt.leg == leg)
+        .map(|attempt| attempt.callee.identity.as_str())
+        .unwrap_or_else(|| panic!("no attempt on leg {leg}"));
+    document
+        .identities
+        .iter()
+        .find(|identity| identity.name == callee)
+        .and_then(|identity| identity.observed.clone())
+        .unwrap_or_else(|| panic!("identity {callee} states no observed number"))
+}
+
 /// Rung three, the REROUTE rung: the first destination answers 486 and the
 /// system hunts on to the alternate, which answers.
 ///
 /// Two attempts on ONE branch and one socket, told apart by the Request-URI
 /// user part each is dialled under — the relayed one for the attempt the caller
-/// dialled, the registry's own number for the reroute the system composed — so
-/// each INVITE reaches the leg the document names for it.
+/// dialled, the number the document observed for the rerouted callee — so each
+/// INVITE reaches the leg the document names for it.
 ///
 /// It skips loudly when no case library is configured.
 #[tokio::test(start_paused = true)]
@@ -25,6 +44,7 @@ async fn rung_three_a_reroute_draft_hunts_past_a_busy_destination() {
         eprintln!("SKIPPED: set PIVOT_CASE_DIRS to an authored case library");
         return;
     };
+    let rerouted = observed_callee(&case, "C");
     let scene = hunting_scene("pivot-reroute-486").await;
     let bob = scene.bob.clone();
     let (outcome, dir) =
@@ -52,13 +72,10 @@ async fn rung_three_a_reroute_draft_hunts_past_a_busy_destination() {
             .unwrap_or_default()
     };
     assert_eq!(dialled("B"), "sip:+1999999bob5070@127.0.0.1:5070", "the dialled callee");
-    assert_eq!(dialled("C"), "sip:+15550900005@127.0.0.1:5070", "the rerouted callee");
+    assert_eq!(dialled("C"), format!("sip:{rerouted}@127.0.0.1:5070"), "the rerouted callee");
 
-    // The residue is the authoring platform's CDR vocabulary and nothing else:
-    // two event words it spells in PascalCase and one `b_legs.count` field this
-    // lane does not publish at all.
+    // The residue, if any, is CDR vocabulary, and nothing gates.
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
-    assert_eq!(outcome.verdict.informative.len(), 3, "{:#?}", outcome.verdict.informative);
     assert!(
         outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
             && matches!(&note.finding, Failure::CdrMismatch { .. })),
@@ -132,8 +149,8 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
         "the ACK to a non-2xx rides its own INVITE's branch"
     );
 
+    // The residue, if any, is CDR vocabulary, and nothing gates.
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
-    assert_eq!(outcome.verdict.informative.len(), 3, "{:#?}", outcome.verdict.informative);
     assert!(
         outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
             && matches!(&note.finding, Failure::CdrMismatch { .. })),

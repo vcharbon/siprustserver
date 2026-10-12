@@ -150,15 +150,15 @@ async fn a_declared_retransmit_ladder_is_emitted_paced_and_counted_in_both_views
 /// The other half of the two-view table: a retransmitted FINAL and the ACKs it
 /// draws, neither of which the transaction layer absorbs.
 ///
-/// The callee repeats its 200 on §13.3.1.4's own pacing and the caller HOLDS its
-/// ACK — a held automatic is the step's `delay`, never a deviation (§11) — so
-/// the platform runs its own 2xx ladder toward the caller, which the run counts
-/// on the step that ladder repeats. Each 2xx the platform receives draws its own
-/// ACK (§13.2.2.4) on the one client transaction the first 2xx armed: the copies
-/// that land before the caller's ACK are answered as soon as that ACK supplies
-/// the body, so three 200s leave three ACKs on the b-leg.
+/// The callee repeats its 200 on §13.3.1.4's own pacing (T1, then 2·T1) and the
+/// caller HOLDS its ACK past one rung — a held automatic is the step's `delay`,
+/// never a deviation (§11) — so the platform runs its own 2xx ladder toward the
+/// caller, which the run counts on the step that ladder repeats, and the
+/// caller's ACK stops it. The b-leg ACK is the caller's, relayed: a copy that
+/// lands before it is absorbed, and each copy that lands after it re-sends that
+/// ACK (§13.2.2.4) on the one client transaction the first 2xx armed.
 #[tokio::test(start_paused = true)]
-async fn a_retransmitted_final_is_counted_and_each_2xx_draws_its_own_ack() {
+async fn a_retransmitted_final_is_counted_and_each_2xx_after_the_relayed_ack_draws_it_again() {
     let Some(case) = case_dir("bc-rc-held-ack-final-ladder") else {
         eprintln!("SKIPPED: set PIVOT_CASE_DIRS to an authored case library");
         return;
@@ -180,7 +180,7 @@ async fn a_retransmitted_final_is_counted_and_each_2xx_draws_its_own_ack() {
         .collect();
     assert_eq!(
         ladders,
-        BTreeMap::from([("s6", (2, 2)), ("s7", (2, 2)), ("s9", (2, 2))]),
+        BTreeMap::from([("s6", (2, 2)), ("s7", (1, 1)), ("s9", (1, 1))]),
         "{:#?}",
         outcome.verdict.retransmits
     );
@@ -200,34 +200,34 @@ async fn a_retransmitted_final_is_counted_and_each_2xx_draws_its_own_ack() {
         (sent[1].at_us - sent[0].at_us, sent[2].at_us - sent[0].at_us),
         (500_000, 1_500_000)
     );
-    // One ACK per 2xx received (§13.2.2.4), each answering the copy above it and
-    // all three the same bytes — one client transaction, so the callee's INVITE
+    // The relayed ACK, and one re-send for the copy that follows it: the copy at
+    // T1 lands while the caller still holds its ACK and draws nothing of its own.
+    // Both are the same bytes — one client transaction, so the callee's INVITE
     // server transaction quiesces on whichever arrives.
     let acks: Vec<_> = legs["B"].iter().filter(|m| text(m).starts_with("ACK ")).collect();
-    assert_eq!(acks.len(), 3, "{:#?}", legs["B"]);
+    assert_eq!(acks.len(), 2, "{:#?}", legs["B"]);
     assert!(acks.iter().all(|a| text(a) == text(acks[0])), "{:#?}", acks);
-    assert!(
-        acks.iter().zip(&sent).all(|(a, s)| a.at_us > s.at_us),
-        "each ACK follows the 2xx it answers"
-    );
+    assert!(acks[0].at_us > sent[1].at_us, "no ACK answers the copy the hold absorbed");
+    assert!(acks[1].at_us > sent[2].at_us, "the re-send follows the copy it answers");
 
-    // The platform's own ladder toward the held caller, counted where it lands.
+    // The platform's own ladder toward the held caller, counted where it lands:
+    // one rung fits the hold, and the caller's ACK cancels the next.
     let to_invite: Vec<_> = legs["A"]
         .iter()
         .filter(|m| text(m).starts_with("SIP/2.0 200 ") && text(m).contains("CSeq: 1 INVITE"))
         .collect();
-    assert_eq!(to_invite.len(), 3, "{:#?}", legs["A"]);
-    assert!(to_invite[1..].iter().all(|m| m.repeat_of == Some(to_invite[0].seq)));
-    assert!(to_invite[1..].iter().all(|m| m.step.is_none()), "a repeat satisfies no expect");
+    assert_eq!(to_invite.len(), 2, "{:#?}", legs["A"]);
+    assert_eq!(to_invite[1].repeat_of, Some(to_invite[0].seq));
+    assert!(to_invite[1].step.is_none(), "a repeat satisfies no expect");
 
-    // The trap row of the table: a 2xx retransmission is end-to-end, so every
+    // The trap row of the table: a 2xx retransmission is end-to-end, so the
     // repeat is in the wire view AND in the TU view.
     let tu = outcome.tu_view();
     let repeats = |view: &[scenario_harness::absorption::WireEntry], prefix: &str| {
         view.iter().filter(|e| e.start_line().starts_with(prefix) && e.is_repeat()).count()
     };
-    assert_eq!(repeats(&outcome.wire_view, "SIP/2.0 200"), 2, "the platform's 2xx ladder");
-    assert_eq!(repeats(&tu, "SIP/2.0 200"), 2, "2xx retransmission is never absorbed");
+    assert_eq!(repeats(&outcome.wire_view, "SIP/2.0 200"), 1, "the platform's 2xx ladder");
+    assert_eq!(repeats(&tu, "SIP/2.0 200"), 1, "2xx retransmission is never absorbed");
     assert!(dir.join("verdict.json").is_file(), "the run keeps its bundle");
 
     scene.finish().await;

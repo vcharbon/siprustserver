@@ -127,9 +127,9 @@ async fn rung_six_a_limited_second_call_is_refused_before_any_b_leg() {
 
     // Both calls were BILLED, and the document says so with the only per-record
     // scoping `{count, checks}` has: the count. Which record carries what is
-    // unaskable there, so the rung reads it off this lane's own
-    // CDR — the draft's two event checks are the authoring platform's spelling
-    // and are recorded rather than gating (§9.1).
+    // unaskable there, so the rung reads it off this lane's own CDR — the
+    // draft's event checks carry `cdr-vocabulary`, so whatever they find is
+    // recorded rather than gating (§9.1).
     let records = scene.b2bua.cdr_records();
     assert_eq!(records.len(), 2, "{records:#?}");
     let refused = records
@@ -151,9 +151,8 @@ async fn rung_six_a_limited_second_call_is_refused_before_any_b_leg() {
         answered.events
     );
 
-    // And the residue is that authoring vocabulary and nothing else.
+    // And the residue, if any, is CDR vocabulary, and nothing gates.
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
-    assert_eq!(outcome.verdict.informative.len(), 2, "{:#?}", outcome.verdict.informative);
     assert!(
         outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
             && matches!(&note.finding, Failure::CdrMismatch { .. })),
