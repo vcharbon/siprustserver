@@ -134,6 +134,16 @@ mod tests {
     }
 
     #[test]
+    fn a_cookie_field_never_replaces_a_param_the_via_carries() {
+        let via = Via::udp("10.0.0.1", 5060).with_branch("z9hG4bKours").requesting_rport();
+        let mut cookie = cookie();
+        cookie.insert("branch".to_string(), "z9hG4bKforced".to_string());
+        let stamped = via_with_cookie(via, Some(&cookie));
+        assert_eq!(stamped.branch(), Some("z9hG4bKours"));
+        assert_eq!(via_cookie_params(&stamped).get("w_pri").map(String::as_str), Some("b2b-1"));
+    }
+
+    #[test]
     fn a_flag_param_reads_back_as_a_present_key() {
         let uri = Uri::parse(&SipStr::owned("sip:10.0.0.1:5060;outbound;lr")).expect("parses");
         let params = cookie_params(&uri);
