@@ -57,6 +57,15 @@ describe("call-id joins", () => {
     expect(out.groups[0]!.calls).toEqual(["g0", "g1"])
   })
 
+  it("names a group by the smallest Call-ID its calls own, whatever order the calls come in", () => {
+    const calls = callsOf(rerouteFlows())
+    const named = (input: typeof calls) =>
+      new Map(correlate(input, [CALL_ID_RULE]).groups.map((g) => [g.id, [...g.calls].sort()]))
+    const smallest = (call: (typeof calls)[number]) => [...call.callIds].sort()[0]!
+    expect([...named(calls).keys()].sort()).toEqual(calls.map(smallest).sort())
+    expect(named([...calls].reverse())).toEqual(named(calls))
+  })
+
   it("relates nothing when no rule fires, and every call is its own group", () => {
     const calls = callsOf(rerouteFlows())
     const out = correlate(calls, [CALL_ID_RULE])

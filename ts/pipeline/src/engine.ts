@@ -27,6 +27,11 @@ export interface Join {
 }
 
 export interface Group {
+  /**
+   * The smallest Call-ID any of its calls owns: a name the group's own calls
+   * fix, so neither the order calls arrive in nor a group gained elsewhere
+   * moves it.
+   */
   readonly id: string
   readonly calls: ReadonlyArray<string>
   readonly joins: ReadonlyArray<string>
@@ -333,6 +338,10 @@ const orderChains = (edges: ReadonlyArray<Edge>, calls: ReadonlyArray<Call>) => 
   return { chainOf: (call: string) => chainId.get(uf.find(call))!, chains, position }
 }
 
+/** The smallest Call-ID the calls own, by code unit; a call owning none falls back to its own id. */
+const smallestCallId = (calls: ReadonlyArray<Call>): string =>
+  calls.flatMap((c) => (c.callIds.length > 0 ? c.callIds : [c.id])).reduce((a, b) => (b < a ? b : a))
+
 export const correlate = (
   calls: ReadonlyArray<Call>,
   rules: ReadonlyArray<Rules.Rule>
@@ -418,15 +427,30 @@ export const correlate = (
   // Groups: union-find closure over ALL joins, ambiguous and chain ones included.
   const closure = unionFind(calls.map((c) => c.id))
   for (const j of joins) closure.union(j.left, j.right)
-  const buckets = new Map<string, Array<string>>()
+  const buckets = new Map<string, Array<Call>>()
   for (const c of calls) {
     const r = closure.find(c.id)
-    buckets.set(r, [...(buckets.get(r) ?? []), c.id])
+    buckets.set(r, [...(buckets.get(r) ?? []), c])
   }
-  const groups: Array<Group> = [...buckets.values()]
-    .sort((a, b) => a[0]!.localeCompare(b[0]!))
-    .map((members, i) => ({
-      id: `case${i}`,
+  const byOrder = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+  const named = [...buckets.values()]
+    .map((owned) => ({
+      id: smallestCallId(owned),
+      owns: [...new Set(owned.flatMap((c) => c.callIds))].sort().join(" "),
+      members: owned.map((c) => c.id)
+    }))
+    .sort((a, b) => byOrder(a.id, b.id) || byOrder(a.owns, b.owns))
+  // Two groups whose smallest Call-ID is the same (the extractor split one
+  // Call-ID's legs) are told apart by every Call-ID they own: `#2`, `#3`.
+  const taken = new Map<string, number>()
+  const groups: Array<Group> = named
+    .map(({ id, members }) => {
+      const n = (taken.get(id) ?? 0) + 1
+      taken.set(id, n)
+      return { id: n === 1 ? id : `${id}#${n}`, members }
+    })
+    .map(({ id, members }) => ({
+      id,
       calls: members,
       joins: joins
         .filter((j) => members.includes(j.left) && members.includes(j.right))

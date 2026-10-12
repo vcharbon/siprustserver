@@ -10,7 +10,7 @@ import { decideCases } from "../src/caseset.js"
 import { callFamilies, cutCalls } from "../src/cut.js"
 import type { CallIdDerivation } from "../src/derivation.js"
 import { policyWith } from "../src/policy.js"
-import { doc, leg, oneHop, plan, request, response, SOCKETS, sutSet } from "./fixtures.js"
+import { doc, leg, nameByCallIds, oneHop, plan, request, response, SOCKETS, sutSet } from "./fixtures.js"
 
 /** The shortest base a suffix match is evidence rather than coincidence. */
 const MIN_BASE = 8
@@ -162,7 +162,7 @@ describe("deciding every case of a capture", () => {
   it("correlates the capture once, not once per case", () => {
     const flows = manyCallsFlows(150)
     const sut = sutSet()
-    const cut = cutCalls(flows, sut, "many.pcap", suffixDerives)
+    const cut = cutCalls(flows, sut, "many.pcap", suffixDerives, nameByCallIds)
     expect(cut.calls).toHaveLength(150)
     const specs = cut.calls.map((c) => ({
       id: c.id,
