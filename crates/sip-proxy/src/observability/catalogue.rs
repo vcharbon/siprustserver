@@ -284,13 +284,13 @@ pub const WORKER_POOL_EMPTY: Family = Family::gauge(
 pub const DISCOVERY_NO_CLIENT: Family = Family::gauge(
     "sip_proxy_discovery_no_client",
     Labels::None,
-    "1 while worker discovery has no kube client, so nothing is discovered; 0 once one is built, and with a fixed PROXY_WORKERS pool.",
+    "1 while worker discovery's kube client has failed to build and none is built, so nothing is discovered; 0 before the first attempt ends, once one is built, and with a fixed PROXY_WORKERS pool.",
 );
 
 pub const DISCOVERY_WATCH_BROKEN_SINCE: Family = Family::gauge(
     "sip_proxy_discovery_watch_broken_since_seconds",
     Labels::None,
-    "Unix time the worker EndpointSlice watch broke, 0 while it delivers and with a fixed PROXY_WORKERS pool. The last listed pool stays meanwhile and the OPTIONS probe keeps its health current.",
+    "Unix time the worker EndpointSlice watch broke, 0 while it delivers (an event, or 90 s without an error) and with a fixed PROXY_WORKERS pool. The last listed pool stays meanwhile and the OPTIONS probe keeps its health current.",
 );
 
 pub const OVERLOAD_REJECTIONS: Family = Family::counter(

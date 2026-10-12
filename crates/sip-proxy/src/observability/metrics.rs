@@ -527,8 +527,8 @@ impl ProxyMetrics {
         self.pool.set_health_counts([alive, draining, not_ready, unknown, dead]);
     }
 
-    /// Publish the worker discovery's own health: whether it has a kube
-    /// client, and since when (Unix ms) its watch is broken.
+    /// Publish the worker discovery's own health: whether its kube client is
+    /// failing to build, and since when (Unix ms) its watch is broken.
     pub fn set_discovery(&self, no_client: bool, watch_broken_since_unix_ms: Option<u64>) {
         self.pool.set_discovery(no_client, watch_broken_since_unix_ms);
     }

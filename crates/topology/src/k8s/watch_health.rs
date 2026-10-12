@@ -1,15 +1,27 @@
 //! [`WatchHealth`] — whether the EndpointSlice watch has a kube client and
 //! whether it is delivering, and the episode log of each: one warning naming
 //! the cause when a failure starts, one line when it ends.
+//!
+//! A watch that restarts on a still valid resource version delivers no event
+//! until the next change, so a broken watch also ends once it has gone
+//! [`WATCH_QUIET_PERIOD`] without an error.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// A broken watch with no error for this long is delivering again: longer
+/// than the longest gap between two errors of a broken watch, the watcher's
+/// backoff ceiling (30 s) plus the client connect timeout (30 s), with margin.
+pub const WATCH_QUIET_PERIOD: Duration = Duration::from_secs(90);
 
 /// The watch's own health, for a consumer's metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchHealth {
     /// A kube client is built; until then nothing is watched.
     pub client_built: bool,
+    /// A kube client failed to build and none is built yet. False before the
+    /// first attempt has ended.
+    pub client_failing: bool,
     /// Unix time (ms) the watch broke, `None` while it delivers. The last
     /// listed members stay meanwhile.
     pub broken_since_unix_ms: Option<u64>,
@@ -19,6 +31,7 @@ pub struct WatchHealth {
 #[derive(Debug, Default)]
 pub(super) struct WatchHealthState {
     client_built: AtomicBool,
+    client_failed: AtomicBool,
     /// 0 while the watch delivers.
     broken_since_unix_ms: AtomicU64,
 }
@@ -26,8 +39,10 @@ pub(super) struct WatchHealthState {
 impl WatchHealthState {
     pub(super) fn read(&self) -> WatchHealth {
         let since = self.broken_since_unix_ms.load(Ordering::Relaxed);
+        let client_built = self.client_built.load(Ordering::Relaxed);
         WatchHealth {
-            client_built: self.client_built.load(Ordering::Relaxed),
+            client_built,
+            client_failing: !client_built && self.client_failed.load(Ordering::Relaxed),
             broken_since_unix_ms: (since != 0).then_some(since),
         }
     }
@@ -45,8 +60,9 @@ pub(super) struct ConnectEpisode {
 
 impl ConnectEpisode {
     /// One build failed; the next attempt is `retry_in` away.
-    pub(super) fn failed(&mut self, cause: &str, retry_in: Duration) {
+    pub(super) fn failed(&mut self, state: &WatchHealthState, cause: &str, retry_in: Duration) {
         self.failures += 1;
+        state.client_failed.store(true, Ordering::Relaxed);
         let retry_in_ms = retry_in.as_millis() as u64;
         if self.failures == 1 {
             tracing::warn!(
@@ -80,6 +96,7 @@ impl ConnectEpisode {
 #[derive(Debug, Default)]
 pub(super) struct WatchEpisode {
     started: Option<tokio::time::Instant>,
+    last_error: Option<tokio::time::Instant>,
     errors: u64,
 }
 
@@ -87,6 +104,7 @@ impl WatchEpisode {
     /// The watch reported an error; it is retried with backoff.
     pub(super) fn error(&mut self, state: &WatchHealthState, cause: &str) {
         self.errors += 1;
+        self.last_error = Some(tokio::time::Instant::now());
         if self.started.is_none() {
             self.started = Some(tokio::time::Instant::now());
             state.broken_since_unix_ms.store(unix_ms(), Ordering::Relaxed);
@@ -99,9 +117,18 @@ impl WatchEpisode {
         }
     }
 
-    /// The watch delivered an event.
+    /// When the open episode ends unless another error comes first: the
+    /// last error plus [`WATCH_QUIET_PERIOD`]. `None` with no open episode.
+    pub(super) fn quiet_deadline(&self) -> Option<tokio::time::Instant> {
+        self.started?;
+        self.last_error.map(|at| at + WATCH_QUIET_PERIOD)
+    }
+
+    /// The watch delivered an event, or went the quiet period without an
+    /// error: it is delivering again.
     pub(super) fn delivered(&mut self, state: &WatchHealthState) {
         let Some(started) = self.started.take() else { return };
+        self.last_error = None;
         state.broken_since_unix_ms.store(0, Ordering::Relaxed);
         tracing::info!(
             broken_for_ms = started.elapsed().as_millis() as u64,

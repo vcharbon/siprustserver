@@ -14,7 +14,7 @@ pub(super) struct PoolGauges {
     /// `1` iff no worker is `Alive` (routable): the proxy can serve no new
     /// dialog. Pairs with the `/readyz` gate.
     empty: AtomicU64,
-    /// `1` while worker discovery has no kube client.
+    /// `1` while worker discovery's kube client fails to build.
     no_client: AtomicU64,
     /// Unix time (ms) the worker watch broke, `0` while it delivers.
     watch_broken_since_ms: AtomicU64,

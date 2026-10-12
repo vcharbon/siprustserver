@@ -39,8 +39,8 @@ use crate::{reconcile_to_desired, MemberDelta, Membership, MembershipState, Peer
 
 mod watch_health;
 
-pub use watch_health::WatchHealth;
 use watch_health::{ConnectEpisode, WatchEpisode, WatchHealthState};
+pub use watch_health::{WatchHealth, WATCH_QUIET_PERIOD};
 
 /// The standard label kube stamps on every EndpointSlice pointing back to its
 /// owning Service. Watching by this selector scopes the informer to one pool.
@@ -117,7 +117,19 @@ impl K8sMembership {
             futures::pin_mut!(stream);
             let mut episode = WatchEpisode::default();
             loop {
-                match stream.next().await {
+                let next = match episode.quiet_deadline() {
+                    None => stream.next().await,
+                    Some(deadline) => {
+                        match tokio::time::timeout_at(deadline, stream.next()).await {
+                            Ok(next) => next,
+                            Err(_quiet) => {
+                                episode.delivered(&watch_health);
+                                continue;
+                            }
+                        }
+                    }
+                };
+                match next {
                     Some(Ok(event)) => {
                         episode.delivered(&watch_health);
                         let slices = reader.state();
@@ -162,7 +174,7 @@ where
                 return client;
             }
             Err(cause) => {
-                episode.failed(&cause, wait);
+                episode.failed(health, &cause, wait);
                 tokio::time::sleep(wait).await;
                 wait = (wait * 2).min(CONNECT_BACKOFF_CEILING);
             }

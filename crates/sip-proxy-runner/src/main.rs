@@ -630,7 +630,7 @@ async fn main() {
                 }
                 m.set_worker_health_counts(alive, draining, not_ready, unknown, dead);
                 match discovery.as_ref().map(|watch| watch.watch_health()) {
-                    Some(h) => m.set_discovery(!h.client_built, h.broken_since_unix_ms),
+                    Some(h) => m.set_discovery(h.client_failing, h.broken_since_unix_ms),
                     None => m.set_discovery(false, None),
                 }
             }
