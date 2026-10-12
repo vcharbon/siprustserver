@@ -16,6 +16,7 @@ use std::time::Duration;
 use sip_clock::Clock;
 use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_proxy::observability::metrics::UntrustedClaim;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
 use sip_proxy::self_gate::{AdmitDecision, BypassKind, ProxySelfGate, ShedReason};
@@ -67,6 +68,7 @@ struct Lab {
     outsider: Box<dyn UdpEndpoint>,
     far: Box<dyn UdpEndpoint>,
     gate: Arc<CountingGate>,
+    metrics: Arc<ProxyMetrics>,
     core: tokio::task::JoinHandle<()>,
 }
 
@@ -112,12 +114,13 @@ async fn proxy_lab(dual: bool, admit: bool) -> Lab {
         consulted: AtomicU32::new(0),
         bypass_internal: AtomicU32::new(0),
     });
+    let metrics = Arc::new(ProxyMetrics::new());
     let core = if dual {
         let int_ep = bind(int_vip()).await;
         let ext_ep = bind(ext_vip()).await;
         ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
             .clock(Clock::test_at(0))
-            .metrics(Arc::new(ProxyMetrics::new()))
+            .metrics(metrics.clone())
             .self_gate(gate.clone())
             .external_face(ExternalFaceParts {
                 endpoint: ext_ep,
@@ -129,12 +132,12 @@ async fn proxy_lab(dual: bool, admit: bool) -> Lab {
         let ep = bind(ext_vip()).await;
         ProxyCoreBuilder::new(ProxyAddr::new(EXT_VIP, EXT_PORT), strategy, reg)
             .clock(Clock::test_at(0))
-            .metrics(Arc::new(ProxyMetrics::new()))
+            .metrics(metrics.clone())
             .self_gate(gate.clone())
             .build(ep)
     };
     let core = tokio::spawn(core.run());
-    Lab { worker, unlisted_worker, outsider, far, gate, core }
+    Lab { worker, unlisted_worker, outsider, far, gate, metrics, core }
 }
 
 fn header_lines(bytes: &[u8], name: &str) -> Vec<String> {
@@ -250,6 +253,10 @@ fn outbound_route(host: &str, port: u16) -> String {
     format!("<sip:{host}:{port};lr;outbound>")
 }
 
+fn counted(lab: &Lab, claim: UntrustedClaim) -> u64 {
+    lab.metrics.external_untrusted_total(claim)
+}
+
 fn got_status(seen: &Seen, status: &str) -> bool {
     seen.back_to_sender.iter().any(|b| start_line(b).starts_with(&format!("SIP/2.0 {status}")))
 }
@@ -281,6 +288,7 @@ async fn an_outbound_marker_on_the_external_face_is_ignored() {
     let invite = request("INVITE", "ext-marker", &outsider_via(), Some(&route), None);
     let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
     assert_met_the_gate_and_not_relayed(&seen);
+    assert_eq!(counted(&lab, UntrustedClaim::OutboundMarker), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -289,6 +297,7 @@ async fn a_worker_via_on_the_external_face_is_ignored() {
     let invite = request("INVITE", "ext-via", &worker_via(), None, None);
     let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
     assert_met_the_gate_and_not_relayed(&seen);
+    assert_eq!(counted(&lab, UntrustedClaim::WorkerVia), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -315,6 +324,7 @@ async fn a_foreign_loose_route_on_the_external_face_is_removed() {
         let (_, forwarded) = &seen.to_worker[0];
         assert!(header_lines(forwarded, "Route").is_empty(), "{route}: no Route rides on");
         assert_eq!(seen.consulted, 1);
+        assert_eq!(counted(&lab, UntrustedClaim::ForeignRoute), 1);
     }
 }
 
@@ -371,6 +381,7 @@ Content-Length: 0\r\n\r\n"
     lab.outsider.send_to(forged.as_bytes(), ext_vip()).await.unwrap();
     settle().await;
     assert!(drain(&*lab.far).is_empty(), "the proxy reflects no response to a non-worker");
+    assert_eq!(counted(&lab, UntrustedClaim::ResponseNotToWorker), 1);
 }
 
 #[tokio::test(start_paused = true)]

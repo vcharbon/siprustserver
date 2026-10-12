@@ -296,7 +296,7 @@ pub struct RunnerEnv {
     /// `0.0.0.0` (a storm).
     pub advertise: Option<String>,
     /// `B2BUA_OUTBOUND_PROXY` — front-proxy `host:port` every b-leg
-    /// (worker→callee) request is forced through (preloaded `Route ;lr;outbound`).
+    /// (worker→callee) request is forced through (a preloaded plain `;lr` Route).
     /// REQUIRED in the k8s cluster (pod IPs are not peer-routable); unset →
     /// b-leg goes straight to the callee (local/dev only). A malformed value is
     /// fatal at parse — a silent fallback to pod-direct would send b-leg traffic
@@ -705,9 +705,9 @@ impl RunnerEnv {
         );
 
         match &self.outbound_proxy {
-            // Every b-leg request goes to the front proxy with a preloaded
-            // `Route: <sip:host:port;lr;outbound>` so the proxy classifies it
-            // worker-outbound and record-routes itself into the b-leg.
+            // Every b-leg request goes to the front proxy with a preloaded plain
+            // `;lr` Route; its internal face classifies it worker-outbound
+            // (ADR-0047) and it record-routes itself into the b-leg.
             Some((h, p)) => tracing::info!(
                 service = name,
                 proxy_host = %h,

@@ -11,9 +11,10 @@
 //! stateful proxy's, and this proxy is stateless (§16.11), so it neither
 //! absorbs the downstream 100 nor generates one of its own. A response is
 //! dropped only when its top Via is not this proxy, when it carries fewer than
-//! two Vias, when it answers an INVITE for a Dead worker and no cookie of this
-//! proxy names a backup to fail it over to, or when its top Via cannot be
-//! popped and the rest re-rendered.
+//! two Vias, when it arrives on the external face and its next Via's response
+//! address is no registry worker (ADR-0047), when it answers an INVITE for a
+//! Dead worker and no cookie of this proxy names a backup to fail it over to,
+//! or when its top Via cannot be popped and the rest re-rendered.
 //!
 //! An address that LEFT the worker set counts as `Dead` here for Timer H
 //! (`registry::tombstone`): a node whose endpoint is withdrawn while its process
@@ -27,7 +28,7 @@ use sip_message::{Method, SipMessage};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{ack_hop_key, invite_txn_key};
-use crate::observability::metrics::{Direction, MessageResult};
+use crate::observability::metrics::{Direction, Face, MessageResult, UntrustedClaim};
 use crate::registry::WorkerHealth;
 use crate::strategy::DecodeResult;
 use crate::trace::emit;
@@ -44,8 +45,14 @@ fn rejects_the_setup(status: u16, method: &Method) -> bool {
 
 impl ProxyCore {
     /// `src` is the datagram's source: the node that sent this final, which
-    /// is the hop a §17.1.1.3 ACK for it must reach.
-    pub(super) async fn handle_response(&self, resp: SipResponse, src: std::net::SocketAddr) {
+    /// is the hop a §17.1.1.3 ACK for it must reach. `face` is the face it
+    /// arrived on.
+    pub(super) async fn handle_response(
+        &self,
+        resp: SipResponse,
+        src: std::net::SocketAddr,
+        face: Face,
+    ) {
         let cseq = resp.cseq();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         self.metrics.record_response(cseq.method().as_str(), resp.status());
@@ -85,6 +92,15 @@ impl ProxyCore {
         let next = &hops[1];
         // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
         let (next_host, next_port) = next.response_target();
+        // The external face relays a response only to a worker, a departed
+        // one included: the proxy reflects nothing to a host a sender names.
+        if face == Face::External
+            && self.registry.lookup_by_address(&ProxyAddr::new(next_host, next_port)).is_none()
+        {
+            self.metrics.record_external_untrusted(UntrustedClaim::ResponseNotToWorker);
+            self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+            return;
+        }
         let mut host = next_host.to_string();
         let mut port = next_port;
 
@@ -203,6 +219,13 @@ impl ProxyCore {
                 );
             }
         }
+    }
+
+    /// A test's `handle_response`: the response arrives on the face of its
+    /// source's plane, as a deployed network delivers it.
+    #[cfg(test)]
+    pub(super) async fn handle_response_from(&self, resp: SipResponse, src: std::net::SocketAddr) {
+        self.handle_response(resp, src, self.egress_face(src)).await
     }
 
     /// The stickiness cookie for reverse-path failover toward `worker`: the

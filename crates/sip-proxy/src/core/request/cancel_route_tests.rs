@@ -165,11 +165,11 @@ enum Order {
 
 async fn both_invites(core: &ProxyCore, order: Order) {
     let worker = || async {
-        let out = core.route_request(&worker_invite(), worker_src()).await;
+        let out = core.route_request_from(&worker_invite(), worker_src()).await;
         assert_eq!(out.target, Some(ProxyAddr::new(THIRD, 5060)), "the worker's INVITE leaves");
     };
     let third = || async {
-        let out = core.route_request(&spiralled_invite(), third_src()).await;
+        let out = core.route_request_from(&spiralled_invite(), third_src()).await;
         assert_eq!(out.target, Some(ProxyAddr::new(WORKER, 5060)), "the spiral comes back");
     };
     match order {
@@ -188,7 +188,7 @@ async fn each_cancel_follows_its_own_invite(order: Order) {
     let core = core().await;
     both_invites(&core, order).await;
 
-    let out = core.route_request(&worker_cancel(), worker_src()).await;
+    let out = core.route_request_from(&worker_cancel(), worker_src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::Cancel);
     assert_eq!(
         out.target,
@@ -196,7 +196,7 @@ async fn each_cancel_follows_its_own_invite(order: Order) {
         "{order:?}: the worker's CANCEL goes where its INVITE went, the downstream proxy"
     );
 
-    let out = core.route_request(&third_cancel(), third_src()).await;
+    let out = core.route_request_from(&third_cancel(), third_src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::Cancel);
     assert_eq!(
         out.target,
@@ -228,15 +228,15 @@ async fn a_spirals_two_non_2xx_acks_each_follow_their_own_final() {
 Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKproxyhop;rport\r\n\
 Via: SIP/2.0/UDP {WORKER}:5060;branch={WORKER_BRANCH};rport\r\n"
     );
-    core.handle_response(terminated(&spiralled_vias), worker_src()).await;
+    core.handle_response_from(terminated(&spiralled_vias), worker_src()).await;
     let worker_vias = format!("Via: SIP/2.0/UDP {WORKER}:5060;branch={WORKER_BRANCH};rport\r\n");
-    core.handle_response(terminated(&worker_vias), third_src()).await;
+    core.handle_response_from(terminated(&worker_vias), third_src()).await;
 
-    let out = core.route_request(&ack(THIRD, THIRD_BRANCH, PROXY_VIP), third_src()).await;
+    let out = core.route_request_from(&ack(THIRD, THIRD_BRANCH, PROXY_VIP), third_src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::AckHop, "the spiralled INVITE's ACK");
     assert_eq!(out.target, Some(ProxyAddr::new(WORKER, 5060)), "to where its 487 came from");
 
-    let out = core.route_request(&ack(WORKER, WORKER_BRANCH, THIRD), worker_src()).await;
+    let out = core.route_request_from(&ack(WORKER, WORKER_BRANCH, THIRD), worker_src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::AckHop, "the worker's INVITE's ACK");
     assert_eq!(out.target, Some(ProxyAddr::new(THIRD, 5060)), "to where its 487 came from");
 }

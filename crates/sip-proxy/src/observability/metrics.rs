@@ -13,9 +13,11 @@ use sip_net::UdpEndpoint;
 use super::catalogue;
 use pool::PoolGauges;
 
+mod face;
 mod pool;
 use crate::resolver::{outcome, refresh_outcome};
 use crate::strategy::DecodeResult;
+pub use face::{Face, UntrustedClaim};
 
 /// Inbound vs outbound: the first half of `sip_messages_total`'s
 /// `label="direction:result"`.
@@ -28,28 +30,6 @@ pub enum Direction {
 impl Direction {
     /// Every direction, in declaration order.
     pub const ALL: [Direction; 2] = [Direction::Inbound, Direction::Outbound];
-}
-
-/// Which proxy face a datagram crossed, for
-/// `sip_proxy_face_messages_total{label="face:direction"}` (dual-face mode). A
-/// single-face proxy records everything as `int`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Face {
-    Internal,
-    External,
-}
-
-impl Face {
-    /// Every face, in declaration order.
-    pub const ALL: [Face; 2] = [Face::Internal, Face::External];
-
-    /// The face's metrics label, and the value a trace event names it by.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Face::Internal => "int",
-            Face::External => "ext",
-        }
-    }
 }
 
 /// How a message was handled: the second half of `sip_messages_total`'s
@@ -302,6 +282,8 @@ pub struct ProxyMetrics {
     /// A single-face proxy only ever touches the `int` slots — cheap fixed
     /// atomics, no restructuring of the existing counters.
     face_messages: [[AtomicU64; 2]; 2],
+    /// Claims of the internal plane the external face does not honour.
+    external_untrusted: FixedCounts,
     /// Per-peer failure/timeout counters
     /// (`sip_proxy_peer_failures_total{peer,scope,kind}`). Internal = resolves to
     /// a known worker (registry), always its own series; external = under the
@@ -338,6 +320,7 @@ impl Default for ProxyMetrics {
             pool: Default::default(),
             recv_shards_stalled: Default::default(),
             face_messages: Default::default(),
+            external_untrusted: FixedCounts::new(&catalogue::EXTERNAL_UNTRUSTED),
             per_peer: Default::default(),
         }
     }
@@ -374,23 +357,6 @@ impl ProxyMetrics {
     /// out-of-dialog INVITE), for `sip_proxy_calls_total`.
     pub fn record_call(&self) {
         self.calls.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Count one datagram RECEIVED on `face` (the recv loop's arrival socket).
-    pub fn record_face_ingress(&self, face: Face) {
-        self.face_messages[face as usize][Direction::Inbound as usize]
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Count one datagram EGRESSED on `face` (the destination-picked socket).
-    pub fn record_face_egress(&self, face: Face) {
-        self.face_messages[face as usize][Direction::Outbound as usize]
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Read one per-face counter (test/assertion surface).
-    pub fn face_messages_total(&self, face: Face, direction: Direction) -> u64 {
-        self.face_messages[face as usize][direction as usize].load(Ordering::Relaxed)
     }
 
     pub fn record_routing_decision(&self, kind: RoutingDecisionKind) {
@@ -600,6 +566,7 @@ impl ProxyMetrics {
             let (f, d) = (series.at(0) / Direction::ALL.len(), series.at(0) % Direction::ALL.len());
             load(&self.face_messages[f][d])
         });
+        self.external_untrusted.render(&mut s);
         let native = Method::NATIVE_TOKENS
             .iter()
             .zip(&self.requests)

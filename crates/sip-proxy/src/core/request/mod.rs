@@ -1,16 +1,19 @@
-//! Request path, RFC 3261 §16, single-endpoint: preflight (Max-Forwards 483,
-//! Proxy-Require 420), the non-2xx ACK hop decision (relay on the INVITE's
-//! hop, or absorb the ACK to a self-generated final), top-Route strip +
-//! worker-outbound classification, self-gate (ELU/CPS) admission, target
+//! Request path, RFC 3261 §16: preflight (Max-Forwards 483, Proxy-Require
+//! 420), the non-2xx ACK hop decision (relay on the INVITE's hop, or absorb the
+//! ACK to a self-generated final), top-Route strip + direction under the
+//! ingress face's trust (ADR-0047), self-gate (ELU/CPS) admission, target
 //! selection (CANCEL LRU → loose-route next hop → worker-outbound R-URI →
 //! cookie decode → select), received/rport stamping, Record-Route insertion,
 //! Via push, retransmission memos, serialize + forward.
 //!
-//! The routing ladder lives in [`route`], the double-Record-Route insertion in
+//! The routing ladder lives in [`route`], Route preprocessing in [`classify`],
+//! the gate in [`admission`], the double-Record-Route insertion in
 //! [`record_route`], the cookie on a worker's Via in [`via_cookie`],
 //! self-generated UAS finals in [`reply`]. The response relay does NOT live
 //! here — see `core/response`.
 
+mod admission;
+mod classify;
 mod record_route;
 mod reply;
 mod route;
@@ -41,7 +44,7 @@ use std::net::SocketAddr;
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
-use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
+use crate::observability::metrics::{Direction, Face, MessageResult, RoutingDecisionKind};
 use crate::trace::emit;
 
 use super::ProxyCore;
@@ -67,7 +70,8 @@ fn top_via_branch(req: &SipRequest) -> Option<String> {
 }
 
 impl ProxyCore {
-    pub(super) async fn handle_request(&self, msg: SipMessage, src: SocketAddr) {
+    /// Route one request received from `src` on `face`.
+    pub(super) async fn handle_request(&self, msg: SipMessage, src: SocketAddr, face: Face) {
         let start_ms = self.now_ms();
         let SipMessage::Request(req) = &msg else { return };
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
@@ -92,7 +96,7 @@ impl ProxyCore {
         emit::sip_in(&self.traces, call_id, at_ms, src, req.image());
         let initial_invite = matches!(req.method(), Method::Invite) && req.to().tag().is_none();
 
-        let outcome = self.route_request(&msg, src).await;
+        let outcome = self.route_request(&msg, src, face).await;
 
         // Close on the last fact this hop sees about the call, rather than
         // holding its span, its active-cap slot and the process-wide sampled
@@ -114,5 +118,22 @@ impl ProxyCore {
         let duration = (self.now_ms().saturating_sub(start_ms)) as f64 / 1000.0;
         self.metrics.observe_routing_duration(duration);
         self.metrics.record_routing_decision(outcome.decision);
+    }
+
+    /// A test's `handle_request`: the request arrives on the face of its
+    /// source's plane, as a deployed network delivers it.
+    #[cfg(test)]
+    pub(in crate::core) async fn handle_request_from(&self, msg: SipMessage, src: SocketAddr) {
+        self.handle_request(msg, src, self.egress_face(src)).await
+    }
+
+    /// A test's `route_request`, as [`Self::handle_request_from`].
+    #[cfg(test)]
+    pub(in crate::core) async fn route_request_from(
+        &self,
+        msg: &SipMessage,
+        src: SocketAddr,
+    ) -> RouteOutcome {
+        self.route_request(msg, src, self.egress_face(src)).await
     }
 }

@@ -185,6 +185,12 @@ fn external_face(env: &mut EnvReader) -> Option<ExternalFace> {
             "PROXY_FACE_INT_CIDRS set but PROXY_LISTEN_EXT unset — single-face mode, CIDR list ignored"
         );
     }
+    if listen_ext.is_none() {
+        tracing::warn!(
+            "single-face proxy (PROXY_LISTEN_EXT unset): every sender is trusted as the internal \
+             plane and may have a request relayed to its Request-URI (ADR-0047)"
+        );
+    }
     listen_ext?;
     let listen = env.bind_addr("PROXY_LISTEN_EXT", SocketAddr::from(([0, 0, 0, 0], 0)));
     let advertise = advertise(env, "PROXY_ADVERTISE_EXT", listen);

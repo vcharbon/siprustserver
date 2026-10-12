@@ -9,6 +9,7 @@ use sip_message::status::STACK_CODES;
 
 use super::metrics::{
     CancelLookup, Direction, Face, HmacFailureReason, MessageResult, RoutingDecisionKind,
+    UntrustedClaim,
 };
 use super::peer_failures::{PeerFailureKind, PeerScope};
 use crate::resolver::{outcome, refresh_outcome};
@@ -62,6 +63,9 @@ const HMAC_REASON_VALUES: [&str; 3] =
 /// Why an HMAC verify failed, indexed like [`HmacFailureReason::ALL`].
 pub const HMAC_REASON: Dim = Dim::new("reason", &HMAC_REASON_VALUES);
 
+const UNTRUSTED_CLAIM_VALUES: [&str; 5] =
+    label_values!(UntrustedClaim::ALL, UntrustedClaim::as_str);
+
 const CANCEL_LOOKUP_VALUES: [&str; 2] = label_values!(CancelLookup::ALL, CancelLookup::as_str);
 
 const PROMOTION_VALUES: [&str; 2] = label_values!(Promotion::ALL, Promotion::as_str);
@@ -106,6 +110,13 @@ assert_exposition_order!(Direction: Inbound, Outbound);
 assert_exposition_order!(MessageResult: Forwarded, Responded, Dropped);
 assert_exposition_order!(Face: Internal, External);
 assert_exposition_order!(
+    UntrustedClaim: OutboundMarker,
+    WorkerVia,
+    WorkerSource,
+    ForeignRoute,
+    ResponseNotToWorker,
+);
+assert_exposition_order!(
     RoutingDecisionKind: SelectNew,
     DecodeForward,
     DecodeForwardBackup,
@@ -137,6 +148,12 @@ pub const FACE_MESSAGES: Family = Family::counter(
     "sip_proxy_face_messages_total",
     Labels::Product(&[Dim::new("label", &FACE_LABELS)]),
     "Datagrams by proxy face + direction (dual-face mode; single-face records int only).",
+);
+
+pub const EXTERNAL_UNTRUSTED: Family = Family::counter(
+    "sip_proxy_external_untrusted_total",
+    Labels::Product(&[Dim::new("kind", &UNTRUSTED_CLAIM_VALUES)]),
+    "Messages on the external face claiming the internal plane, by claim: an outbound marker, a worker Via or a worker source ignored, foreign Route entries removed (the request is routed as an inbound one), a response whose next Via is no worker dropped.",
 );
 
 pub const REQUESTS: Family = Family::counter(
@@ -396,6 +413,7 @@ pub const SELF_GATE_INTERNAL_BYPASSED: Family = Family::counter(
 pub const PROXY: &[Family] = &[
     MESSAGES,
     FACE_MESSAGES,
+    EXTERNAL_UNTRUSTED,
     REQUESTS,
     REQUESTS_OVERFLOW,
     RESPONSES,

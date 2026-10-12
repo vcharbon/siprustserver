@@ -128,17 +128,17 @@ async fn each_request_decode_counts_what_it_says_of_the_primary() {
     let w1 = Some(ProxyAddr::new(W1_POD, 5060));
     let w2 = Some(ProxyAddr::new(W2_POD, 5060));
 
-    let out = f.core.route_request(&bye(&cookie, 3), src).await;
+    let out = f.core.route_request_from(&bye(&cookie, 3), src).await;
     assert_eq!(out.target, w2, "fresh w1: to the backup");
     f.registry.set_health("w1", WorkerHealth::NotReady);
     for cseq in 4..6 {
-        let out = f.core.route_request(&bye(&cookie, cseq), src).await;
+        let out = f.core.route_request_from(&bye(&cookie, cseq), src).await;
         assert_eq!(out.target, w2, "not-ready w1: to the backup");
     }
     f.registry.set_health("w1", WorkerHealth::Alive);
     f.registry.set_health("w2", WorkerHealth::Dead);
     for cseq in 6..9 {
-        let out = f.core.route_request(&bye(&cookie, cseq), src).await;
+        let out = f.core.route_request_from(&bye(&cookie, cseq), src).await;
         assert_eq!(out.target, w1, "no usable backup: the fresh w1");
     }
 
@@ -165,7 +165,8 @@ CSeq: 1 INVITE\r\n\
 Contact: <sip:alice@{UAC}:5060>\r\n\
 Content-Length: 0\r\n\r\n"
     ));
-    let primary = f.core.route_request(&invite, src).await.target.expect("the INVITE is routed");
+    let primary =
+        f.core.route_request_from(&invite, src).await.target.expect("the INVITE is routed");
     let (primary_id, backup) = if primary.host == W1_POD {
         ("w1", ProxyAddr::new(W2_POD, 5060))
     } else {
@@ -183,7 +184,7 @@ Call-ID: {CALL_ID}\r\n\
 CSeq: 1 CANCEL\r\n\
 Content-Length: 0\r\n\r\n"
     ));
-    let out = f.core.route_request(&cancel, src).await;
+    let out = f.core.route_request_from(&cancel, src).await;
     assert_eq!(out.target, Some(backup), "the CANCEL follows the cookie to the backup");
 
     let m = &f.metrics;
@@ -220,7 +221,7 @@ Content-Length: 0\r\n\r\n"
     );
     let decoded = f.strategy.decode_stickiness(&params, &SipMessage::Response(resp.clone())).await;
     assert!(matches!(decoded, DecodeResult::Forward { fresh_primary: true, .. }), "{decoded:?}");
-    f.core.handle_response(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
+    f.core.handle_response_from(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
 
     let m = &f.metrics;
     assert!(

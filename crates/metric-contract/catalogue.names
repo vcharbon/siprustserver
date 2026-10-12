@@ -204,6 +204,7 @@ b2bua-runner process_resident_memory_bytes gauge fixed {}
 b2bua-runner process_threads gauge fixed {}
 sip-proxy-runner sip_messages_total counter fixed {label}
 sip-proxy-runner sip_proxy_face_messages_total counter fixed {label}
+sip-proxy-runner sip_proxy_external_untrusted_total counter fixed {kind}
 sip-proxy-runner sip_proxy_requests_total counter capped:256 {method}
 sip-proxy-runner sip_proxy_requests_overflow_total counter fixed {}
 sip-proxy-runner sip_proxy_responses_total counter capped:256 {method,code}

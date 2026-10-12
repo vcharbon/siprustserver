@@ -54,7 +54,8 @@ back (a spiral with no Record-Routing hop between passes) takes its direction
 from the first entry of the last pair: it leaves this proxy on the last pass, and
 its worker Via does not make it worker-outbound when that pair decodes. An odd run
 of own entries is no run of pairs this proxy recorded: its first entry decides,
-and a worker Via still makes the request worker-outbound.
+and a worker Via still makes the request worker-outbound. These direction rules
+hold on the internal face only (ADR-0047).
 
 ## Decision X2 — the scenario harness gains a System-Under-Test seam
 

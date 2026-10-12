@@ -384,10 +384,10 @@ impl ProxyCore {
 
         loop {
             // Dual-face: serve BOTH sockets from the one core (one process,
-            // one state — cancel_lru / stickiness / registry shared across
-            // faces by construction). Either socket closing ends the core: the
-            // faces are one identity and must live and die together (the
-            // runner supervises the core task and exits for restart).
+            // one state shared across faces). Either socket closing ends the
+            // core: the faces are one identity and live and die together (the
+            // runner supervises the core task and exits for restart). The face
+            // a datagram arrived on is its trust (ADR-0047).
             let (pkt, face) = match &self.external {
                 Some(ext) => tokio::select! {
                     p = self.endpoint.recv() => (p, Face::Internal),
@@ -414,8 +414,8 @@ impl ProxyCore {
                 continue;
             };
             match msg {
-                SipMessage::Request(_) => self.handle_request(msg, src).await,
-                SipMessage::Response(resp) => self.handle_response(resp, src).await,
+                SipMessage::Request(_) => self.handle_request(msg, src, face).await,
+                SipMessage::Response(resp) => self.handle_response(resp, src, face).await,
             }
             self.pulse.waiting(self.shard);
         }

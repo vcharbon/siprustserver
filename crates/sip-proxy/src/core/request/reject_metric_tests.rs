@@ -88,7 +88,7 @@ async fn no_target_select_failure_attributes_its_reject() {
     let (core, metrics) =
         core_failing_with(|| SelectError::NoTarget { reason: "empty registry".into() }).await;
     let outcome =
-        core.route_request(&new_dialog_invite(), format!("{UAC}:5060").parse().unwrap()).await;
+        core.route_request_from(&new_dialog_invite(), format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.reject_count("no_target_available"), 1);
     assert_eq!(metrics.reject_count("worker_rate_capped"), 0);
@@ -107,7 +107,7 @@ async fn rate_cap_select_failure_attributes_its_reject() {
     })
     .await;
     let outcome =
-        core.route_request(&new_dialog_invite(), format!("{UAC}:5060").parse().unwrap()).await;
+        core.route_request_from(&new_dialog_invite(), format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.reject_count("worker_rate_capped"), 1);
     assert_eq!(metrics.reject_count("no_target_available"), 0);
@@ -132,7 +132,7 @@ CSeq: 2 BYE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let req = CustomParser::default().parse(raw.as_bytes()).unwrap();
-    let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome = core.route_request_from(&req, format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.reject_count("too_many_hops"), 1);
 }
@@ -185,7 +185,7 @@ Content-Length: 0\r\n\r\n"
 async fn an_ack_with_no_target_is_dropped_not_answered() {
     let (core, metrics) =
         core_failing_with(|| SelectError::NoTarget { reason: "empty registry".into() }).await;
-    let outcome = core.route_request(&ack(None), format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome = core.route_request_from(&ack(None), format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.messages_total(), 0, "no response to an ACK");
     assert_eq!(metrics.reject_count("ack_not_answered"), 1);
@@ -208,7 +208,7 @@ async fn an_ack_whose_cookie_is_refused_is_dropped_not_answered() {
             .build(ep);
     let route = format!("<sip:{PROXY_VIP}:5060;lr;w_pri=w9>");
     let outcome =
-        core.route_request(&ack(Some(&route)), format!("{UAC}:5060").parse().unwrap()).await;
+        core.route_request_from(&ack(Some(&route)), format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.messages_total(), 0, "no response to an ACK");
     assert_eq!(metrics.reject_count("ack_not_answered"), 1);

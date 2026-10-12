@@ -218,8 +218,8 @@ async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
 
     // The 401-challenged INVITE and the credentialed retry: same Call-ID and
     // From-tag, fresh branch and CSeq, so nothing about it is a retransmission.
-    core.handle_request(invite("dup@10.0.0.1", "z9hG4bK-first", 1), src()).await;
-    core.handle_request(invite("dup@10.0.0.1", "z9hG4bK-retry", 2), src()).await;
+    core.handle_request_from(invite("dup@10.0.0.1", "z9hG4bK-first", 1), src()).await;
+    core.handle_request_from(invite("dup@10.0.0.1", "z9hG4bK-retry", 2), src()).await;
 
     assert_eq!(traces.active(), 1, "one root span per call, however many INVITEs it takes");
     let sip_in = log.matching("kind=sip.in");
@@ -247,7 +247,7 @@ async fn a_shed_call_records_the_503_it_was_answered_with() {
     let traces = sample_everything();
     let (core, ep) = core_with(traces.clone(), Some(Arc::new(SheddingGate)));
 
-    core.handle_request(invite("shed@10.0.0.1", "z9hG4bK-shed", 1), src()).await;
+    core.handle_request_from(invite("shed@10.0.0.1", "z9hG4bK-shed", 1), src()).await;
 
     assert!(
         log.matching("kind=sip.in").iter().any(|e| e.contains("INVITE sip:")),
@@ -279,18 +279,18 @@ async fn a_rejected_call_closes_its_span_when_the_ack_relays() {
     let (core, ep) = core_with(traces.clone(), None);
     const CALL_ID: &str = "reject@10.0.0.1";
 
-    core.handle_request(invite(CALL_ID, "z9hG4bK-rej", 1), src()).await;
+    core.handle_request_from(invite(CALL_ID, "z9hG4bK-rej", 1), src()).await;
     assert_eq!(traces.active(), 1);
     let proxy_branch = forwarded_branch(&ep);
 
-    core.handle_response(
+    core.handle_response_from(
         response(CALL_ID, "486 Busy Here", &proxy_branch, "z9hG4bK-rej", "1 INVITE"),
         worker_src(),
     )
     .await;
     assert_eq!(traces.active(), 1, "the call is not over until its ACK is on the wire");
 
-    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-rej", 1), src()).await;
+    core.handle_request_from(in_dialog("ACK", CALL_ID, "z9hG4bK-rej", 1), src()).await;
 
     assert_eq!(traces.active(), 0, "the relayed ACK ends the rejected transaction at this hop");
     assert!(!traces.any_sampled(), "and the process-wide flag drops with the last span");
@@ -310,29 +310,32 @@ async fn a_rejected_re_invite_leaves_the_live_call_its_span() {
     let (core, ep) = core_with(traces.clone(), None);
     const CALL_ID: &str = "reinvite@10.0.0.1";
 
-    core.handle_request(invite(CALL_ID, "z9hG4bK-setup", 1), src()).await;
+    core.handle_request_from(invite(CALL_ID, "z9hG4bK-setup", 1), src()).await;
     let setup = forwarded_branch(&ep);
-    core.handle_response(
+    core.handle_response_from(
         response(CALL_ID, "200 OK", &setup, "z9hG4bK-setup", "1 INVITE"),
         worker_src(),
     )
     .await;
-    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-ack", 1), src()).await;
+    core.handle_request_from(in_dialog("ACK", CALL_ID, "z9hG4bK-ack", 1), src()).await;
 
-    core.handle_request(in_dialog("INVITE", CALL_ID, "z9hG4bK-hold", 2), src()).await;
+    core.handle_request_from(in_dialog("INVITE", CALL_ID, "z9hG4bK-hold", 2), src()).await;
     let hold = forwarded_branch(&ep);
-    core.handle_response(
+    core.handle_response_from(
         response(CALL_ID, "488 Not Acceptable Here", &hold, "z9hG4bK-hold", "2 INVITE"),
         worker_src(),
     )
     .await;
-    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-hold", 2), src()).await;
+    core.handle_request_from(in_dialog("ACK", CALL_ID, "z9hG4bK-hold", 2), src()).await;
     assert_eq!(traces.active(), 1, "a rejected re-INVITE ends a transaction, not the dialog");
 
-    core.handle_request(in_dialog("BYE", CALL_ID, "z9hG4bK-bye", 3), src()).await;
+    core.handle_request_from(in_dialog("BYE", CALL_ID, "z9hG4bK-bye", 3), src()).await;
     let bye = forwarded_branch(&ep);
-    core.handle_response(response(CALL_ID, "200 OK", &bye, "z9hG4bK-bye", "3 BYE"), worker_src())
-        .await;
+    core.handle_response_from(
+        response(CALL_ID, "200 OK", &bye, "z9hG4bK-bye", "3 BYE"),
+        worker_src(),
+    )
+    .await;
 
     assert!(
         log.matching("kind=sip.in").iter().any(|e| e.contains("BYE sip:")),
@@ -353,7 +356,7 @@ async fn an_auth_challenge_keeps_the_span_for_the_credentialed_retry() {
     let (core, ep) = core_with(traces.clone(), None);
     const CALL_ID: &str = "auth@10.0.0.1";
 
-    core.handle_request(invite(CALL_ID, "z9hG4bK-chal", 1), src()).await;
+    core.handle_request_from(invite(CALL_ID, "z9hG4bK-chal", 1), src()).await;
     let challenged = forwarded_branch(&ep);
     let challenge = response(
         CALL_ID,
@@ -362,8 +365,8 @@ async fn an_auth_challenge_keeps_the_span_for_the_credentialed_retry() {
         "z9hG4bK-chal",
         "1 INVITE",
     );
-    core.handle_response(challenge, worker_src()).await;
-    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-chal", 1), src()).await;
+    core.handle_response_from(challenge, worker_src()).await;
+    core.handle_request_from(in_dialog("ACK", CALL_ID, "z9hG4bK-chal", 1), src()).await;
     assert_eq!(
         traces.active(),
         1,
@@ -372,14 +375,14 @@ async fn an_auth_challenge_keeps_the_span_for_the_credentialed_retry() {
 
     // The retry is the transaction the call now hangs on — and its rejection is
     // the one that ends the call.
-    core.handle_request(invite(CALL_ID, "z9hG4bK-cred", 2), src()).await;
+    core.handle_request_from(invite(CALL_ID, "z9hG4bK-cred", 2), src()).await;
     let credentialed = forwarded_branch(&ep);
-    core.handle_response(
+    core.handle_response_from(
         response(CALL_ID, "486 Busy Here", &credentialed, "z9hG4bK-cred", "2 INVITE"),
         worker_src(),
     )
     .await;
-    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-cred", 2), src()).await;
+    core.handle_request_from(in_dialog("ACK", CALL_ID, "z9hG4bK-cred", 2), src()).await;
 
     assert_eq!(traces.active(), 0);
     assert!(!traces.any_sampled());

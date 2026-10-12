@@ -114,11 +114,11 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn non_2xx_ack_with_preloaded_proxy_route_follows_the_invite_hop() {
     let core = core().await;
-    core.route_request(&invite("z9hG4bKinv"), src()).await;
-    core.handle_response(busy_486("z9hG4bKinv"), worker_src()).await;
+    core.route_request_from(&invite("z9hG4bKinv"), src()).await;
+    core.handle_response_from(busy_486("z9hG4bKinv"), worker_src()).await;
 
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
-    let outcome = core.route_request(&ack("z9hG4bKinv", &route), src()).await;
+    let outcome = core.route_request_from(&ack("z9hG4bKinv", &route), src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
     assert_eq!(
         outcome.target,
@@ -132,10 +132,10 @@ async fn non_2xx_ack_with_preloaded_proxy_route_follows_the_invite_hop() {
 #[tokio::test]
 async fn non_2xx_ack_without_route_follows_the_invite_hop() {
     let core = core().await;
-    core.route_request(&invite("z9hG4bKinv"), src()).await;
-    core.handle_response(busy_486("z9hG4bKinv"), worker_src()).await;
+    core.route_request_from(&invite("z9hG4bKinv"), src()).await;
+    core.handle_response_from(busy_486("z9hG4bKinv"), worker_src()).await;
 
-    let outcome = core.route_request(&ack("z9hG4bKinv", ""), src()).await;
+    let outcome = core.route_request_from(&ack("z9hG4bKinv", ""), src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
     assert_eq!(outcome.target, Some(ProxyAddr::new(W1, 5060)));
 }
@@ -147,11 +147,11 @@ async fn non_2xx_ack_without_route_follows_the_invite_hop() {
 #[tokio::test]
 async fn non_2xx_ack_follows_the_finals_sender_not_the_invite_target() {
     let core = core().await;
-    core.route_request(&invite("z9hG4bKinv"), src()).await;
+    core.route_request_from(&invite("z9hG4bKinv"), src()).await;
     let survivor: std::net::SocketAddr = format!("{W2}:5060").parse().unwrap();
-    core.handle_response(busy_486("z9hG4bKinv"), survivor).await;
+    core.handle_response_from(busy_486("z9hG4bKinv"), survivor).await;
 
-    let outcome = core.route_request(&ack("z9hG4bKinv", ""), src()).await;
+    let outcome = core.route_request_from(&ack("z9hG4bKinv", ""), src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
     assert_eq!(
         outcome.target,
@@ -166,11 +166,11 @@ async fn non_2xx_ack_follows_the_finals_sender_not_the_invite_target() {
 #[tokio::test]
 async fn fresh_branch_ack_after_a_relayed_final_takes_the_normal_ladder() {
     let core = core().await;
-    core.route_request(&invite("z9hG4bKinv"), src()).await;
-    core.handle_response(busy_486("z9hG4bKinv"), worker_src()).await;
+    core.route_request_from(&invite("z9hG4bKinv"), src()).await;
+    core.handle_response_from(busy_486("z9hG4bKinv"), worker_src()).await;
 
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
-    let outcome = core.route_request(&ack("z9hG4bKack2xx", &route), src()).await;
+    let outcome = core.route_request_from(&ack("z9hG4bKack2xx", &route), src()).await;
     assert!(outcome.target.is_some(), "a fresh-branch ACK must still be forwarded");
     assert_ne!(
         outcome.decision,
@@ -187,10 +187,10 @@ async fn fresh_branch_ack_after_a_relayed_final_takes_the_normal_ladder() {
 #[tokio::test]
 async fn ack_for_2xx_is_forwarded_even_when_its_branch_aliases_the_invite() {
     let core = core().await;
-    core.route_request(&invite("z9hG4bKinv"), src()).await;
+    core.route_request_from(&invite("z9hG4bKinv"), src()).await;
 
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
-    let outcome = core.route_request(&ack("z9hG4bKinv", &route), src()).await;
+    let outcome = core.route_request_from(&ack("z9hG4bKinv", &route), src()).await;
     assert!(
         outcome.target.is_some(),
         "with no relayed non-2xx final, an ACK must be forwarded even on a branch alias"
@@ -201,10 +201,10 @@ async fn ack_for_2xx_is_forwarded_even_when_its_branch_aliases_the_invite() {
 #[tokio::test]
 async fn ack_for_2xx_with_fresh_branch_is_forwarded() {
     let core = core().await;
-    core.route_request(&invite("z9hG4bKinv"), src()).await;
+    core.route_request_from(&invite("z9hG4bKinv"), src()).await;
 
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
-    let outcome = core.route_request(&ack("z9hG4bKack2xx", &route), src()).await;
+    let outcome = core.route_request_from(&ack("z9hG4bKack2xx", &route), src()).await;
     assert!(outcome.target.is_some(), "a fresh-branch (2xx) ACK must be forwarded end-to-end");
 }
 
@@ -229,9 +229,9 @@ Contact: <sip:alice@{UAC}:5060>\r\n\
 Proxy-Require: bogus-extension-xyz\r\n\
 Content-Length: 0\r\n\r\n"
     ));
-    core.route_request(&inv, src()).await; // → self-generated 420
+    core.route_request_from(&inv, src()).await; // → self-generated 420
 
-    let outcome = core.route_request(&ack("z9hG4bKinv", ""), src()).await;
+    let outcome = core.route_request_from(&ack("z9hG4bKinv", ""), src()).await;
     assert_eq!(
         outcome.target, None,
         "the ACK to a self-generated non-2xx final must be absorbed at this hop"
@@ -276,7 +276,7 @@ CSeq: 1 INVITE\r\n\
 Contact: <sip:alice@{UAC}:5060>\r\n\
 Content-Length: 0\r\n\r\n"
     ));
-    core.route_request(&invite, src()).await;
+    core.route_request_from(&invite, src()).await;
     let SipMessage::Response(busy) = branchless(&format!(
         "SIP/2.0 486 Busy Here\r\n\
 Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout;rport\r\n\
@@ -289,13 +289,13 @@ Content-Length: 0\r\n\r\n"
     )) else {
         panic!("expected response")
     };
-    core.handle_response(busy, worker_src()).await;
+    core.handle_response_from(busy, worker_src()).await;
 
     let routed = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
-    let out = core.route_request(&branchless_ack(&routed), src()).await;
+    let out = core.route_request_from(&branchless_ack(&routed), src()).await;
     assert_ne!(out.decision, RoutingDecisionKind::AckHop, "a routed ACK takes the ladder");
 
-    let out = core.route_request(&branchless_ack(""), src()).await;
+    let out = core.route_request_from(&branchless_ack(""), src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::AckHop);
     assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)), "to where the 486 came from");
 }

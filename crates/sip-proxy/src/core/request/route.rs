@@ -1,27 +1,29 @@
 //! The §16 routing ladder for one inbound request: preflight checks, the
-//! non-2xx ACK hop decision, Route preprocessing + worker-outbound
-//! classification, self-gate admission, target selection, Via push, LRU memos,
-//! freeze + forward. The pushed branch is `crate::branch`'s.
-//! Record-Route insertion lives in [`record_route`](super::record_route);
+//! non-2xx ACK hop decision, Route preprocessing + direction, self-gate
+//! admission, target selection, Via push, LRU memos, freeze + forward. The
+//! pushed branch is `crate::branch`'s. Route preprocessing lives in
+//! [`classify`](super::classify), the gate in [`admission`](super::admission),
+//! Record-Route insertion in [`record_route`](super::record_route),
 //! self-generated finals in [`reply`](super::reply).
 
 use std::net::SocketAddr;
 
 use sip_message::emergency::is_emergency_request;
-use sip_message::header::{MaxForwards, ProxyRequire, RouteEntry, Unsupported, Uri, Via};
-use sip_message::{Method, SipMessage, SipRequest};
+use sip_message::header::{MaxForwards, ProxyRequire, Unsupported, Via};
+use sip_message::{Method, SipMessage};
 
 use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
 use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry};
-use crate::headers::{cookie_params, route_target, via_with_cookie};
-use crate::observability::metrics::{CancelLookup, Direction, MessageResult, RoutingDecisionKind};
-use crate::self_gate::{AdmitDecision, BypassKind};
+use crate::headers::via_with_cookie;
+use crate::observability::metrics::{
+    CancelLookup, Direction, Face, MessageResult, RoutingDecisionKind,
+};
+use crate::self_gate::BypassKind;
 use crate::strategy::{DecodeResult, SelectOpts};
-use crate::trace::emit;
 
-use super::super::{is_dialog_creating, ProxyCore};
-use super::reply::{extra_header, proxy_reason, reject_retry_after};
+use super::super::ProxyCore;
+use super::reply::extra_header;
 use super::{top_via_branch, RouteOutcome};
 
 /// The hop budget RFC 3261 §8.1.1.6 gives a request that names none — and the
@@ -30,28 +32,6 @@ use super::{top_via_branch, RouteOutcome};
 const DEFAULT_MAX_FORWARDS: u32 = 70;
 
 impl ProxyCore {
-    /// The top-Via sent-by when it is one of our registered workers — i.e. the
-    /// request was originated *by* that worker (e.g. a B2BUA in-dialog
-    /// keepalive OPTIONS toward the far endpoint, or a b-leg INVITE).
-    /// SNAT-immune: the worker's advertised identity rides the message, unlike
-    /// the UDP source which the VIP masquerades. Used as the worker-outbound
-    /// discriminator AND as the originator identity the stickiness cookie is
-    /// encoded for.
-    fn worker_via_sent_by(&self, req: &SipRequest) -> Option<ProxyAddr> {
-        let top = req.top_via();
-        let (host, port) = top.sent_by().pair();
-        let addr = ProxyAddr::new(host, port);
-        self.registry.lookup_by_address(&addr).is_some().then_some(addr)
-    }
-
-    /// Whether a Route / Record-Route URI names THIS proxy. Dual-face: a self
-    /// entry may carry EITHER face's advertise (the §16.6 double-RR stamps the
-    /// two entries with the face facing each party).
-    fn is_self_route(&self, uri: &Uri) -> bool {
-        let (host, port) = uri.host_port();
-        self.is_self_addr(host, port)
-    }
-
     /// Abandon a forward whose own edit the message will not allow. Unreachable
     /// in practice — every value edited on the hop was read off these same
     /// bytes moments earlier — and a drop is the only honest outcome: half an
@@ -66,6 +46,7 @@ impl ProxyCore {
         &self,
         msg: &SipMessage,
         src: SocketAddr,
+        face: Face,
     ) -> RouteOutcome {
         let SipMessage::Request(req) = msg else {
             self.metrics.record_reject("non_request");
@@ -208,128 +189,26 @@ impl ProxyCore {
             self.activate_trace(req, src, self.now_ms() as i64);
         }
 
-        // ── §16.4 Route preprocessing ───────────────────────────────────────
-        let mut draft = req.thaw();
-        let mut stripped_route_params: Option<crate::strategy::RouteParams> = None;
-        let mut is_worker_outbound = false;
-        // §16.12 + double-record-route: pop ALL leading Route values that are
-        // ours. The direction is read from one of them: in a run of whole
-        // pairs, the first entry of the last pair; in an odd run, the first
-        // entry. `;outbound` (the worker-facing half) → forward to the R-URI;
-        // the stickiness cookie (the external-facing half) → decode to the
-        // worker. The rest are popped and ignored. Why the last pair: ADR-0009
-        // X1.
-        //
-        // A route set the strict reader rejects is one this hop cannot act on:
-        // it rides through exactly as it arrived (no pop, no loose-route next
-        // hop) rather than failing a relay over a route set that is not ours to
-        // understand.
-        let routes: Vec<RouteEntry> = req.list::<RouteEntry>().unwrap_or_default();
-        let self_routes = routes.iter().take_while(|r| self.is_self_route(r.uri())).count();
-        let direction_route = match self_routes {
-            0 => None,
-            n if n % 2 == 0 => routes.get(n - 2),
-            _ => routes.first(),
+        // ── §16.4 Route preprocessing + direction (`classify`) ──────────────
+        let Some((mut draft, c)) = self.classify(req, src, face, req.thaw()) else {
+            return self.drop_unforwardable();
         };
-        if let Some(direction_route) = direction_route {
-            let params = cookie_params(direction_route.uri());
-            if params.contains_key("outbound") {
-                is_worker_outbound = true;
-            } else {
-                stripped_route_params = Some(params);
-            }
-        }
-        for _ in 0..self_routes {
-            // §7.3.1: a UA may fold its whole route set into one comma-combined
-            // header, so the pop drops one ENTRY — removing the line would take
-            // a downstream proxy's Route with it and the request would bypass
-            // that route set entirely.
-            draft = match draft.pop_top::<RouteEntry>() {
-                Ok(d) => d,
-                Err(_) => return self.drop_unforwardable(),
-            };
-        }
-        // Worker-outbound override — break the in-dialog loop. A worker-originated
-        // in-dialog request (e.g. the B2BUA's A-leg keepalive OPTIONS toward the
-        // UAC) carries our own Record-Route cookie but no `;outbound` param, so the
-        // checks above leave it classified as `decode_forward`; left there, the
-        // cookie's `w_pri` decode bounces the request straight back to a worker and
-        // the real downstream endpoint (the UAC) never sees it — its keepalive
-        // times out and the dialog is torn down (the steady-state long-call-loss
-        // class).
-        //
-        // Detect the worker origin from a SNAT-immune signal. The UDP source
-        // `src` is NOT reliable: behind the keepalived VIP a worker→proxy packet
-        // is masqueraded to the *node* IP (and often an ephemeral port), so
-        // `lookup_by_address(src)` misses every time. The worker's own advertised
-        // identity rides the message instead — the top Via sent-by — which the
-        // registry keys exactly (this is the same Via-based lookup the response
-        // path already trusts in `core/response.rs`). Keep the `src` check as a
-        // fast path for the un-NAT'd (test / pod-direct) case.
-        //
-        // The Via identity is computed only when something below consumes it:
-        // classification (when the self-RR didn't already decide) or the
-        // stickiness cookie of a dialog-creating request. The in-dialog
-        // `;outbound` keepalive path keeps its zero-lookup fast path.
-        let via_worker_addr = if !is_worker_outbound || is_dialog_creating(method.as_str()) {
-            self.worker_via_sent_by(req)
-        } else {
-            None
-        };
-        // A run of two or more whole pairs whose last pair decodes is a request
-        // re-entering through a later pass: its worker Via is the earlier
-        // pass's origin and does not make it worker-outbound.
-        let spiral_reentry =
-            self_routes > 2 && self_routes % 2 == 0 && stripped_route_params.is_some();
-        if !is_worker_outbound
-            && !spiral_reentry
-            && (self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
-                || via_worker_addr.is_some())
-        {
-            is_worker_outbound = true;
-            stripped_route_params = None;
-        }
 
-        // ── Proxy-self gate (ELU/CPS admission) ─────────────────────────────
+        // ── Proxy-self gate (`admission`) ───────────────────────────────────
         // A retransmission bypasses the gate entirely: its first copy was
         // already admitted and forwarded, so rejecting the re-sent copy would
         // 503 a setup that is already ringing downstream.
-        let is_new_dialog_invite = method == Method::Invite && !has_to_tag;
         let is_emergency = is_emergency_request(req);
-        if rtx_hit.is_none() {
-            if is_new_dialog_invite && !is_emergency && !is_worker_outbound {
-                if let AdmitDecision::Reject { reason, retry_after_sec } =
-                    self.self_gate.try_admit_external()
-                {
-                    let reason = reason.label();
-                    let extra = [
-                        extra_header(reject_retry_after(retry_after_sec)),
-                        extra_header(proxy_reason(503, reason)),
-                    ];
-                    // The shed fact precedes the 503 it explains: `reply` is
-                    // itself an emission site (the datagram it synthesizes).
-                    emit::shed(&self.traces, call_id.as_str(), self.now_ms() as i64, reason);
-                    // A closed set: the gate's `ShedReason` labels.
-                    return self
-                        .reply_reject(req, src, 503, "Service Unavailable", &extra, reason)
-                        .await;
-                }
-            } else if is_new_dialog_invite && is_emergency {
-                self.self_gate.note_bypass(BypassKind::Emergency);
-            } else if is_new_dialog_invite && is_worker_outbound {
+        if rtx_hit.is_none() && method == Method::Invite && !has_to_tag {
+            if c.worker_outbound && !is_emergency {
                 self.self_gate.note_bypass(BypassKind::Internal);
+            } else if let Err(refused) = self.admit_new_call(req, src, is_emergency).await {
+                return refused;
             }
         }
-
-        // ── Loose-route next hop (a downstream proxy's surviving Route) ──────
-        let mut loose_route_next_hop: Option<ProxyAddr> = None;
-        if method != Method::Cancel {
-            if let Some(next_route) = routes.get(self_routes) {
-                if next_route.uri().is_loose_route() {
-                    loose_route_next_hop = Some(route_target(next_route.uri()));
-                }
-            }
-        }
+        // An INVITE naming a dialog on the external face that no verified
+        // cookie backs is admitted as a new call where it falls to selection.
+        let dialog_unbacked = face == Face::External && method == Method::Invite && has_to_tag;
 
         // ── Pick the downstream target ──────────────────────────────────────
         // Every branch below assigns both (or returns early).
@@ -369,7 +248,7 @@ impl ProxyCore {
             } else {
                 self.metrics.record_cancel_lookup(CancelLookup::Miss);
                 decision = RoutingDecisionKind::Cancel;
-                if is_worker_outbound {
+                if c.worker_outbound {
                     // §9.1: a CANCEL goes where its INVITE went. A worker's own
                     // b-leg INVITE went to the R-URI, memo or no memo — a
                     // fresh selection would hand a worker's CANCEL to a worker
@@ -395,10 +274,10 @@ impl ProxyCore {
             // so §16.11 already puts it on the INVITE's outbound branch.
             target = Some(found.target);
             decision = RoutingDecisionKind::AckHop;
-        } else if let Some(next) = loose_route_next_hop {
+        } else if let Some(next) = c.loose_route_next_hop.clone() {
             target = Some(next);
             decision = RoutingDecisionKind::LooseRoute;
-        } else if is_worker_outbound {
+        } else if c.worker_outbound {
             // An out-of-range R-URI port is malformed (400), not truncated —
             // `sip:host:70596` must not be forwarded to port 5060, and a URI
             // that states one does not read.
@@ -410,7 +289,7 @@ impl ProxyCore {
                 }
                 _ => return self.reply_malformed_uri(req, src).await,
             }
-        } else if let Some(params) = &stripped_route_params {
+        } else if let Some(params) = &c.cookie {
             let decoded = self.strategy.decode_stickiness(params, msg).await;
             self.metrics.record_request_decode(&decoded);
             match decoded {
@@ -431,13 +310,22 @@ impl ProxyCore {
                         .reply_reject(req, src, status, &reason, &[], "stickiness_decode_rejected")
                         .await;
                 }
-                DecodeResult::Unknown { is_emergency } => {
+                DecodeResult::Unknown { is_emergency: cookie_emergency } => {
                     // A retransmit must repeat the original (random) selection,
                     // not roll the dice again — see the rtx memo above.
                     if let Some(found) = &rtx_hit {
                         target = Some(found.target.clone());
                     } else {
-                        let opts = SelectOpts { emergency_override: is_emergency };
+                        let admit_as_new =
+                            dialog_unbacked && self.strategy.verified_cookie(params, msg).is_none();
+                        if admit_as_new {
+                            if let Err(refused) = self.admit_new_call(req, src, is_emergency).await
+                            {
+                                return refused;
+                            }
+                        }
+                        let opts =
+                            SelectOpts { emergency_override: cookie_emergency, admit_as_new };
                         match self.strategy.select_for_new_dialog(msg, opts).await {
                             Ok(t) => target = Some(t),
                             Err(e) => return self.reply_select_failure(req, src, e).await,
@@ -457,7 +345,13 @@ impl ProxyCore {
             target = Some(found.target.clone());
             decision = RoutingDecisionKind::SelectNew;
         } else {
-            match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
+            if dialog_unbacked {
+                if let Err(refused) = self.admit_new_call(req, src, is_emergency).await {
+                    return refused;
+                }
+            }
+            let opts = SelectOpts { admit_as_new: dialog_unbacked, ..SelectOpts::default() };
+            match self.strategy.select_for_new_dialog(msg, opts).await {
                 Ok(t) => target = Some(t),
                 Err(e) => return self.reply_select_failure(req, src, e).await,
             }
@@ -484,12 +378,12 @@ impl ProxyCore {
             req,
             src,
             &target,
-            is_worker_outbound,
-            &via_worker_addr,
+            c.worker_outbound,
+            &c.via_worker,
         );
         draft = routed;
         let via_cookie =
-            is_worker_outbound.then(|| self.via_cookie(msg, req, &routes[..self_routes])).flatten();
+            c.worker_outbound.then(|| self.via_cookie(msg, req, &c.own_routes)).flatten();
 
         // ── §16.11: the pushed branch is a function of the message ──────────
         // A retransmission of this request, and its CANCEL and non-2xx ACK,
@@ -533,11 +427,8 @@ impl ProxyCore {
             // re-INVITE carried in its Route, else the one this initial INVITE's
             // Record-Route was minted with. A worker-outbound INVITE's cookie
             // names the worker, not the downstream target, so it is not kept.
-            let stickiness = if is_worker_outbound {
-                None
-            } else {
-                stripped_route_params.clone().or(minted_cookie)
-            };
+            let stickiness =
+                if c.worker_outbound { None } else { c.cookie.clone().or(minted_cookie) };
             self.cancel_lru.remember(
                 &key,
                 CancelEntry { target: target.clone(), branch: our_branch, stickiness },

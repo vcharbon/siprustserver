@@ -164,7 +164,7 @@ impl RoutingStrategy for LoadBalancerStrategy {
     ) -> Result<ProxyAddr, SelectError> {
         let call_id = call_id_of(msg).unwrap_or("");
         let is_emergency = opts.emergency_override || is_emergency_invite(msg);
-        let in_dialog = is_in_dialog(msg);
+        let in_dialog = is_in_dialog(msg) && !opts.admit_as_new;
         let snapshot = self.registry.snapshot();
 
         // A new dialog falls back to the not-ready workers only while no

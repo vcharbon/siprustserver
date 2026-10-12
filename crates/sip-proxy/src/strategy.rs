@@ -95,6 +95,9 @@ pub struct SelectOpts {
     /// on the wire, so the cookie's `e=1` flag is forwarded here to keep the
     /// request out of the (future) AIMD bucket.
     pub emergency_override: bool,
+    /// The request names a dialog (a To-tag) no verified cookie backs: the
+    /// strategy admits it as a new dialog, under every new-call cap.
+    pub admit_as_new: bool,
 }
 
 /// The routing-policy seam. `async` for symmetry with the registry the LB calls

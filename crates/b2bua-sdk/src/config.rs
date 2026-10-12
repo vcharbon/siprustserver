@@ -16,10 +16,10 @@ pub struct B2buaConfig {
     pub sip_local_port: u16,
     /// When the worker is deployed behind the SIP front proxy, every b-leg
     /// (worker→callee) outbound request is sent to this `(host, port)` with a
-    /// preloaded `Route: <sip:host:port;lr;outbound>` so the proxy classifies
-    /// the flow as worker-outbound (skip LB, forward to the R-URI). The R-URI /
-    /// remote target stays the callee (RFC 3261 §16.12). `None` = send b-leg
-    /// traffic straight to the callee.
+    /// preloaded plain `Route: <sip:host:port;lr>`; the proxy's internal face
+    /// classifies it worker-outbound (skip LB, forward to the R-URI; ADR-0047).
+    /// The R-URI / remote target stays the callee (RFC 3261 §16.12). `None` =
+    /// send b-leg traffic straight to the callee.
     pub b2b_outbound_proxy: Option<(String, u16)>,
     /// Global cap on concurrently-running handlers across all calls.
     pub event_dispatch_concurrency: usize,

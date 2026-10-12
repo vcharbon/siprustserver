@@ -30,7 +30,7 @@
 //!                   else peers route responses to 0.0.0.0 (a storm).
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
 //!   B2BUA_OUTBOUND_PROXY  front-proxy host:port every b-leg (worker→callee)
-//!                   request is forced through (preloaded `Route ;lr;outbound`).
+//!                   request is forced through (a preloaded plain `;lr` Route).
 //!                   REQUIRED in the k8s cluster: a peer's internal pod IP is not
 //!                   routable peer-to-peer in a real deployment, so ALL outbound
 //!                   SIP must traverse the LB proxy — never go pod-direct. Unset →

@@ -179,11 +179,12 @@ impl Via {
     }
 
     /// Stamp what the receiving side observed: `received` whenever the source
-    /// address differs from the sent-by host, and `rport` only when the sender
-    /// asked for it (RFC 3261 §18.2.1, RFC 3581 §4). A `received` another hop
-    /// already recorded stands — stamping is idempotent, never corrective.
+    /// address differs from the sent-by host or the hop already carries one,
+    /// and `rport` only when the sender asked for it (RFC 3261 §18.2.1, RFC
+    /// 3581 §4). A `received` on the hop is the sender's own writing, so it is
+    /// always replaced by the source address, never kept.
     pub fn stamped_from(mut self, source_host: &str, source_port: u16) -> Self {
-        if self.received().is_none() && self.host() != source_host {
+        if self.received().is_some() || self.host() != source_host {
             self = self.with_received(SipStr::owned(source_host));
         }
         if matches!(self.rport(), Some(Rport::Requested)) {

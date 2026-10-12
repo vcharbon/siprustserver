@@ -196,7 +196,7 @@ async fn a_workers_reinvite_and_its_cancel_carry_the_dialog_cookie_on_the_pushed
     let cookie = cookie(&f);
     let route = dialog_route(&cookie);
     let reinvite = request("INVITE", "z9hG4bKre", &route, ";tag=b", "2 INVITE");
-    f.core.handle_request(parse(&reinvite), w1()).await;
+    f.core.handle_request_from(parse(&reinvite), w1()).await;
     let (_, fwd) = one_sent(&f);
     let via = top_via(&fwd);
     for (name, value) in &cookie {
@@ -205,7 +205,7 @@ async fn a_workers_reinvite_and_its_cancel_carry_the_dialog_cookie_on_the_pushed
     assert!(!via.contains("outbound") && !via.contains(";lr"), "no routing flag: {via}");
 
     let cancel = request("CANCEL", "z9hG4bKre", &route, ";tag=b", "2 CANCEL");
-    f.core.handle_request(parse(&cancel), w1()).await;
+    f.core.handle_request_from(parse(&cancel), w1()).await;
     let (_, cxl) = one_sent(&f);
     assert_eq!(top_via(&cxl), via, "the CANCEL's Via is its INVITE's");
 }
@@ -217,12 +217,14 @@ async fn a_workers_reinvite_and_its_non_2xx_ack_carry_one_via() {
     let f = fixture();
     let route = dialog_route(&cookie(&f));
     let reinvite = request("INVITE", "z9hG4bKre", &route, ";tag=b", "2 INVITE");
-    f.core.handle_request(parse(&reinvite), w1()).await;
+    f.core.handle_request_from(parse(&reinvite), w1()).await;
     let (_, fwd) = one_sent(&f);
-    f.core.handle_response(answer(&fwd, "491 Request Pending", ";tag=b", "2 INVITE"), uas()).await;
+    f.core
+        .handle_response_from(answer(&fwd, "491 Request Pending", ";tag=b", "2 INVITE"), uas())
+        .await;
     let _relayed = one_sent(&f);
     let ack = request("ACK", "z9hG4bKre", &route, ";tag=b", "2 ACK");
-    f.core.handle_request(parse(&ack), w1()).await;
+    f.core.handle_request_from(parse(&ack), w1()).await;
     assert_eq!(top_via(&one_sent(&f).1), top_via(&fwd), "the non-2xx ACK's Via is its INVITE's");
 }
 
@@ -235,7 +237,7 @@ async fn a_workers_initial_invite_carries_no_via_cookie() {
     let f = fixture();
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
     let invite = request("INVITE", "z9hG4bKini", &route, "", "1 INVITE");
-    f.core.handle_request(parse(&invite), w1()).await;
+    f.core.handle_request_from(parse(&invite), w1()).await;
     let via = top_via(&one_sent(&f).1);
     assert!(!via.contains("sig=") && !via.contains("w_pri="), "{via}");
 }
@@ -244,7 +246,7 @@ async fn a_workers_initial_invite_carries_no_via_cookie() {
 async fn reinvite_forwarded_then_w1_dead(f: &Fixture) -> Vec<u8> {
     let route = dialog_route(&cookie(f));
     let reinvite = request("INVITE", "z9hG4bKre", &route, ";tag=b", "2 INVITE");
-    f.core.handle_request(parse(&reinvite), w1()).await;
+    f.core.handle_request_from(parse(&reinvite), w1()).await;
     let (_, fwd) = one_sent(f);
     f.registry.set_health("w1", WorkerHealth::Dead);
     fwd
@@ -258,7 +260,7 @@ async fn a_response_without_record_route_fails_over_on_the_via_cookie() {
     let f = fixture();
     let fwd = reinvite_forwarded_then_w1_dead(&f).await;
     for status in ["100 Trying", "200 OK"] {
-        f.core.handle_response(answer(&fwd, status, ";tag=b", "2 INVITE"), uas()).await;
+        f.core.handle_response_from(answer(&fwd, status, ";tag=b", "2 INVITE"), uas()).await;
         let (dst, _) = one_sent(&f);
         assert_eq!(dst, format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap(), "{status}");
     }
@@ -274,7 +276,7 @@ async fn a_tampered_via_cookie_is_not_honoured() {
     let sig = text.split(";sig=").nth(1).unwrap().split([';', '\r']).next().unwrap();
     let tampered = text.replacen(&format!(";sig={sig}"), ";sig=AAAAAAAAAAAAAAAAAAAAAA", 1);
     f.core
-        .handle_response(answer(tampered.as_bytes(), "200 OK", ";tag=b", "2 INVITE"), uas())
+        .handle_response_from(answer(tampered.as_bytes(), "200 OK", ";tag=b", "2 INVITE"), uas())
         .await;
     assert!(f.wire.take().is_empty(), "a forged cookie routes nothing");
 }
@@ -293,7 +295,7 @@ async fn only_the_cookie_fields_reach_the_via() {
         cookie_text(&cookie)
     );
     let reinvite = request("INVITE", "z9hG4bKre", &route, ";tag=b", "2 INVITE");
-    f.core.handle_request(parse(&reinvite), w1()).await;
+    f.core.handle_request_from(parse(&reinvite), w1()).await;
     let via = top_via(&one_sent(&f).1);
     assert!(!via.contains("maddr") && !via.contains("rport=9"), "{via}");
     assert!(!via.contains("z9hG4bKforced"), "the §16.11 branch stays the proxy's: {via}");
@@ -308,7 +310,7 @@ async fn a_forged_route_cookie_is_not_carried() {
     let mut forged = cookie(&f);
     forged.insert("w_bak".into(), "w9".into());
     let reinvite = request("INVITE", "z9hG4bKre", &dialog_route(&forged), ";tag=b", "2 INVITE");
-    f.core.handle_request(parse(&reinvite), w1()).await;
+    f.core.handle_request_from(parse(&reinvite), w1()).await;
     let via = top_via(&one_sent(&f).1);
     assert!(!via.contains("sig=") && !via.contains("w_pri="), "{via}");
 }

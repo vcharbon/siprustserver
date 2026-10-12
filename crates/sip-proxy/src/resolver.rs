@@ -34,9 +34,9 @@
 //!   (a forever-cache would pin the dead IP for the process lifetime);
 //! - a **negative TTL** so an unresolvable name costs one lookup per window,
 //!   not one per packet;
-//! - a **size cap**, because the `;outbound` self-Route lets any sender steer
-//!   arbitrary R-URI hostnames into resolution — uncapped, each distinct name
-//!   would be a permanent map entry (remote memory growth).
+//! - a **size cap**, because every sender on the internal plane (any sender of
+//!   a single-face proxy, ADR-0047) can steer arbitrary R-URI hostnames into
+//!   resolution — uncapped, each distinct name would be a permanent map entry.
 //!
 //! Packets that race an in-flight resolve for the same name are dropped (and
 //! counted).

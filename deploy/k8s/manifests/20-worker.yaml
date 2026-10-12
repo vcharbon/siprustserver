@@ -92,12 +92,14 @@ spec:
             # ALL worker→callee (b-leg) SIP MUST traverse the front proxy. In a
             # real cluster a peer's internal pod IP is not routable peer-to-peer,
             # so every B2BUA-originated request — initial b-leg INVITE, in-dialog
-            # BYE / keepalive OPTIONS / re-INVITE — is sent to the proxy VIP with a
-            # preloaded Route ;lr;outbound. The proxy strips that Route, classifies
-            # the flow worker-outbound (registry-/IP-independent, so it survives a
-            # worker reboot onto a new pod IP), forwards to the callee, and
-            # record-routes itself into the b-leg so subsequent in-dialog requests
-            # stay on the proxy path. Without this the b-leg goes pod-direct and
+            # BYE / keepalive OPTIONS / re-INVITE — is sent to the proxy's internal
+            # VIP: the initial INVITE with a preloaded plain ;lr Route, in-dialog
+            # requests on the route set the proxy recorded. On its internal face
+            # the proxy classifies the flow worker-outbound (by the worker's source
+            # or Via, or in dialog by its own ;outbound Record-Route, which
+            # survives a worker reboot onto a new pod IP; ADR-0047), forwards to
+            # the callee, and record-routes itself into the b-leg so subsequent
+            # in-dialog requests stay on the proxy path. Without this the b-leg goes pod-direct and
             # bypasses the LB — the endurance long-call-loss class (post-reboot
             # b-leg keepalives to a pod IP get no 200 → keepalive-timeout → BYE).
             # The VIP is the keepalived VRRP address (ADR-0012 D7), stable across

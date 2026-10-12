@@ -252,7 +252,7 @@ fn cancel_200_without_record_route() -> sip_message::types::SipResponse {
 #[tokio::test]
 async fn response_to_a_dead_worker_fails_over_to_the_backup() {
     let (core, ep) = core_with(WorkerHealth::Dead);
-    core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+    core.handle_response_from(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
@@ -347,8 +347,11 @@ async fn a_spiralled_response_to_a_dead_worker_fails_over_on_its_own_cookie() {
     let (core, ep) = spiral_core();
     let inbound =
         format!("<sip:{PROXY_VIP}:5060;outbound;lr>, <sip:{PROXY_VIP}:5060;w_pri=w3;w_bak=w4;lr>");
-    core.handle_response(spiralled_invite_200(&inbound), format!("{W1_POD}:5060").parse().unwrap())
-        .await;
+    core.handle_response_from(
+        spiralled_invite_200(&inbound),
+        format!("{W1_POD}:5060").parse().unwrap(),
+    )
+    .await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
@@ -364,8 +367,11 @@ async fn a_spiralled_response_to_a_dead_worker_ignores_the_other_calls_cookie() 
         "<sip:{PROXY_VIP}:5060;w_pri=w3;w_bak=w4;outbound;lr>, \
              <sip:{PROXY_VIP}:5060;w_pri=w3;w_bak=w4;lr>"
     );
-    core.handle_response(spiralled_invite_200(&inbound), format!("{W1_POD}:5060").parse().unwrap())
-        .await;
+    core.handle_response_from(
+        spiralled_invite_200(&inbound),
+        format!("{W1_POD}:5060").parse().unwrap(),
+    )
+    .await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
@@ -379,8 +385,11 @@ async fn a_spiralled_response_to_a_dead_worker_reads_the_bottommost_matching_coo
     let (core, ep) = spiral_core();
     let inbound =
         format!("<sip:{PROXY_VIP}:5060;outbound;lr>, <sip:{PROXY_VIP}:5060;w_pri=w1;w_bak=w4;lr>");
-    core.handle_response(spiralled_invite_200(&inbound), format!("{W1_POD}:5060").parse().unwrap())
-        .await;
+    core.handle_response_from(
+        spiralled_invite_200(&inbound),
+        format!("{W1_POD}:5060").parse().unwrap(),
+    )
+    .await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
@@ -392,7 +401,7 @@ async fn a_spiralled_response_to_a_dead_worker_reads_the_bottommost_matching_coo
 #[tokio::test]
 async fn response_to_an_alive_worker_keeps_the_received_rport_target() {
     let (core, ep) = core_with(WorkerHealth::Alive);
-    core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+    core.handle_response_from(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
@@ -408,7 +417,7 @@ async fn response_from_a_departed_address_fails_over_to_the_backup() {
         Arc::new(BackupStrategy),
         Clock::test_at(0),
     );
-    core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+    core.handle_response_from(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
@@ -424,7 +433,7 @@ async fn response_from_an_expired_departed_address_follows_the_via() {
         Clock::test_at(0),
     );
     tokio::time::advance(std::time::Duration::from_millis(DEPARTED_ADDRESS_TTL_MS)).await;
-    core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+    core.handle_response_from(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
@@ -440,7 +449,7 @@ async fn response_from_an_address_the_pool_never_knew_follows_the_via() {
             ProxyAddr::new(W2_POD, 5060),
         )]));
     let (core, ep) = core_over(reg, Arc::new(BackupStrategy), Clock::test_at(0));
-    core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+    core.handle_response_from(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
@@ -456,7 +465,7 @@ async fn a_departed_sender_with_no_usable_backup_drops_the_response() {
         Arc::new(NoBackupStrategy),
         Clock::test_at(0),
     );
-    core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+    core.handle_response_from(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
     assert!(ep.sent.lock().unwrap().is_empty());
 }
@@ -473,7 +482,7 @@ async fn a_non_invite_response_from_a_departed_address_follows_the_via() {
             Arc::new(BackupStrategy),
             Clock::test_at(0),
         );
-        core.handle_response(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
+        core.handle_response_from(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
 
         let sent = ep.sent.lock().unwrap();
         assert_eq!(
@@ -491,7 +500,7 @@ async fn a_non_invite_response_from_a_departed_address_follows_the_via() {
 async fn a_non_invite_response_to_a_dead_worker_follows_the_via() {
     for resp in [cancel_200(), keepalive_200(), bye_200()] {
         let (core, ep) = core_with(WorkerHealth::Dead);
-        core.handle_response(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
+        core.handle_response_from(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
 
         let sent = ep.sent.lock().unwrap();
         assert_eq!(
@@ -511,7 +520,7 @@ async fn a_non_invite_response_needs_no_usable_backup() {
         Arc::new(NoBackupStrategy),
         Clock::test_at(0),
     );
-    core.handle_response(cancel_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+    core.handle_response_from(cancel_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);

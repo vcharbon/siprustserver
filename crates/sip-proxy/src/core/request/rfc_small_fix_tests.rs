@@ -58,7 +58,7 @@ CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"
     ));
     let before = metrics.messages_total();
-    let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome = core.route_request_from(&req, format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(
         metrics.messages_total(),
@@ -89,7 +89,7 @@ CSeq: 2 BYE\r\n\
 Route: <sip:{PROXY_VIP}:5060;lr>, <sip:10.9.9.9:5062;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     ));
-    let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome = core.route_request_from(&req, format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(
         outcome.decision,
         RoutingDecisionKind::LooseRoute,
@@ -114,7 +114,7 @@ CSeq: 2 BYE\r\n\
 Route: <sip:{PROXY_VIP}:70596;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     ));
-    let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome = core.route_request_from(&req, format!("{UAC}:5060").parse().unwrap()).await;
     // A 70596→5060 wrap would match the advertised VIP and strip the entry
     // as a self-route. It must stay foreign (and being malformed, it can't
     // drive loose routing either) → plain selection.

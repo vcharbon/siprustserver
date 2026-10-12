@@ -44,7 +44,7 @@ Content-Length: 0\r\n\r\n"
     let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
         panic!("expected response")
     };
-    core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
+    core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.len(), 1, "the 100 must be relayed exactly once");
@@ -137,7 +137,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::default().parse(raw_invite.as_bytes()).unwrap();
-    core.handle_request(msg, format!("{UAC}:5060").parse().unwrap()).await;
+    core.handle_request_from(msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     // The branch the proxy stamped on its forwarded INVITE — the relayed
     // ACK must repeat it exactly.
@@ -167,7 +167,7 @@ Content-Length: 0\r\n\r\n"
     else {
         panic!("expected response")
     };
-    core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
+    core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
     {
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.len(), 1, "the 486 relay must be the ONLY send — no synthesized ACK");
@@ -193,7 +193,7 @@ CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let ack_msg = CustomParser::default().parse(raw_ack.as_bytes()).unwrap();
-    core.handle_request(ack_msg, format!("{UAC}:5060").parse().unwrap()).await;
+    core.handle_request_from(ack_msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.len(), 1, "the upstream's ACK must be relayed, not absorbed");

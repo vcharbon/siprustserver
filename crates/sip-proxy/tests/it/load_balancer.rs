@@ -461,7 +461,7 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
     );
     // (b) the explicit `emergency_override` opts shortcut (used by the dispatcher-marked
     //     in-dialog path) bypasses the filter on a non-RPH INVITE.
-    let emergency = SelectOpts { emergency_override: true };
+    let emergency = SelectOpts { emergency_override: true, ..SelectOpts::default() };
     assert_eq!(s.select_for_new_dialog(&invite, emergency).await.unwrap(), addr(A1));
 }
 
@@ -508,7 +508,7 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
 
     // Emergency new dialog also bypasses the bucket.
     let emergency = request("INVITE", "call-rc-em@h", None);
-    let opts = SelectOpts { emergency_override: true };
+    let opts = SelectOpts { emergency_override: true, ..SelectOpts::default() };
     assert_eq!(s.select_for_new_dialog(&emergency, opts).await.unwrap(), addr(A1));
 }
 

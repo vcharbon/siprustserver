@@ -10,8 +10,9 @@ use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
 
 use crate::addr::ProxyAddr;
-use crate::core::ProxyCoreBuilder;
-use crate::observability::metrics::RoutingDecisionKind;
+use crate::core::{ExternalFaceParts, ProxyCoreBuilder};
+use crate::face::FaceCidrs;
+use crate::observability::metrics::{Face, RoutingDecisionKind, UntrustedClaim};
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::strategies::forward_all::ForwardAllStrategy;
@@ -22,6 +23,8 @@ use crate::{ProxyMetrics, RoutingStrategy};
 const W1_POD: &str = "10.244.5.8";
 const UAC: &str = "10.244.7.13";
 const PROXY_VIP: &str = "192.0.2.250";
+/// The external face of the dual-face core.
+const EXT_VIP: &str = "198.51.100.250";
 
 async fn core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore {
     let net = SimulatedSignalingNetwork::new(1);
@@ -75,7 +78,7 @@ async fn snat_masqueraded_worker_keepalive_routes_to_downstream_not_back_to_work
     // SNAT'd source: the kind NODE ip + an ephemeral port — NOT in the registry.
     let snat_src = "192.0.2.11:63522".parse().unwrap();
     let msg = keepalive_options();
-    let outcome = core.route_request(&msg, snat_src).await;
+    let outcome = core.route_request_from(&msg, snat_src).await;
 
     assert_eq!(
         outcome.decision,
@@ -143,7 +146,7 @@ Content-Length: 0\r\n\r\n"
 
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        core.route_request(&msg, format!("{W1_POD}:5060").parse().unwrap()),
+        core.route_request_from(&msg, format!("{W1_POD}:5060").parse().unwrap()),
     )
     .await
     .expect("route_request must not wait on DNS resolution");
@@ -163,7 +166,7 @@ async fn pod_direct_worker_source_is_still_worker_outbound() {
 
     let pod_src = format!("{W1_POD}:5060").parse().unwrap();
     let msg = keepalive_options();
-    let outcome = core.route_request(&msg, pod_src).await;
+    let outcome = core.route_request_from(&msg, pod_src).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
@@ -194,25 +197,50 @@ Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
-    let outcome = core.route_request(&msg, format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome = core.route_request_from(&msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
     assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
 }
 
-// A worker-stamped `;outbound` is accepted as backward-compatible
-// defense-in-depth; the load-bearing path is the proxy's own
-// double-record-route (tests below).
+/// A dual-face core: the internal face on `PROXY_VIP`, the external one on
+/// `EXT_VIP`, the internal plane `10.244.0.0/16`.
+async fn dual_face_core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore {
+    let net = SimulatedSignalingNetwork::new(1);
+    let bind = |addr: &str| {
+        let net = net.clone();
+        let addr = addr.parse().unwrap();
+        async move { net.bind_udp(BindUdpOpts::new(addr, 64)).await.unwrap() }
+    };
+    let int_ep = bind(&format!("{PROXY_VIP}:5060")).await;
+    let ext_ep = bind(&format!("{EXT_VIP}:5060")).await;
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
+    ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+        .clock(Clock::test_at(0))
+        .metrics(Arc::new(ProxyMetrics::new()))
+        .external_face(ExternalFaceParts {
+            endpoint: ext_ep,
+            advertised: ProxyAddr::new(EXT_VIP, 5060),
+            int_cidrs: FaceCidrs::parse("10.244.0.0/16").unwrap(),
+        })
+        .build(int_ep)
+}
+
+// An unsigned `;outbound` on the proxy's own Route entry, from a source and a
+// Via no registry holds (a worker on a new pod address, behind address
+// translation): the internal face trusts it, the external face ignores it,
+// counts it, and routes the request by the cookie the entry carries.
 #[tokio::test]
-async fn worker_stamped_outbound_marker_still_accepted() {
+async fn an_unsigned_outbound_marker_is_trusted_only_on_the_internal_face() {
     let reg: Arc<dyn WorkerRegistry> =
         Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
             "w1",
             ProxyAddr::new(W1_POD, 5060),
         )]));
-    let core = core(reg).await;
+    let core = dual_face_core(reg).await;
 
-    let new_pod_ip = "10.244.9.99"; // rebooted worker's new IP — NOT in registry
+    let new_pod_ip = "10.244.9.99"; // a worker's address the registry does not hold
     let raw = format!(
         "OPTIONS sip:sipp@{UAC}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {new_pod_ip}:5060;branch=z9hG4bKreboot;lg=a;rport\r\n\
@@ -227,9 +255,15 @@ Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
     let snat_src = "192.0.2.12:51000".parse().unwrap();
-    let outcome = core.route_request(&msg, snat_src).await;
-    assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
-    assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
+
+    let internal = core.route_request(&msg, snat_src, Face::Internal).await;
+    assert_eq!(internal.decision, RoutingDecisionKind::WorkerOutbound);
+    assert_eq!(internal.target, Some(ProxyAddr::new(UAC, 5060)));
+
+    let external = core.route_request(&msg, snat_src, Face::External).await;
+    assert_eq!(external.decision, RoutingDecisionKind::DecodeForward);
+    assert_eq!(external.target, Some(ProxyAddr::new(W1_POD, 5060)));
+    assert_eq!(core.metrics().external_untrusted_total(UntrustedClaim::OutboundMarker), 1);
 }
 
 // ── Double-record-route: direction is intrinsic to the proxy's own RR ─────
@@ -267,7 +301,7 @@ Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
     let snat_src = "192.0.2.12:51000".parse().unwrap(); // node IP, not a worker
-    let outcome = core.route_request(&msg, snat_src).await;
+    let outcome = core.route_request_from(&msg, snat_src).await;
 
     assert_eq!(
         outcome.decision,
@@ -308,7 +342,7 @@ Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
-    let outcome = core.route_request(&msg, format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome = core.route_request_from(&msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     assert_eq!(
         outcome.decision,
@@ -363,7 +397,7 @@ fn two_workers() -> Arc<dyn WorkerRegistry> {
 async fn a_route_set_with_two_own_pairs_back_to_back_follows_the_last_pair() {
     let core = core(two_workers()).await;
     let outcome = core
-        .route_request(&spiralled_reinvite(""), format!("{W1_POD}:5060").parse().unwrap())
+        .route_request_from(&spiralled_reinvite(""), format!("{W1_POD}:5060").parse().unwrap())
         .await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
@@ -377,7 +411,10 @@ async fn a_third_party_between_two_passes_keeps_the_first_pair_direction() {
     let core = core(two_workers()).await;
     let between = format!("Route: <sip:{THIRD_PARTY}:5060;lr>\r\n");
     let outcome = core
-        .route_request(&spiralled_reinvite(&between), format!("{W1_POD}:5060").parse().unwrap())
+        .route_request_from(
+            &spiralled_reinvite(&between),
+            format!("{W1_POD}:5060").parse().unwrap(),
+        )
         .await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::LooseRoute);
@@ -403,7 +440,7 @@ Route: <sip:{PROXY_VIP}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
-    let outcome = core.route_request(&msg, format!("{W1_POD}:5060").parse().unwrap()).await;
+    let outcome = core.route_request_from(&msg, format!("{W1_POD}:5060").parse().unwrap()).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
