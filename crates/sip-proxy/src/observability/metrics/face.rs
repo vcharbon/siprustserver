@@ -1,6 +1,6 @@
 //! The proxy's faces in its metrics: the face a datagram crossed, the traffic
 //! per face, and the claims of the internal plane the external face does not
-//! honour (ADR-0047).
+//! honour (ADR-0048).
 
 use std::sync::atomic::Ordering;
 

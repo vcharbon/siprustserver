@@ -17,7 +17,7 @@ pub struct B2buaConfig {
     /// When the worker is deployed behind the SIP front proxy, every b-leg
     /// (worker→callee) outbound request is sent to this `(host, port)` with a
     /// preloaded plain `Route: <sip:host:port;lr>`; the proxy's internal face
-    /// classifies it worker-outbound (skip LB, forward to the R-URI; ADR-0047).
+    /// classifies it worker-outbound (skip LB, forward to the R-URI; ADR-0048).
     /// The R-URI / remote target stays the callee (RFC 3261 §16.12). `None` =
     /// send b-leg traffic straight to the callee.
     pub b2b_outbound_proxy: Option<(String, u16)>,

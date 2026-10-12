@@ -8,7 +8,7 @@
 //! advertise stamped on Via / Record-Route) **by destination IP**: an address
 //! inside any configured internal CIDR egresses on the internal face,
 //! everything else on the external face. Trust goes by the face a datagram
-//! arrives on, never by its source address (ADR-0047).
+//! arrives on, never by its source address (ADR-0048).
 //!
 //! [`FaceCidrs`] is that classifier: the parsed `PROXY_FACE_INT_CIDRS`
 //! comma-separated IPv4 CIDR list. It is deliberately IPv4-only (the cluster

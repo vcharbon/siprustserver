@@ -387,7 +387,7 @@ impl ProxyCore {
             // one state shared across faces). Either socket closing ends the
             // core: the faces are one identity and live and die together (the
             // runner supervises the core task and exits for restart). The face
-            // a datagram arrived on is its trust (ADR-0047).
+            // a datagram arrived on is its trust (ADR-0048).
             let (pkt, face) = match &self.external {
                 Some(ext) => tokio::select! {
                     p = self.endpoint.recv() => (p, Face::Internal),

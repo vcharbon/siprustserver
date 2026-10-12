@@ -1,7 +1,7 @@
 //! Request path, RFC 3261 §16: preflight (Max-Forwards 483, Proxy-Require
 //! 420), the non-2xx ACK hop decision (relay on the INVITE's hop, or absorb the
 //! ACK to a self-generated final), top-Route strip + direction under the
-//! ingress face's trust (ADR-0047), self-gate (ELU/CPS) admission, target
+//! ingress face's trust (ADR-0048), self-gate (ELU/CPS) admission, target
 //! selection (CANCEL LRU → loose-route next hop → worker-outbound R-URI →
 //! cookie decode → select), received/rport stamping, Record-Route insertion,
 //! Via push, retransmission memos, serialize + forward.

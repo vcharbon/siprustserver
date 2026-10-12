@@ -707,7 +707,7 @@ impl RunnerEnv {
         match &self.outbound_proxy {
             // Every b-leg request goes to the front proxy with a preloaded plain
             // `;lr` Route; its internal face classifies it worker-outbound
-            // (ADR-0047) and it record-routes itself into the b-leg.
+            // (ADR-0048) and it record-routes itself into the b-leg.
             Some((h, p)) => tracing::info!(
                 service = name,
                 proxy_host = %h,

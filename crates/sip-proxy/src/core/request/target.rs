@@ -102,7 +102,7 @@ impl ProxyCore {
     /// usable worker falls to a fresh selection, which a retransmission
     /// (`rtx_hit`) repeats from its memo instead of rolling the dice again.
     /// `dialog_unbacked`: an INVITE naming a dialog on the external face,
-    /// admitted as a new call when the cookie does not verify (ADR-0047).
+    /// admitted as a new call when the cookie does not verify (ADR-0048).
     pub(super) async fn cookie_target(
         &self,
         msg: &SipMessage,

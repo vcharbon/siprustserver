@@ -55,7 +55,7 @@ from the first entry of the last pair: it leaves this proxy on the last pass, an
 its worker Via does not make it worker-outbound when that pair decodes. An odd run
 of own entries is no run of pairs this proxy recorded: its first entry decides,
 and a worker Via still makes the request worker-outbound. These direction rules
-hold on the internal face only (ADR-0047).
+hold on the internal face only (ADR-0048).
 
 ## Decision X2 — the scenario harness gains a System-Under-Test seam
 

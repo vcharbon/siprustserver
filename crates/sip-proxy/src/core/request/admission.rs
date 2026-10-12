@@ -4,7 +4,7 @@
 //!
 //! A new call is an initial INVITE (no To-tag), first transmission only, that
 //! is not worker-outbound. On the external face an INVITE with a To-tag that
-//! no verified cookie backs is a new call too (ADR-0047): it is never refused
+//! no verified cookie backs is a new call too (ADR-0048): it is never refused
 //! for its To-tag, only by the gate, as any new call.
 
 use std::net::SocketAddr;

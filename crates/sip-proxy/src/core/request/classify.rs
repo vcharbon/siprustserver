@@ -1,5 +1,5 @@
 //! §16.4 Route preprocessing and a request's direction, under the trust
-//! boundary of the ingress face (ADR-0047).
+//! boundary of the ingress face (ADR-0048).
 //!
 //! Every leading Route entry naming this proxy is popped. The direction is
 //! read from one of them: in a run of whole pairs, the first entry of the last

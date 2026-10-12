@@ -12,7 +12,7 @@
 //! absorbs the downstream 100 nor generates one of its own. A response is
 //! dropped only when its top Via is not this proxy, when it carries fewer than
 //! two Vias, when it arrives on the external face and its next Via's response
-//! address is no registry worker (ADR-0047), when it answers an INVITE for a
+//! address is no registry worker (ADR-0048), when it answers an INVITE for a
 //! Dead worker and no cookie of this proxy names a backup to fail it over to,
 //! or when its top Via cannot be popped and the rest re-rendered.
 //!

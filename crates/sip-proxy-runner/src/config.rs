@@ -188,7 +188,7 @@ fn external_face(env: &mut EnvReader) -> Option<ExternalFace> {
     if listen_ext.is_none() {
         tracing::warn!(
             "single-face proxy (PROXY_LISTEN_EXT unset): every sender is trusted as the internal \
-             plane and may have a request relayed to its Request-URI (ADR-0047)"
+             plane and may have a request relayed to its Request-URI (ADR-0048)"
         );
     }
     listen_ext?;
