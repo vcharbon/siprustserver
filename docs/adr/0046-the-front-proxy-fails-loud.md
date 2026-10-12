@@ -41,16 +41,23 @@ its family.
    never changes readiness: the last listed pool stays, and the OPTIONS probe
    keeps its health current.
 3. **Discovery reports its own health.** `sip_proxy_discovery_no_client` is 1
-   while no kube client is built; `sip_proxy_discovery_watch_broken_since_seconds`
-   is the Unix time the watch broke, 0 while it delivers. Each failure is an
-   episode: one warning naming the cause when it starts, one line when it ends.
+   once a kube client build has failed and while none is built (0 before the
+   first attempt ends); `sip_proxy_discovery_watch_broken_since_seconds` is the
+   Unix time the watch broke, 0 while it delivers. A watch that restarts on a
+   valid resource version delivers no event until the next change, so a broken
+   watch ends on a delivered event or after 90 s without an error (the
+   watcher's 30 s backoff ceiling plus the 30 s connect timeout, with margin).
+   Each failure is an episode: one warning naming the cause when it starts,
+   one line when it ends.
 4. **The virtual address follows proxy health.** The VRRP instance tracks a
    script that reads the proxy's `/healthz`, wrapped in `/bin/sh -c` with its
    exit code clamped to 0/1: 1 s timeout, `interval 1`, `fall 3`, `rise 2`,
-   `weight -50`. A failing check lowers the node's priority and never puts the
-   instance in FAULT. Both nodes keep the same base priority and preempt (no
+   `weight -50`, `init_fail`. A failing check lowers the node's priority and
+   never puts the instance in FAULT; a starting node sits at the lowered
+   priority until its proxy passes `rise 2`, so it never takes the address
+   ahead of its own proxy. Both nodes keep the same base priority and preempt (no
    `nopreempt`). VRRP preempts only on a strictly higher priority, so:
-   - a dead proxy loses the address in about 3–4 s;
+   - a dead proxy loses the address in about 3–5 s;
    - when both checks fail the priorities are equal again and the address stays
      where it is, never lost;
    - a proxy that recovers does not take the address back.
@@ -77,10 +84,14 @@ its family.
 8. **Named-target lookups are bounded.** Each lookup is bounded at
    `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` (2 s). At the bound the packet is
    dropped and the negative entry (5 s) written: a packet is sent at once or
-   never. The lookup's in-flight slot stays taken until the lookup returns, so
-   stuck lookup threads stay at most `max_in_flight` (64) per recv shard. Of a
-   name's addresses the first in the family of the sending socket is used, and
-   kept for the cache lifetime.
+   never. A lookup past its bound starts no further attempt (no second name
+   form); its in-flight slot stays taken until the attempt already running
+   returns, so stuck lookup threads stay at most `max_in_flight` (64) per recv
+   shard, and a name is looked up again within about one resolver timeout
+   after DNS recovers. Of a name's addresses the first the egress socket can
+   reach is used — the socket of the face the packet leaves on; an unspecified
+   IPv6 bind is dual-stack and reaches both families — and kept for the cache
+   lifetime.
 9. **NAPTR/SRV is a deliberate gap.** Names resolve through A/AAAA only; RFC
    3263 §4.1-4.2 server selection is not implemented. A portless URI goes to
    port 5060.
@@ -129,7 +140,9 @@ its family.
   malformed, empty and out-of-range value, an unparsable `LB_*` override, an
   empty namespace, a missing advertise, a name as a bind address, a missing
   key), `discovery::tests` (a kube client that fails then builds: NotReady
-  with no stand-in worker, then the pool fills); `sip-proxy`
-  `resolver::tests` (a lookup past its bound, the address family). The VRRP
-  behaviour is checked on a lab cluster: staggered starts, the proxy killed on
-  the address holder, an established call across the move, no takeback.
+  with no stand-in worker, then the pool fills; a watch that restarts quietly
+  ends its broken episode); `sip-proxy` `resolver::tests` (a lookup past its
+  bound, no candidate past the deadline, the address family and a dual-stack
+  bind). The VRRP behaviour is checked on a lab cluster: staggered starts, a
+  crash-looping proxy on the address holder, established calls across the
+  move, no takeback, no FAULT.

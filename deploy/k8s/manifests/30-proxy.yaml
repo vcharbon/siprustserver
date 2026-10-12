@@ -43,14 +43,17 @@ data:
     # FAULT if the external iface disappears (chaos cut_external_plane / carrier
     # loss) so the peer takes both VIPs together.
     #
-    # The VIPs follow proxy health (ADR-0046): chk_proxy_health GETs the proxy's
-    # /healthz. It is weighted, never a FAULT trigger: 3 failures in a row drop
-    # this node's priority by 50, so a dead or crash-looping proxy hands the VIPs
-    # to a healthy peer in ~3-4 s; both checks failing leaves the priorities
-    # equal and the VIPs where they are; a recovered proxy is back at the same
-    # priority and does not take them back. The check is a /bin/sh -c predicate
-    # clamped to exit 0/1, so an exec failure in the startup window reads as one
-    # failed check, not a latched FAULT.
+    # The VIPs follow proxy health (ADR-0046): chk_proxy_health GETs the
+    # proxy's /healthz. It is weighted, never a FAULT trigger: 3 failures in a
+    # row drop this node's priority by 50, so a dead or crash-looping proxy
+    # hands the VIPs to a healthy peer in ~3-5 s; both checks failing leaves the
+    # priorities equal and the VIPs where they are; a recovered proxy is back at
+    # the same priority and does not take them back. init_fail: a keepalived
+    # that starts sits at the lowered priority until its proxy passes `rise 2`,
+    # and at equal priorities it never preempts, so a restarting node never
+    # takes the VIPs ahead of its own proxy. The check is a /bin/sh -c
+    # predicate clamped to exit 0/1, so an exec failure in the startup window
+    # reads as one failed check, not a latched FAULT.
     global_defs {
         router_id sip-front-proxy
         script_user root
@@ -62,6 +65,7 @@ data:
         fall 3
         rise 2
         weight -50
+        init_fail
     }
     vrrp_instance VI_SIP {
         state BACKUP
