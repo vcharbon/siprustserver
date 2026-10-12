@@ -11,10 +11,10 @@
 //! stateful proxy's, and this proxy is stateless (§16.11), so it neither
 //! absorbs the downstream 100 nor generates one of its own. A response is
 //! dropped only when its top Via is not this proxy, when it carries fewer than
-//! two Vias, when it arrives on the external face and its next Via's response
-//! address is no registry worker (ADR-0048), when it answers an INVITE for a
-//! Dead worker and no cookie of this proxy names a backup to fail it over to,
-//! or when its top Via cannot be popped and the rest re-rendered.
+//! two Vias, when it arrives on the external face and its next Via names no
+//! registry worker (ADR-0048), when it answers an INVITE for a Dead worker and
+//! no cookie of this proxy names a backup to fail it over to, or when its top
+//! Via cannot be popped and the rest re-rendered.
 //!
 //! An address that LEFT the worker set counts as `Dead` here for Timer H
 //! (`registry::tombstone`): a node whose endpoint is withdrawn while its process
@@ -90,19 +90,21 @@ impl ProxyCore {
         }
 
         let next = &hops[1];
-        // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
-        let (next_host, next_port) = next.response_target();
-        // The external face relays a response only to a worker, a departed
-        // one included: the proxy reflects nothing to a host a sender names.
-        if face == Face::External
-            && self.registry.lookup_by_address(&ProxyAddr::new(next_host, next_port)).is_none()
-        {
-            self.metrics.record_external_untrusted(UntrustedClaim::ResponseNotToWorker);
-            self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
-            return;
-        }
-        let mut host = next_host.to_string();
-        let mut port = next_port;
+        let (mut host, mut port) = match face {
+            // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
+            Face::Internal => {
+                let (host, port) = next.response_target();
+                (host.to_string(), port)
+            }
+            Face::External => match self.external_response_target(next) {
+                Some(target) => (target.host, target.port),
+                None => {
+                    self.metrics.record_external_untrusted(UntrustedClaim::ResponseNotToWorker);
+                    self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+                    return;
+                }
+            },
+        };
 
         // ── Reverse-path failover: INVITE responses only ────────────────────
         // An INVITE response from a **confirmed Dead** next-Via worker answers a
@@ -119,12 +121,12 @@ impl ProxyCore {
         //
         // The worker is IDENTIFIED by its Via **sent-by** — its advertised
         // registry address, SNAT-immune (the same signal the request path keys
-        // worker-outbound classification on). The received/rport-derived
-        // `host:port` above stays the SEND target per §18.2.2/RFC 3581, but it
-        // must not be the lookup key: behind the keepalived VIP it is the SNAT
-        // node IP + an ephemeral port, which matches no registry entry. A
-        // departed address answers `Dead` from the registry's tombstone, so
-        // this branch covers it too.
+        // worker-outbound classification on). The send target above may be the
+        // received/rport address (§18.2.2/RFC 3581), which must not be the
+        // lookup key: behind address translation it is a node IP and an
+        // ephemeral port, which matches no registry entry. A departed address
+        // answers `Dead` from the registry's tombstone, so this branch covers
+        // it too.
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         let dead_worker = (cseq.method() == Method::Invite)
@@ -221,11 +223,29 @@ impl ProxyCore {
         }
     }
 
-    /// A test's `handle_response`: the response arrives on the face of its
-    /// source's plane, as a deployed network delivers it.
+    /// A test's `handle_response` on a single-face proxy, where every response
+    /// arrives on the internal face. A dual-face test names the face itself.
     #[cfg(test)]
     pub(super) async fn handle_response_from(&self, resp: SipResponse, src: std::net::SocketAddr) {
-        self.handle_response(resp, src, self.egress_face(src)).await
+        assert!(self.external.is_none(), "a dual-face test names the response's face");
+        self.handle_response(resp, src, Face::Internal).await
+    }
+
+    /// Where a response arriving on the external face goes (ADR-0048): its next
+    /// Via's response address when that is a registry worker, a departed one
+    /// included; else that Via's sent-by when the sent-by is one, a worker
+    /// whose source was translated on its way to the proxy. `None`: the Via
+    /// names no worker, so the response is not relayed. The proxy reflects
+    /// nothing to a host a sender names.
+    fn external_response_target(&self, next: &Via) -> Option<ProxyAddr> {
+        let (host, port) = next.response_target();
+        let target = ProxyAddr::new(host, port);
+        if self.registry.lookup_by_address(&target).is_some() {
+            return Some(target);
+        }
+        let (host, port) = next.sent_by().pair();
+        let sent_by = ProxyAddr::new(host, port);
+        self.registry.lookup_by_address(&sent_by).is_some().then_some(sent_by)
     }
 
     /// The stickiness cookie for reverse-path failover toward `worker`: the

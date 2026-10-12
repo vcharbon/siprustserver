@@ -20,7 +20,7 @@ use crate::addr::ProxyAddr;
 use crate::core::{ProxyCore, ProxyCoreBuilder};
 use crate::observability::metrics::RoutingDecisionKind;
 use crate::registry::static_reg::StaticWorkerRegistry;
-use crate::registry::WorkerRegistry;
+use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::self_gate::{AdmitDecision, ProxySelfGate};
 use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
 use crate::ProxyMetrics;
@@ -112,7 +112,12 @@ async fn fixture(targets: &[ProxyAddr]) -> Fixture {
     let strategy = QueueStrategy::of(targets);
     let gate = Arc::new(AdmitOnceGate::default());
     let metrics = Arc::new(ProxyMetrics::new());
-    let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+    // W1 is a registry worker: its own b-leg CANCEL is worker-outbound by its Via.
+    let reg: Arc<dyn WorkerRegistry> =
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1, 5060),
+        )]));
     let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
@@ -175,14 +180,13 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-/// A worker's own b-leg CANCEL: it rides the proxy's `;outbound` self-Route,
-/// the direction marker the proxy stamped on the worker-facing half of its
-/// double Record-Route.
+/// A worker's own b-leg CANCEL: it carries its INVITE's Route (§9.1), the
+/// plain `;lr` preload to the proxy, and its worker Via.
 fn worker_cancel(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
     parse_req(&format!(
         "CANCEL sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch={branch};rport\r\n\
-Route: <sip:{PROXY_VIP}:5060;lr;outbound>\r\n\
+Route: <sip:{PROXY_VIP}:5060;lr>\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@{W1}>;tag={from_tag}\r\n\
 To: <sip:bob@10.0.0.50>\r\n\

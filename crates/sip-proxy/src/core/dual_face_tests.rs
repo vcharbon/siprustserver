@@ -24,7 +24,7 @@ use sip_net::{SendError, UdpEndpoint, UdpEndpointCounters, UdpPacket};
 use crate::addr::ProxyAddr;
 use crate::core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
 use crate::face::FaceCidrs;
-use crate::observability::metrics::RoutingDecisionKind;
+use crate::observability::metrics::{Face, RoutingDecisionKind};
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::strategies::forward_all::ForwardAllStrategy;
@@ -130,6 +130,10 @@ fn caller_src() -> SocketAddr {
     format!("{CALLER}:5060").parse().unwrap()
 }
 
+fn callee_src() -> SocketAddr {
+    format!("{CALLEE}:5060").parse().unwrap()
+}
+
 /// Header lines named `name` (case-insensitive), in wire order.
 fn header_lines(bytes: &[u8], name: &str) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes).to_string();
@@ -156,7 +160,7 @@ Content-Length: 0\r\n\r\n"
 }
 
 /// A worker-originated b-leg INVITE toward the external callee (top Via = the
-/// worker's registry identity; preloaded outbound Route as the b2bua sends it).
+/// worker's registry identity; the plain preloaded `;lr` Route the b2bua sends).
 fn worker_bleg_invite(call_id: &str) -> SipMessage {
     parse_msg(&format!(
         "INVITE sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
@@ -167,7 +171,7 @@ To: <sip:bob@{CALLEE}>\r\n\
 Call-ID: {call_id}\r\n\
 CSeq: 1 INVITE\r\n\
 Contact: <sip:b2bua@{W1}:5060;leg=b>\r\n\
-Route: <sip:{INT_VIP}:{INT_PORT};lr;outbound>\r\n\
+Route: <sip:{INT_VIP}:{INT_PORT};lr>\r\n\
 Content-Length: 0\r\n\r\n"
     ))
 }
@@ -302,14 +306,15 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
+    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap(), Face::Internal).await;
     let sent = f.take_sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, "ext", "a caller-bound response must egress the EXTERNAL socket");
     assert_eq!(sent[0].1, caller_src());
 
-    // b-leg response: proxy's EXTERNAL Via on top (the b-leg INVITE egressed
-    // toward the callee), next Via = the worker → relays on the INT socket.
+    // b-leg response: the callee's answer arrives on the EXTERNAL face, the
+    // proxy's EXTERNAL Via on top (the b-leg INVITE egressed toward the
+    // callee), next Via = the worker → relays on the INT socket.
     // The external-face top Via must be accepted as "us" (§16.7.3).
     let raw = format!(
         "SIP/2.0 200 OK\r\n\
@@ -322,7 +327,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
+    f.core.handle_response(resp, callee_src(), Face::External).await;
     let sent = f.take_sent();
     assert_eq!(sent.len(), 1, "the external-face top Via must be recognised as ours");
     assert_eq!(sent[0].0, "int", "a worker-bound response must egress the INTERNAL socket");
@@ -354,7 +359,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
+    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap(), Face::Internal).await;
 
     let sent = f.take_sent();
     // No synthesized hop ACK (ADR-0022 X4: the proxy is transaction-less; the

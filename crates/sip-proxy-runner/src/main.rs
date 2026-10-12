@@ -24,15 +24,15 @@
 //! empty, malformed or out of its range refuses the boot, naming every
 //! problem (ADR-0046). Only the `PROXY_UDP_*BUF` pair gives empty a meaning.
 //!   PROXY_LISTEN     SIP listen ip:port — the INTERNAL face, an IP literal
-//!                    (default 0.0.0.0:5060)
+//!                    (default 0.0.0.0:5060; dual-face: never a wildcard)
 //!   PROXY_ADVERTISE  host:port stamped on Via/Record-Route for internal-face
 //!                    egress (default: the listen address; REQUIRED when the
 //!                    listen IP is unspecified)
 //!   PROXY_LISTEN_EXT external-face listen ip:port, an IP literal — enables
 //!                    DUAL-FACE mode: a second UDP socket on the caller plane;
 //!                    the egress socket and advertise follow the destination IP
-//!   PROXY_ADVERTISE_EXT  external-face advertise (default: PROXY_LISTEN_EXT;
-//!                    REQUIRED when its IP is unspecified)
+//!   PROXY_ADVERTISE_EXT  external-face advertise (default: PROXY_LISTEN_EXT,
+//!                    which is never a wildcard: each face binds its own IP)
 //!   PROXY_FACE_INT_CIDRS comma-separated IPv4 CIDRs of the INTERNAL plane
 //!                    (e.g. 10.244.0.0/16,172.20.0.0/16). REQUIRED when
 //!                    PROXY_LISTEN_EXT is set; ignored with a warning otherwise.

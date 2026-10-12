@@ -78,8 +78,8 @@ impl ProxyConfig {
 
         let listen = env.bind_addr("PROXY_LISTEN", SocketAddr::from(([0, 0, 0, 0], 5060)));
         let advertise = advertise(&mut env, "PROXY_ADVERTISE", listen);
+        let external = external_face(&mut env, listen);
         let listen = listen.unwrap_or(SocketAddr::from(([0, 0, 0, 0], 5060)));
-        let external = external_face(&mut env);
         let workers = worker_source(&mut env, pod_namespace);
         let metrics = env
             .bind_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)))
@@ -169,8 +169,11 @@ fn advertise(env: &mut EnvReader, key: &str, listen: Option<SocketAddr>) -> Prox
 }
 
 /// `PROXY_LISTEN_EXT` enables the external face; it then needs
-/// `PROXY_FACE_INT_CIDRS`.
-fn external_face(env: &mut EnvReader) -> Option<ExternalFace> {
+/// `PROXY_FACE_INT_CIDRS`, and each face binds its own address: a wildcard
+/// bind of `PROXY_LISTEN` (the internal face, `listen`) or of
+/// `PROXY_LISTEN_EXT` would let the external plane reach the trusted internal
+/// socket (ADR-0048).
+fn external_face(env: &mut EnvReader, listen: Option<SocketAddr>) -> Option<ExternalFace> {
     let listen_ext = env.present("PROXY_LISTEN_EXT");
     let cidrs = env.present("PROXY_FACE_INT_CIDRS");
     let int_cidrs = match parse_ext_face_cidrs(listen_ext.is_some(), cidrs.as_deref()) {
@@ -192,8 +195,16 @@ fn external_face(env: &mut EnvReader) -> Option<ExternalFace> {
         );
     }
     listen_ext?;
+    let int_listen = listen;
     let listen = env.bind_addr("PROXY_LISTEN_EXT", SocketAddr::from(([0, 0, 0, 0], 0)));
     let advertise = advertise(env, "PROXY_ADVERTISE_EXT", listen);
+    for (key, addr) in [("PROXY_LISTEN", int_listen), ("PROXY_LISTEN_EXT", listen)] {
+        if let Some(addr) = addr.filter(|a| a.ip().is_unspecified()) {
+            env.refuse(format!(
+                "{key} {addr} is a wildcard: a dual-face proxy binds each face to its own address"
+            ));
+        }
+    }
     let listen = listen.unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
     Some(ExternalFace { listen, advertise, int_cidrs: int_cidrs? })
 }

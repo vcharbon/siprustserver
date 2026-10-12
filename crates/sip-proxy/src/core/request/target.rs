@@ -9,7 +9,7 @@ use sip_message::{SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{invite_txn_key, CancelEntry};
-use crate::observability::metrics::{CancelLookup, RoutingDecisionKind};
+use crate::observability::metrics::{CancelLookup, Face, RoutingDecisionKind};
 use crate::strategy::{DecodeResult, RouteParams, SelectOpts};
 
 use super::super::ProxyCore;
@@ -35,8 +35,8 @@ impl ProxyCore {
         Ok(ProxyAddr::new(host, port))
     }
 
-    /// A fresh selection. `opts.admit_as_new`: the request names a dialog no
-    /// verified cookie backs, so it meets the gate first, as a new call.
+    /// A fresh selection. `opts.admit_as_new` (the To-tag rule,
+    /// [`ProxyCore::admits_as_new`]): it meets the gate first, as a new call.
     pub(super) async fn select_target(
         &self,
         msg: &SipMessage,
@@ -101,8 +101,8 @@ impl ProxyCore {
     /// The target `cookie` places the request on. A cookie that names no
     /// usable worker falls to a fresh selection, which a retransmission
     /// (`rtx_hit`) repeats from its memo instead of rolling the dice again.
-    /// `dialog_unbacked`: an INVITE naming a dialog on the external face,
-    /// admitted as a new call when the cookie does not verify (ADR-0048).
+    /// `face`: the request's ingress face, for the To-tag rule
+    /// ([`ProxyCore::admits_as_new`]).
     pub(super) async fn cookie_target(
         &self,
         msg: &SipMessage,
@@ -110,7 +110,7 @@ impl ProxyCore {
         src: SocketAddr,
         cookie: &RouteParams,
         rtx_hit: Option<&CancelEntry>,
-        dialog_unbacked: bool,
+        face: Face,
     ) -> Result<Chosen, RouteOutcome> {
         let decoded = self.strategy.decode_stickiness(cookie, msg).await;
         self.metrics.record_request_decode(&decoded);
@@ -132,8 +132,7 @@ impl ProxyCore {
         let target = match rtx_hit {
             Some(found) => found.target.clone(),
             None => {
-                let admit_as_new =
-                    dialog_unbacked && self.strategy.verified_cookie(cookie, msg).is_none();
+                let admit_as_new = self.admits_as_new(msg, face, Some(cookie));
                 let opts = SelectOpts { emergency_override: miss, admit_as_new };
                 self.select_target(msg, req, src, opts).await?
             }

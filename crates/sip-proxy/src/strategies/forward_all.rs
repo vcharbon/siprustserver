@@ -4,6 +4,9 @@
 //! backs the transit-only suite). On an in-dialog request it parses that param
 //! back to `Forward { target }`; a missing/malformed param yields `Unknown` and
 //! the core falls back to `select_for_new_dialog` (still the static target).
+//! The param is unsigned, so any sender names the host an in-dialog request is
+//! forwarded to: the external face's trust boundary (ADR-0048) assumes a
+//! strategy whose cookie is authenticated, which this one is not.
 
 use async_trait::async_trait;
 use sip_message::SipMessage;

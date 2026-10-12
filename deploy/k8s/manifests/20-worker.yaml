@@ -99,11 +99,11 @@ spec:
             # or Via, or in dialog by its own ;outbound Record-Route, which
             # survives a worker reboot onto a new pod IP; ADR-0048), forwards to
             # the callee, and record-routes itself into the b-leg so subsequent
-            # in-dialog requests stay on the proxy path. Without this the b-leg goes pod-direct and
-            # bypasses the LB — the endurance long-call-loss class (post-reboot
-            # b-leg keepalives to a pod IP get no 200 → keepalive-timeout → BYE).
-            # The VIP is the keepalived VRRP address (ADR-0012 D7), stable across
-            # proxy failover and pod restart.
+            # in-dialog requests stay on the proxy path. Without this the b-leg
+            # goes pod-direct and bypasses the LB — the endurance long-call-loss
+            # class (post-reboot b-leg keepalives to a pod IP get no 200 →
+            # keepalive-timeout → BYE). The VIP is the keepalived VRRP address
+            # (ADR-0012 D7), stable across proxy failover and pod restart.
             - { name: B2BUA_OUTBOUND_PROXY, value: "${PROXY_VIP}:${SIP_PORT}" }
             # Boot-time assert (sipext dual-plane invariant: only the proxy sees
             # the external world). With this set the runner REFUSES to start if

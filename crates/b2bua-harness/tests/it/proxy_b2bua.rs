@@ -14,9 +14,9 @@
 //! - The proxy HRW-routes alice's new-dialog INVITE to the (only) worker and
 //!   inserts a signed Record-Route cookie; alice learns that route set off the
 //!   200 OK, so her in-dialog BYE returns through the proxy (cookie decode).
-//! - The worker's b-leg INVITE/ACK/BYE carry a preloaded `;outbound` Route at
-//!   the proxy (R-URI stays bob); the proxy classifies them worker-outbound and
-//!   forwards to the R-URI.
+//! - The worker's b-leg INVITE carries a plain preloaded `;lr` Route at the
+//!   proxy, its ACK/BYE the route set the proxy recorded (R-URI stays bob); the
+//!   proxy classifies them worker-outbound and forwards to the R-URI.
 //!
 //! The test asserts both the call lifecycle (CDR with answer + bye) AND that
 //! the INVITE and BYE each really made all four hops on the recording.

@@ -205,9 +205,6 @@ impl ProxyCore {
                 return refused;
             }
         }
-        // An INVITE naming a dialog on the external face that no verified
-        // cookie backs is admitted as a new call where it falls to selection.
-        let dialog_unbacked = face == Face::External && method == Method::Invite && has_to_tag;
 
         // ── Pick the downstream target (`target`) ───────────────────────────
         let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
@@ -225,7 +222,7 @@ impl ProxyCore {
             let target = self.request_uri_target(req, src).await;
             target.map(|t| (t, RoutingDecisionKind::WorkerOutbound, None))
         } else if let Some(cookie) = &c.cookie {
-            self.cookie_target(msg, req, src, cookie, rtx_hit.as_ref(), dialog_unbacked).await
+            self.cookie_target(msg, req, src, cookie, rtx_hit.as_ref(), face).await
         } else if let Some(found) = &rtx_hit {
             // Retransmitted out-of-dialog request: repeat the original
             // selection. Re-running the strategy under a changed candidate set
@@ -235,7 +232,8 @@ impl ProxyCore {
             // then overwritten to point at the second one.
             Ok((found.target.clone(), RoutingDecisionKind::SelectNew, None))
         } else {
-            let opts = SelectOpts { admit_as_new: dialog_unbacked, ..SelectOpts::default() };
+            let admit_as_new = self.admits_as_new(msg, face, None);
+            let opts = SelectOpts { admit_as_new, ..SelectOpts::default() };
             let target = self.select_target(msg, req, src, opts).await;
             target.map(|t| (t, RoutingDecisionKind::SelectNew, None))
         };
@@ -303,12 +301,13 @@ impl ProxyCore {
             // sip-txn INVITE_INITIAL_TIMEOUT) — see cancel_lru.rs. Keyed on
             // the transaction as received, the Via the CANCEL will repeat.
             let key = invite_txn_key(req.top_via(), call_id.as_str(), from.tag(), cseq.seq());
-            // The cookie a CANCEL re-resolves a dead worker through: the one the
-            // re-INVITE carried in its Route, else the one this initial INVITE's
-            // Record-Route was minted with. A worker-outbound INVITE's cookie
-            // names the worker, not the downstream target, so it is not kept.
-            let stickiness =
-                if c.worker_outbound { None } else { c.cookie.clone().or(minted_cookie) };
+            // The cookie a CANCEL re-resolves a dead worker through: the verified
+            // one the re-INVITE carried in its Route, else the one this initial
+            // INVITE's Record-Route was minted with (a plain preloaded Route to
+            // the proxy carries none). A worker-outbound INVITE's cookie names
+            // the worker, not the downstream target, so it is not kept.
+            let carried = c.cookie.as_ref().and_then(|p| self.strategy.verified_cookie(p, msg));
+            let stickiness = if c.worker_outbound { None } else { carried.or(minted_cookie) };
             self.cancel_lru.remember(
                 &key,
                 CancelEntry { target: target.clone(), branch: our_branch, stickiness },

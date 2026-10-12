@@ -1,3 +1,7 @@
+//! Reverse-path failover on a single-face proxy: every response arrives on the
+//! internal face and is sent to its `received`/`rport`. The external face's
+//! response rule is pinned in `tests/it/ingress_trust.rs`.
+
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 

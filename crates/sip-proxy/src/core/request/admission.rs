@@ -1,17 +1,21 @@
-//! The proxy-self gate (ELU/CPS admission) on the request path: a request the
-//! ladder takes as a new call meets the gate, and a refused one is answered
-//! 503 with Retry-After. An emergency call bypasses the gate.
+//! Which requests are new calls, and the proxy-self gate (ELU/CPS admission)
+//! a new call meets: a refused one is answered 503 with Retry-After, an
+//! emergency call bypasses the gate.
 //!
 //! A new call is an initial INVITE (no To-tag), first transmission only, that
 //! is not worker-outbound. On the external face an INVITE with a To-tag that
-//! no verified cookie backs is a new call too (ADR-0048): it is never refused
-//! for its To-tag, only by the gate, as any new call.
+//! no verified cookie backs is a new call too, where it falls to a fresh
+//! selection (the To-tag rule, [`ProxyCore::admits_as_new`], ADR-0048): it
+//! meets the gate and the strategy's new-call caps, and is never refused for
+//! its To-tag alone.
 
 use std::net::SocketAddr;
 
-use sip_message::SipRequest;
+use sip_message::{Method, SipMessage, SipRequest};
 
+use crate::observability::metrics::Face;
 use crate::self_gate::{AdmitDecision, BypassKind};
+use crate::strategy::RouteParams;
 use crate::trace::emit;
 
 use super::super::ProxyCore;
@@ -19,6 +23,22 @@ use super::reply::{extra_header, proxy_reason, reject_retry_after};
 use super::RouteOutcome;
 
 impl ProxyCore {
+    /// The To-tag rule: `msg`, received on `face` and routed by `cookie` (if
+    /// any), names a dialog no verified cookie backs, so a fresh selection
+    /// admits it as a new call. Only an INVITE on the external face.
+    pub(super) fn admits_as_new(
+        &self,
+        msg: &SipMessage,
+        face: Face,
+        cookie: Option<&RouteParams>,
+    ) -> bool {
+        let SipMessage::Request(req) = msg else { return false };
+        face == Face::External
+            && req.method() == Method::Invite
+            && req.to().tag().is_some_and(|t| !t.is_empty())
+            && cookie.is_none_or(|c| self.strategy.verified_cookie(c, msg).is_none())
+    }
+
     /// Admit `req` as a new call. `Err` holds the outcome of the 503 a refused
     /// one was answered with.
     pub(super) async fn admit_new_call(
