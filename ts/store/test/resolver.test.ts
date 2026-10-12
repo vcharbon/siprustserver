@@ -290,6 +290,14 @@ describe.skipIf(!served)("Resolver.resolve", () => {
     expect(answer.status).toBe("not-found")
     expect(answer.note).toContain(Resolver.FORMS)
   })
+
+  it("names the accepted forms where a case id or a bare suffix names nothing", async () => {
+    for (const input of [`${BULK}-case99999`, "case99999", "trace_nowhere-…-auto"]) {
+      const answer = await resolve(input)
+      expect(answer.status).toBe("not-found")
+      expect(answer.note).toContain(Resolver.FORMS)
+    }
+  })
 })
 
 describe.skipIf(!served)("Refusals.whyNot", () => {

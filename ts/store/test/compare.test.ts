@@ -161,6 +161,19 @@ describe("a call's class", () => {
     expect(blessClass(cell({ caseId: "c", deltas: null }))).toBe("unmeasured")
   })
 
+  it("is unstable where a side's repeats on one code, document and lane disagree", () => {
+    expect(classOf(red("c"), cell({ caseId: "c", repeats: { runs: 3, passed: 2 } }))).toBe("unstable")
+    expect(classOf(red("c", { repeats: { runs: 2, passed: 1 } }), red("c"))).toBe("unstable")
+    expect(classOf(red("c", { repeats: { runs: 3, passed: 0 } }), cell({ caseId: "c", repeats: { runs: 3, passed: 3 } })))
+      .toBe("red→green")
+  })
+
+  it("puts an unstable call on the harness", () => {
+    const result = compare(side([red("c")]), side([cell({ caseId: "c", repeats: { runs: 2, passed: 1 } })]))
+    expect(result.moves.map((move) => move.class)).toEqual(["unstable"])
+    expect(unexplained(result)).toBe(1)
+  })
+
   it("is ran→skipped where the lane came to block the call", () => {
     expect(classOf(cell({ caseId: "c" }), cell({ caseId: "c", passed: false, skipped: "blocked:x" }))).toBe(
       "ran→skipped"

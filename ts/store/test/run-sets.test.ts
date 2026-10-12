@@ -270,3 +270,24 @@ describe.skipIf(!served)("compare over two sides", () => {
     expect(unexplained(comparison)).toBe(0)
   })
 })
+
+describe.skipIf(!served)("repeats within a side", () => {
+  const P = "sets_repeat.pcap.gz"
+  const BASE: RunIdentity = { env: "dev-8-base", branch: "fix/8-base", laneHash: "lane1", load: null }
+  const REPEAT: RunIdentity = { env: "dev-8-repeat", branch: "fix/8-repeat", laneHash: "lane1", load: null }
+
+  it("reads how many of a side's runs of a call on its code, document and lane passed, and classes a split unstable", async () => {
+    await withStore(Effect.gen(function*() {
+      yield* ran(P, "fake", BASE, "t1", [result(`${P}-case1`, false)])
+      yield* ran(P, "fake", REPEAT, "t1", [result(`${P}-case1`, true)], { setKind: "cases" })
+      yield* ran(P, "fake", REPEAT, "t1", [result(`${P}-case1`, false)], { setKind: "cases" })
+      // Another tree's run is no repeat of the latest.
+      yield* ran(P, "fake", REPEAT, "t2", [result(`${P}-case1`, false)], { setKind: "cases" })
+      yield* ran(P, "fake", REPEAT, "t1", [result(`${P}-case1`, true)], { setKind: "cases" })
+    }))
+    const { before, after } = await pairOf("@env:dev-8-base", "@env:dev-8-repeat")
+    expect(before.cells.map((cell) => cell.repeats)).toEqual([{ runs: 1, passed: 0 }])
+    expect(after.cells.map((cell) => cell.repeats)).toEqual([{ runs: 3, passed: 2 }])
+    expect(compare(before, after).moves.map((move) => move.class)).toEqual(["unstable"])
+  })
+})

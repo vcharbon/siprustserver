@@ -23,6 +23,13 @@ describe("Selector.parse", () => {
     expect(terms("@job:42")).toEqual([{ _tag: "job", id: 42 }])
   })
 
+  it("reads a sweep and a job by their bare kind-and-number forms too", () => {
+    expect(terms("sweep7")).toEqual([{ _tag: "sweep", id: 7 }])
+    expect(terms("job42")).toEqual([{ _tag: "job", id: 42 }])
+    expect(Selector.FORMS).toContain("@sweep:N (or sweepN)")
+    expect(Selector.FORMS).toContain("@job:N (or jobN)")
+  })
+
   it("joins terms with /, every one of which a run meets", () => {
     expect(terms("@env:dev-519/@lane:fake")).toEqual([
       { _tag: "env", env: "dev-519" },
