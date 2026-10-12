@@ -79,9 +79,8 @@ impl Owner {
                 CancelGate::Hold => {
                     let branch_key = msg.top_via().branch().unwrap_or_default();
                     if let Some(txn) = self.clients.get_mut(branch_key) {
-                        // A newer CANCEL supersedes a still-held one — count the
-                        // displaced (never-sent) datagram so held counters
-                        // reconcile (held == flushed + dropped).
+                        // A newer CANCEL supersedes a still-held one — count the displaced
+                        // (never-sent) datagram so held == flushed + dropped.
                         if txn
                             .held_cancel
                             .replace(HeldCancel::new(buf, dest, CancelWire::Held))
@@ -93,6 +92,7 @@ impl Owner {
                         }
                     }
                     self.metrics.cancels_held.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.release_seed_resend(branch_key);
                 }
                 CancelGate::Suppress => {
                     self.metrics

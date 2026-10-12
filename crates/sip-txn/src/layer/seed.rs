@@ -101,8 +101,9 @@ impl Owner {
     /// `call_ref` when the Via names no `cr`), with the INVITE bound armed and
     /// no retransmit ladder: the node that sent it ran Timer A. It opens
     /// `Proceeding` when the record holds a provisional for it, else `Trying`,
-    /// so a CANCEL on it waits for one (RFC 3261 §9.1). The bound runs from the
-    /// seed: the first copy's send instant is not in the record.
+    /// so a CANCEL on it waits for one (RFC 3261 §9.1); a `Trying` seed keeps
+    /// its INVITE to re-send once when a CANCEL is held on it. The bound runs
+    /// from the seed: the first copy's send instant is not in the record.
     fn seed_client_invite(
         &mut self,
         call_ref: &str,
@@ -116,6 +117,8 @@ impl Owner {
         let bound = self
             .timers
             .insert(Timer::ClientTimeout(branch.clone()), ms(self.invite_initial_timeout_ms));
+        let resend = (!provisional)
+            .then(|| bytes::Bytes::from(serialize(&SipMessage::Request(invite.clone()))));
         let txn = self.open_txn(NewTransaction {
             id: TxnId::Client(branch.clone()),
             kind: TxnKind::Invite,
@@ -131,6 +134,28 @@ impl Owner {
         });
         txn.timeout_kind = TimeoutKind::Transaction;
         txn.timeout_key = Some(bound);
+        txn.seed_resend = resend;
+    }
+
+    /// Re-send, once, the INVITE of the seeded `Trying` transaction at
+    /// `branch` that a CANCEL is now held on: the callee's server transaction
+    /// answers it with its latest provisional (RFC 3261 §17.2.1), which
+    /// releases the CANCEL. No ladder: the one fire re-arms nothing. A
+    /// transaction past its bound re-sends nothing.
+    pub(super) fn release_seed_resend(&mut self, branch: &str) {
+        let Some(buf) = self
+            .clients
+            .get_mut(branch)
+            .filter(|t| !t.lifetime.gave_up())
+            .and_then(|t| t.seed_resend.take())
+        else {
+            return;
+        };
+        let key = self.timers.insert(Timer::ClientRetransmit(branch.to_string()), ms(0));
+        if let Some(txn) = self.clients.get_mut(branch) {
+            txn.retransmit_buf = Some(buf);
+            txn.retransmit_key = Some(key);
+        }
     }
 
     /// Hold the CANCEL the record says was sent for the seeded client INVITE
@@ -140,6 +165,7 @@ impl Owner {
         let Some(txn) = self.clients.get_mut(branch) else { return };
         txn.held_cancel = Some(HeldCancel::new(buf, dest, CancelWire::Held));
         self.metrics.cancels_held.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.release_seed_resend(branch);
     }
 
     /// Process `message` as an inbound datagram against the transactions now

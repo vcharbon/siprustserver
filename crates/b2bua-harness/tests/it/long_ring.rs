@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::LimiterEntry;
+use b2bua_harness::limiter::doubles::{admit_all, delay_nth_admit};
 use b2bua_harness::{invite_final_statuses, settle_until, B2buaScene, B2buaSut};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -222,6 +224,59 @@ async fn a_ring_from_a_late_18x_is_held_inside_the_invite_bound() {
     assert!(
         rang_for > Duration::from_secs(191) && rang_for <= Duration::from_secs(192),
         "the CANCEL left at 192 s after the INVITE, the bound less its margin: {rang_for:?}",
+    );
+    cancel.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    s.bob.receive("ACK").await;
+    call.expect(480).await;
+
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
+    s.finish().await;
+}
+
+/// The same held ring on a route whose admission answers 3 s late: the bound
+/// runs from the INVITE as it left after that admission, not from the turn
+/// that routed it, so the CANCEL still leaves 192 s after the INVITE.
+#[tokio::test(start_paused = true)]
+async fn a_held_ring_runs_from_the_invite_as_it_left_after_a_slow_admission() {
+    let s = B2buaScene::with_b2bua("long-ring-held-slow-admission", |bob_port| {
+        let decision: Arc<dyn CallDecisionEngine> = Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(move |_req| {
+                    let mut r = route_to("127.0.0.1", bob_port);
+                    r.no_answer_ms = Some(190_000);
+                    r.call_limiter = vec![LimiterEntry { id: "trunk".into(), limit: 10 }];
+                    NewCallResponse::Route(r)
+                })
+                .build(),
+        );
+        B2buaSut::builder(decision)
+            .limiter(delay_nth_admit(1, Duration::from_secs(3), admit_all()))
+            .tune(|c| {
+                c.invite_txn_timeout_sec = 200;
+                c.setup_timeout_ms = 0;
+            })
+    })
+    .await;
+
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    let invited = tokio::time::Instant::now();
+    s.h.advance(Duration::from_secs(10)).await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    s.h.advance(Duration::from_secs(191) - (tokio::time::Instant::now() - invited)).await;
+    assert!(
+        s.bob.try_receive_tolerating("CANCEL", &[]).await.is_none(),
+        "no CANCEL before the held 192 s",
+    );
+    let mut cancel = s.bob.receive("CANCEL").await;
+    let rang_for = tokio::time::Instant::now() - invited;
+    assert!(
+        rang_for > Duration::from_secs(191) && rang_for <= Duration::from_secs(192),
+        "the CANCEL left 192 s after the INVITE left: {rang_for:?}",
     );
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;

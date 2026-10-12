@@ -14,7 +14,9 @@ pub struct OutboundInvite {
     pub our_tag: String,
     pub cseq: i64,
     /// When the INVITE left, epoch ms: the start of its client transaction,
-    /// whose bound every deadline of the leg's setup stays inside.
+    /// whose bound every deadline of the leg's setup stays inside. Past an
+    /// admission its turn awaited it is later than the turn's instant, which
+    /// the turn's CDR events keep.
     pub sent_at_ms: i64,
     /// The INVITE's client transaction: what a CANCEL (§9.1) and each
     /// dialog's ACK for its 2xx (§13.2.2.4) are built from.

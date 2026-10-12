@@ -529,3 +529,34 @@ async fn a_non_invite_response_needs_no_usable_backup() {
     let sent = ep.sent.lock().unwrap();
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
 }
+
+/// The pool after w1 rebooted at w3's pod: the address it left is tombstoned
+/// and the ordinal resolves at its new one.
+fn registry_with_w1_moved(clock: Clock) -> Arc<dyn WorkerRegistry> {
+    let reg = SimulatedWorkerRegistry::with_clock(
+        vec![
+            WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060)),
+            WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
+        ],
+        clock,
+    );
+    reg.set_address("w1", ProxyAddr::new(W3_POD, 5060));
+    Arc::new(reg)
+}
+
+/// An INVITE response to the address a worker left reaches that worker at
+/// its new address — the rebooted pod reclaimed the transaction it answers —
+/// rather than the cookie's backup, and with no cookie at all.
+#[tokio::test]
+async fn response_from_a_departed_address_reaches_its_worker_at_its_new_address() {
+    let at_w3 = [format!("{W3_POD}:5060").parse::<SocketAddr>().unwrap()];
+    for resp in [invite_200(), worker_bound_200_routed("1 INVITE", "", "")] {
+        let (core, ep) = core_over(
+            registry_with_w1_moved(Clock::test_at(0)),
+            Arc::new(BackupStrategy),
+            Clock::test_at(0),
+        );
+        core.handle_response(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
+        assert_eq!(ep.sent.lock().unwrap().as_slice(), &at_w3);
+    }
+}

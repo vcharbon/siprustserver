@@ -624,3 +624,34 @@ fn a_folded_record_route_row_with_a_foreign_hop_is_compared_whole() {
     let Evidence::RungDiverged { first_line, .. } = violated(&f[0]) else { panic!() };
     assert_eq!(first_line.as_deref(), Some(folded(OWN_COOKIE_B2).as_str()));
 }
+
+/// The INVITE the proxy relays for a sender that moved between its copies:
+/// the sender's Via, below the proxy's own, carries the `rport` and
+/// `received` the proxy stamped with this copy's source (§18.2.1, RFC 3581).
+fn relayed_from(stamps: &str, branch: &str) -> String {
+    forwarded_invite(&[OWN_OUTBOUND]).replace(
+        "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1;received=10.0.0.1;rport=5060",
+        &format!("Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}{stamps}"),
+    )
+}
+
+/// A relay stamps each copy's source on the Via below its own (§18.2.1, RFC
+/// 3581): a sender that moved between two copies of one INVITE is relayed as
+/// one message, the stamps aside; any other byte of that Via is still
+/// compared.
+#[test]
+fn a_relays_source_stamps_may_differ_between_rungs_and_nothing_else_of_the_via() {
+    let first = relayed_from(";rport=5060", "z9hG4bK-1");
+    for moved in [";rport=5061", ";rport=5060;received=10.0.2.1", ";rport=5099;received=10.0.2.1"] {
+        let f = eval(&[
+            forwarded(1_000, &first),
+            forwarded(501_000, &relayed_from(moved, "z9hG4bK-1")),
+        ]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(matches!(f[0].decision, Decision::Compliant), "{moved}: {f:?}");
+    }
+    let renamed = relayed_from(";rport=5060;received=10.0.2.1", "z9hG4bK-9");
+    let f = eval(&[forwarded(1_000, &first), forwarded(501_000, &renamed)]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    violated(&f[0]);
+}

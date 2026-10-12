@@ -334,6 +334,12 @@ impl WorkerSet {
         });
     }
 
+    /// Tombstone `address`, which worker `id` stopped serving outside a
+    /// membership recompose (a test double's host move), as a recompose does.
+    pub(crate) fn depart(&self, address: ProxyAddr, id: &str) {
+        self.tombstones.insert(address, id.to_string(), self.now_ms());
+    }
+
     // ---- read seam (lock-free, hot path) ----
 
     pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {

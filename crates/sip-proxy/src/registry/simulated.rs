@@ -179,6 +179,8 @@ impl SimulatedWorkerRegistry {
             );
             self.membership.change_address(Peer::new(id.to_string(), address.host.clone()));
             self.set.recompose();
+            // The preset hid the move from the recompose: tombstone the old address.
+            self.set.depart(cur.address, id);
         } else {
             // Pure port change (same host): a proxy-only annotation.
             self.set.set_port_override(id, address.port);
@@ -273,6 +275,10 @@ mod tests {
         assert_eq!(reg.resolve("w").unwrap().address, ProxyAddr::new("10.0.0.9", 5070));
         assert_eq!(reg.resolve("w").unwrap().health, WorkerHealth::Alive);
         assert_eq!(reg.membership().resolve("w").unwrap().host, "10.0.0.9");
+        // The address the worker left answers as departed, as a host move
+        // through membership does (Timer H).
+        let left = reg.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5070));
+        assert_eq!(left.map(|w| (w.id, w.health)), Some(("w".into(), WorkerHealth::Dead)));
     }
 
     #[test]

@@ -53,7 +53,12 @@ INVITE's leg — and `Trying` otherwise, so the survivor's CANCEL obeys the same
 wait. A CANCEL the record says was sent with no provisional on record is still
 held when the node that sent it dies: the record keeps the headers it stated
 (`OutboundInvite::cancel_headers`), and the seed carries it rebuilt, held on
-the `Trying` transaction until the callee's first 18x reaches the survivor.
+the `Trying` transaction until the callee's first provisional reaches the
+survivor. A `Trying` seed runs no Timer A, so a CANCEL held on it (carried by
+the seed or sent later by the survivor) has its INVITE re-sent once: the
+callee's server transaction answers a retransmission with its latest
+provisional (§17.2.1), which releases the CANCEL. One resend only; the INVITE
+bound still ends a callee that answers nothing.
 
 ### X2 — The caller is answered at once
 

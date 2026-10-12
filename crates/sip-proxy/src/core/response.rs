@@ -1,8 +1,9 @@
 //! Response path, single-endpoint: validate ≥2 Via and that the top is us;
 //! route to the next Via (received/rport precedence); reverse-path failover of
 //! an INVITE response to the backup of the cookie naming the destination worker
-//! (on this proxy's Record-Route, else on its own top Via) when that worker is
-//! confirmed Dead; pop the top Via entry (comma-aware);
+//! (on this proxy's Record-Route, else on its own top Via), or to that worker's
+//! new address, when the address it was sent to is confirmed Dead; pop the top
+//! Via entry (comma-aware);
 //! forward; remember the ACK-relay hop for a non-2xx INVITE final — the node
 //! the final arrived from (the ACK itself travels end-to-end — see
 //! `core/request`).
@@ -108,7 +109,10 @@ impl ProxyCore {
 
         // ── Reverse-path failover: INVITE responses only ────────────────────
         // An INVITE response from a **confirmed Dead** next-Via worker answers a
-        // setup the cookie's `w_bak` materialises, so it goes there. A non-INVITE
+        // setup the cookie's `w_bak` materialises, so it goes there — unless
+        // the worker that left the address is up again at a new one (a rebooted
+        // pod that reclaimed its calls and their INVITEs, ADR-0014): the
+        // response goes there, cookie or none (a 100 carries none). A non-INVITE
         // response answers a client transaction only its sender holds (§17.1.2):
         // no other node can consume it, so it follows the Via (§16.7 step 6) and
         // is lost with its sender rather than dropped here.
@@ -133,7 +137,14 @@ impl ProxyCore {
             .then(|| self.registry.lookup_by_address(&sent_by))
             .flatten()
             .filter(|dest| dest.health == WorkerHealth::Dead);
-        if let Some(dead) = dead_worker {
+        let moved = dead_worker
+            .as_ref()
+            .and_then(|dead| self.registry.resolve(&dead.id))
+            .filter(|w| w.address != sent_by && w.health != WorkerHealth::Dead);
+        if let Some(moved) = moved {
+            host = moved.address.host;
+            port = moved.address.port;
+        } else if let Some(dead) = dead_worker {
             match self.own_cookie_for(&resp, &hops[0], &dead.id) {
                 Some(params) => match self
                     .strategy

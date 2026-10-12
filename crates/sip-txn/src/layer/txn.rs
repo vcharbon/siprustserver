@@ -199,6 +199,7 @@ impl Transaction {
             held_cancel: None,
             cancel_retransmit_key: None,
             retransmit_buf: None,
+            seed_resend: None,
             ladder: None,
             timeout_kind: TimeoutKind::Response,
             dead_hop_reported: false,
@@ -303,6 +304,9 @@ pub(super) struct Transaction {
     /// as [`last_response`](Self::last_response). In `Accepted` it is the ACK
     /// re-passed to every repeat of the 2xx.
     pub(super) retransmit_buf: Option<Bytes>,
+    /// On a client INVITE seeded `Trying` (ADR-0014): its INVITE, re-sent once
+    /// when a CANCEL is first held on it (ADR-0043), taken at that send.
+    pub(super) seed_resend: Option<Bytes>,
     /// The Timer A/E ladder for [`retransmit_buf`](Self::retransmit_buf).
     /// `None` until this txn starts retransmitting, and on a server txn until
     /// its non-2xx final arms Timer G.

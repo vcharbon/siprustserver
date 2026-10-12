@@ -552,6 +552,54 @@ async fn a_seeded_cancel_with_no_provisional_on_record_waits_for_one() {
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
 }
 
+/// A client INVITE seeded with no provisional on record re-sends its INVITE
+/// once when a CANCEL is held on it — the CANCEL the seed carries, or one the
+/// TU sends later — so the callee resends its latest provisional (RFC 3261
+/// §17.2.1) and the CANCEL goes out on it. Nothing else is re-sent, and a seed
+/// no CANCEL waits on re-sends nothing.
+#[tokio::test(start_paused = true)]
+async fn a_held_cancel_on_a_seed_re_sends_its_invite_once() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let (carried, later) = ("z9hG4bK-seed-carried", "z9hG4bK-seed-later");
+    let seed = TxnSeed::ClientInvite {
+        invite: invite_with_cr_lg(CALL_REF, "seed-carried", carried, "b-1"),
+        dest: addr(PEER),
+        provisional: false,
+        cancel: Some(Box::new(seed_cancel(carried, "seed-carried"))),
+    };
+    let seeds = vec![
+        seed,
+        unanswered_client_seed(later, "seed-later"),
+        client_seed("z9hG4bK-seed-rang", "seed-rang"),
+    ];
+    stack.txn.seed(CALL_REF, seeds).await.unwrap();
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 1, "the carried CANCEL's INVITE");
+
+    stack
+        .txn
+        .send_request(seed_cancel(later, "seed-later"), addr(PEER), sip_txn::TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(20).await;
+    let sent = stack.drain_peer();
+    assert_eq!(count_requests(&sent, "INVITE"), 1, "the later CANCEL's INVITE");
+    assert_eq!(count_requests(&sent, "CANCEL"), 0, "both CANCELs wait for a 1xx");
+
+    for (branch, call_id) in [(carried, "seed-carried"), (later, "seed-later")] {
+        stack.inject(&response_bytes(100, "Trying", "INVITE", branch, call_id, false)).await;
+        elapse_ms(20).await;
+        assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the resent 100 releases it");
+        stack
+            .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true))
+            .await;
+        elapse_ms(20).await;
+        assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
+    }
+    elapse_ms(40_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 0, "never re-sent again");
+}
+
 /// The CANCEL of the INVITE [`invite_with_cr_lg`] builds on `branch`.
 fn seed_cancel(branch: &str, call_id: &str) -> SipRequest {
     parse_request(&format!(

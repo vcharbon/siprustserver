@@ -41,10 +41,15 @@ const RING_MS: i64 = 6_789;
 /// leaves: callee → front proxy → worker, 1 ms each.
 const HOPS_IN_MS: i64 = 2;
 
-/// The ring deadline of the cells whose primary reboots and reclaims the call
-/// while it rings: the reboot and the reclaim complete inside it, and it ends
-/// before the 150 s setup deadline.
+/// The ring deadline of the cell whose primary loses bob's 180 and a later 18x
+/// hands the call to the survivor: it ends before the 150 s setup deadline.
 const LOST_RING_MS: i64 = 90_123;
+
+/// The ring deadline of the cell whose primary reboots and reclaims the call
+/// while it rings: the reboot and the reclaim complete inside it, and it ends
+/// while the proxy still knows the primary's departed address (Timer H), so
+/// bob's responses to the reclaimed INVITE reach its new one.
+const RECLAIM_RING_MS: i64 = 25_123;
 
 /// Every call routes to bob under `ring_ms`; its expiry rejects the caller.
 fn ringing_route(ring_ms: i64) -> Arc<dyn CallDecisionEngine> {
@@ -300,14 +305,19 @@ async fn ring_lost_with_the_primary(
     (call_ref, sent_at, call, uas)
 }
 
-/// Bob's 180 dies with the primary, which reboots: the copy it reclaims shows
-/// no ring, so it presumes bob ringing since his INVITE and gives the ring up
-/// `no_answer_ms` after that INVITE — not at the setup deadline.
+/// Bob's 180 dies with the primary, which reboots at a new address: the copy
+/// it reclaims shows no ring, so it presumes bob ringing since his INVITE and
+/// gives the ring up `no_answer_ms` after that INVITE — not at the setup
+/// deadline. Its INVITE transaction holds no provisional on record, so the
+/// CANCEL waits for one (RFC 3261 §9.1) and has the INVITE re-sent once; bob's
+/// transaction answers that retransmission with his latest provisional
+/// (§17.2.1), which the proxy brings to the primary's new address and which
+/// releases the CANCEL; bob's INVITE ends 487.
 #[tokio::test(start_paused = true)]
 async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
-    let mut c = spawn_cluster("ring-deadline-lost-18x-reclaim", LOST_RING_MS).await;
+    let mut c = spawn_cluster("ring-deadline-lost-18x-reclaim", RECLAIM_RING_MS).await;
     let mut primary_is_b1 = true;
-    let (call_ref, sent_at, mut call, _uas) =
+    let (call_ref, sent_at, mut call, mut uas) =
         ring_lost_with_the_primary(&mut c, &mut primary_is_b1).await;
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = c;
     let (primary, backup) =
@@ -316,7 +326,7 @@ async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
     reboot_and_reclaim(&mut fh, primary, backup, &proxy).await;
     let reclaimed = primary.live_call(&call_ref).expect("the rebooted primary serves the call");
     assert_eq!(reclaimed.b_legs[0].ring, Ring::Presumed, "bob is presumed ringing");
-    let fire_at = sent_at + LOST_RING_MS;
+    let fire_at = sent_at + RECLAIM_RING_MS;
     assert_eq!(ring_deadline(&reclaimed), Some(fire_at), "the ring runs from the INVITE");
 
     quiet_until(&fh, &bob, fire_at).await;
@@ -326,10 +336,17 @@ async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
         fire_at + HOPS_IN_MS,
         "the caller is answered at the presumed deadline"
     );
-    // The reclaimed INVITE transaction holds no provisional on record, so its
-    // CANCEL waits for one (RFC 3261 §9.1).
-    fh.advance(Duration::from_millis(500)).await;
+
+    let resent = bob.receive("INVITE").await;
+    assert_eq!(resent.request().top_via().branch(), uas.request().top_via().branch());
     assert!(bob.try_receive_tolerating("CANCEL", &[]).await.is_none(), "the CANCEL is held");
+    uas.respond(180, "Ringing").await;
+    let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
+    cancel.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    fh.advance(Duration::from_secs(40)).await;
+    assert!(bob.try_receive_tolerating("INVITE", &[]).await.is_none(), "re-sent once only");
 
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call within the settle budget");

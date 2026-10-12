@@ -1,16 +1,16 @@
-//! Lenient raw-datagram scanners: extract one field from an unparsed SIP
-//! datagram without a full parse. For hot paths (demux, dedup, metrics
-//! labelling) that must stay cheap and tolerate malformed input by returning
-//! `None`/empty rather than erroring.
+//! Lenient raw-datagram scanners: extract one field from an unparsed SIP datagram without a
+//! full parse. For hot paths (demux, dedup, metrics labelling) that must stay cheap and
+//! tolerate malformed input by returning `None`/empty rather than erroring.
 //!
-//! This module is the ONLY sanctioned home for raw SIP header extraction —
-//! never re-implement these scanners in another crate. If a scanner you need
-//! is missing, add it here. For anything richer than single-field extraction,
-//! use the real parser ([`crate::parser`]). Strict, allocation-free
-//! pre-parse *classifiers* (overload brake, dispatcher fast-path) live in
-//! [`crate::preparse`] and its sibling modules.
+//! This module is the ONLY sanctioned home for raw SIP header extraction — never re-implement
+//! these scanners in another crate. If a scanner you need is missing, add it here. For
+//! anything richer than single-field extraction, use the real parser ([`crate::parser`]).
+//! Strict, allocation-free pre-parse *classifiers* (overload brake, dispatcher fast-path) live
+//! in [`crate::preparse`] and its sibling modules.
 
+mod via_stamp;
 use std::borrow::Cow;
+pub use via_stamp::relay_stamp_spans;
 
 use crate::parser::custom::scanner::is_token_char;
 use crate::trace_sample::{TraceSample, TRACE_SAMPLE_HEADER};
