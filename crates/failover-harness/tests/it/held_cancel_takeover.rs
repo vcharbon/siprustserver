@@ -4,9 +4,10 @@
 //! replicated record; when the serving node dies before the callee answers,
 //! the survivor rebuilds the INVITE transaction with that CANCEL held on it.
 //! The callee's 100 never reaches the survivor: it carries no Record-Route
-//! (§8.2.6.1), so the front proxy has no cookie to fail it over on and drops
-//! it. The callee's 180 does reach it, on that cookie, and releases the CANCEL
-//! (ADR-0043 X1).
+//! (§8.2.6.1), and the proxy's Via on an initial INVITE carries no cookie, so
+//! the front proxy has none to fail it over on and drops it. The callee's 180
+//! brings the Record-Route cookie back, reaches the survivor on it, and
+//! releases the CANCEL (ADR-0043 X1).
 
 use std::time::Duration;
 

@@ -230,3 +230,6 @@ mod reverse_failover_tests;
 
 #[cfg(test)]
 mod relay_tests;
+
+#[cfg(test)]
+mod via_cookie_tests;
