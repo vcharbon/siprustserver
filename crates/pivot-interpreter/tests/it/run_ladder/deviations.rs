@@ -59,6 +59,22 @@ async fn rung_five_a_preserved_block_and_a_jumped_cseq_reach_the_wire() {
         eprintln!("SKIPPED: set PIVOT_CASE_DIRS to an authored case library");
         return;
     };
+    // The second `Accept` row as the document stores it: its media type is the
+    // case library's choice, its position and casing are what the rung proves.
+    let stated = serde_json::to_value(&case.document).expect("the document serialises");
+    let accepts: Vec<String> = stated["flow"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|node| node["id"] == "s1")
+        .and_then(|node| node["msg"]["headers"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|header| header["name"] == "Accept")
+        .filter_map(|header| header["value"].as_str().map(str::to_string))
+        .collect();
+    let second_accept =
+        format!("\r\nAccept: {}\r\n", accepts.get(1).expect("s1 stores two Accept rows"));
     let scene = B2buaScene::new("pivot-cseq-jump-raw-order").await;
     // The `cseq-override` IS the non-compliance the case reproduces (RFC 3261
     // §12.2.1.1), and it is the scripted CALLER that emits it: the waiver is
@@ -99,7 +115,7 @@ async fn rung_five_a_preserved_block_and_a_jumped_cseq_reach_the_wire() {
         "\r\nuser-agent: PivotReplay/1.0\r\n",
         "\r\nP-Asserted-Identity: <sip:0009001@pivot.invalid>\r\n",
         "\r\nAccept: application/sdp\r\n",
-        "\r\nAccept: application/vnd.example.indata\r\n",
+        second_accept.as_str(),
         "\r\nsupported: timer, replaces\r\n",
         "\r\nX-Pivot-Order: stored-last\r\n",
     ];

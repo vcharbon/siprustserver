@@ -11,12 +11,12 @@ use super::*;
 /// the answer, an order-free teardown pair — runs to completion against a real
 /// B2BUA and the run is GREEN, carrying two facts it does not gate on:
 ///
-/// - the draft asserts CDR events in the vocabulary of the deployment it was
-///   written for (`InviteReceived`, `Bye`) while this system spells them
-///   `invite_received` and `bye`. Both checks state `cdr-vocabulary`, this lane
-///   is not the draft's `origin_lane`, so both are evaluated and RECORDED —
-///   the document keeps the fact and the run does not turn red for replaying it
-///   somewhere else;
+/// - a CDR check the draft states in another writer's vocabulary carries
+///   `cdr-vocabulary`, and this lane is not the draft's `origin_lane`, so it is
+///   evaluated and RECORDED as informative — the document keeps the fact and
+///   the run does not turn red for replaying it somewhere else. How many such
+///   checks a library's draft carries is the library's; that every residue is
+///   one, and none gates, is the rung's;
 /// - the RFC 3261 §9.2 violation the case exists for is emitted by a scripted
 ///   peer, so it is listed loudly and gates nothing.
 ///
@@ -29,6 +29,16 @@ async fn rung_three_a_draft_runs_green_with_its_origin_lane_s_vocabulary_recorde
         return;
     };
     let scene = B2buaScene::new("pivot-cancel-xing").await;
+    // The scripted callee's 200 after the CANCEL IS the non-compliance the case
+    // reproduces (RFC 3261 §9.2): waived for that party alone, so the same rule
+    // stays gated on the system's own output.
+    scene.h.waive(
+        scenario_harness::WaiverScope::rule(
+            "no-200-after-cancel",
+            "the draft's callee answers 200 after taking the CANCEL, which is what this case exists to replay",
+        )
+        .on_party("bob"),
+    );
     let (outcome, dir) = replay_case(&scene, case, BTreeMap::new()).await;
     assert_bundle_is_complete(&outcome, &dir);
 
@@ -57,11 +67,10 @@ async fn rung_three_a_draft_runs_green_with_its_origin_lane_s_vocabulary_recorde
     assert_eq!(note.step, "s11");
     assert!(!note.gating, "a scripted peer's violation never gates");
 
-    // And the residue gates nothing: the draft's two CDR event regexes are the
-    // authoring lane's PascalCase vocabulary read off a snake_case stream, both
-    // classified, both evaluated, both recorded as informative.
+    // And the residue gates nothing: whatever CDR checks the draft states in
+    // another writer's vocabulary are classified, evaluated and recorded as
+    // informative, and nothing else is.
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
-    assert_eq!(outcome.verdict.informative.len(), 2, "{:#?}", outcome.verdict.informative);
     assert!(
         outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
             && matches!(&note.finding, Failure::CdrMismatch { .. })),
@@ -74,7 +83,12 @@ async fn rung_three_a_draft_runs_green_with_its_origin_lane_s_vocabulary_recorde
     let written: serde_json::Value =
         serde_json::from_reader(std::fs::File::open(dir.join("verdict.json")).unwrap()).unwrap();
     assert_eq!(written["status"], "ok");
-    assert_eq!(written["informative"].as_array().map(Vec::len), Some(2), "{written:#}");
+    // An empty section is left out of the file.
+    assert_eq!(
+        written["informative"].as_array().map_or(0, Vec::len),
+        outcome.verdict.informative.len(),
+        "{written:#}"
+    );
     assert_eq!(written["rfc_violations"][0]["rule"], "no-200-after-cancel");
 
     scene.finish().await;
@@ -82,7 +96,9 @@ async fn rung_three_a_draft_runs_green_with_its_origin_lane_s_vocabulary_recorde
 
 /// Rung three, the IN-DIALOG rung: a draft whose callee re-INVITEs an
 /// established dialog, whose caller's BYE crosses that re-INVITE, and whose
-/// 481 and teardown BYE reach the callee in either order.
+/// teardown BYE and the platform's 487 to the doomed re-INVITE (RFC 3261
+/// §15.1.2: a dialog's pending requests are answered 487 when it ends) reach
+/// the callee in either order.
 ///
 /// It is the re-INVITE drive end to end — an in-dialog request composed on the
 /// dialog the leg already owns, its 100 Trying, its relayed copy on the far leg,
@@ -91,7 +107,7 @@ async fn rung_three_a_draft_runs_green_with_its_origin_lane_s_vocabulary_recorde
 ///
 /// It skips loudly when no case library is configured.
 #[tokio::test(start_paused = true)]
-async fn rung_three_a_re_invite_draft_crosses_a_bye_and_takes_the_481_order_free() {
+async fn rung_three_a_re_invite_draft_crosses_a_bye_and_takes_the_487_order_free() {
     let Some(case) = case_dir("bc-rc-reinvite-then-bye") else {
         eprintln!("SKIPPED: set PIVOT_CASE_DIRS to an authored case library");
         return;
@@ -111,7 +127,7 @@ async fn rung_three_a_re_invite_draft_crosses_a_bye_and_takes_the_481_order_free
 
     // The callee's re-INVITE and the caller's crossing BYE really crossed: the
     // b-leg carries an outbound in-dialog INVITE on the dialog it already owns,
-    // and the ACK the 481 owes rides that same transaction (§17.1.1.3).
+    // and the ACK the 487 owes rides that same transaction (§17.1.1.3).
     let b_leg = &outcome.recording.legs()["B"];
     let re_invite = b_leg
         .iter()
@@ -122,7 +138,7 @@ async fn rung_three_a_re_invite_draft_crosses_a_bye_and_takes_the_481_order_free
     let hop_ack = b_leg
         .iter()
         .find(|m| m.step.as_deref() == Some("s19"))
-        .expect("the ACK to the 481 is recorded");
+        .expect("the ACK to the 487 is recorded");
     assert!(text(hop_ack).contains("CSeq: 1 ACK"), "{}", text(hop_ack));
     let branch = |raw: &str| {
         raw.split("branch=").nth(1).and_then(|r| r.split(['\r', ';']).next()).map(str::to_string)
@@ -133,9 +149,8 @@ async fn rung_three_a_re_invite_draft_crosses_a_bye_and_takes_the_481_order_free
         "the ACK to a non-2xx rides its own INVITE's branch"
     );
 
-    // The residue is the authoring platform's CDR vocabulary and nothing else.
+    // The residue, if any, is CDR vocabulary, and nothing gates.
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
-    assert_eq!(outcome.verdict.informative.len(), 2, "{:#?}", outcome.verdict.informative);
     assert!(
         outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
             && matches!(&note.finding, Failure::CdrMismatch { .. })),

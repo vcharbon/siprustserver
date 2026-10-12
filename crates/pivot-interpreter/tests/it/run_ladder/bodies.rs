@@ -22,6 +22,8 @@ async fn rung_five_a_multipart_invite_reaches_the_callee_with_both_parts_byte_ex
     let parts_dir = case.base_dir.join("resources");
     let offer = std::fs::read(parts_dir.join("uac1_0_0.sdp")).expect("the offer part");
     let payload = std::fs::read(parts_dir.join("uac1_0_1.bin")).expect("the binary part");
+    let case_base = case.base_dir.clone();
+    let stated = serde_json::to_value(&case.document).expect("the document serialises");
     let scene = B2buaScene::new("pivot-multipart-indata").await;
     let (outcome, dir) = replay_case(&scene, case, BTreeMap::new()).await;
     assert_bundle_is_complete(&outcome, &dir);
@@ -99,31 +101,7 @@ async fn rung_five_a_multipart_invite_reaches_the_callee_with_both_parts_byte_ex
     // parameter, not an entity header or its order, not a delimiter's CRLF, not
     // the closing marker. A rewrite token this interpreter starts honouring
     // joins the named list here or fails this assertion, which is the point.
-    let geoloc = std::fs::read(parts_dir.join("uac1_0_2.xml")).expect("the location part");
-    let mut captured: Vec<u8> = Vec::new();
-    captured.extend_from_slice(
-        b"--unique-boundary-1\r\n\
-          Content-Type: application/sdp\r\n\
-          Content-ID: <offer@example.invalid>\r\n\
-          Content-Disposition: session\r\n\r\n",
-    );
-    captured.extend_from_slice(&offer);
-    captured.extend_from_slice(
-        b"\r\n--unique-boundary-1\r\n\
-          Content-Type: application/vnd.example.indata\r\n\
-          Content-ID: <indata@example.invalid>\r\n\
-          Content-Transfer-Encoding: binary\r\n\
-          Content-Disposition: signal;handling=optional\r\n\r\n",
-    );
-    captured.extend_from_slice(&payload);
-    captured.extend_from_slice(
-        b"\r\n--unique-boundary-1\r\n\
-          Content-Type: application/pidf+xml;charset=utf-8\r\n\
-          Content-ID: <geoloc@example.invalid>\r\n\
-          Content-Disposition: render;handling=optional\r\n\r\n",
-    );
-    captured.extend_from_slice(&geoloc);
-    captured.extend_from_slice(b"\r\n--unique-boundary-1--\r\n");
+    let captured = stated_multipart(&case_base, &stated);
 
     let head_end = find_bytes(&raw, b"\r\n\r\n").expect("the datagram's head ends") + 4;
     let arrived_body = &raw[head_end..];
@@ -146,6 +124,43 @@ async fn rung_five_a_multipart_invite_reaches_the_callee_with_both_parts_byte_ex
 
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     scene.finish().await;
+}
+
+/// The multipart body the document states on its first multipart step, framed
+/// as a capture holds it under `unique-boundary-1`: per part, its type, its
+/// Content-ID and its entity headers in the document's order, then the bytes
+/// its `ref` names. The rung compares the wire against what the document
+/// says, whatever payload types the case library chose.
+fn stated_multipart(base_dir: &std::path::Path, document: &serde_json::Value) -> Vec<u8> {
+    let parts = document["flow"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|node| node["msg"]["body"]["multipart"]["parts"].as_array())
+        .expect("the document states a multipart body");
+    let field = |part: &serde_json::Value, key: &str| -> String {
+        part[key].as_str().unwrap_or_else(|| panic!("a part states its {key}")).to_string()
+    };
+    let mut body: Vec<u8> = Vec::new();
+    for part in parts {
+        body.extend_from_slice(b"--unique-boundary-1\r\n");
+        body.extend_from_slice(
+            format!("Content-Type: {}\r\n", field(part, "content-type")).as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-ID: {}\r\n", field(part, "content-id")).as_bytes());
+        for header in part["headers"].as_array().into_iter().flatten() {
+            body.extend_from_slice(
+                format!("{}: {}\r\n", field(header, "name"), field(header, "value")).as_bytes(),
+            );
+        }
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(
+            &std::fs::read(base_dir.join(field(part, "ref"))).expect("the part's bytes"),
+        );
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(b"--unique-boundary-1--\r\n");
+    body
 }
 
 /// `haystack` with every occurrence of `from` replaced by `to`, over bytes a
