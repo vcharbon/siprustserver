@@ -120,7 +120,7 @@ export const layer = Layer.effect(
       const rows = yield* sql<{ pins: boolean; maps: boolean; citations: boolean; summaries: boolean }>`
         SELECT to_regclass('pins') IS NOT NULL AS pins, to_regclass('case_maps') IS NOT NULL AS maps,
                to_regclass('citations') IS NOT NULL AS citations,
-               to_regclass('cell_summaries') IS NOT NULL AS summaries
+               to_regclass('run_summaries') IS NOT NULL AS summaries
       `
       return rows[0]!
     })
@@ -180,9 +180,8 @@ export const layer = Layer.effect(
                (SELECT count(*) FROM case_results cr WHERE cr.run_id = r.id) AS results,
                (SELECT count(*) FROM run_rule_hits h WHERE h.run_id = r.id) AS rule_hits,
                ${has.summaries
-                 ? sql`(EXISTS (SELECT 1 FROM cell_summaries s WHERE s.run_id = r.id)
-                        OR NOT EXISTS (SELECT 1 FROM case_results cr WHERE cr.run_id = r.id))`
-                 : sql`NOT EXISTS (SELECT 1 FROM case_results cr WHERE cr.run_id = r.id)`} AS summarised,
+                 ? sql`EXISTS (SELECT 1 FROM run_summaries s WHERE s.run_id = r.id)`
+                 : sql`false`} AS summarised,
                CASE WHEN ${kept} THEN (
                  SELECT count(*) FROM case_results cr
                  WHERE cr.run_id = r.id AND NOT EXISTS (${

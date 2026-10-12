@@ -91,9 +91,13 @@ interface Seeded {
   readonly real: number
   readonly pinned: number
   readonly swept: number
+  readonly empty: number
 }
 
-/** One capture cut once, and five finished runs of it: cited, uncited, real-lane, pinned, in a cited sweep. */
+/**
+ * One capture cut once, and six finished runs of it: cited, uncited,
+ * real-lane, pinned, in a cited sweep, and cited with no cell at all.
+ */
 const seed = Effect.gen(function*() {
   const cuts = yield* Cuts.Service
   const runs = yield* Runs.Service
@@ -137,8 +141,17 @@ const seed = Effect.gen(function*() {
   const real = yield* run(REAL)
   const pinned = yield* run(FAKE)
   const swept = yield* run(FAKE, sweep)
+  const opened = yield* runs.open({
+    capture: CAPTURE,
+    lane: FAKE,
+    mode: "record",
+    sessionDir: "/w/wiped",
+    prepId: prep,
+    identity: CURRENT
+  })
+  yield* runs.finish({ id: opened.id, status: "error", detail: "the cut broke", cases: [] })
   yield* pins.pin([pinned], "proj/1")
-  return { prep, cited, loose, real, pinned, swept, sweep }
+  return { prep, cited, loose, real, pinned, swept, sweep, empty: opened.id }
 })
 
 let store: (Seeded & { readonly sweep: number }) | undefined
@@ -165,6 +178,7 @@ afterAll(async () => {
 const citations = (): ReadonlyArray<Citations.Citation> => [
   { kind: "run", ref: String(store!.cited), citedBy: "proj/2", citedOn: null },
   { kind: "sweep", ref: String(store!.sweep), citedBy: "proj/3", citedOn: null },
+  { kind: "run", ref: String(store!.empty), citedBy: "proj/4", citedOn: null },
   { kind: "run", ref: String(store!.loose), citedBy: "proj/old", citedOn: "2000-01-01" }
 ]
 
@@ -179,7 +193,8 @@ const readings = async () => {
     "call-1@h",
     `run${store!.real}/case1`,
     `run${store!.cited}/case1`,
-    `run${store!.swept}/case2`
+    `run${store!.swept}/case2`,
+    `run${store!.empty}`
   ]
   const out: Record<string, { status: string; callKey: string | null }> = {}
   for (const input of inputs) {
@@ -215,13 +230,13 @@ describe.skipIf(!served)("the wipe", () => {
     const counts = await tableCounts()
     const plan = await withStore(Effect.flatMap(Wipe.Service, (wipe) => wipe.plan({ ...KEEP, citations: citations() })))
     expect(plan.kept).toEqual({ lane: 1, pinned: 1, open: 0 })
-    expect(plan.dropped.runs).toBe(3)
-    // The cited run and the cited sweep's run; a citation older than the store names none of its runs.
-    expect(plan.cited).toBe(2)
-    expect(plan.unsummarised).toBe(2)
+    expect(plan.dropped.runs).toBe(4)
+    // The cited runs and the cited sweep's run; a citation older than the store names none of its runs.
+    expect(plan.cited).toBe(3)
+    expect(plan.unsummarised).toBe(3)
     expect(plan.dropped.preps).toBe(1)
     expect(plan.dropped.cutCases).toBe(2)
-    expect(plan.bundles).toHaveLength(3)
+    expect(plan.bundles).toHaveLength(4)
     expect(plan.unexported).toBe(0)
     expect(plan.unmapped).toBe(0)
     expect(await tableCounts()).toEqual(counts)
@@ -253,10 +268,10 @@ describe.skipIf(!served)("the wipe", () => {
     await withStore(Effect.gen(function*() {
       const cited = yield* Citations.Service
       yield* cited.record(citations())
-      expect(yield* cited.summarise).toBe(4)
+      expect(yield* cited.summarise).toEqual({ runs: 3, cells: 4 })
     }))
     const plan = await withStore(Effect.flatMap(Wipe.Service, (wipe) => wipe.execute(KEEP)))
-    expect(plan.dropped.runs).toBe(4)
+    expect(plan.dropped.runs).toBe(5)
     const counts = await tableCounts()
     expect(counts).toMatchObject({
       runs: 2,
@@ -277,6 +292,8 @@ describe.skipIf(!served)("the wipe", () => {
     expect(after).toEqual(before)
     expect(after[`run${store!.cited}/case1`]).toEqual({ status: "resolved", callKey: "call-1@h" })
     expect(after[`${CAPTURE}-cut3`]?.status).toBe("refused")
+    // A cited run that held no cell still reads as a run.
+    expect(after[`run${store!.empty}`]?.status).toBe("a-run")
     expect((await resolve(`run${store!.loose}`)).status).toBe("not-found")
   })
 })

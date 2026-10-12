@@ -1,9 +1,10 @@
 /**
  * What OUTSIDE RECORDS cite of the store — runs, jobs, sweeps, preps and case
- * ids, each with the record citing it and the day it did — and one summary row
- * per cell of every run a citation names (`cell_summaries`): the case, its
- * call, its verdict, failed step and main error, the code and environment that
- * ran it. A summary is written once and outlives the run it was read from.
+ * ids, each with the record citing it and the day it did — and a summary of
+ * every run a citation names: one row for the run (`run_summaries`: capture,
+ * lane, status, identity, code) and one per cell (`cell_summaries`: the case,
+ * its call, its verdict, failed step and main error). A summary is written
+ * once and outlives the run it was read from.
  *
  * A citation dated before the store's first cut names an id of another store:
  * it is recorded as cited and summarises nothing.
@@ -31,8 +32,14 @@ export interface Interface {
   readonly record: (citations: ReadonlyArray<Citation>) => Effect.Effect<number, SqlError>
   /** Every recorded citation. */
   readonly all: Effect.Effect<ReadonlyArray<Citation>, SqlError>
-  /** Summarises every cell of every cited run, job and sweep not summarised yet; answers the rows written. */
-  readonly summarise: Effect.Effect<number, SqlError>
+  /** Summarises every cited run, job and sweep, run and cell, not summarised yet; answers the rows written. */
+  readonly summarise: Effect.Effect<Summarised, SqlError>
+}
+
+/** What a summarise wrote: run rows and cell rows. */
+export interface Summarised {
+  readonly runs: number
+  readonly cells: number
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/store/Citations") {}
@@ -76,7 +83,37 @@ export const layer = Layer.effect(
     })
 
     const summarise = Effect.gen(function*() {
-      const rows = yield* sql<{ n: number }>`
+      const runs = yield* sql<{ n: number }>`
+        WITH since AS (
+          SELECT least(
+            (SELECT min(cut_at) FROM capture_cuts),
+            (SELECT min(cut_at) FROM case_maps)
+          )::date AS day
+        ),
+        current AS (
+          SELECT c.kind, c.ref::bigint AS id FROM citations c, since
+          WHERE c.kind IN ('run', 'job', 'sweep') AND c.ref ~ '^[0-9]{1,18}$'
+            AND (c.cited_on IS NULL OR since.day IS NULL OR c.cited_on >= since.day)
+        ),
+        cited AS (
+          SELECT r.id FROM runs r JOIN current c ON c.kind = 'run' AND c.id = r.id
+          UNION SELECT r.id FROM runs r JOIN current c ON c.kind = 'job' AND c.id = r.job_id
+          UNION SELECT r.id FROM runs r JOIN current c ON c.kind = 'sweep' AND c.id = r.sweep_id
+        ),
+        written AS (
+          INSERT INTO run_summaries (
+            run_id, capture, lane, set_kind, status, detail, cases, failed, env, branch, components,
+            sweep_id, job_id, prep_id, started_at, finished_at
+          )
+          SELECT r.id, r.capture, r.lane, r.set_kind, r.status, r.detail, r.cases, r.failed, r.env, r.branch,
+                 r.components, r.sweep_id, r.job_id, r.prep_id, r.started_at, r.finished_at
+          FROM cited JOIN runs r ON r.id = cited.id
+          ON CONFLICT DO NOTHING
+          RETURNING 1
+        )
+        SELECT count(*)::int AS n FROM written
+      `
+      const cells = yield* sql<{ n: number }>`
         WITH since AS (
           SELECT least(
             (SELECT min(cut_at) FROM capture_cuts),
@@ -115,7 +152,7 @@ export const layer = Layer.effect(
         )
         SELECT count(*)::int AS n FROM written
       `
-      return Number(rows[0]!.n)
+      return { runs: Number(runs[0]!.n), cells: Number(cells[0]!.n) } satisfies Summarised
     })
 
     return Service.of({ record, all, summarise })

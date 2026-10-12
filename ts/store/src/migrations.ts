@@ -576,13 +576,46 @@ const currentDocuments = Effect.gen(function*() {
 export const CURRENT_DOCUMENTS = "3_current_documents"
 
 /**
+ * `run_summaries`: one row per cited run — its capture, lane, status, detail,
+ * identity and code — so a cited run outlives its row whether or not it holds
+ * cells (`citations.ts`).
+ */
+const runSummaries = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE run_summaries (
+      run_id      bigint PRIMARY KEY,
+      capture     text NOT NULL,
+      lane        text NOT NULL,
+      set_kind    text NOT NULL,
+      status      text NOT NULL,
+      detail      text,
+      cases       integer NOT NULL,
+      failed      integer NOT NULL,
+      env         text,
+      branch      text,
+      components  jsonb NOT NULL DEFAULT '[]'::jsonb,
+      sweep_id    bigint,
+      job_id      bigint,
+      prep_id     bigint,
+      started_at  timestamptz NOT NULL,
+      finished_at timestamptz
+    )
+  `
+})
+
+/** The key of the migration that keeps a summary of every cited run. */
+export const RUN_SUMMARIES = "4_run_summaries"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
 export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [BASELINE]: baseline,
   [FROZEN_IDS]: frozenIds,
-  [CURRENT_DOCUMENTS]: currentDocuments
+  [CURRENT_DOCUMENTS]: currentDocuments,
+  [RUN_SUMMARIES]: runSummaries
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

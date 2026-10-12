@@ -349,7 +349,7 @@ export const layerWith = (grammar: Grammar) => Layer.effect(
       const rows = yield* sql<{ id: string | null }>`
         SELECT greatest(
           (SELECT max(id) FROM runs),
-          (SELECT max(run_id) FROM cell_summaries),
+          (SELECT max(run_id) FROM run_summaries),
           (SELECT CASE WHEN is_called THEN last_value END FROM runs_id_seq)
         ) AS id
       `
@@ -363,10 +363,17 @@ export const layerWith = (grammar: Grammar) => Layer.effect(
       id: number,
       named: string | undefined
     ) {
-      const head = yield* sql<{ capture: string; lane: string; env: string | null; started_at: Date; cells: string }>`
-        SELECT capture, lane, env, min(started_at) AS started_at, count(*) AS cells
-        FROM cell_summaries WHERE run_id = ${id}
-        GROUP BY capture, lane, env
+      const head = yield* sql<{
+        capture: string
+        lane: string
+        env: string | null
+        status: string
+        started_at: Date
+        cells: string
+      }>`
+        SELECT s.capture, s.lane, s.env, s.status, s.started_at,
+               (SELECT count(*) FROM cell_summaries c WHERE c.run_id = s.run_id) AS cells
+        FROM run_summaries s WHERE s.run_id = ${id}
       `
       const run = head[0]
       if (run === undefined) return undefined
@@ -379,7 +386,7 @@ export const layerWith = (grammar: Grammar) => Layer.effect(
           status: "a-run",
           calls: [],
           total: 0,
-          note: `${said} is a run, not a call: on ${run.lane}, env ${run.env ?? "unknown"}`
+          note: `${said} is a run, not a call: on ${run.lane}, env ${run.env ?? "unknown"}, ${run.status}`
         } satisfies Resolution
       }
       const caseId = shapes.suffix.test(named) ? `${run.capture}-${named}` : named
