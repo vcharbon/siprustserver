@@ -285,8 +285,7 @@ fn assert_not_taken_over(survivor: &ReplicatedB2buaSut, hydrated_before: u64, ca
     assert!(!survivor.serves(call_ref), "the survivor serves nothing for the call yet");
 }
 
-/// The peer's re-send is what took the call over, and it did so once — a second
-/// hydration would mean the copy was released and rebuilt inside the window.
+/// The re-send took the call over, once: a second hydration is a copy rebuilt in the window.
 fn assert_taken_over_once(survivor: &ReplicatedB2buaSut, hydrated_before: u64) {
     assert_eq!(
         survivor.metrics().repl_takeover_hydrated_total(),
@@ -559,7 +558,9 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Invite);
     alice.try_send_datagram(&wire, dst).await.expect("the peer's re-send leaves");
     fh.advance(Duration::from_millis(200)).await;
-    assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    assert_taken_over_once(survivor, hydrated_before);
+    assert_eq!(invite_trying_sent(&fh, survivor.sip_addr(), proxy.addr()), 1, "one 100 (§17.2.1)");
     assert_eq!(
         round_invites_sent_to(&fh, bob.addr(), REOFFER),
         1,
@@ -569,9 +570,8 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     // ── The round resolves on the seeded transaction's bound ────────────────
     // Nothing further reaches the survivor for the round, so its seeded client
     // INVITE gives up on the configured INVITE bound, and the survivor ends the
-    // dialog it got no answer on (RFC 3261 §12.2.1.2). The caller's re-INVITE
-    // is still pending on the survivor: it draws its final first (§15.1.2),
-    // then the BYE.
+    // dialog it got no answer on (RFC 3261 §12.2.1.2). The caller's pending
+    // re-INVITE draws its final first (§15.1.2), then the BYE.
     fh.advance(invite_bound() + Duration::from_millis(500)).await;
     let round_final = loop {
         match alice.recv_any().await.expect("the caller draws a response to its re-INVITE") {

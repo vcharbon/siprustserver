@@ -412,10 +412,10 @@ async fn a_reoffered_cancel_is_answered_by_the_seed_it_arrived_before() {
     assert!(cancelled(&stack.drain_events()));
 }
 
-/// A request re-offered on a branch a server transaction already holds is the
-/// retransmission it is: the cached response is replayed and it is `Matched`;
-/// a bare seed holding no response yet composes the 100 Trying it owes the
-/// retransmission (§17.2.1) and caches it for the next; on a branch nothing
+/// A request re-offered on a branch a server transaction holds is the datagram
+/// that transaction already answered on arrival, not a retransmission from the
+/// wire (RFC 3261 §17.2.1): it is `Matched` and absorbed with nothing sent, on
+/// the transaction it opened and on a bare seed alike. On a branch nothing
 /// holds it is `Unmatched` and no transaction is built.
 #[tokio::test(start_paused = true)]
 async fn a_reoffered_request_is_absorbed_by_the_transaction_on_its_branch() {
@@ -430,35 +430,27 @@ async fn a_reoffered_request_is_absorbed_by_the_transaction_on_its_branch() {
 
     assert_eq!(stack.txn.reoffer(invite, addr(PEER)).await.unwrap(), Reoffer::Matched);
     elapse_ms(60).await;
-    assert_eq!(
-        count_responses(&stack.drain_peer(), 100),
-        1,
-        "the cached 100 is replayed (§17.2.1)"
-    );
-    assert!(stack.drain_events().is_empty(), "a retransmission surfaces nothing");
+    assert!(stack.drain_peer().is_empty(), "one received datagram draws one 100 (§17.2.1)");
+    assert!(stack.drain_events().is_empty(), "the re-offered datagram surfaces nothing");
     assert_eq!(active(&stack), 1);
 
-    // A bare seed (a relayed re-INVITE rebuilt without its request) has no
-    // response cached: the retransmission draws a 100 composed now, the next
-    // one the cached copy, and neither surfaces.
+    // A bare seed (a relayed re-INVITE rebuilt without its request): the
+    // re-offer is absorbed silently too; the next copy from the wire is the
+    // retransmission that draws the 100 the seed owes it.
     let bare = "z9hG4bK-reoffer-bare";
     let bare_raw = inbound_request("INVITE", bare, "reoffer-bare", Some("peer-tag"));
     stack.txn.seed(CALL_REF, vec![server_seed(bare, "reoffer-bare", false)]).await.unwrap();
-    let retransmission = CustomParser::new().parse(&bare_raw).expect("parse");
-    assert_eq!(stack.txn.reoffer(retransmission, addr(PEER)).await.unwrap(), Reoffer::Matched);
+    let copy = CustomParser::new().parse(&bare_raw).expect("parse");
+    assert_eq!(stack.txn.reoffer(copy, addr(PEER)).await.unwrap(), Reoffer::Matched);
     elapse_ms(60).await;
-    assert_eq!(
-        count_responses(&stack.drain_peer(), 100),
-        1,
-        "a Proceeding seed owes the retransmission a provisional (§17.2.1)"
-    );
+    assert!(stack.drain_peer().is_empty(), "a re-offer is no retransmission");
     assert!(stack.drain_events().is_empty());
     stack.inject(&bare_raw).await;
     elapse_ms(60).await;
     assert_eq!(
         count_responses(&stack.drain_peer(), 100),
         1,
-        "every later retransmission draws the cached 100"
+        "a Proceeding seed owes a retransmission from the wire a provisional (§17.2.1)"
     );
     assert!(stack.drain_events().is_empty());
     assert_eq!(active(&stack), 2);
@@ -494,8 +486,7 @@ async fn a_seeded_100_echoes_the_retransmissions_timestamp() {
     };
 
     stack.txn.seed(CALL_REF, vec![server_seed(branch, "seed-stamp", false)]).await.unwrap();
-    let retransmission = CustomParser::new().parse(raw.as_bytes()).expect("parse");
-    assert_eq!(stack.txn.reoffer(retransmission, addr(PEER)).await.unwrap(), Reoffer::Matched);
+    stack.inject(raw.as_bytes()).await;
     elapse_ms(60).await;
     assert_eq!(stamps(stack.drain_peer()), ["812.5"], "the composed 100 echoes the Timestamp");
 

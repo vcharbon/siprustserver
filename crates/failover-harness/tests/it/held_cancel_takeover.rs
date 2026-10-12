@@ -2,9 +2,11 @@
 //! callee that has sent nothing has given the worker no provisional, so the
 //! worker's CANCEL of it waits for one (RFC 3261 §9.1). The CANCEL is in the
 //! replicated record; when the serving node dies before the callee answers,
-//! the survivor rebuilds the INVITE transaction with that CANCEL held on it,
-//! and the callee's 180 — failed over to the survivor on the front proxy's
-//! Record-Route cookie — releases it (ADR-0043 X1).
+//! the survivor rebuilds the INVITE transaction with that CANCEL held on it.
+//! The callee's 100 never reaches the survivor: it carries no Record-Route
+//! (§8.2.6.1), so the front proxy has no cookie to fail it over on and drops
+//! it. The callee's 180 does reach it, on that cookie, and releases the CANCEL
+//! (ADR-0043 X1).
 
 use std::time::Duration;
 
@@ -22,7 +24,7 @@ const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
 
 #[tokio::test(start_paused = true)]
-async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_ring() {
+async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_18x_not_its_100() {
     let mut fh = FailoverHarness::new("held-cancel-takeover", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -60,6 +62,14 @@ async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_ring()
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
+
+    // ── bob's 100 dies at the proxy: no Record-Route, no cookie to follow ──
+    uas.respond(100, "Trying").await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(
+        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
+        "a 100 sent after the kill never reaches the survivor, so the CANCEL stays held",
+    );
 
     // ── bob rings: the survivor takes the call over and sends the CANCEL ────
     uas.respond(180, "Ringing").await;
