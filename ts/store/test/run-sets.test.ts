@@ -283,11 +283,25 @@ describe.skipIf(!served)("repeats within a side", () => {
       yield* ran(P, "fake", REPEAT, "t1", [result(`${P}-case1`, false)], { setKind: "cases" })
       // Another tree's run is no repeat of the latest.
       yield* ran(P, "fake", REPEAT, "t2", [result(`${P}-case1`, false)], { setKind: "cases" })
-      yield* ran(P, "fake", REPEAT, "t1", [result(`${P}-case1`, true)], { setKind: "cases" })
+      yield* ran(P, "fake", REPEAT, "t1", [result(`${P}-case1`, false)], { setKind: "cases" })
     }))
     const { before, after } = await pairOf("@env:dev-8-base", "@env:dev-8-repeat")
     expect(before.cells.map((cell) => cell.repeats)).toEqual([{ runs: 1, passed: 0 }])
-    expect(after.cells.map((cell) => cell.repeats)).toEqual([{ runs: 3, passed: 2 }])
+    expect(after.cells.map((cell) => cell.repeats)).toEqual([{ runs: 3, passed: 1 }])
     expect(compare(before, after).moves.map((move) => move.class)).toEqual(["unstable"])
+  })
+
+  it("reads no repeats where the lane hash is unknown: runs of an unknown lane behaviour repeat nothing", async () => {
+    const Q = "sets_repeat_unhashed.pcap.gz"
+    const UNHASHED: RunIdentity = { env: "dev-9-unhashed", branch: "fix/9", laneHash: null, load: null }
+    const BASE9: RunIdentity = { env: "dev-9-base", branch: "fix/9-base", laneHash: null, load: null }
+    await withStore(Effect.gen(function*() {
+      yield* ran(Q, "real", BASE9, "t1", [result(`${Q}-case1`, false)])
+      yield* ran(Q, "real", UNHASHED, "t1", [result(`${Q}-case1`, true)], { setKind: "cases" })
+      yield* ran(Q, "real", UNHASHED, "t1", [result(`${Q}-case1`, false)], { setKind: "cases" })
+    }))
+    const { before, after } = await pairOf("@env:dev-9-base", "@env:dev-9-unhashed")
+    expect(after.cells.map((cell) => cell.repeats)).toEqual([undefined])
+    expect(compare(before, after).moves.map((move) => move.class)).toEqual(["unchanged"])
   })
 })
