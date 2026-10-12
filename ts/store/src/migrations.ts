@@ -42,7 +42,7 @@ import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 
 /** The store's migrations table. */
-export const TABLE = "sip_store_migrations"
+export const TABLE = "store_migrations"
 
 /** The key of the migration that creates the whole schema of a store made from nothing. */
 export const BASELINE = "1_baseline"
