@@ -63,7 +63,7 @@ crates/failover-harness/src/runner.rs 652
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 1020
 crates/failover-harness/tests/it/failover.rs 1571
 crates/failover-harness/tests/it/fault_primitives.rs 887
-crates/failover-harness/tests/it/inflight_resend.rs 855
+crates/failover-harness/tests/it/inflight_resend.rs 812
 crates/failover-harness/tests/it/limiter_ha.rs 881
 crates/failover-harness/tests/it/limiter_release_by_call.rs 970
 crates/failover-harness/tests/it/prack_takeover.rs 906
