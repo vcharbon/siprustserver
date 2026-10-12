@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
@@ -51,10 +52,13 @@ pub enum HandlerFailure {
 /// call reaper installs the only production hook (two-strike escalation).
 pub type FailureHook = Arc<dyn Fn(&str, HandlerFailure) + Send + Sync>;
 
-/// The handler body each call has in flight (FIFO: at most one), by call.
-/// Clone-cheap.
+/// The handler body each call has in flight (FIFO: at most one), by call,
+/// and whether the dispatcher halted. Clone-cheap.
 #[derive(Clone, Default)]
-pub struct InFlight(Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>);
+pub struct InFlight {
+    bodies: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+    halted: Arc<AtomicBool>,
+}
 
 impl InFlight {
     /// Abort `call_ref`'s in-flight body (ADR-0020 X6 escalation rung): a
@@ -62,7 +66,7 @@ impl InFlight {
     /// the body future — releasing the lock guard — and the worker reports
     /// [`HandlerFailure::Aborted`]. `true` when there was a body to abort.
     pub fn abort(&self, call_ref: &str) -> bool {
-        match self.0.lock().unwrap().get(call_ref) {
+        match self.bodies.lock().unwrap().get(call_ref) {
             Some(h) => {
                 h.abort();
                 true
@@ -71,12 +75,24 @@ impl InFlight {
         }
     }
 
+    /// Abort every body in flight, and run no item after: the node crashed.
+    pub fn halt(&self) {
+        self.halted.store(true, Ordering::SeqCst);
+        for handle in self.bodies.lock().unwrap().values() {
+            handle.abort();
+        }
+    }
+
+    fn halted(&self) -> bool {
+        self.halted.load(Ordering::SeqCst)
+    }
+
     fn insert(&self, call_ref: &str, handle: tokio::task::AbortHandle) {
-        self.0.lock().unwrap().insert(call_ref.to_string(), handle);
+        self.bodies.lock().unwrap().insert(call_ref.to_string(), handle);
     }
 
     fn remove(&self, call_ref: &str) {
-        self.0.lock().unwrap().remove(call_ref);
+        self.bodies.lock().unwrap().remove(call_ref);
     }
 }
 
@@ -197,6 +213,7 @@ pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: 
                 }
                 ctx.metrics.bump_creation();
             }
+            Some(Popped::Item(_, _)) if ctx.in_flight.halted() => return,
             Some(Popped::Item(item, class)) => {
                 let held = ctx.permits.acquire(class.row().pool, &ctx.metrics).await;
                 let task = tokio::spawn(item.into_body());

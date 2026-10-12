@@ -37,7 +37,7 @@ pub(super) fn expected(class: DispatchClass) -> Expected {
         C::TxnOutcome => (Always, true, true, Nothing, Nothing, Nothing),
         C::Cancelled => (PastBounds, true, true, Nothing, Nothing, Nothing),
         C::Timer => (Always, false, true, Nothing, Nothing, Nothing),
-        C::Internal => (Always, false, true, Nothing, Nothing, Nothing),
+        C::Internal | C::Quiesced => (Always, false, true, Nothing, Nothing, Nothing),
     };
     let (pool, threshold) = match class {
         C::InitialInvite => (PermitPool::NewCall, QueueThreshold::NewCallHeadroom),

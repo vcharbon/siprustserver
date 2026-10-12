@@ -18,14 +18,46 @@ use b2bua_sdk::model::{
 const LOST_ROUND: &str = "lost_round";
 
 /// The lost-round rule family: CORE, registered before the generic core set.
+/// `re-ack-lost-round` sends the retained ACK again for a repeat of the
+/// round's non-2xx, which no transaction here absorbs (§17.1.1.2); a repeated
+/// 2xx is `re-ack-retransmitted-2xx`'s.
 pub fn lost_round_rules() -> Vec<RuleDefinition> {
-    vec![RuleDefinition::core(
-        "ack-lost-round",
-        CORE_LAYER,
-        &["handle-481"],
-        Match::response().method("INVITE").leg_states(&[LegState::Confirmed]).filter(lost_round),
-        ack_lost_round,
-    )]
+    vec![
+        RuleDefinition::core(
+            "ack-lost-round",
+            CORE_LAYER,
+            &["handle-481"],
+            Match::response()
+                .method("INVITE")
+                .leg_states(&[LegState::Confirmed])
+                .filter(lost_round),
+            ack_lost_round,
+        ),
+        RuleDefinition::core(
+            "re-ack-lost-round",
+            CORE_LAYER,
+            &["absorb-stale-failure", "handle-481"],
+            Match::response()
+                .method("INVITE")
+                .leg_states(&[LegState::Confirmed, LegState::Terminated])
+                .filter(repeated_lost_failure),
+            |ctx| {
+                let leg_id = ctx.source_leg_id.to_string();
+                Some(RuleHandleResult::new(vec![RuleAction::AckLeg { leg_id, body: None }]))
+            },
+        ),
+    ]
+}
+
+/// Whether the current response repeats the non-2xx of a lost round: the
+/// dialog holds no INVITE of its own and the ACK it kept names this CSeq.
+fn repeated_lost_failure(ctx: &RuleContext) -> bool {
+    let (Some(resp), Some(dialog)) = (ctx.response(), ctx.dialog()) else { return false };
+    resp.status() >= 300
+        && dialog.pending_invite_txn.is_none()
+        && dialog.emitted_ack.is_some()
+        && crate::rules::relay::acked_invite_cseq(dialog) == Some(resp.cseq().seq())
+        && ctx.relayed_pending().is_none()
 }
 
 /// Whether the current response is a final to a round the record lost.

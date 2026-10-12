@@ -199,16 +199,16 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 indexed: None,
             }
         }
-        CallEvent::InternalEvent { call_ref, .. } => Resolution {
-            call_ref: Some(call_ref.clone()),
-            source_leg_id: "a".into(),
-            direction: Direction::FromA,
-            initial_invite: false,
-            incarnation: None,
-            indexed: None,
-        },
-        // Handled (and returned) in `on_event` before `resolve` is ever called.
-        CallEvent::CallQuiesced { .. } => unreachable!("CallQuiesced is handled before resolve"),
+        CallEvent::InternalEvent { call_ref, .. } | CallEvent::CallQuiesced { call_ref } => {
+            Resolution {
+                call_ref: Some(call_ref.clone()),
+                source_leg_id: "a".into(),
+                direction: Direction::FromA,
+                initial_invite: false,
+                incarnation: None,
+                indexed: None,
+            }
+        }
         CallEvent::Lifecycle(_) => unreachable!("a lifecycle event is delivered, never dispatched"),
     }
 }

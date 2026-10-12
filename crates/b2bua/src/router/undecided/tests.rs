@@ -54,3 +54,10 @@ fn an_ended_call_is_not_undecided() {
     call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
     assert!(!is_undecided(&call), "nothing is left to settle");
 }
+
+#[test]
+fn a_call_with_an_attempt_open_is_decided() {
+    let mut call = born();
+    call::helpers::open_attempt(&mut call, call::AttemptCause::Route, call::Deadline::Off);
+    assert!(!is_undecided(&call), "an attempt is dialling");
+}

@@ -201,6 +201,12 @@ impl<T: Runnable> PerCallDispatcher<T> {
 }
 
 impl<T> PerCallDispatcher<T> {
+    /// Abort every in-flight handler body and run nothing more; see
+    /// [`InFlight::halt`].
+    pub fn halt(&self) {
+        self.in_flight.halt();
+    }
+
     /// Abort `call_ref`'s in-flight handler body; see [`InFlight::abort`].
     pub fn abort_in_flight(&self, call_ref: &str) -> bool {
         self.in_flight.abort(call_ref)

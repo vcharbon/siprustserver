@@ -104,9 +104,10 @@ pub(super) enum Reason {
 #[derive(Debug)]
 pub(super) enum Materialised {
     /// Freshly materialised on this call: inserted, timers re-armed, and for a
-    /// takeover marked and watched. `seeded` counts the seeds the layer took;
-    /// one whose branch a transaction here already held is not among them.
-    Served { call: Call, seeded: usize },
+    /// takeover marked and watched. `seeded` counts the seeds the layer took
+    /// — one whose branch a transaction here already held is not among them —
+    /// and is `None` when the layer could not be asked (it has closed).
+    Served { call: Call, seeded: Option<usize> },
     /// Already live on this node; nothing was re-armed.
     Resident(Call),
     /// Not served; the caller's orphan path answers.
@@ -164,14 +165,14 @@ pub(super) async fn materialise(
         return Materialised::Resident(ctx.state.peek(call_ref).unwrap_or(call));
     }
     ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
-    let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(&call)).await.unwrap_or(0);
+    let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(&call)).await.ok();
     match origin {
         Origin::Takeover => {
             ctx.state.mark_takeover(call_ref);
             let _ = ctx.txn.watch_self_release(call_ref).await;
             ctx.metrics.bump_repl_takeover_hydrated();
             ctx.state.note_takeover(call_ref, "hydrated");
-            ctx.state.note_takeover_count(call_ref, "seeded", seeded as u64);
+            ctx.state.note_takeover_count(call_ref, "seeded", seeded.unwrap_or(0) as u64);
         }
         Origin::Reclaim(smoothing) => {
             ctx.metrics.bump_repl_reclaimed();

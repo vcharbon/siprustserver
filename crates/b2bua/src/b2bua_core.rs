@@ -645,12 +645,12 @@ impl B2buaCore {
     /// ha-harness `HaNode::crash` discipline at the live-core level: the spawned
     /// per-connection/per-puller tasks lose their driver and unwind, and dropping
     /// this `B2buaCore` afterwards releases the last store/supervisor `Arc`s so a
-    /// reboot can re-listen on the same addresses. Intended for the failover
-    /// harness only.
+    /// reboot can re-listen on the same addresses. No per-call body runs on.
     pub fn abort(&mut self) {
         for t in self.tasks.drain(..) {
             t.abort();
         }
+        self.ctx.dispatcher.halt();
         // Also abort the transaction-layer owner task — it is spawned untracked
         // inside `TransactionLayer::spawn` and owns the SIP endpoint, so without
         // this the "crashed" node keeps answering SIP (100/200/487, cached replays,

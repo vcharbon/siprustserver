@@ -31,6 +31,10 @@ impl Runnable for Turn {
         let unpolled = UnpolledForget::arm(&self.ctx.txn, &self.event, self.class);
         Box::pin(async move {
             unpolled.disarm();
+            if let CallEvent::CallQuiesced { call_ref } = &self.event {
+                super::quiesced::self_release_turn(&self.ctx, call_ref).await;
+                return;
+            }
             process(&self.ctx, self.event, self.res, self.unborn).await;
         })
     }

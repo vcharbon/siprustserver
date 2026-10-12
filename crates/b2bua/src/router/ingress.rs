@@ -1,6 +1,5 @@
 //! The pre-dispatch pipeline: every event enters here once. Data-path metrics,
-//! per-peer timeout attribution, the acting-backup self-release notice, the
-//! out-of-dialog OPTIONS health responder, resolution (an event resolving to
+//! per-peer timeout attribution, the out-of-dialog OPTIONS health responder, resolution (an event resolving to
 //! no call goes to [`super::unroutable`]), a new INVITE's router rungs of the
 //! admission ladder ([`super::admit`]), then the offer of the event's
 //! [`Turn`] to its call's queue under its dispatch class
@@ -16,7 +15,6 @@ use sip_message::SipMessage;
 use super::admit;
 use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
-use super::release::{release_call, ReleaseKind};
 use super::resolve::{replica_takeover, resolve};
 use super::responses::build_options_health_response;
 use super::turn::Turn;
@@ -60,58 +58,12 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         );
     }
 
-    // ADR-0014 acting-backup self-release: the txn layer reports the last
-    // transaction we served for a takeover copy has cleared; shed the live copy
-    // (the `bak:` replica + reverse-flushed deltas remain). Re-checked under the
-    // per-call lock, and the guard is held ACROSS the release — dropping it
-    // between the re-check and `drop_local` re-opens the X11 double-serve
-    // zombie window (ADR-0014): a parked handler could hydrate the still-
-    // resident copy unmarked/unwatched and re-insert it after `drop_local`.
-    // `release_call` takes no per-call lock itself, so holding the guard across
-    // it is deadlock-free.
+    // A self-release notice for a call this node holds no takeover copy of
+    // has nothing to shed.
     if let CallEvent::CallQuiesced { call_ref } = &event {
-        let call_ref = call_ref.clone();
-        if ctx.state.is_takeover(&call_ref) {
-            let _guard = ctx.state.lock(&call_ref).await;
-            if ctx.state.is_takeover(&call_ref) {
-                if ctx.txn.active_txn_count_for_call(&call_ref).await.unwrap_or(0) == 0 {
-                    // Model Y (ADR-0020 X3): a takeover copy DEFERS its discharge
-                    // to the live primary regardless of its state — it is never an
-                    // independent CDR/limiter writer — so self-release
-                    // unconditionally. An Active copy continues at the reclaiming
-                    // primary (ADR-0014); a Terminating/Terminated copy was
-                    // reverse-flushed in `process_result` and the primary
-                    // discharges it exactly once (immediately if reconciling, on
-                    // reboot via reclaim). A primary that never returns inside the
-                    // replica TTL loses the CDR/limiter cleanup — the accepted
-                    // double-failure.
-                    if let Some(call) = ctx.state.peek(&call_ref) {
-                        if matches!(
-                            call.state,
-                            call::CallModelState::Terminating | call::CallModelState::Terminated
-                        ) {
-                            // Belt-and-braces reverse-flush of the terminal state (a
-                            // Terminated copy skips the process_result flush gate) so
-                            // the primary's reconcile/reclaim has it — held with the
-                            // normal replica TTL (`reboot_budget`).
-                            ctx.state.flush(&call);
-                        }
-                    }
-                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease { ended: false }).await;
-                } else {
-                    // A fresh in-dialog request (a second takeover during a
-                    // sustained partition) re-armed a transaction since this notice
-                    // was emitted, and the txn layer's watch is one-shot — it was
-                    // consumed delivering THIS CallQuiesced. Re-arm it so the
-                    // eventual last-txn clear notifies us again; otherwise the
-                    // takeover copy is stranded double-serving until its
-                    // GlobalDuration backstop (hydrate never re-arms the watch for
-                    // an already-resident copy: it returns fresh == false).
-                    let _ = ctx.txn.watch_self_release(&call_ref).await;
-                }
-            }
+        if !ctx.state.is_takeover(call_ref) {
+            return;
         }
-        return;
     }
 
     // Out-of-dialog OPTIONS keepalive: self-report readiness (ADR-0011 X6).
@@ -178,10 +130,10 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     if let CallEvent::Cancelled { in_dialog: false, invite_cseq: Some(cseq), .. } = &event {
         if admit::invite_here(ctx, &call_ref, *cseq) {
             ctx.state.mark_setup_cancelled(&call_ref, *cseq);
+            super::undecided::replicate_cancelled_setup(ctx, &call_ref, *cseq);
         }
     }
 
-    // `CallQuiesced`, the one event with no dispatch class, returned above.
     let Some(class) = DispatchClass::of(&event) else { return };
     // A new INVITE is judged unless it is a copy of a call already here (live,
     // or admitted and not born yet, on the same CSeq). The check and the offer

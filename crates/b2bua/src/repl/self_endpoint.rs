@@ -8,8 +8,11 @@
 //! monotone latch: `Unobserved` until the worker has seen itself routable once
 //! (a booting pod is absent or not ready before it is published, which is not a
 //! withdrawal), then `Routable`, then — sticky — `Withdrawn` with the condition
-//! that produced it. It is a fact about routing only: nothing here stops the
-//! worker from serving what still reaches it (D5).
+//! that produced it; a `Terminating` withdrawal moves on to `Absent` when the
+//! endpoint then leaves the slice. An endpoint that left the slice belongs to a
+//! process its orchestrator removed: the ordinal, should it return, names a
+//! replacement. It is a fact about routing only: nothing here stops the worker
+//! from serving what still reaches it (D5).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -54,6 +57,11 @@ impl SelfEndpoint {
     pub fn is_withdrawn(self) -> bool {
         matches!(self, SelfEndpoint::Withdrawn(_))
     }
+
+    /// Whether the endpoint left the slice after it was routable (sticky).
+    pub fn left_the_slice(self) -> bool {
+        self == SelfEndpoint::Withdrawn(WithdrawalCondition::Absent)
+    }
 }
 
 /// The latch over a stream of membership snapshots. Inert until
@@ -93,6 +101,10 @@ impl SelfObserver {
             let next = match (*state, observed) {
                 (SelfEndpoint::Unobserved, None) => SelfEndpoint::Routable,
                 (SelfEndpoint::Routable, Some(condition)) => SelfEndpoint::Withdrawn(condition),
+                (
+                    SelfEndpoint::Withdrawn(WithdrawalCondition::Terminating),
+                    Some(WithdrawalCondition::Absent),
+                ) => SelfEndpoint::Withdrawn(WithdrawalCondition::Absent),
                 _ => return false,
             };
             *state = next;
@@ -184,6 +196,25 @@ mod tests {
             Some(SelfEndpoint::Withdrawn(WithdrawalCondition::Terminating))
         );
         assert!(o.is_withdrawn());
+    }
+
+    #[test]
+    fn a_terminating_endpoint_that_then_leaves_the_slice_has_left_it() {
+        // The abrupt shape may show one terminating event before the removal.
+        let o = SelfObserver::new("w0");
+        o.enable();
+        o.observe(&peers(&["w0", "w1"]), true);
+        let terminating =
+            vec![Peer::with_conditions("w0", "w0", false, true), Peer::new("w1", "w1")];
+        o.observe(&terminating, true);
+        assert!(!o.current().left_the_slice(), "still in the slice");
+        assert_eq!(
+            o.observe(&peers(&["w1"]), true),
+            Some(SelfEndpoint::Withdrawn(WithdrawalCondition::Absent))
+        );
+        assert!(o.current().left_the_slice());
+        assert_eq!(o.observe(&peers(&["w0", "w1"]), true), None, "a replacement changes nothing");
+        assert!(o.current().left_the_slice(), "sticky");
     }
 
     #[test]

@@ -10,7 +10,8 @@
 //! async-HTTP folds, `materialise` the one path a stored replica takes to
 //! become the live copy this node serves (takeover or reclaim), `departure`
 //! the takeover of a departed peer's in-flight calls, `undecided` the end of
-//! a call materialised before its routing decision, `reclaim`
+//! a call materialised before its routing decision, `quiesced` the
+//! self-release turn of a takeover copy, `reclaim`
 //! the replication reclaim/discharge funnels,
 //! `restore_hygiene` the replicated-timer restore seam, `release` the one
 //! per-call teardown executor, `responses` the locally-authored response
@@ -42,6 +43,7 @@ pub(crate) use peer_metrics::outbound_proxy_target;
 mod process;
 #[cfg(test)]
 mod provisional_turn_tests;
+mod quiesced;
 mod reclaim;
 mod refer_result;
 mod release;
@@ -303,6 +305,6 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
             let dir = reclaim::FlushDirection::Forward;
             reclaim::fold_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
         }
-        ReplCommand::PeerDeparted(ordinal) => departure::take_over_departed(ctx, &ordinal).await,
+        ReplCommand::PeerDeparted(ordinal) => departure::take_over_departed(ctx, &ordinal),
     }
 }

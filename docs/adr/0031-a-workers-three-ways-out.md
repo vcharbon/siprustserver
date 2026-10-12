@@ -26,9 +26,10 @@ EndpointSlice API (`ready`, `serving`, `terminating`; the last two GA since Kube
 | **4. Restarted in place** (OOM-kill, kubelet restart, a readiness flap under load) | the pod object stays; the container restarts, or only the probe fails | `ready=false, serving=false, terminating=false`, still in the slice, **same address** | 0 (container restart) or the whole time (readiness flap: the process is alive and serving) | the same container, same address, seconds later |
 
 Leaving the slice is also when a worker's backups take over its calls with an INVITE
-in flight (ADR-0046): at the end of case 1, the pod gone after its drain, and at +0 in
-case 2, overlapping the process's last 2 s. Cases 3 and 4 never leave the slice while
-the process may live, and their calls stay reactive.
+in flight (ADR-0046): at the end of case 1, the pod gone after its drain; at +0 in
+case 2, overlapping the process's last 2 s; and in case 3b when the pod on an
+unreachable node is force-deleted, while its process may still live behind the
+partition. Case 3a and case 4 never leave the slice, and their calls stay reactive.
 
 What each element believed about the leaving worker, per case, from the harness's views
 ledger and the kind cluster's logs:
@@ -113,8 +114,8 @@ exit reason is counted (`quiescent`, `caught_up`, `grace_peers_behind`): the las
 static membership, or SIGTERM before the slice moved) keeps quiescence-or-grace: takeover is
 reactive, so a proxied worker's calls are served on the next in-dialog request, but a
 direct-bound worker's would be abandoned. Exiting on `caught_up` with live calls is a
-*replicated crash*, deliberately: ringing calls wait for the caller's next request or its
-own timers, as after any crash. Before any exit the worker flushes its queued limiter
+*replicated crash*, deliberately: once the endpoint leaves the slice its backups take
+over the calls with an INVITE in flight (ADR-0046), the quiet ones on their next request. Before any exit the worker flushes its queued limiter
 releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0040 decision 9); an exit is
 taken only with the queue empty, and a quiescent or caught-up one only if it still holds
 once the flush is done, since the worker serves its calls meanwhile; the drain never

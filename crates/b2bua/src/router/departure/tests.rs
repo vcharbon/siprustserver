@@ -10,6 +10,8 @@ use std::time::Duration;
 use call::{Call, CallBodyCodec, CallModelState, LegState, MsgpackCodec};
 use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
 
+use b2bua_sdk::event::CallEvent;
+
 use super::take_over_departed;
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
@@ -78,7 +80,7 @@ async fn a_departed_peers_calls_with_an_invite_in_flight_are_taken_over_and_no_o
         put(&n.store, call).await;
     }
 
-    take_over_departed(ctx, "w0").await;
+    take_over_departed(ctx, "w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
     assert_eq!(lines, ["SIP/2.0 503 Service Unavailable"], "the undecided caller's final");
@@ -109,7 +111,7 @@ async fn an_undecided_call_whose_branch_is_another_calls_here_is_settled_off_the
     let lines = heard(caller.as_ref(), Duration::from_millis(100)).await;
     assert_eq!(lines, ["SIP/2.0 100 Trying"], "the copy is served here");
 
-    take_over_departed(ctx, "w0").await;
+    take_over_departed(ctx, "w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
     assert!(lines.is_empty(), "nothing reaches the caller on the other call's transaction");
@@ -117,5 +119,75 @@ async fn an_undecided_call_whose_branch_is_another_calls_here_is_settled_off_the
         element(&n.store, &undecided.call_ref).await.state,
         CallModelState::Terminated,
         "the undecided call is settled all the same",
+    );
+}
+
+/// The sweep runs off the router loop: while a departed peer's partition of
+/// quiet calls and undecided ones is swept, the router keeps serving its own
+/// events — a new call of this node's own is born before the sweep is done.
+#[tokio::test(start_paused = true)]
+async fn the_router_serves_its_own_calls_while_a_departed_partition_is_swept() {
+    const QUIET: usize = 2_000;
+    const UNDECIDED: usize = 200;
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |c| c.overload_panic_elu_threshold = 1.1, Vec::new()).await;
+    let _caller = net.bind_udp(BindUdpOpts::new(src(), 4096)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    for i in 0..QUIET {
+        put(&n.store, &quiet(&format!("quiet-{i}"))).await;
+    }
+    for i in 0..UNDECIDED {
+        put(&n.store, &born(&format!("undecided-{i}"))).await;
+    }
+    n.membership.add(topology::Peer::new("w0", "w0"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    n.membership.remove("w0");
+    while n.metrics.repl_takeover_hydrated_total() == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    // A new call of this node's own reaches the router mid-sweep.
+    let config = B2buaConfig { self_ordinal: "w1".into(), ..Default::default() };
+    let own = invite("w1", "w0", "own");
+    let own_ref = build_initial_call(&own, src(), &config, &sip_txn::IdGen::seeded(1), 0).call_ref;
+    let event = CallEvent::Sip {
+        message: Box::new(sip_message::SipMessage::Request(own)),
+        src: src(),
+        matched_client_txn: false,
+    };
+    ctx.reentry_tx.send(event).unwrap();
+    let mut rounds = 0;
+    while ctx.state.peek(&own_ref).is_none() {
+        rounds += 1;
+        assert!(rounds < 100_000, "the new call is never born");
+        tokio::task::yield_now().await;
+    }
+    let taken = n.metrics.repl_takeover_hydrated_total();
+    assert!(
+        taken < UNDECIDED as u64,
+        "the new call is born while the sweep is under way ({taken} of {UNDECIDED} taken)",
+    );
+}
+
+/// A transaction layer that cannot be asked seeds nothing, and that is no
+/// branch held by another call: the undecided call is not ended off the wire.
+#[tokio::test(start_paused = true)]
+async fn an_undecided_call_whose_seeding_failed_is_not_settled() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let ctx = n.core.router_ctx();
+    let undecided = born("unseeded");
+    put(&n.store, &undecided).await;
+    ctx.txn.abort_owner();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    take_over_departed(ctx, "w0");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "the call was taken over");
+    assert_eq!(
+        element(&n.store, &undecided.call_ref).await.state,
+        CallModelState::Active,
+        "a seeding that failed settles nothing",
     );
 }

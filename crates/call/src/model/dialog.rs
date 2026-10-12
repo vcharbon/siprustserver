@@ -244,7 +244,8 @@ pub struct Dialog {
     /// 2xx: on a delayed offer it carries the answer only that ACK supplied
     /// (RFC 3264 §4). `None` until that ACK leaves, and again once a new INVITE
     /// transaction resets it alongside `ack_branch` — the bytes belong to
-    /// exactly one INVITE's ACK.
+    /// exactly one INVITE's ACK. For a round the record never held, the ACK of
+    /// its non-2xx too, which no transaction here re-sends (ADR-0046).
     pub emitted_ack: Option<RetainedEmission>,
     /// The session this early dialog carries where the stack has described
     /// something inside it before its leg is confirmed: each early dialog of a

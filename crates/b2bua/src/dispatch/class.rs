@@ -23,6 +23,7 @@
 //! | `Cancelled` | PB | S | C | yes | yes | nothing | — |
 //! | `Timer` | A | S | C | no | yes | nothing | — |
 //! | `Internal` | A | S | C | no | yes | nothing | — |
+//! | `Quiesced` | A | S | C | no | yes | nothing | — |
 //!
 //! A normal new call's turn holds its permits across the decision round
 //! trip, so new calls hold at most their share of the shared pool and the
@@ -37,8 +38,7 @@
 //! new INVITE's row owes its answer for no room and on a capped call only;
 //! its `ended` answer is never owed.
 //!
-//! `CallQuiesced` and an out-of-dialog OPTIONS are handled before any queue
-//! and have no class. The per-interval message cap is a third bound, kept on
+//! An out-of-dialog OPTIONS is handled before any queue and has no class. The per-interval message cap is a third bound, kept on
 //! the call's turn (`router::process`), not here.
 
 use sip_message::{Method, SipMessage};
@@ -79,11 +79,15 @@ pub enum DispatchClass {
     /// An event the node raised itself: a reaper verdict, or the answer to a
     /// request the call sent off its turn.
     Internal,
+    /// The layer's notice that the last transaction of a takeover copy
+    /// cleared: queued behind the turns of the messages that cleared them
+    /// (ADR-0014 self-release).
+    Quiesced,
 }
 
 impl DispatchClass {
     /// Every class, in table order.
-    pub const ALL: [DispatchClass; 11] = [
+    pub const ALL: [DispatchClass; 12] = [
         DispatchClass::InitialInvite,
         DispatchClass::EmergencyInvite,
         DispatchClass::InDialogInvite,
@@ -95,10 +99,11 @@ impl DispatchClass {
         DispatchClass::Cancelled,
         DispatchClass::Timer,
         DispatchClass::Internal,
+        DispatchClass::Quiesced,
     ];
 
-    /// The class of `event`; `None` for a `CallQuiesced` or a lifecycle
-    /// event, which no queue sees.
+    /// The class of `event`; `None` for a lifecycle event, which no queue
+    /// sees.
     pub fn of(event: &CallEvent) -> Option<Self> {
         Some(match event {
             CallEvent::Sip { message, matched_client_txn, .. } => match message.as_ref() {
@@ -121,7 +126,8 @@ impl DispatchClass {
             CallEvent::Cancelled { .. } => DispatchClass::Cancelled,
             CallEvent::Timer { .. } => DispatchClass::Timer,
             CallEvent::InternalEvent { .. } => DispatchClass::Internal,
-            CallEvent::CallQuiesced { .. } | CallEvent::Lifecycle(_) => return None,
+            CallEvent::CallQuiesced { .. } => DispatchClass::Quiesced,
+            CallEvent::Lifecycle(_) => return None,
         })
     }
 
@@ -188,6 +194,8 @@ impl DispatchClass {
             // per call at its overflow ceiling or lifetime cap) or one answer
             // per request the call sent off its turn.
             DispatchClass::Internal => Row::own_work(),
+            // One per clear of a takeover copy's last transaction.
+            DispatchClass::Quiesced => Row::own_work(),
         }
     }
 }

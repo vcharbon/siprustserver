@@ -66,6 +66,13 @@ pub trait ReadinessSource: Send + Sync {
     fn membership_settled(&self) -> bool {
         true
     }
+    /// This node's own endpoint left the slice (ADR-0031 D6): its orchestrator
+    /// removed it, and its backups took its calls with an INVITE in flight
+    /// over (ADR-0046). Default `false` for a source that does not observe the
+    /// node itself.
+    fn left_the_slice(&self) -> bool {
+        false
+    }
 }
 
 impl ReadinessSource for ReplicationSupervisor {
@@ -77,6 +84,9 @@ impl ReadinessSource for ReplicationSupervisor {
     }
     fn membership_settled(&self) -> bool {
         ReplicationSupervisor::membership_settled(self)
+    }
+    fn left_the_slice(&self) -> bool {
+        self.self_endpoint().borrow().left_the_slice()
     }
 }
 
@@ -156,6 +166,12 @@ impl Readiness {
                 "readiness transition"
             );
         }
+    }
+
+    /// Whether this node's own endpoint left the slice
+    /// ([`ReadinessSource::left_the_slice`]).
+    pub fn left_the_slice(&self) -> bool {
+        self.inner.source.left_the_slice()
     }
 
     /// Whether the drain latch is set — the raw SIGTERM flag, read WITHOUT

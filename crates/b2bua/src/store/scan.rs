@@ -1,0 +1,37 @@
+//! The bulk reads of one partition of the replicating store: its call bodies
+//! decoded, or its `callRef`s alone.
+
+use call::{Call, CallBodyCodec};
+
+use super::{CallState, CallStore, PartitionRole};
+
+impl CallState {
+    /// Decode every call body `(role, primary)` holds in the replicating store
+    /// — this node's own `pri:{self}` for the bulk reclaim (ADR-0011 X11).
+    /// The router materialises what it serves through the per-call read. Empty
+    /// when no replicating store is wired. Each entry pairs the decoded call with
+    /// its persisted receive-time clock-skew offset (`0` when the record carries
+    /// none) — the router re-anchors the call's absolute timer deadlines by this
+    /// offset before re-arming them (clock-skew hardening).
+    pub async fn scan_partition(&self, role: PartitionRole, primary: &str) -> Vec<(Call, i64)> {
+        let Some(repl) = self.repl_store() else {
+            return Vec::new();
+        };
+        let bodies = repl.scan_calls(role, primary).await.unwrap_or_default();
+        bodies
+            .iter()
+            .filter_map(|b| self.codec.decode(b).ok())
+            .map(|c| {
+                let skew = repl.skew_offset_ms(&c.call_ref).unwrap_or(0);
+                (c, skew)
+            })
+            .collect()
+    }
+
+    /// The `callRef` of every call body `(role, primary)` holds, nothing decoded
+    /// — a departed peer's `bak:{peer}` for the departure sweep (ADR-0046),
+    /// which reads each body in turn. Empty when no replicating store is wired.
+    pub fn partition_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {
+        self.repl_store().map(|repl| repl.scan_call_refs(role, primary)).unwrap_or_default()
+    }
+}

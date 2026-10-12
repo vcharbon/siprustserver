@@ -29,6 +29,8 @@ use crate::{B2buaCore, B2buaDeps, ReplicationSetup};
 /// and clock in hand.
 pub struct Node {
     pub core: B2buaCore,
+    /// The node's membership view: a peer added then removed departs.
+    pub membership: Arc<SimulatedMembership>,
     pub store: Arc<ReplicatingCallStore>,
     pub cdr: InMemoryCdrWriter,
     pub metrics: B2buaMetrics,
@@ -71,8 +73,8 @@ pub async fn node_on(
         .await
         .expect("bind the simulated SIP endpoint");
     let store = Arc::new(ReplicatingCallStore::new(1, clock.clone()));
-    let membership: Arc<dyn Membership> =
-        Arc::new(SimulatedMembership::with_clock(Vec::new(), clock.clone()));
+    let view = Arc::new(SimulatedMembership::with_clock(Vec::new(), clock.clone()));
+    let membership: Arc<dyn Membership> = view.clone();
     let addr_resolver: AddrResolver =
         Arc::new(FnPeerResolver(|_: &Peer| SocketAddr::from(([127, 0, 0, 2], 1))));
     let network = SimulatedReplicationNetwork::with_delay(1);
@@ -119,6 +121,7 @@ pub async fn node_on(
     };
     Node {
         core: B2buaCore::spawn_with_services(endpoint, deps, services),
+        membership: view,
         store,
         cdr,
         metrics,
