@@ -17,7 +17,8 @@
  * case map is not written, or while a cited run it drops has no summary: the
  * export comes first, and a wipe cannot lose what a citation names. Once it
  * has run, no run, job, sweep or prep id below `idFloor` is minted again, so a
- * new id never answers to an old citation.
+ * new id never answers to an old citation; the ids skipped are kept in
+ * `id_gaps`.
  */
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
@@ -313,6 +314,13 @@ export const layer = Layer.effect(
         `
         if (request.idFloor !== undefined) {
           for (const sequence of SEQUENCES) {
+            // The ids skipped are recorded first: none of them was ever issued.
+            yield* sql`
+              INSERT INTO id_gaps (sequence, first, next)
+              SELECT ${sequence}, CASE WHEN is_called THEN last_value + 1 ELSE last_value END, ${request.idFloor}
+              FROM ${sql(sequence)}
+              WHERE CASE WHEN is_called THEN last_value + 1 ELSE last_value END < ${request.idFloor}
+            `
             yield* sql`
               SELECT setval(${sequence}::regclass, greatest(last_value, ${request.idFloor - 1}), true)
               FROM ${sql(sequence)}

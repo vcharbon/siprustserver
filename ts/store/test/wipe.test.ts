@@ -349,6 +349,11 @@ describe.skipIf(!served)("the wipe", () => {
     expect(minted.every((id) => id >= 5_000)).toBe(true)
   })
 
+  it("reads a run id the floor skipped as never issued here, and one it did issue as gone", async () => {
+    expect((await resolve("run4000")).status).toBe("pre-rebuild")
+    expect((await resolve(`run${store!.loose}`)).status).toBe("not-found")
+  })
+
   it("reads every cited form back to the same call after the wipe", async () => {
     const after = await readings()
     expect(after).toEqual(before)

@@ -21,8 +21,9 @@
  * frozen ids hold answers with its call and no prep. A run whose row is gone
  * answers from its cell summaries where a citation kept them. The store was
  * rebuilt on the date its first prep was cut, and every id then restarted: a
- * run id above the highest the store ever issued, or an id the caller says was
- * cited before that date, answers `pre-rebuild`.
+ * run id the store never issued (above the highest it issued, or skipped when
+ * the wipe raised the sequence), or an id the caller says was cited before
+ * that date, answers `pre-rebuild`.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -344,17 +345,26 @@ export const layerWith = (grammar: Grammar) => Layer.effect(
       return answer(input, form, [], caseId)
     })
 
-    /** The highest run id the store ever issued: a run cited above it is another store's. */
-    const highestRun = Effect.gen(function*() {
-      const rows = yield* sql<{ id: string | null }>`
-        SELECT greatest(
-          (SELECT max(id) FROM runs),
-          (SELECT max(run_id) FROM run_summaries),
-          (SELECT CASE WHEN is_called THEN last_value END FROM runs_id_seq)
-        ) AS id
-      `
-      return Number(rows[0]?.id ?? 0)
-    })
+    /**
+     * Whether the store never issued run `id`: it is above the highest run id
+     * issued, or among those a raised sequence skipped (`id_gaps`). A run cited
+     * so is another store's.
+     */
+    const neverIssued = (id: number) =>
+      Effect.gen(function*() {
+        const rows = yield* sql<{ highest: string | null; skipped: boolean }>`
+          SELECT greatest(
+                   (SELECT max(id) FROM runs),
+                   (SELECT max(run_id) FROM run_summaries),
+                   (SELECT CASE WHEN is_called THEN last_value END FROM runs_id_seq)
+                 ) AS highest,
+                 EXISTS (
+                   SELECT 1 FROM id_gaps WHERE sequence = 'runs_id_seq' AND ${id} >= first AND ${id} < next
+                 ) AS skipped
+        `
+        const highest = Number(rows[0]?.highest ?? 0)
+        return { highest, never: id > highest || rows[0]?.skipped === true }
+      })
 
     /** A run whose row is gone, read off the summaries a citation kept of its cells. */
     const summarisedRun = Effect.fn("Resolver.summarisedRun")(function*(
@@ -449,16 +459,16 @@ export const layerWith = (grammar: Grammar) => Layer.effect(
         if (run.length === 0) {
           const kept = yield* summarisedRun(input, form, id, form === "run" ? undefined : match[2]!)
           if (kept !== undefined) return kept
-          const highest = yield* highestRun
+          const { highest, never } = yield* neverIssued(id)
           return {
             input,
             form,
-            status: id > highest ? "pre-rebuild" : "not-found",
+            status: never ? "pre-rebuild" : "not-found",
             calls: [],
             total: 0,
-            note: id > highest
-              ? `run ${id} is above the store's highest run ${highest}: a run of before the rebuild` +
-                (rebuilt === null ? "" : ` of ${rebuilt}`)
+            note: never
+              ? `run ${id} was never issued by this store (highest ${highest}, skipped ids aside): ` +
+                "a run of before the rebuild" + (rebuilt === null ? "" : ` of ${rebuilt}`)
               : `run ${id} is not in the store (removed, and no citation kept its summary)`
           } satisfies Resolution
         }

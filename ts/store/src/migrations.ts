@@ -632,6 +632,27 @@ const seedFrozenIds = Effect.gen(function*() {
 export const SEED_FROZEN_IDS = "5_seed_frozen_ids"
 
 /**
+ * `id_gaps`: the ids a sequence skipped when the wipe raised it (`wipe.ts`
+ * `idFloor`), `[first, next)`: ids this store never issued, so a citation of
+ * one names another store's row.
+ */
+const idGaps = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE id_gaps (
+      sequence   text   NOT NULL,
+      first      bigint NOT NULL,
+      next       bigint NOT NULL,
+      skipped_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (sequence, first)
+    )
+  `
+})
+
+/** The key of the migration that records the ids a raised sequence skipped. */
+export const ID_GAPS = "6_id_gaps"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -640,7 +661,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [FROZEN_IDS]: frozenIds,
   [CURRENT_DOCUMENTS]: currentDocuments,
   [RUN_SUMMARIES]: runSummaries,
-  [SEED_FROZEN_IDS]: seedFrozenIds
+  [SEED_FROZEN_IDS]: seedFrozenIds,
+  [ID_GAPS]: idGaps
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)
