@@ -556,7 +556,7 @@ async fn response_from_a_departed_address_reaches_its_worker_at_its_new_address(
             Arc::new(BackupStrategy),
             Clock::test_at(0),
         );
-        core.handle_response(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
+        core.handle_response_from(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
         assert_eq!(ep.sent.lock().unwrap().as_slice(), &at_w3);
     }
 }
