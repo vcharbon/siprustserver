@@ -4,12 +4,13 @@
 //! (`sip_net::RealSignalingNetwork`) into the production data path:
 //!   - `LoadBalancerStrategy` — HRW worker selection + HMAC-signed Record-Route
 //!     stickiness cookie (rotation-overlap aware).
-//!   - `StaticWorkerRegistry` — worker pool from `id@host:port,...`.
+//!   - The worker pool ([`sip_proxy_runner::discovery`]): the EndpointSlices of
+//!     the worker Service (ADR-0012 D4), or a fixed `PROXY_WORKERS` list.
 //!   - `HealthProbe` — periodic OPTIONS to workers, feeding the
 //!     `WorkerLoadObserver` band classifier (above-critical workers are excluded
 //!     from new-dialog selection). Health writes flow through the registry's
 //!     `control()` seam, so an unanswered worker is demoted (Dead/NotReady/
-//!     Draining) and routing reacts — for the static pool too.
+//!     Draining) and routing reacts.
 //!   - `EluCpsGate` self-gate: EWMA-smoothed intake pressure
 //!     (packet age at dequeue, recorded by every recv shard) + a per-class CPS
 //!     token bucket shed external new-dialog non-emergency INVITEs under
@@ -18,58 +19,86 @@
 //!     reverts to the always-admit gate.
 //!   - Prometheus `/metrics` + `/healthz` + `/readyz` via the shared `probe-http`.
 //!
-//! Config via env (all optional):
-//!   PROXY_LISTEN     SIP listen addr — the INTERNAL face   (default 0.0.0.0:5060)
+//! Config via env, read once before the first bind
+//! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
+//! empty, malformed or out of its range refuses the boot, naming every
+//! problem (ADR-0046). Only the `PROXY_UDP_*BUF` pair gives empty a meaning.
+//!   PROXY_LISTEN     SIP listen ip:port — the INTERNAL face, an IP literal
+//!                    (default 0.0.0.0:5060)
 //!   PROXY_ADVERTISE  host:port stamped on Via/Record-Route for internal-face
-//!                    egress (default: listen, or 127.0.0.1 if listen IP is
-//!                    unspecified)
-//!   PROXY_LISTEN_EXT optional — enables DUAL-FACE mode: a second UDP socket
-//!                    bound on the external (caller) plane VIP. The proxy then
-//!                    picks the egress socket + advertise per destination IP.
-//!   PROXY_ADVERTISE_EXT  external-face advertise (default: PROXY_LISTEN_EXT,
-//!                    same unspecified→loopback rule as PROXY_ADVERTISE)
+//!                    egress (default: the listen address; REQUIRED when the
+//!                    listen IP is unspecified)
+//!   PROXY_LISTEN_EXT external-face listen ip:port, an IP literal — enables
+//!                    DUAL-FACE mode: a second UDP socket on the caller plane;
+//!                    the egress socket and advertise follow the destination IP
+//!   PROXY_ADVERTISE_EXT  external-face advertise (default: PROXY_LISTEN_EXT;
+//!                    REQUIRED when its IP is unspecified)
 //!   PROXY_FACE_INT_CIDRS comma-separated IPv4 CIDRs of the INTERNAL plane
 //!                    (e.g. 10.244.0.0/16,172.20.0.0/16). REQUIRED when
-//!                    PROXY_LISTEN_EXT is set — boot fails fast otherwise.
+//!                    PROXY_LISTEN_EXT is set; ignored with a warning otherwise.
 //!                    Destination ∈ any CIDR → internal socket; else external.
-//!   PROXY_WORKERS    static worker pool "id@host:port,..." (default empty → k8s
+//!   PROXY_WORKERS    fixed worker pool "id@ip:port,..." (default unset →
 //!                    EndpointSlice discovery; ADR-0012 D4)
 //!   PROXY_WORKER_SERVICE  headless worker Service to watch  (default b2bua-worker)
-//!   PROXY_WORKER_PORT     SIP port appended to each Pod IP  (default 5060)
-//!   PROXY_NAMESPACE  namespace for k8s discovery            (default $POD_NAMESPACE / sip-test)
-//!   PROXY_METRICS    Prometheus HTTP listen addr           (default 0.0.0.0:9090)
-//!   PROXY_QUEUE      inbound UDP queue depth (packets)      (default 8192)
-//!   PROXY_UDP_SNDBUF SO_SNDBUF requested on every signalling socket, bytes
+//!   PROXY_WORKER_PORT     SIP port of each pod IP, 1..65535 (default 5060)
+//!   PROXY_NAMESPACE  namespace of the worker Service (default POD_NAMESPACE,
+//!                    else the pod's own service-account namespace; required
+//!                    for discovery when none is known)
+//!   PROXY_METRICS    Prometheus HTTP listen ip:port, an IP literal
+//!                    (default 0.0.0.0:9090)
+//!   PROXY_QUEUE      inbound UDP queue depth, packets ≥ 1  (default 8192)
+//!   PROXY_UDP_SNDBUF SO_SNDBUF requested on every signalling socket, bytes ≥ 1
 //!                    (default 4 MiB; empty = kernel wmem_default; the kernel
 //!                    clamps at wmem_max). Size it well above the neighbour
 //!                    unresolved queue (unres_qlen_bytes) — ADR-0033
-//!   PROXY_UDP_RCVBUF SO_RCVBUF requested on every signalling socket, bytes
+//!   PROXY_UDP_RCVBUF SO_RCVBUF requested on every signalling socket, bytes ≥ 1
 //!                    (default 4 MiB; empty = kernel rmem_default; the kernel
 //!                    clamps at rmem_max). Overflow is counted in
 //!                    sip_proxy_udp_kernel_rx_dropped_total
 //!   PROXY_SHARD_STALL_MS  a recv shard still on one packet past this is
 //!                    stalled: /readyz NotReady, gauge
-//!                    sip_proxy_recv_shards_stalled       (default 2000)
-//!   PROXY_RECV_SHARDS  N reuse-port recv sockets/cores      (default 1; >1 shards
-//!                    the serial recv loop — the ~550 OPTIONS/s burst ceiling —
-//!                    across N sockets; kernel flow-hashing keeps each UAC
-//!                    src:port on one socket so per-flow ordering holds)
+//!                    sip_proxy_recv_shards_stalled, ms ≥ 1 (default 2000)
+//!   PROXY_RECV_SHARDS  N reuse-port recv sockets/cores, 1..1024 (default 1;
+//!                    >1 shards the serial recv loop across N sockets; kernel
+//!                    flow-hashing keeps each UAC src:port on one socket so
+//!                    per-flow ordering holds)
+//!   PROXY_INTAKE_SHED_PCT  queue depth, percent 0..100 of PROXY_QUEUE, at
+//!                    which new non-emergency INVITEs are shed at intake
+//!                    (default 50; floored at one queued packet)
 //!   PROXY_BIND_RETRY_INTERVAL_MS  cadence of bind retries while a port is
-//!                    still held (EADDRINUSE)                (default 200)
-//!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline; exceeds the 5 s
-//!                    SIGTERM drain grace so a recreated pod waits out its
-//!                    predecessor instead of crash-looping   (default 10000)
+//!                    still held (EADDRINUSE), ms ≥ 1   (default 200)
+//!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline, ms ≥ 1; exceeds
+//!                    the SIGTERM drain grace so a recreated pod waits out its
+//!                    predecessor instead of crash-looping (default 10000)
+//!   PROXY_DRAIN_GRACE_MS  wait between SIGTERM (/readyz Draining) and exit,
+//!                    ms ≥ 1                               (default 5000)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
-//!   PROXY_HMAC_KEY   stickiness cookie secret (>=16 bytes) (default dev key)
-//!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS / HEALTH_THRESHOLD  (probe tuning)
+//!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
+//!                    default; every proxy of a cluster shares it)
+//!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS  OPTIONS probe tick and reply
+//!                    window, ms ≥ 1                  (default 1000 / 1500)
+//!   HEALTH_THRESHOLD  consecutive misses that mark a worker Dead, ≥ 1
+//!                    (default 2)
+//!   LB_ELU_SOFT / LB_ELU_HARD / LB_ELU_CRITICAL  worker ELU bands, each in
+//!                    (0, 1], soft < hard < critical (default 0.4 / 0.5 / 0.65)
+//!   LB_BAND_HYSTERESIS  in [0, 1), below the narrower band gap (default 0.05)
+//!   LB_AIMD_DECREASE_FACTOR  in (0, 1)                     (default 0.5)
+//!   LB_AIMD_INCREASE_STEP_CPS  > 0                         (default 2)
+//!   LB_CAP_CEILING_CPS / LB_CAP_FLOOR_CPS  > 0, floor ≤ 30 (the initial cap)
+//!                    ≤ ceiling                       (default 200 / 1)
 //!   PROXY_RESOLVER_PREWARM  comma-separated host:port DNS targets to resolve
-//!                    at startup and pin permanently warm      (default empty)
-//!   PROXY_RESOLVER_POSITIVE_TTL_MS  resolver positive-cache TTL (default 60000)
-//!   PROXY_RESOLVER_NEGATIVE_TTL_MS  resolver negative-cache TTL (default 5000)
-//!   PROXY_SELF_GATE  1 → real ELU/CPS self-gate, 0 → always-admit (default 1)
-//!   PROXY_SELF_GATE_ELU_CRITICAL  ELU shed threshold       (default 0.80)
-//!   PROXY_SELF_GATE_CPS_SIZE      CPS bucket capacity      (default 50)
-//!   PROXY_SELF_GATE_CPS_RATE      CPS bucket refill /s     (default 100)
+//!                    at startup and pin permanently warm      (default none)
+//!   PROXY_RESOLVER_POSITIVE_TTL_MS  resolver positive-cache TTL, ms ≥ 1
+//!                    (default 60000)
+//!   PROXY_RESOLVER_NEGATIVE_TTL_MS  resolver negative-cache TTL, ms ≥ 1
+//!                    (default 5000)
+//!   PROXY_RESOLVER_LOOKUP_TIMEOUT_MS  bound on one name lookup, ms ≥ 1
+//!                    (default 2000)
+//!   PROXY_SELF_GATE  1|true|yes|on → ELU/CPS self-gate, 0|false|no|off →
+//!                    always-admit                          (default on)
+//!   PROXY_SELF_GATE_ELU_CRITICAL  ELU shed threshold, (0, 1] (default 0.80)
+//!   PROXY_SELF_GATE_CPS_SIZE      CPS bucket capacity, ≥ 1 (default 50)
+//!   PROXY_SELF_GATE_CPS_RATE      CPS bucket refill /s, ≥ 1 (default 100)
 
 // Use jemalloc instead of glibc malloc (mirrors b2bua-runner). glibc retains
 // freed arena chunks and ratchets RSS under sustained churn; jemalloc's decay
@@ -243,6 +272,7 @@ async fn main() {
     // proxy cannot honour refuses the boot, naming every problem at once.
     let cfg = ProxyConfig::from_lookup(&env_value, &pod_namespace)
         .unwrap_or_else(|violations| refuse_to_start(&violations));
+    let sigterm = sigterm();
     let listen_sa = cfg.listen;
     let metrics_sa = cfg.metrics;
     let advertised = cfg.advertise.clone();
@@ -709,7 +739,7 @@ async fn main() {
             tracing::info!(signal = "SIGINT", "shutting down");
             0
         }
-        _ = wait_sigterm() => {
+        _ = sigterm => {
             tracing::info!(signal = "SIGTERM", drain_grace_ms, "draining");
             draining.store(true, Ordering::Relaxed);
             tokio::time::sleep(std::time::Duration::from_millis(drain_grace_ms)).await;
@@ -732,25 +762,23 @@ async fn main() {
     }
 }
 
-/// Await a SIGTERM (k8s sends this on pod termination). On non-unix this future
-/// never resolves (only Ctrl-C drives shutdown there).
+/// The SIGTERM (pod termination) that starts the drain. A handler that
+/// cannot be installed is fatal: without it the proxy is killed undrained.
 #[cfg(unix)]
-async fn wait_sigterm() {
+fn sigterm() -> impl std::future::Future<Output = ()> {
     use tokio::signal::unix::{signal, SignalKind};
-    match signal(SignalKind::terminate()) {
-        Ok(mut s) => {
-            s.recv().await;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot install SIGTERM handler");
-            std::future::pending::<()>().await;
-        }
+    let mut term = signal(SignalKind::terminate()).unwrap_or_else(|e| {
+        panic!("sip-proxy-runner FATAL: cannot install the SIGTERM handler: {e}")
+    });
+    async move {
+        term.recv().await;
     }
 }
 
+/// Never resolves: only Ctrl-C drives shutdown off unix.
 #[cfg(not(unix))]
-async fn wait_sigterm() {
-    std::future::pending::<()>().await;
+fn sigterm() -> impl std::future::Future<Output = ()> {
+    std::future::pending::<()>()
 }
 
 #[cfg(test)]

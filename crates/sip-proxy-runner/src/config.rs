@@ -5,7 +5,7 @@
 mod preflight;
 mod reader;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use sip_proxy::health::HealthProbeConfig;
@@ -72,14 +72,14 @@ impl ProxyConfig {
     /// `Err` holds every problem, one line each.
     pub fn from_lookup(
         get: &dyn Fn(&str) -> Option<String>,
-        _pod_namespace: &dyn Fn() -> Option<String>,
+        pod_namespace: &dyn Fn() -> Option<String>,
     ) -> Result<Self, Vec<String>> {
         let mut env = EnvReader::new(get);
 
         let listen = env.bind_addr("PROXY_LISTEN", SocketAddr::from(([0, 0, 0, 0], 5060)));
         let advertise = advertise(&mut env, "PROXY_ADVERTISE", listen);
         let external = external_face(&mut env);
-        let workers = worker_source(&mut env);
+        let workers = worker_source(&mut env, pod_namespace);
         let metrics = env.bind_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)));
         let queue_max = env.int("PROXY_QUEUE", 8192, 1, u32::MAX as u64) as usize;
         let udp_sndbuf = socket_buffer(&mut env, "PROXY_UDP_SNDBUF");
@@ -91,7 +91,7 @@ impl ProxyConfig {
         let bind_retry_deadline =
             Duration::from_millis(env.int("PROXY_BIND_RETRY_DEADLINE_MS", 10_000, 1, MAX_MS));
         let hmac_kid = env.text("PROXY_HMAC_KID", "k0");
-        let hmac_key = env.text("PROXY_HMAC_KEY", "dev-stickiness-key-not-for-prod-0123456789");
+        let hmac_key = hmac_key(&mut env);
         let probe = HealthProbeConfig {
             interval_ms: env.int("HEALTH_INTERVAL_MS", 1000, 1, MAX_MS),
             timeout_ms: env.int("HEALTH_TIMEOUT_MS", 1500, 1, MAX_MS),
@@ -140,29 +140,32 @@ impl ProxyConfig {
 }
 
 /// The address stamped on Via and Record-Route for egress on the face that
-/// listens on `listen`.
+/// listens on `listen`: `key`, else the listen address. An unspecified listen
+/// address names no reachable host, so `key` is then required.
 fn advertise(env: &mut EnvReader, key: &str, listen: SocketAddr) -> ProxyAddr {
-    match env.raw(key) {
+    let fallback = ProxyAddr::new(listen.ip().to_string(), listen.port());
+    match env.present(key) {
         Some(s) => ProxyAddr::parse(&s).unwrap_or_else(|| {
             env.refuse(format!("{key} must be host:port, got {s:?}"));
-            ProxyAddr::new(listen.ip().to_string(), listen.port())
+            fallback
         }),
-        None => {
-            let ip = if listen.ip().is_unspecified() {
-                IpAddr::V4(Ipv4Addr::LOCALHOST)
-            } else {
-                listen.ip()
-            };
-            ProxyAddr::new(ip.to_string(), listen.port())
+        None if listen.ip().is_unspecified() => {
+            if env.raw(key).is_none() {
+                env.refuse(format!(
+                    "{key} is required: the listen address {listen} names no host to advertise"
+                ));
+            }
+            fallback
         }
+        None => fallback,
     }
 }
 
 /// `PROXY_LISTEN_EXT` enables the external face; it then needs
 /// `PROXY_FACE_INT_CIDRS`.
 fn external_face(env: &mut EnvReader) -> Option<ExternalFace> {
-    let listen_ext = env.raw("PROXY_LISTEN_EXT").filter(|s| !s.trim().is_empty());
-    let cidrs = env.raw("PROXY_FACE_INT_CIDRS");
+    let listen_ext = env.present("PROXY_LISTEN_EXT");
+    let cidrs = env.present("PROXY_FACE_INT_CIDRS");
     let int_cidrs = match parse_ext_face_cidrs(listen_ext.is_some(), cidrs.as_deref()) {
         Ok(c) => c,
         Err(e) => {
@@ -205,18 +208,49 @@ pub fn parse_ext_face_cidrs(
     }
 }
 
-/// `PROXY_WORKERS` when set, else EndpointSlice discovery.
-fn worker_source(env: &mut EnvReader) -> WorkerSource {
-    if let Some(list) = env.raw("PROXY_WORKERS").filter(|s| !s.trim().is_empty()) {
-        return WorkerSource::Static(list);
-    }
+/// `PROXY_WORKERS` when set, else EndpointSlice discovery in
+/// `PROXY_NAMESPACE`, else `POD_NAMESPACE`, else the pod's own namespace.
+/// The discovery variables are checked in both modes.
+fn worker_source(env: &mut EnvReader, pod_namespace: &dyn Fn() -> Option<String>) -> WorkerSource {
+    let list = env.present("PROXY_WORKERS");
     let service = env.text("PROXY_WORKER_SERVICE", "b2bua-worker");
     let port = env.int("PROXY_WORKER_PORT", 5060, 1, u16::MAX as u64) as u16;
-    let namespace = env
-        .raw("PROXY_NAMESPACE")
-        .or_else(|| env.raw("POD_NAMESPACE"))
-        .unwrap_or_else(|| "sip-test".to_string());
+    let named = match env.present("PROXY_NAMESPACE") {
+        Some(ns) => Some(ns),
+        None => env.present("POD_NAMESPACE"),
+    };
+    if let Some(list) = list {
+        return WorkerSource::Static(list);
+    }
+    let namespace = named
+        .or_else(|| pod_namespace().map(|ns| ns.trim().to_string()).filter(|ns| !ns.is_empty()))
+        .unwrap_or_else(|| {
+            env.refuse(
+                "the worker namespace is unknown: set PROXY_NAMESPACE (or POD_NAMESPACE), \
+                 or PROXY_WORKERS for a fixed pool"
+                    .to_string(),
+            );
+            String::new()
+        });
     WorkerSource::Discovered { service, namespace, port }
+}
+
+/// `PROXY_HMAC_KEY`, the secret that signs the stickiness cookies: required,
+/// at least 16 bytes, taken as given (not trimmed).
+fn hmac_key(env: &mut EnvReader) -> String {
+    match env.raw("PROXY_HMAC_KEY") {
+        Some(key) if key.len() >= 16 => key,
+        Some(_) => {
+            env.refuse("PROXY_HMAC_KEY must be at least 16 bytes".to_string());
+            String::new()
+        }
+        None => {
+            env.refuse(
+                "PROXY_HMAC_KEY is required: the secret that signs the stickiness cookies".into(),
+            );
+            String::new()
+        }
+    }
 }
 
 /// A `PROXY_UDP_*BUF` request in bytes: 4 MiB when unset, the kernel default
@@ -283,7 +317,7 @@ fn resolver(env: &mut EnvReader) -> ResolverConfig {
 
 /// `PROXY_RESOLVER_PREWARM`: comma-separated `host:port` targets.
 fn prewarm(env: &mut EnvReader) -> Vec<ProxyAddr> {
-    let raw = env.text("PROXY_RESOLVER_PREWARM", "");
+    let raw = env.present("PROXY_RESOLVER_PREWARM").unwrap_or_default();
     let mut targets = Vec::new();
     for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         match ProxyAddr::parse(entry) {
