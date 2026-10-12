@@ -59,6 +59,17 @@ export interface Interface {
   readonly captures: Effect.Effect<ReadonlyArray<string>, SqlError>
   /** Every row of these captures, by capture, newest prep first, then case id. */
   readonly rows: (captures: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Row>, SqlError>
+  /** The readings of these captures the store still holds a flows document for, newest prep first. */
+  readonly readings: (captures: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Reading>, SqlError>
+  /** States where these calls of one reading start, over what stood; answers the rows restated. */
+  readonly restate: (prepId: number, capture: string, starts: ReadonlyArray<Start>) => Effect.Effect<number, SqlError>
+}
+
+/** One reading of a capture and the flows document it cut. */
+export interface Reading {
+  readonly prepId: number
+  readonly capture: string
+  readonly flowsHash: string
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/store/CaseMaps") {}
@@ -234,6 +245,41 @@ export const layer = Layer.effect(
       }))
     })
 
-    return Service.of({ export: exportAll, locate, unexported, captures, rows })
+    const readings = Effect.fn("CaseMaps.readings")(function*(of: ReadonlyArray<string>) {
+      if (of.length === 0) return []
+      const found = yield* sql<{ prep_id: string; capture: string; flows_hash: string }>`
+        SELECT cc.prep_id, cc.capture, cc.flows_hash
+        FROM capture_cuts cc JOIN flows_documents d ON d.hash = cc.flows_hash
+        WHERE cc.capture IN ${sql.in(of)}
+        ORDER BY cc.capture, cc.prep_id DESC
+      `
+      return found.map((row): Reading => ({
+        prepId: Number(row.prep_id),
+        capture: row.capture,
+        flowsHash: row.flows_hash
+      }))
+    })
+
+    const restate = Effect.fn("CaseMaps.restate")(function*(
+      prepId: number,
+      capture: string,
+      starts: ReadonlyArray<Start>
+    ) {
+      if (starts.length === 0) return 0
+      const done = yield* sql<{ n: number }>`
+        WITH restated AS (
+          UPDATE case_maps m
+          SET first_at = to_timestamp(s.at_us / 1000000.0), src = s.src, dst = s.dst
+          FROM jsonb_to_recordset(${JSON.stringify(starts)}::jsonb)
+            AS s("caseId" text, at_us bigint, src text, dst text)
+          WHERE m.prep_id = ${prepId} AND m.capture = ${capture} AND m.case_id = s."caseId"
+          RETURNING 1
+        )
+        SELECT count(*)::int AS n FROM restated
+      `
+      return Number(done[0]!.n)
+    })
+
+    return Service.of({ export: exportAll, locate, unexported, captures, rows, readings, restate })
   })
 )

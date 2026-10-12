@@ -318,6 +318,24 @@ describe.skipIf(!served)("case maps", () => {
     expect(frozen.get("stated.pcap")).toEqual([{ caseId: "stated.pcap-a", callKey: "call-st@h", first: start }])
   })
 
+  it("names each reading whose flows document it holds, and restates where a reading's calls start", async () => {
+    const start = { at_us: 1_789_646_119_005_979, src: "10.0.0.9:5060", dst: "10.0.0.1:5060" }
+    const prep = await withStore(recordAt((p) =>
+      cutOf(p, "restated.pcap", [caseOf("restated.pcap-a", "call-ra@h")], [], flowsOf("restated.pcap", [
+        { callId: "call-ra@h", ts_us: start.at_us, src: start.src, dst: start.dst }
+      ]))
+    ))
+    const later = { at_us: start.at_us + 7_000_000, src: "10.0.0.8:5060", dst: "10.0.0.1:5060" }
+    const answer = await withStore(Effect.gen(function*() {
+      const maps = yield* CaseMaps.Service
+      const readings = yield* maps.readings(["restated.pcap"])
+      const restated = yield* maps.restate(prep, "restated.pcap", [{ caseId: "restated.pcap-a", ...later }])
+      const frozen = yield* Effect.flatMap(CaseIds.Service, (ids) => ids.of(["restated.pcap"]))
+      return { readings: readings.map((r) => [r.prepId, r.capture]), restated, first: frozen.get("restated.pcap")![0]!.first }
+    }))
+    expect(answer).toEqual({ readings: [[prep, "restated.pcap"]], restated: 1, first: later })
+  })
+
   it("surveys the documents of each capture's standing cut alone, in current_documents", async () => {
     await withStore(recordAt((p) => cutOf(p, "survey.pcap", [caseOf("survey.pcap-a", "call-sa@h")])))
     await withStore(recordAt((p) => cutOf(p, "survey.pcap", [caseOf("survey.pcap-b", "call-sb@h")])))
