@@ -311,7 +311,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
-        // ── replacement leg never answers (its route-armed NoAnswer fires) →
+        // ── replacement leg rings unanswered (its route's NoAnswer fires) →
         // the fail-teardown, displacing the CORE `no-answer` rule whose
         // `/call/failure` consult belongs to the setup path.
         rule(

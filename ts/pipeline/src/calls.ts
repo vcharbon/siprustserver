@@ -79,9 +79,10 @@ export const buildCalls = (
         leg: actor.pivotLeg,
         ...(final ? { final } : {}),
         ...(cause ? { cause: cause.cause } : {}),
-        // The dwell the platform's own no-answer timer ran before it gave up,
-        // stated on the attempt that rang: what a lane has to arm to reproduce
-        // the handover. Present exactly when the cause is `no-answer`.
+        // The dwell the platform's own no-answer timer ran from the attempt's
+        // first 18x before it gave up, stated on the attempt that rang: what a
+        // lane has to arm to reproduce the handover. Present exactly when the
+        // cause is `no-answer`.
         ...(cause?.after_ms === undefined || cause.cause !== "no-answer" ? {} : { no_answer_ms: cause.after_ms }),
         // The cause's own evidence stays with the attempt that failed; the
         // evidence that JOINED this attempt to the chain stays with the attempt

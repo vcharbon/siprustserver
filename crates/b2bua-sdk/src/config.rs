@@ -178,7 +178,7 @@ pub struct B2buaConfig {
     pub reaper_idle_max_sec: i64,
     /// **Setup timeout**, milliseconds — the call-level a-leg initial-INVITE deadline:
     /// armed at route time, cancelled at answer, deliberately NOT reset by
-    /// reroute/failover (each new b-leg gets its own `NoAnswer`; this caps the
+    /// reroute/failover (each new b-leg that rings gets its own `NoAnswer`; this caps the
     /// caller's *total* wait for a final response). It rides the replicated
     /// `call.timers` ledger, so it survives a crash → reclaim — the sip-txn
     /// transaction bound
@@ -189,7 +189,7 @@ pub struct B2buaConfig {
     /// (enforced by [`validate`](Self::validate)) so the rules path owns the
     /// teardown (408 to the caller, CANCEL to pending b-legs, obligations
     /// settled), above any sane no-answer timeout so a route-supplied `NoAnswer`
-    /// still fires first. `<= 0` disables (the txn backstop and GlobalDuration
+    /// (run from the leg's first 18x) normally fires first. `<= 0` disables (the txn backstop and GlobalDuration
     /// remain). Overridable via `B2BUA_SETUP_TIMEOUT_MS`.
     pub setup_timeout_ms: i64,
     /// **Initial-INVITE transaction bound**, seconds — the sip-txn
@@ -201,9 +201,9 @@ pub struct B2buaConfig {
     /// `setup_timeout_ms < invite_txn_timeout_sec × 1000` (when enabled) and
     /// range-checks [`MIN_INVITE_TXN_TIMEOUT_SEC`](Self::MIN_INVITE_TXN_TIMEOUT_SEC)
     /// `..=` [`MAX_INVITE_TXN_TIMEOUT_SEC`](Self::MAX_INVITE_TXN_TIMEOUT_SEC);
-    /// a route-supplied `NoAnswer` above
+    /// a route-supplied `NoAnswer` falling later than
     /// `bound − `[`NO_ANSWER_CANCEL_MARGIN_SEC`](Self::NO_ANSWER_CANCEL_MARGIN_SEC)
-    /// is clamped to that ceiling.
+    /// after the leg's INVITE is held to that instant.
     /// Default **158 s**; telephony deployments (Timer C > 3 min, 180 s PSTN
     /// supervision, hunting chains) raise it. Overridable via
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
@@ -844,8 +844,8 @@ impl B2buaConfig {
         u64::try_from(sec).unwrap_or(Self::DEFAULT_ACK_TIMEOUT_SEC as u64).saturating_mul(1000)
     }
 
-    /// Clamp a route-supplied `NoAnswer` deadline (ms) under the transaction
-    /// bound: any value above `bound − `[`NO_ANSWER_CANCEL_MARGIN_SEC`](Self::NO_ANSWER_CANCEL_MARGIN_SEC)
+    /// Clamp a route-supplied `NoAnswer` deadline, as ms after the leg's
+    /// INVITE left, under the transaction bound: any value above `bound − `[`NO_ANSWER_CANCEL_MARGIN_SEC`](Self::NO_ANSWER_CANCEL_MARGIN_SEC)
     /// — including one merely inside the margin band, which would equally
     /// strand the CANCEL→487 exchange — is held to that ceiling so the
     /// exchange completes inside the live b-leg client transaction. Values at

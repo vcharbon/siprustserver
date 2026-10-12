@@ -34,7 +34,7 @@ fn answered_call(pri: &str, bak: &str, cid: &str) -> Call {
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = B_CALL_ID.into();
-    b.outbound_invite = Some(OutboundInvite::new(B_LOCAL_TAG, 1, None));
+    b.outbound_invite = Some(OutboundInvite::new(B_LOCAL_TAG, 1, 0, None));
     b.dialogs = vec![Dialog::new(B_LOCAL_TAG, BOB_TAG, DialogState::Confirmed, 1)].into();
     call::helpers::add_b_leg(call, b)
 }

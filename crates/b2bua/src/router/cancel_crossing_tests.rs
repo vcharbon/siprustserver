@@ -55,7 +55,7 @@ fn relayed_answer_call() -> Call {
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = "b-cid@10.0.0.2".into();
-    b.outbound_invite = Some(OutboundInvite::new("b2bua-b-tag", 1, None));
+    b.outbound_invite = Some(OutboundInvite::new("b2bua-b-tag", 1, 0, None));
     b.own_tag = None;
     b.invite_final_sent = None;
     let mut bob = Dialog::new("b2bua-b-tag", "bob-tag", DialogState::Confirmed, 1);

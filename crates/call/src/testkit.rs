@@ -103,7 +103,7 @@ pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
         local_uri: None,
         remote_uri: None,
         invite_request_uri: None,
-        outbound_invite: Some(OutboundInvite::new(our_tag, 1, None)),
+        outbound_invite: Some(OutboundInvite::new(our_tag, 1, 0, None)),
         own_tag: None,
         ext: None,
         kind: Some(LegKind::Destination),

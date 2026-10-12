@@ -2,7 +2,7 @@
 //! minted under the engine's next leg id, opening the attempt it dials.
 
 use call::helpers::{add_cdr_event, add_originated_b_leg};
-use call::{Call, CdrEvent, Deadline, LegKind, TerminationCause, TimerKey, TimerType};
+use call::{Call, CdrEvent, Deadline, LegKind, TerminationCause};
 use sip_message::header::HeaderName;
 
 use crate::effects::HandlerEffects;
@@ -61,12 +61,6 @@ impl ActionExecutor<'_> {
             return;
         }
         let leg_id = call::helpers::next_b_leg_id(call);
-        // A rule-supplied ring deadline above `bound − margin` is held under
-        // the configured transaction bound so the CANCEL→487 exchange
-        // completes inside the live b-leg client transaction. After the
-        // admission gate: a rejected leg is never armed, so it takes no
-        // clamp note either.
-        let no_answer = relay::clamp_no_answer(self.config, &call.call_ref, no_answer);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let offers_sdp = relay::mints_offer(&a_invite, body_override);
         // The originator's `Accept` states what she takes; a media leg answers
@@ -145,12 +139,15 @@ impl ActionExecutor<'_> {
         }
         *call = add_originated_b_leg(call.clone(), leg, self.now_ms);
         fx.outbound.push(effect);
+        // The leg rings for the attempt's deadline from its first 18x
+        // (`ring_deadline`); a leg that opens no attempt rings under none.
+        debug_assert!(
+            attempt.is_some() || no_answer == Deadline::Off,
+            "a ring deadline on leg {leg_id}, which opens no attempt to hold it"
+        );
         if let Some(opening) = attempt {
             let id = crate::attempts::open(call, fx, opening.clone(), no_answer);
             call::helpers::join_attempt(call, id, &leg_id);
-        }
-        if let Some(ms) = no_answer.millis() {
-            self.schedule(call, fx, TimerKey::leg(TimerType::NoAnswer, leg_id), ms);
         }
     }
 }

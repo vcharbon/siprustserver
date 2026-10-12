@@ -86,12 +86,12 @@ single send. Counter: `cancel_retransmits`.
 - A callee that has sent nothing is not CANCELed: its INVITE resolves on the
   callee's own final or the worker's Timer B, and the call that abandoned it
   rides its terminating backstop until that leg resolves
-  (`silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reaped`).
+  (`silent_callee_abandoned_via_lb__reject__delayed_crossing_200_still_reaped`).
   A 2xx it sends after the call was released is ACKed and the dialog it
   created BYEd by the orphaned transaction (ADR-0034).
 - A callee that has sent a 100 alone is CANCELed on the wire when the call
   abandons it, behind the front proxy as on a direct path
-  (`trying_only_callee_no_answer_via_lb__reject__is_cancelled`).
+  (`trying_only_callee_abandoned_via_lb__reject__is_cancelled`).
 - After a takeover only the callee's 18x or final can release a CANCEL held at
   the kill: a 100 the callee sends to an initial INVITE afterwards carries no
   cookie the front proxy can fail it over on (no Record-Route, and the proxy's
@@ -108,7 +108,7 @@ single send. Counter: `cancel_retransmits`.
 (X4), `sip-txn/tests/it/seed.rs`
 (`a_cancel_on_a_seed_with_no_provisional_waits_for_one`),
 `b2bua-harness/tests/it/cancel_before_provisional.rs`,
-`failover-harness/tests/it/silent_callee_no_answer_via_lb.rs`,
+`failover-harness/tests/it/abandoned_callee_via_lb.rs`,
 `failover-harness/tests/it/inflight_resend.rs`,
 `failover-harness/tests/it/held_cancel_takeover.rs`,
 `b2bua/src/router/materialise/seeds/tests.rs`,

@@ -228,7 +228,7 @@
           "type": "string"
         },
         "no_answer_ms": {
-          "description": "INVITE-to-CANCEL dwell, present exactly when `cause` is `no-answer`.",
+          "description": "First-18x-to-CANCEL dwell on the attempt's leg, ms, present exactly\nwhen `cause` is `no-answer`.",
           "format": "uint64",
           "minimum": 0,
           "type": [

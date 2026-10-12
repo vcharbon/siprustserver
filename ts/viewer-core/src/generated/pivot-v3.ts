@@ -603,7 +603,8 @@ export interface Attempt {
    */
   leg: string
   /**
-   * INVITE-to-CANCEL dwell, present exactly when `cause` is `no-answer`.
+   * First-18x-to-CANCEL dwell on the attempt's leg, ms, present exactly
+   * when `cause` is `no-answer`.
    */
   no_answer_ms?: number | null
   /**

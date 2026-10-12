@@ -527,9 +527,9 @@ pub enum RuleAction {
         /// leg's `adopted` flag derives from this kind (`is_adopted`), so a media
         /// leg is gated out of the generic relay-to-peer fallback.
         kind: Option<LegKind>,
-        /// The attempt this leg dials: a destination or transfer-target leg
-        /// opens one ([`AttemptOpening`]), the leg joining it; a leg a
-        /// service dials for its own use (a media leg) opens none.
+        /// The attempt this leg dials, ringing `no_answer` from the leg's first 18x: a
+        /// destination or transfer-target leg opens one ([`AttemptOpening`]); a leg a
+        /// service dials for its own use (a media leg) opens none, `no_answer` `Off`.
         attempt: Option<AttemptOpening>,
     },
     /// End b-leg `leg_id` as its state asks: a confirmed dialog is BYE'd, a

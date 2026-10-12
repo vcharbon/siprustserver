@@ -1610,8 +1610,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // The three setup/duration deadlines are teardown rules: on a
         // terminating call they run to scrub their spent ledger entry.
         rule("no-answer", &[], Match::timer().timer_type(TimerType::NoAnswer), |ctx| {
-            // NoAnswer is armed PER B-LEG and retired with it; the router
-            // delivers only the instance the ledger holds. The fire stands
+            // NoAnswer is armed PER B-LEG at its first 18x and retired with
+            // it; the router delivers only the instance the ledger holds. The fire stands
             // unless the CALLER is answered: the a-leg's INVITE transaction
             // took its 2xx (from a sibling of X), so no final may be authored
             // on it (RFC 3261 §17.2.1). A sibling b-leg's `Confirmed` alone is

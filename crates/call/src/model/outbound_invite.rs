@@ -13,6 +13,9 @@ use super::invite_txn::InviteTxnHandle;
 pub struct OutboundInvite {
     pub our_tag: String,
     pub cseq: i64,
+    /// When the INVITE left, epoch ms: the start of its client transaction,
+    /// whose bound every deadline of the leg's setup stays inside.
+    pub sent_at_ms: i64,
     /// The INVITE's client transaction: what a CANCEL (§9.1) and each
     /// dialog's ACK for its 2xx (§13.2.2.4) are built from.
     pub txn: Option<InviteTxnHandle>,
@@ -29,12 +32,18 @@ pub struct OutboundInvite {
 }
 
 impl OutboundInvite {
-    /// The INVITE `our_tag` / `cseq` names, its transaction `txn`, with no
-    /// final and no CANCEL yet.
-    pub fn new(our_tag: impl Into<String>, cseq: i64, txn: Option<InviteTxnHandle>) -> Self {
+    /// The INVITE `our_tag` / `cseq` names, sent at `sent_at_ms` under the
+    /// transaction `txn`, with no final and no CANCEL yet.
+    pub fn new(
+        our_tag: impl Into<String>,
+        cseq: i64,
+        sent_at_ms: i64,
+        txn: Option<InviteTxnHandle>,
+    ) -> Self {
         OutboundInvite {
             our_tag: our_tag.into(),
             cseq,
+            sent_at_ms,
             txn,
             final_received: None,
             cancel_sent: false,

@@ -175,7 +175,7 @@ pub fn representative_call() -> Call {
         local_uri: Some("sip:alice@example.com".into()),
         remote_uri: Some("sip:bob@example.com".into()),
         invite_request_uri: Some("sip:bob@example.com".into()),
-        outbound_invite: Some(OutboundInvite::new("b2bua-from-tag-bleg-5544", 1, None)),
+        outbound_invite: Some(OutboundInvite::new("b2bua-from-tag-bleg-5544", 1, 0, None)),
         own_tag: None,
         ext: None,
         kind: None,
@@ -609,16 +609,16 @@ fn arb_leg() -> BoxedStrategy<Leg> {
             proptest::option::of(
                 (
                     arb_tag(),
-                    any::<i64>(),
+                    (any::<i64>(), any::<i64>()),
                     proptest::option::of(arb_invite_handle()),
                     proptest::option::of(100u16..700),
                     any::<bool>(),
                 )
                     .prop_map(
-                        |(our_tag, cseq, txn, final_received, cancel_sent)| OutboundInvite {
+                        |(tag, (cseq, sent), txn, final_received, cancel_sent)| OutboundInvite {
                             final_received,
                             cancel_sent,
-                            ..OutboundInvite::new(our_tag, cseq, txn)
+                            ..OutboundInvite::new(tag, cseq, sent, txn)
                         },
                     ),
             ),

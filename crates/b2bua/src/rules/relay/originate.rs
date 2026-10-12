@@ -4,7 +4,7 @@
 //! (Call-ID, tags, CSeq space, Contact) is minted fresh — nothing
 //! dialog-identifying is copied from the a-leg.
 
-use call::{Deadline, InviteTxnHandle, Leg, RemoteInfo};
+use call::{InviteTxnHandle, Leg, RemoteInfo};
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
 };
@@ -217,27 +217,6 @@ fn narrow_token_set<K: header::kind::TokenKind>(
 /// `None` on the originator's leg, which the stack did not dial.
 pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
     super::ack::parse_request(&leg.outbound_invite.as_ref()?.txn.as_ref()?.original_invite)
-}
-
-/// Clamp a decision-supplied ring deadline for an originated leg under the
-/// configured INVITE transaction bound (`B2buaConfig::clamp_no_answer_ms`),
-/// with the per-call `debug!` note on a clamp — the ONE clamp site both
-/// `NoAnswer` arming paths (`decision::apply_route`, `actions::create_leg`)
-/// funnel through. A deadline that is off stays off.
-pub(crate) fn clamp_no_answer(config: &B2buaConfig, call_ref: &str, ask: Deadline) -> Deadline {
-    let Some(requested_ms) = ask.millis() else { return Deadline::Off };
-    let clamped_ms = config.clamp_no_answer_ms(requested_ms);
-    if clamped_ms == requested_ms {
-        return ask;
-    }
-    tracing::debug!(
-        %call_ref,
-        requested_ms,
-        clamped_ms,
-        invite_txn_timeout_sec = config.invite_txn_timeout_sec,
-        "no_answer_timeout clamped under the INVITE transaction bound"
-    );
-    Deadline::of_millis(Some(clamped_ms))
 }
 
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
@@ -486,7 +465,7 @@ pub fn build_b_leg(
         invite_request_uri: Some(request_uri),
         // Each dialog a response to this INVITE creates inherits its handle,
         // for its ACK-for-2xx / RAck CSeq (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).
-        outbound_invite: Some(call::OutboundInvite::new(from_tag, 1, leg_invite_handle)),
+        outbound_invite: Some(call::OutboundInvite::new(from_tag, 1, now_ms, leg_invite_handle)),
         own_tag: None,
         ext: None,
         kind: Some(kind.unwrap_or(call::LegKind::Destination)),

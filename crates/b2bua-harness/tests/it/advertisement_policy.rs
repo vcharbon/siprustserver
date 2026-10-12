@@ -207,7 +207,7 @@ async fn a_reject_after_a_ring_timeout_carries_the_tables_accept() {
     let (addr, b2bua) = sut(
         &h,
         Engine {
-            initial: Initial::Route(Some(5_000)),
+            initial: Initial::Route(Some(3_000)),
             failure: Failure::Reject(480, Stated::Nothing),
         },
     )
@@ -248,7 +248,7 @@ async fn a_consult_reject_removing_accept_after_a_timeout_states_none() {
     let alice = h.agent("alice", ALICE).await;
     let carol = h.agent("carol", CAROL).await;
     let engine = Engine {
-        initial: Initial::Route(Some(5_000)),
+        initial: Initial::Route(Some(3_000)),
         failure: Failure::Reject(480, Stated::Removal),
     };
     let (addr, b2bua) = sut(&h, engine).await;

@@ -190,10 +190,6 @@ pub async fn apply_route(
     let leg_id = call::helpers::next_b_leg_id(&call);
     let leg_id = leg_id.as_str();
     let dest = (route.destination.host.clone(), route.destination.port());
-    // A route-supplied ring deadline above `bound − margin` is held under the
-    // configured transaction bound so the CANCEL→487 exchange still completes
-    // inside the live b-leg client transaction (`relay::clamp_no_answer`).
-    let no_answer = relay::clamp_no_answer(config, &call.call_ref, ring);
     // The decision's header statements (sets of one or more lines, removals).
     // Structural From/To/R-URI go through the typed fields below, never this
     // map (ADR-0017 X2).
@@ -304,14 +300,11 @@ pub async fn apply_route(
     );
     call = add_originated_b_leg(call, leg, now_ms);
     fx.outbound.push(effect);
+    // The leg rings for the attempt's deadline from its first 18x
+    // (`ring_deadline`).
     let attempt =
-        crate::attempts::open(&mut call, &mut fx, AttemptOpening::new(cause, answer), no_answer);
+        crate::attempts::open(&mut call, &mut fx, AttemptOpening::new(cause, answer), ring);
     call::helpers::join_attempt(&mut call, attempt, leg_id);
-
-    // The leg's ring deadline, retired with the leg.
-    if let Some(ms) = no_answer.millis() {
-        arm(&mut call, &mut fx, TimerKey::leg(TimerType::NoAnswer, leg_id), now_ms + ms);
-    }
 
     // Global-duration backstop, armed at *call creation* (not just at answer).
     //
@@ -321,7 +314,7 @@ pub async fn apply_route(
     // INVITE under load, ring-forever) sits `Active` with NEITHER. Its only other
     // reaper is the NoAnswer ring timer, but that is armed *only* when the route
     // supplies `no_answer_ms` (the scripted endurance adapter supplies
-    // `None`). The result: ~0.4% of calls reach `Active` with an empty
+    // `None`) and the leg rang. The result: ~0.4% of calls reach `Active` with an empty
     // `call.timers`, so no timer ever fires and they leak forever — surviving past
     // even the 1h GlobalDuration cap because it was never armed (observed:
     // ~1095 ESTABLISHED calls flat for >4h on a never-killed worker).

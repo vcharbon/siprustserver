@@ -44,7 +44,6 @@ crates/b2bua/src/rules/actions/respond.rs 640
 crates/b2bua/src/rules/actions/teardown.rs 694
 crates/b2bua/src/rules/defaults/core_rules.rs 2081
 crates/b2bua/src/rules/relay_first_18x.rs 526
-crates/b2bua/src/rules/relay/originate.rs 520
 crates/b2bua/src/rules/relay/originate_tests.rs 849
 crates/b2bua/src/rules/relay/sdp_session_tests.rs 968
 crates/b2bua/src/store/mod.rs 1100

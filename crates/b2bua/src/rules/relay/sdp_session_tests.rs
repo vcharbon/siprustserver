@@ -568,7 +568,7 @@ fn forked() -> Call {
     let mut c = call();
     let leg = &mut c.b_legs[0];
     call::testkit::stage_leg(leg, LegState::Early);
-    leg.outbound_invite = Some(call::OutboundInvite::new("as", 1, None));
+    leg.outbound_invite = Some(call::OutboundInvite::new("as", 1, 0, None));
     leg.dialogs = ["f1", "f2"]
         .into_iter()
         .map(|tag| call::Dialog::new("as", tag, call::DialogState::Early, 1))

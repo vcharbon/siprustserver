@@ -73,9 +73,9 @@ async fn rung_three_a_reroute_draft_hunts_past_a_busy_destination() {
 /// `no_answer_ms` fires, the system CANCELs that attempt and hunts on.
 ///
 /// The dwell is the DOCUMENT's (§4.1): the driver hands its `no_answer_ms` to the
-/// route as stated and nothing else picks it. On a
-/// paused runtime the callee simply stays silent, so the only thing that can
-/// end the ring is the system's own timer.
+/// route as stated and nothing else picks it, and it runs from the attempt's
+/// first 18x. On a paused runtime the callee simply stays silent, so the only
+/// thing that can end the ring is the system's own timer.
 ///
 /// It skips loudly when no case library is configured.
 #[tokio::test(start_paused = true)]
@@ -98,19 +98,20 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
             outcome.verdict.failures
         );
     }
-    // The ring was the DOCUMENT's: the abandoned attempt's INVITE and the
-    // CANCEL that ended it sit `no_answer_ms` apart on the b-leg's own ladder,
-    // and nothing else on the wire could have ended it — the callee never
+    // The ring was the DOCUMENT's: it ran `no_answer_ms` from the abandoned
+    // attempt's first 18x, so on the b-leg's own ladder that 18x and the
+    // CANCEL that ended it sit `no_answer_ms` and a hop each way apart, and
+    // nothing else on the wire could have ended it — the callee never
     // answered.
     let b_leg = &outcome.recording.legs()["B"];
     let at = |predicate: &dyn Fn(&str) -> bool| {
         b_leg.iter().find(|m| predicate(&text(m))).map(|m| m.at_us).expect("recorded")
     };
-    let invited = at(&|raw: &str| raw.starts_with("INVITE sip:+1999999bob5070"));
+    let rang = at(&|raw: &str| raw.starts_with("SIP/2.0 180"));
     let cancelled = at(&|raw: &str| raw.starts_with("CANCEL "));
     assert_eq!(
-        cancelled - invited,
-        1_000_000,
+        cancelled - rang,
+        ring_on_the_wire_us(1_000),
         "the system rang for exactly the `no_answer_ms` the document states"
     );
 
@@ -169,10 +170,10 @@ async fn a_sub_second_ring_is_armed_to_the_millisecond() {
     case.document.case.id = format!("{}-subsecond", case.document.case.id);
     for call in &mut case.document.calls {
         for attempt in &mut call.attempts {
-            if attempt.no_answer_ms.is_some() {
+            if let Some(stated) = attempt.no_answer_ms {
                 attempt.no_answer_ms = Some(RING_MS);
                 if let Some(final_) = &mut attempt.r#final {
-                    final_.at_ms = RING_MS + 80;
+                    final_.at_ms = final_.at_ms - stated + RING_MS;
                 }
             }
         }
@@ -204,15 +205,26 @@ async fn a_sub_second_ring_is_armed_to_the_millisecond() {
     assert_eq!(note.delta_ms, 0, "the system rang what the document measured");
     assert_eq!(note.tolerance_ms, 200);
 
-    // And the wire agrees: the ring really was the declared 15.139 s.
+    // And the wire agrees: the ring really was the declared 15.139 s, from the
+    // attempt's first 18x.
     let b_leg = &outcome.recording.legs()["B"];
     let at = |predicate: &dyn Fn(&str) -> bool| {
         b_leg.iter().find(|m| predicate(&text(m))).map(|m| m.at_us).expect("recorded")
     };
-    let invited = at(&|raw: &str| raw.starts_with("INVITE sip:+1999999bob5070"));
+    let rang = at(&|raw: &str| raw.starts_with("SIP/2.0 180"));
     let cancelled = at(&|raw: &str| raw.starts_with("CANCEL "));
-    assert_eq!(cancelled - invited, RING_MS * 1000);
+    assert_eq!(cancelled - rang, ring_on_the_wire_us(RING_MS));
 
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     scene.finish().await;
+}
+
+/// How far apart a callee's first 18x leaving and the CANCEL of a ring of
+/// `ring_ms` reaching it sit, µs: the ring runs from the 18x reaching the
+/// system, one hop in, and the CANCEL takes one hop out.
+fn ring_on_the_wire_us(ring_ms: u64) -> u64 {
+    (scenario_harness::SIMULATED_TRANSIT_DELAY_MS
+        + ring_ms
+        + scenario_harness::SIMULATED_TRANSIT_DELAY_MS)
+        * 1000
 }

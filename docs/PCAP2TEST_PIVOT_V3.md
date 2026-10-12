@@ -737,7 +737,7 @@ no decision at all, so a lane routes it and points the dial at nothing.
 | `joined_by` | no | what ADDED this leg to a running call: `{ kind: "refer" \| "mrf", step }`. Independent of `cause` |
 | `cause_evidence` | no | the captured signals that justify `cause` |
 | `join_evidence` | no | why the correlator put THIS attempt in that chain |
-| `no_answer_ms` | no | INVITE-to-SUT-CANCEL dwell, present exactly when `cause` is `no-answer` |
+| `no_answer_ms` | no | first-18x-to-SUT-CANCEL dwell on the attempt's leg, ms, present exactly when `cause` is `no-answer` |
 
 `position` is explicit so the list stays reorderable under the sorted-key
 formatter and so `(branch, position)` is a stable key.
@@ -800,7 +800,9 @@ precede the joined leg's own first message, because it is what added the leg.
 call-limiter test, a consultation placed beside the call it will transfer.
 
 `no_answer_ms` is declared only where the attempt RANG and nothing else explains
-the give-up. A caller that answered or hung up mid-attempt makes the SUT's
+the give-up. It runs from the first 180–189 the attempt's leg drew to the SUT's
+CANCEL of it, to the millisecond: a lane arms the ring deadline from that 18x
+the same way. A caller that answered or hung up mid-attempt makes the SUT's
 CANCEL a propagation rather than a timer, and the cause is refused. The value is
 refused outside 1 000 to 3 600 000 ms: below that a whole-second timer arms
 nothing, above it a "ring" is a mis-cut span. The refusals are as normative as

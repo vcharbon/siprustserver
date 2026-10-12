@@ -289,9 +289,9 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     }
     r.new_from = obj.get("new_from").and_then(|v| v.as_str()).map(str::to_string);
     r.new_to = obj.get("new_to").and_then(|v| v.as_str()).map(str::to_string);
-    // Per-route no-answer ring timer: `apply_route` arms
-    // `TimerType::NoAnswer` on the dialed b-leg, so a ring-forever hop advances
-    // the plan (the `no-answer` rule POSTs /call/failure) like a reject would.
+    // Per-route ring deadline: the dialed b-leg arms `TimerType::NoAnswer` at
+    // its first 18x, so a ring-forever hop advances the plan (the `no-answer`
+    // rule POSTs /call/failure) like a reject would.
     r.no_answer_ms = obj.get("no_answer_ms").and_then(|v| v.as_i64());
     r.update_headers = parse_update_headers(obj.get("update_headers"));
     // The route's stated headers by scope (`StatedHeaders`); absent or

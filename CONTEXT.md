@@ -865,6 +865,14 @@ dialled leg names its attempt; a media leg names none.
 _Avoid_: "attempt" for a retransmission or a re-send (a **rung** of a
 **ladder**); "try"; "route" alone for the attempt (the route is its answer).
 
+**Ring deadline** (`no_answer_ms`, `TimerType::NoAnswer`, leg scope):
+How long a dialled leg may ring unanswered: its attempt's statement, run
+from the first 180–189 the leg's INVITE draws, to the millisecond, and held
+inside that INVITE's transaction bound. A leg answered or failed before any
+18x never arms it; a later 18x, on any of its early dialogs, does not move it.
+_Avoid_: "no-answer timeout" for the time since the INVITE (that is the
+**setup** deadline's, or a service's own watchdog).
+
 **Timer scope** (ADR-0042, `TimerScope`):
 What a timer guards — the call, an attempt, a leg, or a retransmission
 obligation — and so when it dies: leaving the scope retires every timer of

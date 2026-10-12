@@ -118,8 +118,8 @@ async fn failover_answered_then_hung_up(call: &mut ClientInvite, carol: &Agent, 
     b2bua.assert_fully_reaped();
 }
 
-/// The callee refuses 486 while its ring deadline is armed: the turn that
-/// ends the leg retires the deadline, so while the failure consult is
+/// The callee rings, arming its ring deadline, then refuses 486: the turn
+/// that ends the leg retires the deadline, so while the failure consult is
 /// awaited no timer names the ended leg.
 #[tokio::test(start_paused = true)]
 async fn a_refused_legs_ring_deadline_leaves_the_ledger_with_the_leg() {
@@ -142,6 +142,8 @@ async fn a_refused_legs_ring_deadline_leaves_the_ledger_with_the_leg() {
         .send()
         .await;
     let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
     let ringing = b2bua.live_call(&call_ref).expect("the call is live");
     assert_eq!(timers_on_leg(&ringing, "b-1"), vec!["NoAnswer on leg b-1"], "bob's ring deadline");
 

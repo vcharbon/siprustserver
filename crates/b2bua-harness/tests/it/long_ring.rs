@@ -180,3 +180,55 @@ async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
         "exactly ONE final on alice's initial INVITE",
     );
 }
+
+/// A ring deadline under the bound that a LATE first 18x would carry past it
+/// (190 s from a 180 sent 10 s after the INVITE, bound 200 s) is held to
+/// `bound − NO_ANSWER_CANCEL_MARGIN_SEC` = 192 s after the INVITE: the
+/// transaction bound runs from the INVITE, so the CANCEL→487 still completes
+/// inside it.
+#[tokio::test(start_paused = true)]
+async fn a_ring_from_a_late_18x_is_held_inside_the_invite_bound() {
+    let s = B2buaScene::with_b2bua("long-ring-late-18x-held", |bob_port| {
+        let decision: Arc<dyn CallDecisionEngine> = Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(move |_req| {
+                    let mut r = route_to("127.0.0.1", bob_port);
+                    r.no_answer_ms = Some(190_000);
+                    NewCallResponse::Route(r)
+                })
+                .build(),
+        );
+        B2buaSut::builder(decision).tune(|c| {
+            c.invite_txn_timeout_sec = 200;
+            c.setup_timeout_ms = 0;
+        })
+    })
+    .await;
+
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    let invited = tokio::time::Instant::now();
+    s.h.advance(Duration::from_secs(10)).await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    s.h.advance(Duration::from_secs(191) - (tokio::time::Instant::now() - invited)).await;
+    assert!(
+        s.bob.try_receive_tolerating("CANCEL", &[]).await.is_none(),
+        "no CANCEL before the held 192 s",
+    );
+    let mut cancel = s.bob.receive("CANCEL").await;
+    let rang_for = tokio::time::Instant::now() - invited;
+    assert!(
+        rang_for > Duration::from_secs(191) && rang_for <= Duration::from_secs(192),
+        "the CANCEL left at 192 s after the INVITE, the bound less its margin: {rang_for:?}",
+    );
+    cancel.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    s.bob.receive("ACK").await;
+    call.expect(480).await;
+
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
+    s.finish().await;
+}

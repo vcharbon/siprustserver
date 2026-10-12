@@ -11,6 +11,7 @@
 #[allow(dead_code)]
 mod stateful_proxy;
 
+mod abandoned_callee_via_lb;
 mod answer_lost_with_primary_no_answer;
 mod backup_capacity;
 mod call_terminate_on_backup;
@@ -44,9 +45,9 @@ mod released_copy;
 mod retransmission_turn_is_quiet;
 mod retry_on_a_challenged_identity;
 mod rfc_acceptance_window;
+mod ring_deadline_takeover;
 mod ringing_call_taken_over_on_departure;
 mod service_answer_deadline;
-mod silent_callee_no_answer_via_lb;
 mod silent_replication_stream;
 mod spiral_takeover;
 mod stale_no_answer_reclaim;

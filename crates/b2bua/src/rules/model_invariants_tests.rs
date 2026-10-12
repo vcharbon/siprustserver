@@ -53,7 +53,7 @@ fn call() -> Call {
     b.leg_id = "b-1".into();
     b.call_id = "bcid".into();
     b.own_tag = None;
-    b.outbound_invite = Some(OutboundInvite::new("own", 1, None));
+    b.outbound_invite = Some(OutboundInvite::new("own", 1, 0, None));
     b.dialogs = vec![dialog("own", "b1")].into();
     call::helpers::add_b_leg(call, b)
 }

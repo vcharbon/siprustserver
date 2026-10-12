@@ -93,7 +93,7 @@ fn b_leg(state: LegState, handle: Option<InviteTxnHandle>) -> Leg {
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
-        outbound_invite: Some(OutboundInvite::new("svc", 1, handle.clone())),
+        outbound_invite: Some(OutboundInvite::new("svc", 1, 0, handle.clone())),
         own_tag: None,
         ext: None,
         kind: Some(LegKind::Destination),

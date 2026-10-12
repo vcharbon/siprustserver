@@ -151,4 +151,4 @@ ACK is exempt — a 2xx ACK is TU-owned and rides no timer (§13.2.2.4). Counter
 `sip-txn/tests/it/cancel_hold.rs`, `sip-txn/tests/it/cancel_retransmit.rs` (X4),
 `b2bua-harness/tests/cancel_before_provisional.rs`,
 `b2bua-harness/tests/no_answer_cancelled_call.rs`,
-`failover-harness/tests/it/silent_callee_no_answer_via_lb.rs` (via-LB shape, X2).
+`failover-harness/tests/it/abandoned_callee_via_lb.rs` (via-LB shape, X2).

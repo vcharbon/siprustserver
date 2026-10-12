@@ -1,6 +1,6 @@
 //! What a response to an INVITE records before the rules read it: that the
-//! callee rang, and the end a non-2xx final makes of the transaction and of
-//! the early dialogs it created.
+//! callee rang, with the ring deadline its first 18x arms, and the end a
+//! non-2xx final makes of the transaction and of the early dialogs it created.
 
 use call::Call;
 use sip_message::{Method, SipResponse};
@@ -11,7 +11,8 @@ use crate::rules::ActionExecutor;
 
 /// Record what `resp` from `leg` says before the rules run. `screened`: the
 /// engine dropped it as a reliable provisional's repeat or one out of `RSeq`
-/// order, which records nothing. A 180–189 marks the callee rang. A non-2xx
+/// order, which records nothing. A 180–189 marks the callee rang; the first
+/// arms the leg's ring deadline (`ring_deadline`). A non-2xx
 /// INVITE final ends the transaction it answers (RFC 3261 §17.1.1.3,
 /// hop-ACKed below the TU), so the record stops naming that round as in
 /// flight; a final to the INVITE that dialled the leg ends every early dialog
@@ -29,6 +30,8 @@ pub(super) fn record(
         return;
     }
     if (180..=189).contains(&resp.status()) {
+        let cseq = i64::from(resp.cseq().seq());
+        crate::ring_deadline::arm_at_first_18x(exec.config, call, fx, leg, cseq, exec.now_ms);
         call::helpers::mark_rang(call, leg);
     }
     if resp.status() < 300 {

@@ -61,7 +61,8 @@ pub struct Attempt {
     pub decision_ordinal: u32,
     /// The legs the attempt dialled, in creation order.
     pub legs: Vec<String>,
-    /// The ring deadline its routing answer states for the legs it dials.
+    /// The ring deadline its routing answer states for the legs it dials:
+    /// each leg's runs from the first 180–189 its INVITE draws.
     pub no_answer: Deadline,
     pub outcome: Option<AttemptOutcome>,
 }
