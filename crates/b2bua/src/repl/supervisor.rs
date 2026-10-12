@@ -11,7 +11,7 @@
 //! subscribes to `changes()` and reconciles:
 //! - `Added` → spawn/Connecting (or un-Park: reconnect from the retained W).
 //! - `Removed` → `Parked`: interrupt both flows, **retain W forever** keyed by
-//!   `(ordinal, flow)`, and tell the router the peer departed (ADR-0046).
+//!   `(ordinal, flow)`, and tell the router the peer departed (ADR-0047).
 //! - `AddressChanged` → reconnect both flows to the new addr from the retained W.
 //! - `ConditionsChanged` → nothing moves: a member is **pulled while it is in the
 //!   snapshot at all**, ready or not, terminating or not (ADR-0031 D1). Only
@@ -495,7 +495,7 @@ impl ReplicationSupervisor {
 
         // Park: any peer whose ordinal departed the desired set (both flows).
         // A peer still running is a real stop: the router is told once, so it
-        // takes over the peer's calls with an INVITE in flight (ADR-0046); a
+        // takes over the peer's calls with an INVITE in flight (ADR-0047); a
         // quiescent call stays reactive (ADR-0014 §1).
         let desired_ords: std::collections::HashSet<&str> =
             desired.iter().map(|p| p.ordinal.as_str()).collect();

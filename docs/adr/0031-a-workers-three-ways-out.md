@@ -1,7 +1,7 @@
 # 0031 — A worker's ways out: graceful, abrupt, vanished, restarted in place — one membership rule for a member still in the slice, one guard for the forward flush
 
 **Status:** accepted (2026-09-13). Amended (2026-10-12): the case table, leaving the slice takes over
-the worker's calls with an INVITE in flight (ADR-0046).
+the worker's calls with an INVITE in flight (ADR-0047).
 
 **Source:** this codebase. Triggered by the failover-harness scenario
 `crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs` and its views
@@ -26,7 +26,7 @@ EndpointSlice API (`ready`, `serving`, `terminating`; the last two GA since Kube
 | **4. Restarted in place** (OOM-kill, kubelet restart, a readiness flap under load) | the pod object stays; the container restarts, or only the probe fails | `ready=false, serving=false, terminating=false`, still in the slice, **same address** | 0 (container restart) or the whole time (readiness flap: the process is alive and serving) | the same container, same address, seconds later |
 
 Leaving the slice is also when a worker's backups take over its calls with an INVITE
-in flight (ADR-0046): at the end of case 1, the pod gone after its drain; at +0 in
+in flight (ADR-0047): at the end of case 1, the pod gone after its drain; at +0 in
 case 2, overlapping the process's last 2 s; and in case 3b when the pod on an
 unreachable node is force-deleted, while its process may still live behind the
 partition. Case 3a and case 4 never leave the slice, and their calls stay reactive.
@@ -115,7 +115,7 @@ static membership, or SIGTERM before the slice moved) keeps quiescence-or-grace:
 reactive, so a proxied worker's calls are served on the next in-dialog request, but a
 direct-bound worker's would be abandoned. Exiting on `caught_up` with live calls is a
 *replicated crash*, deliberately: once the endpoint leaves the slice its backups take
-over the calls with an INVITE in flight (ADR-0046), the quiet ones on their next request. Before any exit the worker flushes its queued limiter
+over the calls with an INVITE in flight (ADR-0047), the quiet ones on their next request. Before any exit the worker flushes its queued limiter
 releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0040 decision 9); an exit is
 taken only with the queue empty, and a quiescent or caught-up one only if it still holds
 once the flush is done, since the worker serves its calls meanwhile; the drain never

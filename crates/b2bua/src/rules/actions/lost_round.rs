@@ -1,4 +1,4 @@
-//! The acknowledgement of a round the record lost (ADR-0046): an INVITE final
+//! The acknowledgement of a round the record lost (ADR-0047): an INVITE final
 //! on a confirmed dialog for a request this stack sent that no record here
 //! holds — its transaction died with the node that sent it.
 

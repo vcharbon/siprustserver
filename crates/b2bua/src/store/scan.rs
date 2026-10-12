@@ -29,7 +29,7 @@ impl CallState {
     }
 
     /// The `callRef` of every call body `(role, primary)` holds, nothing decoded
-    /// — a departed peer's `bak:{peer}` for the departure sweep (ADR-0046),
+    /// — a departed peer's `bak:{peer}` for the departure sweep (ADR-0047),
     /// which reads each body in turn. Empty when no replicating store is wired.
     pub fn partition_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {
         self.repl_store().map(|repl| repl.scan_call_refs(role, primary)).unwrap_or_default()

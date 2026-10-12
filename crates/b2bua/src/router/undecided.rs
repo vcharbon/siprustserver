@@ -6,7 +6,7 @@
 //! INVITE server transaction the materialisation rebuilt, with no Retry-After:
 //! the caller takes it as a 500 (RFC 3261 §21.5.4), whether to retry its own
 //! or its upstream's call. The decision is never asked again, so nothing it
-//! causes happens twice (ADR-0046). A setup its caller CANCELled before any
+//! causes happens twice (ADR-0047). A setup its caller CANCELled before any
 //! decision ends as its `Cancelled` turn would have.
 
 use std::sync::Arc;

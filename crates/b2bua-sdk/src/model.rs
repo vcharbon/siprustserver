@@ -471,7 +471,7 @@ pub enum RuleAction {
         body: Option<Body>,
     },
     /// ACK the INVITE final the current response carries on `leg_id`'s
-    /// confirmed dialog for a round the record does not hold (ADR-0046): the
+    /// confirmed dialog for a round the record does not hold (ADR-0047): the
     /// dialog's sequence is raised to the response's first (RFC 3261
     /// §12.2.1.1); a 2xx is ACKed end to end and its ACK retained for a repeat
     /// (§13.2.2.4), a non-2xx hop by hop on the response's own branch (§17.1.1.3).

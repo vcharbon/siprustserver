@@ -351,7 +351,7 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
 /// A plain crash after the decision was applied, before the routed call's
 /// write reached the backup: the backup holds the call as born, undecided, and
 /// refuses it 503 on the departure, while the callee the dead node dialled is
-/// left ringing, CANCELled by no one (ADR-0046, residual). The caller has its
+/// left ringing, CANCELled by no one (ADR-0047, residual). The caller has its
 /// one final.
 #[tokio::test(start_paused = true)]
 async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {

@@ -1,4 +1,4 @@
-//! The departure sweep (ADR-0046): a peer that left the membership set is
+//! The departure sweep (ADR-0047): a peer that left the membership set is
 //! gone, and a caller or callee it left mid-INVITE may send nothing more — a
 //! caller that heard a 100 runs no Timer B (RFC 3261 §17.1.1.2), and a silent
 //! callee stays silent. Every call this node backs up for the peer with an

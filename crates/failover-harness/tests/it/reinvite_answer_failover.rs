@@ -12,7 +12,7 @@
 //!
 //! Two kills: unannounced to the peers (ADR-0031 cases 3a and 4), the 200 is
 //! what takes the call over; announced, the departure sweep takes over the call
-//! whose round is in flight at once (ADR-0046), and the 200 then reaches the
+//! whose round is in flight at once (ADR-0047), and the 200 then reaches the
 //! copy already live, whose seeded transaction takes it.
 
 use std::time::Duration;

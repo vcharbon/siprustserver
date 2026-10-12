@@ -1,7 +1,7 @@
 # ADR-0014 — Reactive-only takeover + `(p,b)` version-vector reconciliation
 
 **Status:** accepted (2026-06-05). Amended (2026-10-12): D1, a departed peer's calls with an
-INVITE in flight are taken over at its departure (ADR-0046).
+INVITE in flight are taken over at its departure (ADR-0047).
 **Amends:** ADR-0011 Decision X11 — removes the *eager* (membership-driven) takeover
 and the *`Deactivate` watermark handshake*; **keeps** reactive takeover; **replaces**
 LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vector.
@@ -32,7 +32,7 @@ primary+backup mutations (a latent equal-`gen` divergence).
    kept — SIP retransmission cannot bridge an outage; real endpoints give up well
    before Timer F). A call with an INVITE transaction in flight is not quiescent: a
    caller that heard a 100 and a silent callee send nothing more, so its backups take
-   it over when its primary leaves the membership set (ADR-0046).
+   it over when its primary leaves the membership set (ADR-0047).
 
 2. **Remove the `Deactivate` handback** (wire frame tag 5 + the watermark handshake
    + the go-active burst). The acting-backup **self-releases**: when the **last

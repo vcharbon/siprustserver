@@ -89,7 +89,7 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
 /// under its per-call lock (ADR-0011 X11). `smoothing = Some(_)` is the bulk
 /// reboot sweep ([`reclaim_all`]); `None` a single straggler. Neither has a
 /// message to serve, so a call still undecided, or a setup CANCELled before
-/// its decision, is settled (ADR-0046). Returns
+/// its decision, is settled (ADR-0047). Returns
 /// `true` iff this pass did the work — freshly materialised, or a deferred
 /// terminal discharged — so the caller meters per-pass reclaim completeness;
 /// `false` for a call already resident (idempotent re-pass) or gone from the store.

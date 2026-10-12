@@ -13,7 +13,7 @@
 //! Two ways to the takeover: the caller's re-send with the kill unannounced to
 //! the peers (ADR-0031 cases 3a and 4), or — the caller having heard the 100,
 //! so sending nothing more — the departure announced, on which the survivor
-//! takes over the call whose round is in flight (ADR-0046).
+//! takes over the call whose round is in flight (ADR-0047).
 
 use std::time::Duration;
 

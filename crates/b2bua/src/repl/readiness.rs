@@ -68,7 +68,7 @@ pub trait ReadinessSource: Send + Sync {
     }
     /// This node's own endpoint left the slice (ADR-0031 D6): its orchestrator
     /// removed it, and its backups took its calls with an INVITE in flight
-    /// over (ADR-0046). Default `false` for a source that does not observe the
+    /// over (ADR-0047). Default `false` for a source that does not observe the
     /// node itself.
     fn left_the_slice(&self) -> bool {
         false

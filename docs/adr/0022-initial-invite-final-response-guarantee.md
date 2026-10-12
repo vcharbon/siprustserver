@@ -2,7 +2,7 @@
 
 **Status:** accepted (2026-07-03). Amended (2026-10-12): X4, the front proxy relays the worker's 100, and an
 INVITE response bound for a dead worker fails over on the cookie of its Record-Route or of the proxy's Via.
-Amended (2026-10-12): X4 and X5, a caller that heard the 100 is answered when its worker departs (ADR-0046).
+Amended (2026-10-12): X4 and X5, a caller that heard the 100 is answered when its worker departs (ADR-0047).
 
 ## Context
 
@@ -146,7 +146,7 @@ A non-INVITE response answers a client transaction only its sender holds
 
 A caller that heard the worker's 100 sends no retransmission that could re-place
 its call: its client transaction is `Proceeding`, which runs no Timer B. The
-platform answers it without a message from it (ADR-0046): a new call is written
+platform answers it without a message from it (ADR-0047): a new call is written
 to its backup at its birth, one replication stream hop after the 100
 (`failover-harness/tests/it/new_call_replication_window.rs`), and when its worker
 leaves the membership set the backup takes over every call with an INVITE in
@@ -225,7 +225,7 @@ limiter/txn slot until the 150 s `SetupTimeout` / crash. A node that dies mid-se
 leaves a live body, not a terminal one: whoever materialises it with no message —
 the departure sweep or the restarted node's reclaim — rebuilds the caller's INVITE
 server transaction and answers it 503, so it holds the live transaction and answers
-(ADR-0046 D4).
+(ADR-0047 D4).
 
 ## Consequences
 

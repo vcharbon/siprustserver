@@ -377,7 +377,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 /// backup AND the dead pod's endpoint is dropped from the survivor's membership
 /// (`simulate_peer_removed`) — the COMPLETE k8s death signal (a real kill removes
 /// the StatefulSet endpoint). The survivor takes over at once a call with an
-/// INVITE in flight (ADR-0046), and a quiet dialog when the proxy reroutes its
+/// INVITE in flight (ADR-0047), and a quiet dialog when the proxy reroutes its
 /// in-dialog traffic (ADR-0014, `router::materialise`). The reboot re-adds the
 /// endpoint ([`reboot_and_reclaim`]).
 async fn inject_failover(

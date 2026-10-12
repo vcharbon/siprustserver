@@ -1,4 +1,4 @@
-//! `ack-lost-round` (ADR-0046): an INVITE final on a confirmed dialog whose
+//! `ack-lost-round` (ADR-0047): an INVITE final on a confirmed dialog whose
 //! CSeq is above the last this stack's record sent on that dialog, with no
 //! relay pending for it, answers a round the record lost — the node that sent
 //! it died before the round reached this copy. Nothing else claims it: no

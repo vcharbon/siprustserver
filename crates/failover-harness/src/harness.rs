@@ -625,7 +625,7 @@ impl ReplicatedB2buaSut {
     /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
     /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
     /// view. The node's supervisor reconciles it to a Park, and the node takes
-    /// over the departed peer's calls with an INVITE in flight (ADR-0046); a
+    /// over the departed peer's calls with an INVITE in flight (ADR-0047); a
     /// quiet dialog is taken over only when the proxy reroutes its traffic.
     /// A kill the peers are not told of (ADR-0031 cases 3a, 4) skips this.
     pub fn simulate_peer_removed(&self, ordinal: &str) {

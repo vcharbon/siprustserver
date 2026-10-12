@@ -105,7 +105,7 @@ pub(crate) async fn placed(
 
 /// The kill the peers are told of: the node dies, the proxy's probe reads it
 /// dead, and the orchestrator removes its endpoint, so the survivor parks it
-/// and its departure sweep runs (ADR-0046). Returns the survivor's takeover
+/// and its departure sweep runs (ADR-0047). Returns the survivor's takeover
 /// count before the kill.
 pub(crate) async fn kill_announced(
     fh: &mut FailoverHarness,

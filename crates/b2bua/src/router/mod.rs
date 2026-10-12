@@ -238,7 +238,7 @@ pub enum ReplCommand {
     ForwardFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
     /// The peer of this ordinal left the membership set while its flows ran: a
     /// real stop. Its calls this node backs up with an INVITE in flight are
-    /// taken over at once (`departure`, ADR-0046). Sent once per stop.
+    /// taken over at once (`departure`, ADR-0047). Sent once per stop.
     PeerDeparted(String),
 }
 

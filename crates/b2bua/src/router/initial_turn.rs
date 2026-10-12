@@ -127,7 +127,7 @@ pub(super) async fn initial_invite_turn(
     ctx.state.create(call.clone());
     // The caller may already hold this node's 100 and send nothing more, so
     // the backup holds a call that asks its decision from its birth, not from
-    // the decision (ADR-0046); the decision turn's write supersedes this one.
+    // the decision (ADR-0047); the decision turn's write supersedes this one.
     // A setup already CANCELled or refused here asks none.
     let asks_decision = !cancelled && !call.a_leg_invite.from_tag.is_empty();
     if asks_decision && call.topology.as_ref().is_some_and(|t| !t.bak.is_empty()) {
@@ -202,7 +202,7 @@ pub(super) async fn initial_invite_turn(
     } else if !cancelled && ctx.readiness.left_the_slice() {
         // This node's endpoint left the slice while the decision was in
         // flight, so the decision is not applied: the callee is never dialled
-        // for a call its backup took over and answered (ADR-0046). The caller
+        // for a call its backup took over and answered (ADR-0047). The caller
         // holds that answer; a call with no backup is answered here.
         backup_answers = call.topology.as_ref().is_some_and(|t| !t.bak.is_empty());
         handled = refused_after_leaving_the_slice(ctx, &call, handled, now_ms, backup_answers);
@@ -264,7 +264,7 @@ fn refused_after_leaving_the_slice(
 
 /// The drop-guard result: the pre-handler call — no b-leg, no wire effects —
 /// recording the 487 the transaction layer answered the INVITE with, so the
-/// write that lands it on the backup reads the caller answered (ADR-0046).
+/// write that lands it on the backup reads the caller answered (ADR-0047).
 fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult {
     let call = discarded_turn(pre, handled);
     let a_leg = call.a_leg.leg_id.clone();

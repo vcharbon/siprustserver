@@ -1,6 +1,6 @@
 //! An INVITE final on a confirmed dialog, as the default rules read it. One
 //! whose CSeq is above the last the record sent on the dialog, with no relay
-//! pending for it, answers a round the record lost (ADR-0046): it is ACKed —
+//! pending for it, answers a round the record lost (ADR-0047): it is ACKed —
 //! a 2xx end to end under a raised sequence (RFC 3261 §13.2.2.4), a non-2xx
 //! hop by hop on its own branch (§17.1.1.3) — and the call is ended. A repeat
 //! of that 2xx is re-ACKed with the same ACK. A non-2xx that names no lost

@@ -4,7 +4,7 @@
 //! then on the caller sends no retransmission that could re-place the call.
 //! The call is written to its backup at its birth, before the routing decision
 //! is asked for, so a node death after the 100 leaves a replica behind for the
-//! departure sweep to answer (ADR-0046). This cell measures the window from the
+//! departure sweep to answer (ADR-0047). This cell measures the window from the
 //! caller's 100 to the first replica with a decision that takes a known time
 //! to answer: one replication stream hop, the decision's time no part of it.
 
