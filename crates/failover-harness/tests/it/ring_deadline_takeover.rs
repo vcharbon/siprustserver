@@ -8,7 +8,7 @@
 //! - when the primary dies before the callee's first 18x, that 18x reaches the
 //!   survivor, which arms the deadline from it (`a_first_18x_reaching_…`);
 //! - when the turn that took the first 18x dies with the primary before the
-//!   backup holds it, the copy materialised from the replica presumes the
+//!   backup holds it, the copy the departure hands the survivor presumes the
 //!   callee ringing since its INVITE (`a_first_18x_lost_with_the_primary_…`),
 //!   and an 18x it later takes runs the ring from that 18x
 //!   (`a_later_18x_on_the_survivor_…`).
@@ -41,15 +41,9 @@ const RING_MS: i64 = 6_789;
 /// leaves: callee → front proxy → worker, 1 ms each.
 const HOPS_IN_MS: i64 = 2;
 
-/// The ring deadline of the cell whose primary loses bob's 180 and a later 18x
-/// hands the call to the survivor: it ends before the 150 s setup deadline.
+/// The ring deadline of the cells whose primary loses bob's 180: the
+/// takeover happens inside it, and it ends before the 150 s setup deadline.
 const LOST_RING_MS: i64 = 90_123;
-
-/// The ring deadline of the cell whose primary reboots and reclaims the call
-/// while it rings: the reboot and the reclaim complete inside it, and it ends
-/// while the proxy still knows the primary's departed address (Timer H), so
-/// bob's responses to the reclaimed INVITE reach its new one.
-const RECLAIM_RING_MS: i64 = 25_123;
 
 /// Every call routes to bob under `ring_ms`; its expiry rejects the caller.
 fn ringing_route(ring_ms: i64) -> Arc<dyn CallDecisionEngine> {
@@ -305,29 +299,28 @@ async fn ring_lost_with_the_primary(
     (call_ref, sent_at, call, uas)
 }
 
-/// Bob's 180 dies with the primary, which reboots at a new address: the copy
-/// it reclaims shows no ring, so it presumes bob ringing since his INVITE and
-/// gives the ring up `no_answer_ms` after that INVITE — not at the setup
-/// deadline. Its INVITE transaction holds no provisional on record, so the
-/// CANCEL waits for one (RFC 3261 §9.1) and has the INVITE re-sent once; bob's
-/// transaction answers that retransmission with his latest provisional
-/// (§17.2.1), which the proxy brings to the primary's new address and which
+/// Bob's 180 dies with the primary, whose departure hands the call to the
+/// survivor: the copy it takes over shows no ring, so it presumes bob ringing
+/// since his INVITE and gives the ring up `no_answer_ms` after that INVITE —
+/// not at the setup deadline. Its INVITE transaction holds no provisional on
+/// record, so the CANCEL waits for one (RFC 3261 §9.1) and has the INVITE
+/// re-sent once; bob's transaction answers that retransmission with his latest
+/// provisional (§17.2.1), whose Record-Route brings it to the survivor and
 /// releases the CANCEL; bob's INVITE ends 487.
 #[tokio::test(start_paused = true)]
 async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
-    let mut c = spawn_cluster("ring-deadline-lost-18x-reclaim", RECLAIM_RING_MS).await;
+    let mut c = spawn_cluster("ring-deadline-lost-18x-presumed", LOST_RING_MS).await;
     let mut primary_is_b1 = true;
     let (call_ref, sent_at, mut call, mut uas) =
         ring_lost_with_the_primary(&mut c, &mut primary_is_b1).await;
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = c;
-    let (primary, backup) =
+    let (primary, survivor) =
         if primary_is_b1 { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
-    reboot_and_reclaim(&mut fh, primary, backup, &proxy).await;
-    let reclaimed = primary.live_call(&call_ref).expect("the rebooted primary serves the call");
-    assert_eq!(reclaimed.b_legs[0].ring, Ring::Presumed, "bob is presumed ringing");
-    let fire_at = sent_at + RECLAIM_RING_MS;
-    assert_eq!(ring_deadline(&reclaimed), Some(fire_at), "the ring runs from the INVITE");
+    let taken = survivor.live_call(&call_ref).expect("the departure handed the call over");
+    assert_eq!(taken.b_legs[0].ring, Ring::Presumed, "bob is presumed ringing");
+    let fire_at = sent_at + LOST_RING_MS;
+    assert_eq!(ring_deadline(&taken), Some(fire_at), "the ring runs from the INVITE");
 
     quiet_until(&fh, &bob, fire_at).await;
     call.expect(480).await;
@@ -348,6 +341,7 @@ async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
     fh.advance(Duration::from_secs(40)).await;
     assert!(bob.try_receive_tolerating("INVITE", &[]).await.is_none(), "re-sent once only");
 
+    reboot_and_reclaim(&mut fh, primary, survivor, &proxy).await;
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call within the settle budget");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;

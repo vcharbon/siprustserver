@@ -2,11 +2,14 @@
 //! heard the node's 100 Trying through the stateless front proxy (RFC 3261
 //! §16.11) and runs no Timer B (§17.1.1.2); the callee sends nothing more — no
 //! answer, a 100 alone, or a 180 and then nothing. The call's no-answer deadline
-//! lives in its replica, so when the node's departure is announced its backup
-//! takes the call over at once and ends it at that deadline, as the node would
-//! have: the caller gets its 480, the callee its CANCEL (held while its INVITE
-//! drew no provisional, §9.1). An established call of the same node, with
-//! nothing in flight, is not taken over: it stays reactive (ADR-0014 §1).
+//! lives in its replica — armed at the callee's 180, or, the record holding
+//! none, presumed from its INVITE by the copy that takes it over — so when the
+//! node's departure is announced its backup takes the call over at once and
+//! ends it at that deadline, as the node would have: the caller gets its 480,
+//! the callee its CANCEL (held while its INVITE drew no provisional, §9.1, the
+//! INVITE re-sent once so the callee resends its latest one, §17.2.1). An
+//! established call of the same node, with nothing in flight, is not taken
+//! over: it stays reactive (ADR-0014 §1).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,15 +121,26 @@ async fn place(name: &str, callee: Callee) -> Placed {
     Placed { fh, alice, bob, proxy, w_b1, w_b2, quiet, quiet_ref, ringing, at_bob, ringing_ref }
 }
 
-/// The ring deadline `b2`'s replica of `call_ref` carries.
+/// The ring deadline of `b2`'s replica of `call_ref`: the one it carries, or,
+/// its callee not having rung, the one a takeover presumes from its INVITE.
 async fn replicated_deadline(b2: &ReplicatedB2buaSut, call_ref: &str) -> i64 {
     let body = b2.get(PartitionRole::Backup, "b1", call_ref).await.expect("the replica");
     let call = MsgpackCodec::new().decode(&body).expect("the replica decodes");
+    let presumed = || {
+        let invite = call.b_legs[0].outbound_invite.as_ref().expect("the callee was dialled");
+        invite.sent_at_ms + NO_ANSWER.as_millis() as i64
+    };
     call.timers
         .iter()
         .find(|t| *t.timer_type() == TimerType::NoAnswer)
-        .map(|t| t.fire_at)
-        .expect("the replica carries the ring deadline")
+        .map_or_else(presumed, |t| t.fire_at)
+}
+
+/// The INVITE the backup re-sends once the CANCEL it holds waits on it (§9.1):
+/// the callee's transaction takes it as a retransmission.
+async fn resent_invite(p: &Placed) {
+    let resent = p.bob.receive("INVITE").await;
+    assert_eq!(resent.request().top_via().branch(), p.at_bob.request().top_via().branch());
 }
 
 /// The departure of `b1` announced: `b2` takes the ringing call over, and the
@@ -201,9 +215,13 @@ async fn a_call_whose_callee_sent_a_100_alone_ends_at_its_replicated_deadline() 
     ring_until(&p, deadline).await;
     p.fh.advance(Duration::from_millis(600)).await;
     final_at(&mut p, deadline).await;
+    // The callee resends its 100: hop-by-hop, it names no worker the proxy
+    // could fail it over to, so it never reaches the backup.
+    resent_invite(&p).await;
+    p.at_bob.respond(100, "Trying").await;
     p.fh.advance(Duration::from_secs(2)).await;
     assert!(
-        p.bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
+        p.bob.try_receive_tolerating("CANCEL", &[]).await.is_none(),
         "the CANCEL waits for a provisional the record holds (§9.1)",
     );
     p.at_bob.respond(180, "Ringing").await;
@@ -221,9 +239,10 @@ async fn a_call_whose_callee_is_silent_ends_at_its_replicated_deadline() {
     p.fh.advance(Duration::from_millis(600)).await;
     final_at(&mut p, deadline).await;
     // The CANCEL is held (§9.1); the callee's late answer is reaped.
+    resent_invite(&p).await;
     p.fh.advance(Duration::from_secs(2)).await;
     assert!(
-        p.bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
+        p.bob.try_receive_tolerating("CANCEL", &[]).await.is_none(),
         "no CANCEL toward a branch that drew no provisional (§9.1)",
     );
     p.at_bob.respond(200, "OK").with_sdp(ANSWER).await;

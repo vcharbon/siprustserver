@@ -3,6 +3,8 @@
 //! worker's CANCEL of it waits for one (RFC 3261 §9.1). The CANCEL is in the
 //! replicated record; when the serving node dies before the callee answers,
 //! the survivor rebuilds the INVITE transaction with that CANCEL held on it.
+//! It re-sends the INVITE once, the CANCEL waiting on it (ADR-0043), and the
+//! callee's transaction takes it as a retransmission.
 //! The callee's 100 never reaches the survivor: it carries no Record-Route
 //! (§8.2.6.1), and the proxy's Via on an initial INVITE carries no cookie, so
 //! the front proxy has none to fail it over on and drops it. The callee's 180
@@ -63,6 +65,8 @@ async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_18x_no
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
+    let resent = bob.receive("INVITE").await;
+    assert_eq!(resent.request().top_via().branch(), uas.request().top_via().branch());
 
     // ── bob's 100 dies at the proxy: no Record-Route, no cookie to follow ──
     uas.respond(100, "Trying").await;
