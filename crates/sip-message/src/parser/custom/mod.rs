@@ -76,6 +76,17 @@ impl CustomParser {
         Self { limits: SipParserLimits::default() }
     }
 
+    /// The start line and header block of `raw` read as a message's, its
+    /// header fields returned without the mandatory-field extraction a whole
+    /// message passes — the reading a message fragment (RFC 3420) takes.
+    pub fn parse_header_fields(&self, raw: &[u8]) -> Result<Vec<SipHeader>, SipParseError> {
+        let block = scanner::header_block(raw);
+        let text = decode_image(&raw[..block.end]);
+        let mut s = Scanner::new(text.as_str().as_bytes());
+        parse_start_line(&mut s, text.as_str(), &self.limits)?;
+        Ok(headers::parse_headers(&mut s, &text, block.lines, &self.limits)?.headers)
+    }
+
     pub fn with_limits(limits: SipParserLimits) -> Self {
         Self { limits }
     }

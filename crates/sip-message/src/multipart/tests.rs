@@ -417,3 +417,16 @@ fn a_part_serializes_its_bytes_as_base64() {
     assert_eq!(json["payload"], "dxUACg==");
     assert_eq!(serde_json::from_value::<MultipartPart>(json).unwrap(), data());
 }
+
+#[test]
+fn every_entity_header_value_is_located_in_the_body() {
+    let body =
+        b"--b\r\nContent-Type: text/plain\r\nContent-ID:  <x@example.com> \r\n\r\nhi\r\n--b--\r\n";
+    let parts = decompose(body, "b");
+    let spans: Vec<(&str, &[u8])> =
+        parts[0].entity_spans.iter().map(|(n, r)| (n.as_str(), &body[r.clone()])).collect();
+    assert_eq!(
+        spans,
+        [("Content-Type", &b"text/plain"[..]), ("Content-ID", &b"<x@example.com>"[..])]
+    );
+}

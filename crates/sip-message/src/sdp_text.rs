@@ -1,7 +1,7 @@
 //! The free-form fields of a session description (RFC 4566 §5.2–§5.6): the
 //! origin's username, the session name, and every information, URI, email
 //! and phone field at session or media level — the text a description carries
-//! for people rather than for the media stack.
+//! for people rather than for the media stack — and its attributes (§5.13).
 
 /// One free-form field: its letter (`o` for the origin username, `s`, `i`,
 /// `u`, `e`, `p`) and its value as written.
@@ -33,9 +33,51 @@ pub fn text_fields(body: &[u8]) -> Vec<TextField> {
     out
 }
 
+/// One attribute line (`a=<name>` or `a=<name>:<value>`, RFC 4566 §5.13).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribute {
+    pub name: String,
+    pub value: Option<String>,
+}
+
+/// Every attribute of `body`, session and media level, in document order;
+/// nothing where the body is no description (it does not open on `v=`).
+pub fn attributes(body: &[u8]) -> Vec<Attribute> {
+    let text = String::from_utf8_lossy(body);
+    if !text.starts_with("v=") {
+        return Vec::new();
+    }
+    text.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .filter_map(|line| line.strip_prefix("a="))
+        .map(|attr| match attr.split_once(':') {
+            Some((name, value)) => {
+                Attribute { name: name.to_string(), value: Some(value.to_string()) }
+            }
+            None => Attribute { name: attr.to_string(), value: None },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_attribute_is_read_with_its_value_where_it_has_one() {
+        let body = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\na=sendrecv\r\n\
+                     m=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=x-ref:http://a.example/x\r\n";
+        let attrs = attributes(body);
+        assert_eq!(
+            attrs.iter().map(|a| (a.name.as_str(), a.value.as_deref())).collect::<Vec<_>>(),
+            [
+                ("sendrecv", None),
+                ("rtpmap", Some("0 PCMU/8000")),
+                ("x-ref", Some("http://a.example/x"))
+            ]
+        );
+        assert!(attributes(b"a=x:y").is_empty());
+    }
 
     #[test]
     fn every_free_form_field_is_read_at_session_and_media_level() {

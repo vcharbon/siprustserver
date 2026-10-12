@@ -338,6 +338,9 @@ pub struct LocatedPart {
     /// Every entity header but `Content-Type`, `Content-ID` included, in wire
     /// order and with the part's own spelling.
     pub entity_headers: Vec<(String, String)>,
+    /// Every entity header, `Content-Type` included, as its name and the range
+    /// of its value in the body [`decompose`] walked, in wire order.
+    pub entity_spans: Vec<(String, std::ops::Range<usize>)>,
     /// Where the part's content starts in the body [`decompose`] walked.
     pub offset: usize,
     /// The content's length in bytes.
@@ -391,6 +394,7 @@ pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
             content_id: part_header(&block[..head_len], "content-id"),
             headers: part_headers_beyond(&block[..head_len], &["content-type", "content-id"]),
             entity_headers: part_headers_beyond(&block[..head_len], &["content-type"]),
+            entity_spans: part_header_spans(&block[..head_len], start + lead),
             offset: start + lead + head_len + gap,
             len: content.len() - trailing,
         });
@@ -423,35 +427,6 @@ pub fn sdp_range(content_type: &MediaType, body: &[u8]) -> Option<std::ops::Rang
         .map(|part| part.offset..part.offset + part.len)
 }
 
-/// Every entity header of a part's header block except the ones already held in
-/// their own field, in wire order and with the part's own spelling.
-fn part_headers_beyond(head: &[u8], own_fields: &[&str]) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for line in head.split(|&b| b == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
-        let name = String::from_utf8_lossy(&line[..colon]).trim().to_string();
-        if name.is_empty() || own_fields.iter().any(|own| name.eq_ignore_ascii_case(own)) {
-            continue;
-        }
-        out.push((name, String::from_utf8_lossy(&line[colon + 1..]).trim().to_string()));
-    }
-    out
-}
-
-/// One MIME entity header of a part's header block, case-insensitively.
-fn part_header(head: &[u8], name_lower: &str) -> Option<String> {
-    for line in head.split(|&b| b == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
-        let name = String::from_utf8_lossy(&line[..colon]);
-        if name.trim().eq_ignore_ascii_case(name_lower) {
-            return Some(String::from_utf8_lossy(&line[colon + 1..]).trim().to_string());
-        }
-    }
-    None
-}
-
 /// `(offset, slice)` for every stretch of `hay` between occurrences of `sep`,
 /// the separators dropped. The first entry is whatever preceded the first
 /// separator, so a caller wanting the parts skips it.
@@ -472,6 +447,10 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     }
     hay.windows(needle.len()).position(|w| w == needle)
 }
+
+mod entity;
+
+use entity::{part_header, part_header_spans, part_headers_beyond};
 
 #[cfg(test)]
 mod tests;
