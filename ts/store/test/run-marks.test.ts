@@ -82,16 +82,13 @@ describe.skipIf(!served)("run marks", () => {
     expect(rows.map((row) => row.cleanup)).toEqual(["1 call left", "1 call left; 2 calls left"])
   })
 
-  it("closes the open runs of a dead sweep with the detail given, and none of another sweep", async () => {
+  it("names the open runs of a sweep with their bundles, and none of another sweep", async () => {
     const dead = await withStore(sweep)
     const alive = await withStore(sweep)
     const [first, second] = await withStore(Effect.all([open(dead), open(dead)]))
-    const other = await withStore(open(alive))
+    await withStore(open(alive))
     await withStore(Effect.flatMap(Runs.Service, (runs) => runs.finish({ id: first!.id, status: "done", cases: [] })))
-    const closed = await withStore(Effect.flatMap(Runs.Service, (runs) => runs.abandonSweep(dead, "the sweep's process is gone")))
-    expect(closed).toEqual([second!.id])
-    const open_ = await withStore(Effect.flatMap(Runs.Service, (runs) => runs.unfinished))
-    expect(open_.map((row) => row.id)).toContain(other.id)
-    expect(open_.map((row) => row.id)).not.toContain(second!.id)
+    const left = await withStore(Effect.flatMap(Runs.Service, (runs) => runs.openOfSweep(dead)))
+    expect(left).toEqual([{ id: second!.id, bundlePath: second!.bundlePath }])
   })
 })

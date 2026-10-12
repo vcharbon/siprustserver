@@ -22,6 +22,18 @@ export interface Exported {
   readonly refusals: number
 }
 
+/** One case id of one reading, as the map keeps it. */
+export interface Row {
+  readonly prepId: number
+  readonly capture: string
+  readonly caseId: string
+  readonly kind: "case" | "refused"
+  /** The call key; null for a refusal whose cut recorded none. */
+  readonly callKey: string | null
+  /** The Call-IDs a refusal names; empty for a case. */
+  readonly callIds: ReadonlyArray<string>
+}
+
 export interface Interface {
   /** Copies the readings whose rows `case_maps` does not hold yet; answers the rows copied. */
   readonly export: Effect.Effect<Exported, SqlError>
@@ -34,6 +46,10 @@ export interface Interface {
   readonly locate: Effect.Effect<number, SqlError>
   /** The readings holding cut rows whose map is not written: what a removal of cut rows must refuse on. */
   readonly unexported: Effect.Effect<number, SqlError>
+  /** Every capture the maps name, in order. */
+  readonly captures: Effect.Effect<ReadonlyArray<string>, SqlError>
+  /** Every row of these captures, by capture, newest prep first, then case id. */
+  readonly rows: (captures: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Row>, SqlError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/store/CaseMaps") {}
@@ -159,6 +175,35 @@ export const layer = Layer.effect(
       return Number(rows[0]!.n)
     })
 
-    return Service.of({ export: exportAll, locate, unexported })
+    const captures = Effect.gen(function*() {
+      const rows = yield* sql<{ capture: string }>`SELECT DISTINCT capture FROM case_maps ORDER BY capture`
+      return rows.map((row) => row.capture)
+    })
+
+    const rows = Effect.fn("CaseMaps.rows")(function*(of: ReadonlyArray<string>) {
+      if (of.length === 0) return []
+      const found = yield* sql<{
+        prep_id: string
+        capture: string
+        case_id: string
+        kind: "case" | "refused"
+        call_key: string | null
+        call_ids: ReadonlyArray<string>
+      }>`
+        SELECT prep_id, capture, case_id, kind, call_key, call_ids FROM case_maps
+        WHERE capture IN ${sql.in(of)}
+        ORDER BY capture, prep_id DESC, case_id
+      `
+      return found.map((row): Row => ({
+        prepId: Number(row.prep_id),
+        capture: row.capture,
+        caseId: row.case_id,
+        kind: row.kind,
+        callKey: row.call_key,
+        callIds: row.call_ids
+      }))
+    })
+
+    return Service.of({ export: exportAll, locate, unexported, captures, rows })
   })
 )

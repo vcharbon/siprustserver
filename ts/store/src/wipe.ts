@@ -93,6 +93,12 @@ export class Refused extends Data.TaggedError("Wipe.Refused")<{ readonly reasons
 }
 
 export interface Interface {
+  /**
+   * When the store's ids began, `YYYY-MM-DD`: its first reading's cut, kept
+   * or mapped; null for a store that never cut. A citation dated before it
+   * names another store's run.
+   */
+  readonly since: Effect.Effect<string | null, SqlError>
   /** What a wipe would keep and drop, read-only, in a read-only transaction. */
   readonly plan: (request: Request) => Effect.Effect<Plan, SqlError>
   /** Drops what the plan names, one transaction; fails `Refused`, removing nothing, where it may not run. */
@@ -158,18 +164,19 @@ export const layer = Layer.effect(
         summarised: boolean
         unmapped: string
       }>`
-        WITH cited AS (${cited})
+        WITH cited AS MATERIALIZED (${cited}),
+        cited_runs AS MATERIALIZED (
+          SELECT r.id FROM runs r JOIN cited c ON c.kind = 'run' AND c.id = r.id
+          UNION SELECT r.id FROM runs r JOIN cited c ON c.kind = 'job' AND c.id = r.job_id
+          UNION SELECT r.id FROM runs r JOIN cited c ON c.kind = 'sweep' AND c.id = r.sweep_id
+        )
         SELECT r.id, r.bundle_path,
                CASE
                  WHEN ${request.keepLanes.length === 0 ? sql`false` : sql`r.lane IN ${sql.in(request.keepLanes)}`} THEN 'lane'
                  WHEN ${has.pins ? sql`EXISTS (SELECT 1 FROM pins p WHERE p.run_id = r.id)` : sql`false`} THEN 'pinned'
                  WHEN r.finished_at IS NULL THEN 'open'
                END AS keep,
-               EXISTS (
-                 SELECT 1 FROM cited c
-                 WHERE (c.kind = 'run' AND c.id = r.id) OR (c.kind = 'job' AND c.id = r.job_id)
-                    OR (c.kind = 'sweep' AND c.id = r.sweep_id)
-               ) AS cited,
+               r.id IN (SELECT id FROM cited_runs) AS cited,
                (SELECT count(*) FROM case_results cr WHERE cr.run_id = r.id) AS results,
                (SELECT count(*) FROM run_rule_hits h WHERE h.run_id = r.id) AS rule_hits,
                ${has.summaries
@@ -300,6 +307,18 @@ export const layer = Layer.effect(
       return done
     })
 
-    return Service.of({ plan, execute })
+    const since = Effect.gen(function*() {
+      const has = yield* tables
+      const rows = yield* sql<{ at: Date | null }>`
+        SELECT least(
+          (SELECT min(cut_at) FROM capture_cuts),
+          ${has.maps ? sql`(SELECT min(cut_at) FROM case_maps)` : sql`NULL::timestamptz`}
+        ) AS at
+      `
+      const at = rows[0]?.at ?? null
+      return at === null ? null : at.toISOString().slice(0, 10)
+    })
+
+    return Service.of({ since, plan, execute })
   })
 )

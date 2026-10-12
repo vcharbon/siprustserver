@@ -41,6 +41,8 @@ export interface RunRow {
   readonly startedAt: string
   readonly cases: number
   readonly failed: number
+  /** What the lane's post-run cleanup gate found on a batch its cells ran in; null where clean or not judged. */
+  readonly cleanup: string | null
 }
 
 /** Two sides read against each other. */
@@ -214,9 +216,10 @@ export const layer = Layer.effect(
         started_at: Date
         cases: number
         failed: number
+        cleanup: string | null
       }>`
         SELECT r.id, r.capture, r.lane, r.set_kind, r.status, r.env, r.branch, r.components,
-               r.sweep_id, r.job_id, r.started_at, r.cases, r.failed
+               r.sweep_id, r.job_id, r.started_at, r.cases, r.failed, r.cleanup
         FROM runs r
         WHERE ${where(selector)}
         ORDER BY r.id DESC
@@ -235,7 +238,8 @@ export const layer = Layer.effect(
         jobId: row.job_id === null ? null : Number(row.job_id),
         startedAt: row.started_at.toISOString(),
         cases: Number(row.cases),
-        failed: Number(row.failed)
+        failed: Number(row.failed),
+        cleanup: row.cleanup
       }))
     })
 

@@ -248,6 +248,14 @@ describe.skipIf(!served)("a call stands at its latest @current run", () => {
       expect(standing?.lastOkRunId).toBe(green.id)
     })))
 
+  it("stands a capture whose only run is a cases run: it is recorded, never read as never run", () =>
+    withRuns(Effect.gen(function*() {
+      const capture = "caseset_only.pcap.gz"
+      const probe = yield* ran(capture, [failed(`${capture}-case3`)], "cases")
+      const all = yield* Effect.flatMap(Runs.Service, (runs) => runs.standings(LANE))
+      expect(all.find((row) => row.capture === capture)?.runId).toBe(probe.id)
+    })))
+
   it("turns a capture green once a cases run passes its every failing call", () =>
     withRuns(Effect.gen(function*() {
       const capture = "caseset_green.pcap.gz"

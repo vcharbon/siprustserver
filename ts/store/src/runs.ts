@@ -89,6 +89,17 @@ export interface Unfinished {
   readonly prepId: number | null
 }
 
+/** A bundle a run row names, and what a retention ruling reads of that run. */
+export interface RecordedBundle {
+  readonly runId: number
+  /** Absolute. */
+  readonly bundlePath: string
+  readonly lane: string
+  /** Null for a run still open. */
+  readonly finishedAt: string | null
+  readonly pinned: boolean
+}
+
 /** An unfinished row and the bundle whose mtime is the second half of the evidence. */
 export interface Abandonable {
   readonly id: number
@@ -125,8 +136,8 @@ export interface Interface {
   readonly standing: (capture: string, lane?: string) => Effect.Effect<Standing | null, SqlError>
   /** Bundle paths cleanup must never delete: every (capture, lane)'s current, last-ok, and every case's current run. */
   readonly protectedBundles: Effect.Effect<ReadonlySet<string>, SqlError>
-  /** Every bundle path the table points at, so cleanup can name what it drops. */
-  readonly allBundles: Effect.Effect<ReadonlyArray<{ readonly runId: number; readonly bundlePath: string }>, SqlError>
+  /** Every bundle path the table points at, with what a retention ruling reads of its run. */
+  readonly allBundles: Effect.Effect<ReadonlyArray<RecordedBundle>, SqlError>
   /**
    * Every run that has not finished, with the prep it pins. What "open" means
    * is one reading taken once — everything from the lowest id up may still be
@@ -158,8 +169,8 @@ export interface Interface {
    * Answers the rows marked.
    */
   readonly dirty: (ids: ReadonlyArray<number>, finding: string) => Effect.Effect<number, SqlError>
-  /** The runs of a sweep left open, closed `error` with `detail`: a sweep whose process is gone. Answers the rows closed. */
-  readonly abandonSweep: (sweepId: number, detail: string) => Effect.Effect<ReadonlyArray<number>, SqlError>
+  /** The runs of a sweep still open, with their bundles: what closing a sweep whose process is gone closes. */
+  readonly openOfSweep: (sweepId: number) => Effect.Effect<ReadonlyArray<Abandonable>, SqlError>
   /** Wipes every run row whose bundle is under `dir` (the tree, or one session of it); the rebuild's first act. */
   readonly forget: (dir: string) => Effect.Effect<number, SqlError>
 }
@@ -570,12 +581,23 @@ export const layer = Layer.effect(
     })
 
     const allBundles = Effect.gen(function*() {
-      const rows = yield* sql<{ id: string; bundle_path: string }>`
-        SELECT id, bundle_path FROM runs WHERE bundle_path <> '' ORDER BY id
+      const rows = yield* sql<{
+        id: string
+        bundle_path: string
+        lane: string
+        finished_at: Date | null
+        pinned: boolean
+      }>`
+        SELECT r.id, r.bundle_path, r.lane, r.finished_at,
+               EXISTS (SELECT 1 FROM pins p WHERE p.run_id = r.id) AS pinned
+        FROM runs r WHERE r.bundle_path <> '' ORDER BY r.id
       `
-      return rows.map((row) => ({
+      return rows.map((row): RecordedBundle => ({
         runId: Number(row.id),
-        bundlePath: Sessions.fromStored(root, row.bundle_path)
+        bundlePath: Sessions.fromStored(root, row.bundle_path),
+        lane: row.lane,
+        finishedAt: iso(row.finished_at),
+        pinned: row.pinned
       }))
     })
 
@@ -637,13 +659,14 @@ export const layer = Layer.effect(
       return rows.length
     })
 
-    const abandonSweep = Effect.fn("Runs.abandonSweep")(function*(sweepId: number, detail: string) {
-      const rows = yield* sql<{ id: string }>`
-        UPDATE runs SET finished_at = now(), detail = ${detail}
-        WHERE sweep_id = ${sweepId} AND finished_at IS NULL
-        RETURNING id
+    const openOfSweep = Effect.fn("Runs.openOfSweep")(function*(sweepId: number) {
+      const rows = yield* sql<{ id: string; bundle_path: string }>`
+        SELECT id, bundle_path FROM runs WHERE sweep_id = ${sweepId} AND finished_at IS NULL ORDER BY id
       `
-      return rows.map((row) => Number(row.id)).sort((a, b) => a - b)
+      return rows.map((row): Abandonable => ({
+        id: Number(row.id),
+        bundlePath: Sessions.fromStored(root, row.bundle_path)
+      }))
     })
 
     const forget = Effect.fn("Runs.forget")(function*(dir: string) {
@@ -673,7 +696,7 @@ export const layer = Layer.effect(
       abandon,
       unfinishedOf,
       dirty,
-      abandonSweep,
+      openOfSweep,
       forget
     })
   })

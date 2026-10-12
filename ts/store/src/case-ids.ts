@@ -25,6 +25,8 @@ import type { SqlError } from "effect/unstable/sql/SqlError"
 export interface Entry {
   readonly caseId: string
   readonly callKey: string
+  /** What named it, where it is not the freeze's own origin. */
+  readonly origin?: string
 }
 
 /** Where a freeze stops: the id or the call is frozen otherwise. */
@@ -137,10 +139,11 @@ export const freezeOn = (
     }
     if (mode === "strict" && clashes.length > 0) return yield* new Conflict({ capture, clashes })
     if (fresh.length > 0) {
+      const rows = fresh.map((entry) => ({ ...entry, origin: entry.origin ?? origin }))
       yield* sql`
         INSERT INTO case_ids (capture, case_id, call_key, origin)
-        SELECT ${capture}, e."caseId", e."callKey", ${origin}
-        FROM jsonb_to_recordset(${JSON.stringify(fresh)}::jsonb) AS e("caseId" text, "callKey" text)
+        SELECT ${capture}, e."caseId", e."callKey", e.origin
+        FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS e("caseId" text, "callKey" text, origin text)
       `
     }
     return { added: fresh.length, held, skipped: clashes.length } satisfies Frozen
