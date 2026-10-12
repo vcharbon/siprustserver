@@ -21,7 +21,7 @@
 import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens } from "@sip/contracts"
 import type { BackgroundMap } from "./background.js"
 import type * as Captured from "./captured.js"
-import type { CaptureRule } from "./capture-rules.js"
+import { CAPTURE_RULES, type CaptureRule } from "./capture-rules.js"
 import { CASE_RULES, type CaseRule } from "./case-rules.js"
 import { CUT_RULES } from "./cut.js"
 import { neverDerives, type CallIdDerivation } from "./derivation.js"
@@ -339,7 +339,7 @@ export interface TieredRoster {
 
 /** Every refusal rule a policy runs, by tier, in the order a capture meets them. */
 export const tieredRoster = (policy: CasePolicy): TieredRoster => ({
-  capture: [...CUT_RULES, ...policy.refuseAtCapture],
+  capture: [...CUT_RULES, ...CAPTURE_RULES, ...policy.refuseAtCapture],
   case: [...CASE_RULES, ...policy.refuse],
   document: [...DOCUMENT_RULES, ...policy.refuseOnDocument]
 })

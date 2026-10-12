@@ -34,6 +34,13 @@ export interface RuleIdentity {
   readonly id: string
   readonly subject: RefusalSubject
   readonly disposition: Disposition
+  /**
+   * Why a case refused under this token is refused, in ONE line: for a rule
+   * of this package, why the slice cannot run, in RFC terms; for a
+   * deployment's, why the deployment does not judge it. The finding's own
+   * `line` says where; this says why, whatever the case.
+   */
+  readonly why: string
 }
 
 /**
@@ -58,6 +65,32 @@ export interface Finding {
   /** The coordinates a declaration must anchor to withdraw it. */
   readonly charged?: ReadonlyArray<ChargedHit>
 }
+
+/** The legs an evidence set names, ascending. */
+const legsOf = (evidence: ReadonlyArray<RefusalEvidence>): ReadonlyArray<number> =>
+  [...new Set(evidence.flatMap((e) => (e.leg === undefined ? [] : [e.leg])))].sort((a, b) => a - b)
+
+/** The Call-IDs an evidence set names, in first-seen order. */
+export const callIdsOf = (evidence: ReadonlyArray<RefusalEvidence>): ReadonlyArray<string> =>
+  [...new Set(evidence.flatMap((e) => (e.callId === undefined ? [] : [e.callId])))]
+
+/**
+ * One finding built from its own evidence: the legs and the Call-IDs are READ
+ * off the coordinates rather than restated beside them, so a rule states its
+ * finding once instead of once for the log and once for disk.
+ */
+export const findingOf = (
+  capture: string,
+  caseId: string,
+  reason: string,
+  evidence: ReadonlyArray<RefusalEvidence>,
+  clause: (e: RefusalEvidence) => string
+): Finding => ({
+  legs: legsOf(evidence),
+  callIds: callIdsOf(evidence),
+  evidence,
+  line: `${capture}: case '${caseId}' EXCLUDED ${reason} — ${evidence.map(clause).join("; ")}`
+})
 
 /** Where a refusal is recorded: the case the evaluator was deciding. */
 export interface RefusalSite {

@@ -39,7 +39,7 @@ import { caseCallIds } from "./cut.js"
 import type { PartsIndex } from "./parts.js"
 import type { Plan } from "./plan.js"
 import { withdrawnBy, type CasePolicy, type Refusal } from "./policy.js"
-import type { CaptureInput, CaptureRule } from "./capture-rules.js"
+import { CAPTURE_RULES, type CaptureInput, type CaptureRule } from "./capture-rules.js"
 import { CASE_RULES, type CaseRule, type RefusalInput } from "./case-rules.js"
 import { DOCUMENT_RULES, type DocumentInput, type DocumentRule } from "./document-rules.js"
 import { refusalOf, type RefusalSite } from "./refusal-rule.js"
@@ -190,7 +190,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     }
     const site = { caseId: spec.id, capture: input.capture }
     const refusals = [
-      ...atCapture(input.policy.refuseAtCapture, site, captured),
+      ...atCapture([...CAPTURE_RULES, ...input.policy.refuseAtCapture], site, captured),
       ...atCase([...CASE_RULES, ...input.policy.refuse], site, { ...captured, spec })
     ]
 

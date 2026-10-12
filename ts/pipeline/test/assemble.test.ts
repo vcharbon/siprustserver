@@ -156,6 +156,7 @@ describe("deciding a whole capture", () => {
       id: r.reason,
       subject: r.reason.startsWith("sut-") ? "sut" : "scope",
       disposition: r.disposition,
+      why: `${r.reason} as the canned case states it`,
       refuses: () => ({
         line: r.line,
         ...(r.charged === undefined ? {} : { charged: r.charged })

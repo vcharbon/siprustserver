@@ -207,6 +207,12 @@ export const isSuccessToInvite = (step: Step): boolean => {
 }
 
 /**
+ * An ANSWER to an INVITE a B2BUA relays: a `180`–`189` or a `2xx`; the same
+ * claim on a step as `Flows.isRelayedInviteAnswer` on a datagram.
+ */
+export const isRelayedInviteAnswer = (step: Step): boolean => isProvisionalToInvite(step) || isSuccessToInvite(step)
+
+/**
  * A dialog-creating INVITE: the initial offer, not a re-INVITE. The document
  * states it as `in_dialog`; the capture states it as an empty To-tag
  * (`Flows.opensDialog`), and the two are the same claim.

@@ -2,12 +2,12 @@
  * What makes a roster of refusal rules well-formed, refused at LOAD time rather
  * than discovered on a corpus.
  *
- * Three ways a roster lies about itself, and each has cost a session already:
- * two rules sharing one token, so `excluded.json` carries two records nothing
- * tells apart; a token whose prefix names one party while its rule names
- * another; and a rule that names a DEPLOYMENT living in the deployment-free
- * package, which is how `source-answer-not-captured` came to justify itself with
- * a claim about `relay18x`'s arms.
+ * Four ways a roster lies about itself: two rules sharing one token, so the
+ * refusal records carry two findings nothing tells apart; a token whose prefix
+ * names one party while its rule names another; a rule that names a DEPLOYMENT
+ * living in the deployment-free package, where only "this slice cannot run"
+ * belongs; and a rule that states no one-line reason, so a reader meets a
+ * token and nothing saying why.
  *
  * A retired token KEEPS ITS SLOT — {@link RETIRED_REFUSAL_IDS} — so a name a
  * corpus still carries on disk can never be reused for something else.
@@ -46,8 +46,8 @@ export const refusalRuleIds = (
 
 /**
  * Refuse a roster that cannot be trusted to say what it refuses: a token used
- * twice, a token already spent by a retired rule, or a subject its own token
- * contradicts.
+ * twice, a token already spent by a retired rule, a rule with no one-line
+ * reason, or a subject its own token contradicts.
  *
  * `deploymentFree` is the one check a package makes about ITSELF: a roster
  * inside `@sip/pipeline` states no `sut` subject, because naming what one
@@ -66,6 +66,9 @@ export const checkRefusalRoster = (
       throw new Error(`${options.where}: '${rule.id}' is a retired token and cannot be reused`)
     }
     seen.add(rule.id)
+    if (rule.why.trim() === "" || /[\r\n]/.test(rule.why)) {
+      throw new Error(`${options.where}: '${rule.id}' states no one-line reason (\`why\`)`)
+    }
     if (options.deploymentFree === true && rule.subject === "sut") {
       throw new Error(
         `${options.where}: '${rule.id}' names the source platform's own behaviour, which a ` +

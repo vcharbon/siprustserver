@@ -305,7 +305,23 @@ export const vantageIsInbound = (
   flows: Flows.FlowsDoc,
   sut: SutSet,
   v: CutVantage
-): boolean => anchorsOf(flows, v.leg, sut).some((a) => a.hop === v.hop && a.inbound)
+): boolean => {
+  vantageLeg(flows, v)
+  return anchorsOf(flows, v.leg, sut).some((a) => a.hop === v.hop && a.inbound)
+}
+
+/**
+ * The captured leg a vantage names. A vantage is cut from the same flows
+ * document every rule reads, so one naming no leg of it is the caller's defect,
+ * never a case to generate or to clear: it throws.
+ */
+export const vantageLeg = (flows: Flows.FlowsDoc, v: CutVantage): Flows.Leg => {
+  const leg = flows.legs[v.leg]
+  if (leg === undefined) {
+    throw new Error(`vantage leg ${v.leg} hop ${v.hop} names no leg of the flows document`)
+  }
+  return leg
+}
 
 /** Every message index of a leg that belongs to the vantage anchored at `hop`. */
 export const vantageMsgIdxs = (
@@ -386,6 +402,7 @@ const MISSING_UPSTREAM_RULE: CaptureRule = {
   id: MISSING_UPSTREAM_LEG,
   subject: "source",
   disposition: "unreachable",
+  why: "no captured leg carries the call into the system under test, so no caller can be scripted",
   refuses: (input) => {
     const anchors = familyAnchors(input)
     if (anchors.length === 0 || anchors.some((a) => a.inbound)) return undefined
@@ -419,6 +436,7 @@ const HAIRPIN_RULE: CaptureRule = {
   id: HAIRPIN_LOOPBACK,
   subject: "source",
   disposition: "unreachable",
+  why: "a dialog the system under test dialled comes back to it at the same hop, and one actor plays one transit only",
   refuses: (input) => {
     const hairpins = input.legs.flatMap((leg) =>
       hairpinHops(input.flows, leg, input.sut).map((hop) => ({ leg, hop }))
@@ -457,6 +475,7 @@ const NO_DIALOG_RULE: CaptureRule = {
   id: NO_DIALOG_AT_BOUNDARY,
   subject: "source",
   disposition: "not-proposed",
+  why: "no dialog-creating INVITE crosses the boundary of the system under test, so no call is proposed",
   refuses: (input) => {
     if (familyAnchors(input).length > 0) return undefined
     if (!input.legs.some((i) => input.flows.legs[i]!.msgs.some(Flows.isInvite))) return undefined

@@ -17,6 +17,7 @@ import type { CaseSpec } from "./case-spec.js"
 import type { CaptureInput } from "./capture-rules.js"
 import { checkRefusalRoster } from "./refusal-roster.js"
 import type { Finding, RuleIdentity } from "./refusal-rule.js"
+import { CALL_COMPLETENESS_RULE } from "./call-completeness.js"
 import { IDENTITY_REOFFERED, reofferClause, reofferLine, reoffers } from "./reoffer.js"
 
 /** What a CASE-TIER refusal is decided from: the capture, plus the cut's vantages. */
@@ -38,6 +39,7 @@ export const CASE_RULES: ReadonlyArray<CaseRule> = [
     id: IDENTITY_REOFFERED,
     subject: "scope",
     disposition: "refuses",
+    why: "a vantage holds a second dialog-opening INVITE of one originator, and a leg scripts one dialog",
     refuses: (input) => {
       const charged = reoffers(input.flows, [input.spec.uac, ...input.spec.uas])
       if (charged.length === 0) return undefined
@@ -55,7 +57,8 @@ export const CASE_RULES: ReadonlyArray<CaseRule> = [
         line: reofferLine(input.capture, input.caseId, charged)
       }
     }
-  }
+  },
+  CALL_COMPLETENESS_RULE
 ]
 
 checkRefusalRoster(CASE_RULES, { where: "@sip/pipeline case rules", deploymentFree: true })

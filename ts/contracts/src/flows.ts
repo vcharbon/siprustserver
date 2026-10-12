@@ -473,6 +473,13 @@ export const isSuccessToInvite = (msg: Msg): boolean => {
   return status !== undefined && status >= 200 && status < 300
 }
 
+/**
+ * An ANSWER to an INVITE a B2BUA relays: a `180`–`189` or a `2xx`. The one
+ * reading of the datagram; `Flow.isRelayedInviteAnswer` is the same claim on
+ * an assembled step.
+ */
+export const isRelayedInviteAnswer = (msg: Msg): boolean => isProvisionalToInvite(msg) || isSuccessToInvite(msg)
+
 /** An INVITE with no To-tag: the request that OPENS a dialog, never a re-INVITE. */
 export const opensDialog = (msg: Msg): boolean =>
   isInvite(msg) && msg.summary.kind === "request" && msg.summary.to.tag === null
