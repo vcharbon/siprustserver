@@ -624,10 +624,10 @@ impl ReplicatedB2buaSut {
 
     /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
     /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
-    /// view. The node's supervisor reconciles it to a Park. Under reactive-only
-    /// takeover (ADR-0014) this drives no takeover: the survivor takes a dialog
-    /// over only when the proxy reroutes its in-dialog traffic. It keeps the
-    /// survivor's membership view honest across a kill.
+    /// view. The node's supervisor reconciles it to a Park, and the node takes
+    /// over the departed peer's calls with an INVITE in flight (ADR-0046); a
+    /// quiet dialog is taken over only when the proxy reroutes its traffic.
+    /// A kill the peers are not told of (ADR-0031 cases 3a, 4) skips this.
     pub fn simulate_peer_removed(&self, ordinal: &str) {
         self.membership.remove(ordinal);
     }

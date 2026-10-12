@@ -376,11 +376,10 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 /// then the pod terminates. In both the proxy then routes the dialog to the
 /// backup AND the dead pod's endpoint is dropped from the survivor's membership
 /// (`simulate_peer_removed`) — the COMPLETE k8s death signal (a real kill removes
-/// the StatefulSet endpoint). Under reactive-only takeover (ADR-0014) the survivor
-/// takes the dialog over when the proxy reroutes its in-dialog traffic
-/// (`router::materialise`); the membership delta drives no takeover, it only
-/// keeps the survivor's view honest. The reboot re-adds the endpoint
-/// ([`reboot_and_reclaim`]).
+/// the StatefulSet endpoint). The survivor takes over at once a call with an
+/// INVITE in flight (ADR-0046), and a quiet dialog when the proxy reroutes its
+/// in-dialog traffic (ADR-0014, `router::materialise`). The reboot re-adds the
+/// endpoint ([`reboot_and_reclaim`]).
 async fn inject_failover(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
@@ -410,7 +409,7 @@ async fn inject_failover(
             fh.mark(primary_ord, None, "crash", "kill (abrupt)");
             primary.crash();
             proxy.set_health(primary_ord, WorkerHealth::Dead);
-            // k8s drops the dead pod's endpoint → survivor eager-takes-over.
+            // k8s drops the dead pod's endpoint: the survivor's departure sweep runs.
             backup.simulate_peer_removed(primary_ord);
             fh.advance(Duration::from_millis(300)).await;
         }

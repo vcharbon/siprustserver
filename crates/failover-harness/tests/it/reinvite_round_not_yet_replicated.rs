@@ -1,29 +1,28 @@
 //! **A re-INVITE round answered after the serving node died, before the round
 //! reached the backup.** The caller heard the serving node's relayed 100, so it
-//! is `Proceeding` and sends nothing more (RFC 3261 §17.1.1.2). The callee's 200
-//! fails over to the survivor on the cookie of the proxy's Via, and the survivor
-//! takes the call over on it — but the replica it holds predates the round, so
-//! no transaction there takes the 200: nothing reaches the caller, the 200 is
-//! never ACKed, and the copy releases itself. The callee retransmits its 200 on
-//! the §13.3.1.4 ladder, and each copy takes the call over again and is released
-//! again, until the ladder ends at 64·T1. This is the in-dialog twin of a new
-//! call's first-replica window (`new_call_replication_window.rs`): from the
-//! serving node's 100 until the round's replica lands, its death leaves the
-//! round unresolved. The caller's pending re-INVITE gets no final from the
-//! platform (its client transaction is `Proceeding`, which runs no Timer B, and
-//! the survivor answers the caller's BYE from a replica that holds no round to
-//! end with a 487, §15.1.2): only the caller's own application timer ends it.
-//! The caller then ends the dialog with a BYE, which takes the call over again
-//! and reaches the callee.
+//! is `Proceeding` and sends nothing more (RFC 3261 §17.1.1.2); the departure,
+//! announced, takes nothing over, as the replica holds no INVITE in flight. The
+//! callee's final fails over to the survivor on the cookie of the proxy's Via
+//! and takes the call over, but the replica predates the round: no transaction
+//! there takes the final. Its CSeq, above the last the dialog's record sent and
+//! with no relay pending for it, names a round the record lost. The survivor
+//! acknowledges it — a 2xx end to end (§13.2.2.4), a non-2xx hop by hop
+//! (§17.1.1.3) — raises the dialog's sequence past it, so its BYE never reuses
+//! a number the callee saw (§12.2.1.1), and ends the call with a BYE on both
+//! legs. The caller's pending re-INVITE cannot get a final: its transaction
+//! existed only on the dead node (§17.1.3); the BYE ends its dialog. Every
+//! retransmission of the callee's 2xx (§13.3.1.4) finds the call ended and
+//! takes nothing over again: one takeover per lost round.
 
 use std::time::Duration;
 
-use failover_harness::{FailoverHarness, PartitionRole};
-use scenario_harness::agent::Agent;
+use failover_harness::{FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut};
+use scenario_harness::agent::{Agent, Dialog, ServerTxn};
 
+use crate::departure_support::kill_announced;
 use crate::inflight_resend::{
-    bring_up, establish, kill_serving_node, reboot_and_reclaim, settle_to_one_cdr, split_mut,
-    survivor_of, synchronized_call_ref, REANSWER, REOFFER, REPLICATE, T1,
+    bring_up, establish, reboot_and_reclaim, settle_to_one_cdr, split_mut, survivor_of,
+    synchronized_call_ref, REANSWER, REOFFER, REPLICATE, T1,
 };
 
 /// RFC 3261 §17.1.2.2's T2: where the §13.3.1.4 2xx ladder stops doubling.
@@ -32,14 +31,24 @@ const T2: Duration = Duration::from_secs(4);
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 
-/// How many datagrams reached `agent`'s TU, drained without waiting.
-async fn heard(agent: &Agent) -> usize {
-    agent.drain_tu().await
+/// An established call whose re-INVITE round reached the callee, its 100 heard
+/// by the caller, and whose node then died with the round in no replica.
+struct LostRound {
+    fh: FailoverHarness,
+    alice: Agent,
+    bob: Agent,
+    proxy: ProxySut,
+    w_b1: ReplicatedB2buaSut,
+    w_b2: ReplicatedB2buaSut,
+    dialog: Dialog,
+    at_bob: ServerTxn,
+    pri_ord: String,
+    call_ref: String,
+    hydrated_before: u64,
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_round_answered_before_it_replicated_reaches_no_one() {
-    let mut fh = FailoverHarness::new("reinvite-round-not-yet-replicated", &["b1", "b2"]);
+async fn lose_a_round(name: &str) -> LostRound {
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
@@ -50,63 +59,136 @@ async fn a_round_answered_before_it_replicated_reaches_no_one() {
         .await
         .expect("the established call's replica");
 
-    // ── The round is relayed and its 100 heard; its replica never lands ─────
     let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
     reinvite.expect(100).await;
     let mut at_bob = bob.receive("INVITE").await;
     at_bob.respond(100, "Trying").await;
     fh.advance(REPLICATE).await;
-    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    // The round's replica never landed: the backup holds the call as it was
+    // before the round when the node dies.
     survivor_of(&pri_ord, &w_b1, &w_b2)
         .rewind_replica(PartitionRole::Backup, &pri_ord, &call_ref, before_round)
         .await;
-
-    // ── The callee's 200 and its §13.3.1.4 ladder: each copy takes the call ─
-    // ── over, reaches no one, and is released ────────────────────────────────
-    at_bob.respond(200, "OK").with_sdp(REANSWER).await;
-    let (answer, toward) = fh
-        .sip_entries()
-        .into_iter()
-        .rfind(|e| e.from == bob.addr() && e.raw.starts_with(b"SIP/2.0 200"))
-        .map(|e| (e.raw, e.to))
-        .expect("the callee's 200 is on the wire");
-    let mut copies: u64 = 1;
-    let mut gap = T1;
-    let mut elapsed = Duration::ZERO;
-    while elapsed + gap < 64 * T1 {
-        fh.advance(gap).await;
-        elapsed += gap;
-        bob.try_send_datagram(&answer, toward).await.expect("the retransmitted 200 leaves");
-        copies += 1;
-        gap = (gap * 2).min(T2);
-    }
-    fh.advance(Duration::from_millis(200)).await;
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    let hydrated_before = kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     assert_eq!(
         survivor.metrics().repl_takeover_hydrated_total(),
-        hydrated_before + copies,
-        "each copy of the 200 took the call over again",
+        hydrated_before,
+        "a call with nothing in flight in its replica is not taken over on the departure",
     );
-    assert!(!survivor.serves(&call_ref), "every copy released itself");
-    assert_eq!(heard(&alice).await, 0, "the caller hears nothing of the round");
-    assert_eq!(heard(&bob).await, 0, "the callee's 200 is never ACKed");
+    drop(reinvite);
+    LostRound {
+        fh,
+        alice,
+        bob,
+        proxy,
+        w_b1,
+        w_b2,
+        dialog,
+        at_bob,
+        pri_ord,
+        call_ref,
+        hydrated_before,
+    }
+}
 
-    // ── The caller ends the dialog; its re-INVITE never gets a final ────────
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-    fh.advance(Duration::from_secs(1)).await;
-    assert_eq!(heard(&alice).await, 0, "no final for the pending re-INVITE, after the BYE either");
+impl LostRound {
+    fn survivor(&self) -> &ReplicatedB2buaSut {
+        survivor_of(&self.pri_ord, &self.w_b1, &self.w_b2)
+    }
+
+    /// The callee's final, `what`, took the call over, once.
+    fn taken_over_once(&self, what: &str) {
+        let hydrated = self.survivor().metrics().repl_takeover_hydrated_total();
+        assert_eq!(hydrated, self.hydrated_before + 1, "{what} took the call over once");
+    }
+
+    /// The CSeq number of the round the callee answers.
+    fn round_cseq(&self) -> u32 {
+        self.at_bob.request().cseq().seq()
+    }
+
+    /// The survivor ends the call: the callee's BYE, numbered past the lost
+    /// round, and the caller's, both answered 200.
+    async fn ended_on_both_legs(&mut self) {
+        let mut bye = self.bob.receive("BYE").await;
+        assert!(
+            bye.request().cseq().seq() > self.round_cseq(),
+            "the BYE is numbered past the round the callee saw (§12.2.1.1)",
+        );
+        bye.respond(200, "OK").await;
+        self.alice.receive("BYE").await.respond(200, "OK").await;
+        self.fh.advance(Duration::from_millis(500)).await;
+    }
+
+    /// The node returns and reclaims the ended call: one CDR, full release.
+    async fn settle(mut self) {
+        self.fh.advance(Duration::from_secs(60)).await;
+        let (primary, survivor) = split_mut(&self.pri_ord, &mut self.w_b1, &mut self.w_b2);
+        reboot_and_reclaim(&mut self.fh, primary, survivor, &self.pri_ord, &self.proxy).await;
+        let nodes = [&self.w_b1, &self.w_b2];
+        settle_to_one_cdr(&self.fh, &[&self.alice, &self.bob], &nodes, &self.call_ref).await;
+        drop(self.proxy);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_ended() {
+    let mut lost = lose_a_round("reinvite-round-not-yet-replicated").await;
+
+    lost.at_bob.respond(200, "OK").with_sdp(REANSWER).await;
+    let (answer, toward) = lost
+        .fh
+        .sip_entries()
+        .into_iter()
+        .rfind(|e| e.from == lost.bob.addr() && e.raw.starts_with(b"SIP/2.0 200"))
+        .map(|e| (e.raw, e.to))
+        .expect("the callee's 200 is on the wire");
+    let ack = lost.bob.receive("ACK").await;
     assert_eq!(
-        survivor_of(&pri_ord, &w_b1, &w_b2).metrics().repl_takeover_hydrated_total(),
-        hydrated_before + copies + 1,
-        "the BYE took the call over once more",
+        ack.request().cseq().seq(),
+        lost.round_cseq(),
+        "the ACK names the round (§13.2.2.4)"
     );
+    lost.taken_over_once("the callee's 200");
+    lost.ended_on_both_legs().await;
+    let hydrated = lost.survivor().metrics().repl_takeover_hydrated_total();
 
-    fh.advance(Duration::from_secs(60)).await;
-    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
-    drop(proxy);
+    // The callee's §13.3.1.4 ladder, as if the ACK were lost: the call is ended.
+    let mut gap = T1;
+    let mut elapsed = Duration::ZERO;
+    while elapsed + gap < 64 * T1 {
+        lost.fh.advance(gap).await;
+        elapsed += gap;
+        lost.bob.try_send_datagram(&answer, toward).await.expect("the retransmitted 200 leaves");
+        gap = (gap * 2).min(T2);
+    }
+    lost.fh.advance(Duration::from_millis(200)).await;
+    assert_eq!(
+        lost.survivor().metrics().repl_takeover_hydrated_total(),
+        hydrated,
+        "no copy of the 200 takes the ended call over again",
+    );
+    assert!(!lost.survivor().serves(&lost.call_ref), "the copy released itself");
+    let _ = &lost.dialog;
+    lost.settle().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_round_refused_before_it_replicated_is_acknowledged_and_the_call_ended() {
+    let mut lost = lose_a_round("reinvite-round-refused-not-yet-replicated").await;
+
+    lost.at_bob.respond(488, "Not Acceptable Here").await;
+    let ack = lost.bob.receive("ACK").await;
+    assert_eq!(ack.request().cseq().seq(), lost.round_cseq(), "the ACK names the round");
+    assert_eq!(
+        ack.request().top_via().branch(),
+        lost.at_bob.request().top_via().branch(),
+        "a non-2xx is acknowledged on the INVITE's own transaction (§17.1.1.3)",
+    );
+    lost.taken_over_once("the callee's 488");
+    lost.ended_on_both_legs().await;
+    let _ = &lost.dialog;
+    lost.settle().await;
 }

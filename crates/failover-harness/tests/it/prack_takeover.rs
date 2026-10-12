@@ -22,6 +22,9 @@
 //! The negative half is its sibling: a post-takeover PRACK naming a number this
 //! stack never showed must still draw 481 — hydrated books refuse as well as
 //! they admit.
+//!
+//! Every kill here is unannounced to the peers (ADR-0031 cases 3a and 4): no
+//! departure sweep runs, so the message each cell is about takes the call over.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -179,7 +182,6 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
     fh.mark(&pri_ord, None, "crash", "primary down mid-early-dialog");
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
 
@@ -313,7 +315,6 @@ async fn prack_naming_an_unshown_rseq_after_takeover_draws_481() {
 
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     // The §3 ladder repeats the still-un-PRACKed provisional at T1 (500 ms), so
@@ -456,7 +457,6 @@ async fn non_2xx_b_leg_final_after_a_takeover_reaches_the_caller_and_acks_the_ca
 
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     let rung = call.expect(183).await;
@@ -602,7 +602,6 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
 
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     let rung = call.expect(183).await;
@@ -793,7 +792,6 @@ async fn a_lost_takeover_ack_is_resent_when_the_callee_retransmits_its_final() {
 
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     let rung = call.expect(183).await;

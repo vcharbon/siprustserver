@@ -21,6 +21,9 @@
 //!          → 200 → ACK → BYE → 200(BYE)
 //! ```
 //!
+//! The kill is unannounced to the peers (ADR-0031 cases 3a and 4): no departure
+//! sweep runs, so bob's repeat is what takes the call over.
+//!
 //! The sibling cell for a shown provisional — a PRACK the SURVIVOR must
 //! translate — is `prack_takeover.rs`.
 
@@ -202,7 +205,6 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     fh.mark(&pri_ord, None, "crash", "primary down after PRACKing the callee");
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
 

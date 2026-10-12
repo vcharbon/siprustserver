@@ -2,13 +2,11 @@
 //! worker's 100 Trying the instant its server transaction is born (RFC 3261
 //! §17.2.1), and the stateless front proxy relays that 100 (§16.11), so from
 //! then on the caller sends no retransmission that could re-place the call.
-//! The call's first record is written by the turn that handles the INVITE,
-//! once the routing decision has answered, and the backup holds it a stream
-//! hop later: from the 100 until then, a node death leaves no replica behind,
-//! and the caller's INVITE with no final from the platform (a `Proceeding`
-//! client transaction runs no Timer B: only the caller's own application timer
-//! ends it). This cell measures that window with a decision that takes a known
-//! time to answer.
+//! The call is written to its backup at its birth, before the routing decision
+//! is asked for, so a node death after the 100 leaves a replica behind for the
+//! departure sweep to answer (ADR-0046). This cell measures the window from the
+//! caller's 100 to the first replica with a decision that takes a known time
+//! to answer: one replication stream hop, the decision's time no part of it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +32,7 @@ const B2: &str = "127.0.0.1:5092";
 
 /// How long the routing decision takes to answer.
 const DECISION_DELAY: Duration = Duration::from_millis(1_000);
-/// How long after the decision the replica may take to land.
+/// How long after the call's birth the replica may take to land.
 const STREAM_HOP_BOUND: Duration = Duration::from_millis(50);
 /// The probe's resolution.
 const PROBE_STEP: Duration = Duration::from_millis(5);
@@ -63,7 +61,7 @@ impl CallDecisionEngine for SlowDecision {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_new_call_reaches_its_backup_only_after_its_routing_decision() {
+async fn a_new_call_reaches_its_backup_before_its_routing_decision_answers() {
     let mut fh = FailoverHarness::new("new-call-replication-window", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -79,7 +77,7 @@ async fn a_new_call_reaches_its_backup_only_after_its_routing_decision() {
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
-    // ── The caller hears the worker's 100; the replica waits on the decision ─
+    // ── The caller hears the worker's 100; the replica follows at once ──────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     call.expect(100).await;
     let heard_at = fh.now_ms();
@@ -93,11 +91,10 @@ async fn a_new_call_reaches_its_backup_only_after_its_routing_decision() {
         fh.advance(PROBE_STEP).await;
     }
     let window = Duration::from_millis((fh.now_ms() - heard_at) as u64);
-    assert!(routed(), "the replica follows the routing decision, never precedes it");
+    assert!(!routed(), "the replica precedes the routing decision");
     assert!(
-        window >= DECISION_DELAY && window <= DECISION_DELAY + STREAM_HOP_BOUND,
-        "from the caller's 100 to the first replica: the decision plus one stream hop, \
-         measured {window:?}",
+        window <= STREAM_HOP_BOUND,
+        "from the caller's 100 to the first replica: one stream hop, measured {window:?}",
     );
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak) = worker_ordinals(uas.request());

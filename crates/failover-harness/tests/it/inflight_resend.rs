@@ -30,17 +30,19 @@
 //! re-INVITE, whose caller is off the signalling plane from its send to the kill,
 //! so the 100 and the T1 rung are lost and it stays `Calling` (RFC 3261 §17.1.1.2).
 //!
-//! What each cell pins: the survivor takes the call over on that re-send, and
-//! the cluster settles to exactly one CDR with no trace and clean memory on both
-//! nodes. The non-INVITE cells verify D7's "a relayed non-INVITE needs no server
-//! seed — the peer's re-emission covers it": nothing on the survivor rebuilds
-//! the server transaction the dead primary held, the re-send builds a fresh one,
-//! is answered, and the call continues (UPDATE, INFO) or ends (BYE). The two
-//! INVITE cells verify the seeds (D7, D9): the caller's CANCEL is answered from
-//! the a-leg INVITE transaction the survivor rebuilds from the record, and the
-//! caller's re-INVITE re-send is absorbed by the transaction the record names —
-//! one b-leg INVITE for the round, whose seeded client transaction takes the
-//! callee's 200 the front proxy fails over to it (on the cookie of its own Via).
+//! The kill is never told to the peers (ADR-0031 cases 3a and 4), so no
+//! departure sweep runs. What each cell pins: the survivor takes the call over
+//! on that re-send, and the cluster settles to exactly one CDR with no trace
+//! and clean memory on both nodes. The non-INVITE cells verify D7's "a relayed
+//! non-INVITE needs no server seed — the peer's re-emission covers it": nothing
+//! on the survivor rebuilds the server transaction the dead primary held, the
+//! re-send builds a fresh one, is answered, and the call continues (UPDATE,
+//! INFO) or ends (BYE). The two INVITE cells verify the seeds (D7, D9): the
+//! caller's CANCEL is answered from the a-leg INVITE transaction the survivor
+//! rebuilds from the record, and the caller's re-INVITE re-send is absorbed by
+//! the transaction the record names — one b-leg INVITE for the round, whose
+//! seeded client transaction takes the callee's 200 the front proxy fails over
+//! to it (on the cookie of its own Via).
 //!
 //! The killed primary is the call's sole CDR authority (ADR-0020 X3), so every
 //! cell reboots it and lets its reclaim discharge the terminal the survivor
@@ -166,9 +168,9 @@ fn crash_serving_node(
     hydrated_before
 }
 
-/// The shape-**A** kill: the callee holds the exchange open, so the cluster is
-/// told at once — the proxy stops routing to the dead node, the survivor drops
-/// it from membership.
+/// The shape-**A** kill: the callee holds the exchange open, and the proxy's
+/// probe reads the node dead at once. The peers are not told (ADR-0031 cases 3a
+/// and 4), so no departure sweep runs: only a message takes a call over.
 pub(crate) async fn kill_serving_node(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
@@ -178,7 +180,6 @@ pub(crate) async fn kill_serving_node(
 ) -> u64 {
     let hydrated_before = crash_serving_node(fh, primary, survivor, pri_ord);
     proxy.set_health(pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(pri_ord);
     fh.advance(KILL_SETTLE).await;
     hydrated_before
 }
@@ -186,7 +187,7 @@ pub(crate) async fn kill_serving_node(
 /// The shape-**B** kill: the node dies with the peer's datagram still on the
 /// fabric. The proxy's health view lags, so it forwards the doomed copy onto the
 /// dead node's socket — that is where the request is lost — and only then stops
-/// routing there.
+/// routing there. The peers are not told, as in the shape-**A** kill.
 async fn kill_under_the_datagram(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
@@ -197,7 +198,6 @@ async fn kill_under_the_datagram(
     let hydrated_before = crash_serving_node(fh, primary, survivor, pri_ord);
     fh.advance(HEALTH_LAG).await;
     proxy.set_health(pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(pri_ord);
     fh.advance(KILL_SETTLE).await;
     hydrated_before
 }

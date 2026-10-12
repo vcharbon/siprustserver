@@ -16,6 +16,10 @@
 //!
 //! Unlike the 059 pin (`stale_no_answer_reclaim.rs`, a Confirmed replica with a
 //! stale timer), both restored copies read the caller as unanswered.
+//!
+//! The two cells whose callee's 2xx takes the call over kill the primary
+//! unannounced to the peers (ADR-0031 cases 3a and 4), so no departure sweep
+//! takes the ringing call over first.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -404,7 +408,6 @@ async fn an_answer_served_by_the_takeover_copy_draws_no_second_final_from_no_ans
     fh.mark(&primary_ord, None, "crash", "primary down while the callee rings");
     b1.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    b2.simulate_peer_removed(&primary_ord);
     fh.advance(Duration::from_millis(300)).await;
     let hydrated_before = b2.metrics().repl_takeover_hydrated_total();
 
@@ -490,7 +493,6 @@ async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second
     fh.mark(&primary_ord, None, "crash", "primary down while the callee rings");
     b1.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    b2.simulate_peer_removed(&primary_ord);
     fh.advance(Duration::from_millis(300)).await;
     let new_addr = reboot_and_reclaim(&mut fh, b1, b2, &primary_ord, &proxy, false).await;
     assert!(b1.serves(&call_ref), "the rebooted primary reclaimed the ringing call");
