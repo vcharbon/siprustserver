@@ -227,11 +227,12 @@ scope for this thin runner" stance (a deliberate temporary choice).
 anti-affined proxy replicas on the two `tier=edge` nodes, fronted by a **keepalived
 VRRP virtual IP** (`172.20.255.250`, static in the kind `172.20.0.0/16` node
 subnet). Active/passive: the VRRP master owns the VIP and serves all traffic; the
-backup is warm. On master loss the backup claims the VIP in <2 s (3 × 0.5 s
-advert; the survivor keeps it — ADR-0046 for the priorities and the health check).
-`hostNetwork: true` lets the keepalived sidecar answer ARP on the node and read
-the proxy's `/healthz` over the host network; an init
-container pins the VIP on `lo` and sets strict-ARP so both pods can `bind(VIP:5060)`
+backup is warm. On master loss the backup claims the VIP: at once when the
+master's keepalived stops, within the 3.6 s master-down timer (3 × 1 s advert
+plus skew) when it goes silent. The survivor keeps it (ADR-0046 for the
+priorities and the health check). `hostNetwork: true` lets the keepalived
+sidecar answer ARP on the node and read the proxy's `/healthz` over the host
+network; an init container pins the VIP on `lo` and sets strict-ARP so both pods can `bind(VIP:5060)`
 and only the ARP owner answers.
 
 **Why this needs no proxy code change (the load-bearing fact).** The proxy already

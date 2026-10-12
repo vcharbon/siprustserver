@@ -57,10 +57,24 @@ its family.
    priority until its proxy passes `rise 2`, so it never takes the address
    ahead of its own proxy. Both nodes keep the same base priority and preempt (no
    `nopreempt`). VRRP preempts only on a strictly higher priority, so:
-   - a dead proxy loses the address in about 3–5 s;
+   - a dead proxy loses the address in 4.6–6.6 s (below);
    - when both checks fail the priorities are equal again and the address stays
      where it is, never lost;
    - a proxy that recovers does not take the address back.
+
+   The instance runs VRRPv2 with `advert_int 1` (VRRPv2 adverts are whole
+   seconds). A backup that preempts discards the lowered node's adverts and
+   moves only when its master-down timer expires, so a move takes
+
+   ```
+   move = δ + 2·interval + master_down − ε        = 4.6 to 6.6 s
+   δ ∈ (0, 1]   the check's phase after the proxy dies
+   master_down  = 3·advert_int + (256 − 100)/256 = 3.609 s
+   ε ∈ [0, 1)   how long before the drop the last full-priority advert arrived
+   ```
+
+   A kubelet restart of the dead proxy can answer `/healthz` for a moment and
+   reset the fall count, which adds up to 2 s (worst about 8.6 s).
 5. **Strict configuration.** Every variable is read once, before the first
    bind. Unset takes the default. Set empty, malformed or out of its range
    refuses the boot, naming every problem at once; only `PROXY_UDP_SNDBUF` /

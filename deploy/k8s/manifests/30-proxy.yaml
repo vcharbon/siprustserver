@@ -10,8 +10,9 @@
 # Active/passive: the VRRP master owns both VIPs and serves ALL traffic; the
 # backup is warm (its OPTIONS health probes source from its own node IP — the
 # runner binds a SEPARATE ephemeral probe socket — so it keeps a live worker
-# view and its /readyz passes). On master loss the backup claims both VIPs in
-# <2s. Because the proxy advertises the *VIPs* (stable across failover AND pod
+# view and its /readyz passes). On master loss the backup claims both VIPs: at
+# once when the master's keepalived stops (its priority-0 advert), after the
+# 3.6 s master-down timer when it goes silent. Because the proxy advertises the *VIPs* (stable across failover AND pod
 # restart) in Via/Record-Route, in-dialog BYE/keepalives never get orphaned the
 # way a per-pod-IP advertise did, and the HMAC stickiness cookie + worker P2P
 # replication (ADR-0011) keep in-dialog routing + worker failover correct from
@@ -46,14 +47,22 @@ data:
     # The VIPs follow proxy health (ADR-0046): chk_proxy_health GETs the
     # proxy's /healthz. It is weighted, never a FAULT trigger: 3 failures in a
     # row drop this node's priority by 50, so a dead or crash-looping proxy
-    # hands the VIPs to a healthy peer in ~3-5 s; both checks failing leaves the
-    # priorities equal and the VIPs where they are; a recovered proxy is back at
+    # hands the VIPs to a healthy peer (timing below); both checks failing
+    # leaves the priorities equal and the VIPs where they are; a recovered proxy is back at
     # the same priority and does not take them back. init_fail: a keepalived
     # that starts sits at the lowered priority until its proxy passes `rise 2`,
     # and at equal priorities it never preempts, so a restarting node never
     # takes the VIPs ahead of its own proxy. The check is a /bin/sh -c
     # predicate clamped to exit 0/1, so an exec failure in the startup window
     # reads as one failed check, not a latched FAULT.
+    #
+    # A move takes 4.6-6.6 s: move = d + 2*interval + master_down - e, with
+    # d in (0, 1] the check's phase after the failure, master_down =
+    # 3*advert_int + (256-100)/256 = 3.609 s (the backup discards the lowered
+    # node's adverts and waits out its timer), e in [0, 1) how long before the
+    # drop the last full-priority advert arrived. A kubelet restart of the dead
+    # proxy can answer /healthz for a moment and reset the fall count, adding up
+    # to 2 s (worst about 8.6 s).
     global_defs {
         router_id sip-front-proxy
         script_user root
@@ -72,7 +81,9 @@ data:
         interface ${SIP_IF}
         virtual_router_id 51
         priority 100
-        advert_int 0.5
+        # VRRPv2 adverts are whole seconds (0.5 would be rounded up, with a
+        # warning): the config states what runs.
+        advert_int 1
         # GARP hardening: on a FRESHLY-created docker bridge
         # the default single gratuitous-ARP burst at election is easily lost
         # while veth/FDB state is still settling, and it was never re-asserted —
