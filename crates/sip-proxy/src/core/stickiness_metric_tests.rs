@@ -193,6 +193,39 @@ Content-Length: 0\r\n\r\n"
     assert!(renders(m, "sip_proxy_decode_forward_promotions_total{reason=\"fresh_pod\"} 0"));
 }
 
+// A caller's INVITE that preloads a plain Route to the proxy keeps the cookie
+// the proxy mints for it: its CANCEL, after the primary died, reaches the
+// backup (ADR-0014).
+#[tokio::test]
+async fn a_cancel_of_an_invite_with_a_plain_preloaded_route_follows_the_minted_cookie() {
+    let f = fixture().await;
+    let src = format!("{UAC}:5060").parse().unwrap();
+    let request = |method: &str| {
+        parse(&format!(
+            "{method} sip:bob@{UAC}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKpre1;rport\r\n\
+Route: <sip:{PROXY_VIP}:5060;lr>\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=a\r\n\
+To: <sip:bob@{UAC}>\r\n\
+Call-ID: {CALL_ID}\r\n\
+CSeq: 1 {method}\r\n\
+Contact: <sip:alice@{UAC}:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+        ))
+    };
+    let primary = f.core.route_request_from(&request("INVITE"), src).await.target.unwrap();
+    let (primary_id, backup) = if primary.host == W1_POD {
+        ("w1", ProxyAddr::new(W2_POD, 5060))
+    } else {
+        ("w2", ProxyAddr::new(W1_POD, 5060))
+    };
+    f.registry.set_health(primary_id, WorkerHealth::Dead);
+
+    let out = f.core.route_request_from(&request("CANCEL"), src).await;
+    assert_eq!(out.target, Some(backup), "the CANCEL follows the minted cookie to the backup");
+}
+
 // A response from a dead worker whose cookie names a fresh primary and that
 // dead worker as backup decodes to the fresh primary; the response path
 // drops it, and nothing was forwarded to the fresh primary.

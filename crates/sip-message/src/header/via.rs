@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn stamping_adds_received_only_when_the_source_differs() {
+    fn stamping_adds_received_when_the_source_differs_or_rport_asks() {
         let asked = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport");
         assert_eq!(
             asked.clone().stamped_from("192.0.2.7", 33000).to_wire(),
@@ -299,7 +299,12 @@ mod tests {
         );
         assert_eq!(
             asked.stamped_from("10.0.0.1", 33000).to_wire(),
-            "SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport=33000"
+            "SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport=33000;received=10.0.0.1"
+        );
+        let unasked = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1");
+        assert_eq!(
+            unasked.stamped_from("10.0.0.1", 33000).to_wire(),
+            "SIP/2.0/UDP 10.0.0.1:5060;branch=z1"
         );
     }
 

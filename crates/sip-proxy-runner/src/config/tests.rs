@@ -146,3 +146,20 @@ fn a_missing_cookie_signing_key_refuses_the_boot() {
     let errors = ProxyConfig::from_lookup(&get, &|| None).expect_err("refused");
     assert!(errors.iter().any(|e| e.contains("PROXY_HMAC_KEY")), "{errors:?}");
 }
+
+/// A dual-face proxy binds each face to its own address: a wildcard bind
+/// would deliver external-plane datagrams to the trusted internal socket.
+#[test]
+fn a_dual_face_wildcard_bind_refuses_the_boot() {
+    let dual = [("PROXY_LISTEN_EXT", "192.0.2.250:5060"), ("PROXY_FACE_INT_CIDRS", "10.0.0.0/8")];
+    boot(&dual).expect("exact binds on both faces boot");
+    let internal =
+        [dual[0], dual[1], ("PROXY_LISTEN", "0.0.0.0:5060"), ("PROXY_ADVERTISE", "10.0.0.9:5060")];
+    refused(&internal, "PROXY_LISTEN 0.0.0.0:5060");
+    let external = [
+        ("PROXY_LISTEN_EXT", "0.0.0.0:5060"),
+        ("PROXY_ADVERTISE_EXT", "192.0.2.250:5060"),
+        dual[1],
+    ];
+    refused(&external, "PROXY_LISTEN_EXT 0.0.0.0:5060");
+}

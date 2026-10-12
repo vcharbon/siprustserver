@@ -512,6 +512,24 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
     assert_eq!(s.select_for_new_dialog(&emergency, opts).await.unwrap(), addr(A1));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_dialog_admitted_as_new_meets_the_empty_bucket() {
+    // A request naming a dialog no verified cookie backs (`admit_as_new`) is a
+    // new call: the bucket that an in-dialog request bypasses refuses it.
+    let clock = Clock::test_at(0);
+    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
+    let reg =
+        SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
+    observer.apply_payload(W1, &OverloadPayload { elu: 0.1, gc: 0.0, adm: 0.0 }, clock.now_ms());
+    while observer.try_consume_for(W1, clock.now_ms()).is_ok() {}
+    let s = strategy_with_observer(reg, clock, observer);
+
+    let reinvite = request("INVITE", "call-unbacked@h", Some("forged"));
+    let opts = SelectOpts { admit_as_new: true, ..SelectOpts::default() };
+    let refused = s.select_for_new_dialog(&reinvite, opts).await;
+    assert!(matches!(refused, Err(SelectError::RateCapExhausted { .. })), "{refused:?}");
+}
+
 #[tokio::test]
 async fn unobserved_worker_is_admitted_without_a_bucket() {
     // Bootstrap-friendly: a worker the LB has never seen a payload from has no

@@ -34,6 +34,9 @@ const EXT_PORT: u16 = 5060;
 const W1: &str = "10.244.5.8";
 /// A worker on a pod address the registry does not hold.
 const UNLISTED_WORKER: &str = "10.244.9.99";
+/// The node address a worker's packets carry when they are translated on the
+/// way to the proxy.
+const NODE: &str = "10.244.0.1";
 /// A sender on the external plane: not a worker, not internal.
 const OUTSIDER: &str = "203.0.113.66";
 /// The Request-URI host: neither a worker nor the proxy.
@@ -65,6 +68,7 @@ impl ProxySelfGate for CountingGate {
 struct Lab {
     worker: Box<dyn UdpEndpoint>,
     unlisted_worker: Box<dyn UdpEndpoint>,
+    translated_worker: Box<dyn UdpEndpoint>,
     outsider: Box<dyn UdpEndpoint>,
     far: Box<dyn UdpEndpoint>,
     gate: Arc<CountingGate>,
@@ -100,6 +104,7 @@ async fn proxy_lab(dual: bool, admit: bool) -> Lab {
     };
     let worker = bind(sa(W1, 5060)).await;
     let unlisted_worker = bind(sa(UNLISTED_WORKER, 5060)).await;
+    let translated_worker = bind(sa(NODE, 40001)).await;
     let outsider = bind(sa(OUTSIDER, 5060)).await;
     let far = bind(sa(FAR, 5060)).await;
     let reg: Arc<dyn WorkerRegistry> =
@@ -137,7 +142,7 @@ async fn proxy_lab(dual: bool, admit: bool) -> Lab {
             .build(ep)
     };
     let core = tokio::spawn(core.run());
-    Lab { worker, unlisted_worker, outsider, far, gate, metrics, core }
+    Lab { worker, unlisted_worker, translated_worker, outsider, far, gate, metrics, core }
 }
 
 fn header_lines(bytes: &[u8], name: &str) -> Vec<String> {
@@ -390,4 +395,35 @@ async fn a_forged_to_tag_invite_on_the_external_face_meets_the_gate() {
     let invite = request("INVITE", "forged-tag", &outsider_via(), None, Some("forged"));
     let seen = exchange(&lab, &*lab.outsider, ext_vip(), invite).await;
     assert_met_the_gate_and_not_relayed(&seen);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_response_naming_a_worker_with_a_foreign_received_reflects_nothing() {
+    let lab = proxy_lab(true, true).await;
+    let forged = format!(
+        "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP {EXT_VIP}:{EXT_PORT};branch=z9hG4bKforged\r\n\
+Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKw1;rport=5060;received={FAR}\r\n\
+From: <sip:caller@{W1}>;tag=c1\r\n\
+To: <sip:callee@{EXT_VIP}>;tag=c2\r\n\
+Call-ID: reflect-via-worker@{W1}\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    lab.outsider.send_to(forged.as_bytes(), ext_vip()).await.unwrap();
+    settle().await;
+    assert!(drain(&*lab.far).is_empty(), "a worker's sent-by never sends to its received");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_answer_to_a_translated_worker_reaches_it_on_the_external_face() {
+    let lab = proxy_lab(true, false).await;
+    let invite = request("INVITE", "translated", &worker_via(), None, None);
+    let seen = exchange(&lab, &*lab.translated_worker, int_vip(), invite).await;
+    assert_worker_outbound(&seen);
+    let to_worker = drain(&*lab.worker);
+    assert!(
+        to_worker.iter().any(|(_, b)| start_line(b).starts_with("SIP/2.0 200")),
+        "the far end's 200 reaches the worker at its registry address"
+    );
 }
