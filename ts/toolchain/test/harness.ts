@@ -5,8 +5,8 @@
  * The stubs are shell scripts rather than the real binaries on purpose. What
  * these tests own is the ADAPTER — the argv it builds, the streams it collects,
  * the exit codes it maps — and holding that to a `cargo build` would make it
- * untestable on a fresh checkout. The real binaries are exercised by the
- * env-gated conformance test beside these.
+ * untestable on a fresh checkout. The real `pivot-schema` is exercised by the
+ * binary-bound suites beside these (`pivot-schema-bin.ts`).
  */
 import { NodeServices } from "@effect/platform-node"
 import * as ConfigProvider from "effect/ConfigProvider"

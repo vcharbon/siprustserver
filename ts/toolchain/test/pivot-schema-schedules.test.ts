@@ -5,19 +5,17 @@
  * are held to `pivot-schema schema`.
  *
  * The adapter half runs against a stub, as the other adapters' tests do. The
- * conformance half needs the binary: `PIVOT_SCHEMA_BIN` names it, and absent
- * that the release build the toolchain defaults to (`releaseBinary`); with
- * neither on disk it is skipped, as `schema-conformance` is — a suite that
- * needs a `cargo build` is a suite nobody runs on a fresh checkout.
+ * conformance half needs the binary (`./pivot-schema-bin.js`): missing, it
+ * fails unless the run opts out, as `schema-conformance` does.
  */
 import { Canonical } from "@sip/contracts"
 import { SCHEDULES } from "@sip/contracts/schedules"
-import { Binaries, PivotSchemaSchedules } from "@sip/toolchain"
+import { PivotSchemaSchedules } from "@sip/toolchain"
 import * as Effect from "effect/Effect"
 import { execFileSync } from "node:child_process"
-import * as fs from "node:fs"
 import { describe, expect, it } from "vitest"
 import { fixture, rig } from "./harness.js"
+import { BIN, describeBinary } from "./pivot-schema-bin.js"
 
 const table = (env: Record<string, string>) =>
   Effect.runPromise(
@@ -47,10 +45,7 @@ describe("the schedules adapter", () => {
   })
 })
 
-const BIN = process.env.PIVOT_SCHEMA_BIN ?? Binaries.releaseBinary("pivot-schema")
-const available = BIN.length > 0 && fs.existsSync(BIN)
-
-describe.skipIf(!available)("the checked-in schedule table", () => {
+describeBinary("the checked-in schedule table", () => {
   it("is what the binary prints, byte for byte", async () => {
     const decoded = await table({ PIVOT_SCHEMA_BIN: BIN })
     expect(decoded).toEqual(SCHEDULES)

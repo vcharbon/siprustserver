@@ -26,6 +26,11 @@ deployment states its own configuration — database url, current population,
 selector spelling, capture names, document features — and nothing of it lives
 in the store.
 
+The toolchain's suites held to the real `pivot-schema` run `PIVOT_SCHEMA_BIN`,
+else the release build (`cargo build --release -p pivot-schema`). Where neither
+is on disk they fail, naming the path and the build; `TOOLCHAIN_TEST_SKIP=1`
+skips them instead.
+
 ## Nothing generic knows a deployment
 
 `@sip/pipeline` decides what CROSSED THE WIRE and never what one platform does.
