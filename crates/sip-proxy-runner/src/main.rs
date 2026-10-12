@@ -418,7 +418,7 @@ async fn main() {
             static_pool(list, clock.clone()).unwrap_or_else(|e| refuse_to_start(&[e]))
         }
         WorkerSource::Discovered { service, namespace, port } => {
-            discovered_pool(namespace.clone(), service.clone(), *port, clock.clone()).await
+            discovered_pool(namespace.clone(), service.clone(), *port, clock.clone())
         }
     };
     let registry = pool.registry.clone();
@@ -558,11 +558,13 @@ async fn main() {
         })
     };
 
-    // Health sampler: publish the worker-health gauges + `sip_proxy_worker_pool_empty`
-    // from the live registry so an empty/all-unprobed pool is observable in
-    // Prometheus (not just via readiness). Cheap snapshot every probe interval.
+    // Health sampler: publish the worker-health gauges, `sip_proxy_worker_pool_empty`
+    // and the discovery's own health every 2 s, so an empty or unprobed pool
+    // and the reason for it are observable in Prometheus, not only through
+    // readiness.
     {
         let reg = registry.clone();
+        let discovery = pool.discovery.clone();
         let m = metrics.clone();
         let pulse = pulse.clone();
         let clk = clock.clone();
@@ -597,6 +599,10 @@ async fn main() {
                     }
                 }
                 m.set_worker_health_counts(alive, draining, not_ready, unknown, dead);
+                match discovery.as_ref().map(|watch| watch.watch_health()) {
+                    Some(h) => m.set_discovery(!h.client_built, h.broken_since_unix_ms),
+                    None => m.set_discovery(false, None),
+                }
             }
         });
     }

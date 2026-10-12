@@ -77,8 +77,7 @@ async fn a_kube_client_that_fails_then_builds_fills_the_pool_and_never_fakes_a_w
         }
     };
     let pool =
-        discovered_pool_with(connect, "lab".into(), "workers".into(), 5060, Clock::test_at(0))
-            .await;
+        discovered_pool_with(connect, "lab".into(), "workers".into(), 5060, Clock::test_at(0));
 
     assert!(
         pool.registry.snapshot().is_empty(),
@@ -86,9 +85,12 @@ async fn a_kube_client_that_fails_then_builds_fills_the_pool_and_never_fakes_a_w
         pool.registry.snapshot()
     );
     assert_eq!(probe_state(false, false, pool.registry.as_ref()), ProbeState::NotReady);
+    let watch = pool.discovery.as_ref().expect("a discovered pool");
+    assert!(!watch.watch_health().client_built);
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 2, "the client is built again after 1 s");
+    assert!(watch.watch_health().client_built);
     let listed: Vec<String> =
         pool.registry.snapshot().iter().map(|w| format!("{}@{}", w.id, w.address)).collect();
     assert_eq!(listed, ["worker-0@10.0.0.7:5060"]);

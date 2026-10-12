@@ -31,12 +31,7 @@ pub fn static_pool(workers: &str, clock: Clock) -> Result<WorkerPool, String> {
 
 /// The pool discovered from the EndpointSlices of `service` in `namespace`,
 /// through the in-cluster (or kubeconfig) kube client.
-pub async fn discovered_pool(
-    namespace: String,
-    service: String,
-    port: u16,
-    clock: Clock,
-) -> WorkerPool {
+pub fn discovered_pool(namespace: String, service: String, port: u16, clock: Clock) -> WorkerPool {
     discovered_pool_with(
         || async { kube::Client::try_default().await.map_err(|e| e.to_string()) },
         namespace,
@@ -44,11 +39,13 @@ pub async fn discovered_pool(
         port,
         clock,
     )
-    .await
 }
 
-/// [`discovered_pool`] over the kube client `connect` builds.
-pub async fn discovered_pool_with<F, Fut>(
+/// [`discovered_pool`] over the kube client `connect` builds. The pool starts
+/// empty; a client that fails to build is built again in the background
+/// (1 s doubling to 30 s, for the life of the process), and workers join as
+/// the watch lists them. A broken watch keeps the last listed pool.
+pub fn discovered_pool_with<F, Fut>(
     connect: F,
     namespace: String,
     service: String,
@@ -61,28 +58,12 @@ where
 {
     // Installing the provider a second time returns Err; ignored.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    match connect().await {
-        Ok(client) => {
-            tracing::info!(source = "k8s-endpointslice", %service, %namespace, port, "worker pool");
-            let watch = Arc::new(K8sMembership::spawn(client, namespace, service));
-            let membership: Arc<dyn Membership> = watch.clone();
-            let reg = ComposedWorkerRegistry::spawn(membership, port, clock);
-            let control = reg.control();
-            WorkerPool { registry: Arc::new(reg), control, discovery: Some(watch) }
-        }
-        Err(e) => {
-            let fallback = "w0@127.0.0.1:5060";
-            tracing::warn!(
-                error = %e,
-                %fallback,
-                "no kube client and no PROXY_WORKERS — falling back to a single local worker"
-            );
-            let reg =
-                StaticWorkerRegistry::from_string(fallback, "fallback").expect("fallback pool");
-            let control = reg.control();
-            WorkerPool { registry: Arc::new(reg), control, discovery: None }
-        }
-    }
+    tracing::info!(source = "k8s-endpointslice", %service, %namespace, port, "worker pool");
+    let watch = Arc::new(K8sMembership::spawn_connecting(connect, namespace, service));
+    let membership: Arc<dyn Membership> = watch.clone();
+    let reg = ComposedWorkerRegistry::spawn(membership, port, clock);
+    let control = reg.control();
+    WorkerPool { registry: Arc::new(reg), control, discovery: Some(watch) }
 }
 
 #[cfg(test)]

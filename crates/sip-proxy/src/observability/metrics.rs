@@ -11,6 +11,9 @@ use sip_message::method::Method;
 use sip_net::UdpEndpoint;
 
 use super::catalogue;
+use pool::PoolGauges;
+
+mod pool;
 use crate::resolver::{outcome, refresh_outcome};
 use crate::strategy::DecodeResult;
 
@@ -169,17 +172,6 @@ fn count_outcome(counters: &[AtomicU64], labels: &[&str], label: &str) {
     }
 }
 
-/// The five worker-health gauges (one set per registry: the count of workers in
-/// each health state).
-#[derive(Default)]
-struct HealthGauges {
-    alive: AtomicU64,
-    draining: AtomicU64,
-    not_ready: AtomicU64,
-    unknown: AtomicU64,
-    dead: AtomicU64,
-}
-
 /// One recv shard's endpoint state: receive-queue gauges and the endpoints'
 /// lifetime counters, every field summed over the shard's faces.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -301,13 +293,8 @@ pub struct ProxyMetrics {
     /// one gauge; rendered as the cross-shard aggregate (sum). Not hot:
     /// written every sweep tick, read at render.
     udp_shards: Mutex<BTreeMap<usize, UdpShardStats>>,
-    health: HealthGauges,
-    /// `1` ⇒ the worker pool has **zero routable (`Alive`) workers** — the proxy
-    /// can serve no new dialog. Set from the registry by the runner's health
-    /// sampler (ADR-0012 D4): an empty/RBAC-forbidden EndpointSlice informer pool
-    /// is otherwise silent (the proxy just black-holes every INVITE). Pairs with
-    /// the `/readyz` gate; alert on `sip_proxy_worker_pool_empty == 1`.
-    worker_pool_empty: AtomicU64,
+    /// The worker pool: health counts, empty, discovery health.
+    pool: PoolGauges,
     /// Recv shards currently past the stall threshold (see `liveness`).
     recv_shards_stalled: AtomicU64,
     /// Per-face traffic counters (dual-face mode): `[face][direction]` where
@@ -348,8 +335,7 @@ impl Default for ProxyMetrics {
             resolver_cache_size: Default::default(),
             send_failures: Default::default(),
             udp_shards: Default::default(),
-            health: Default::default(),
-            worker_pool_empty: Default::default(),
+            pool: Default::default(),
             recv_shards_stalled: Default::default(),
             face_messages: Default::default(),
             per_peer: Default::default(),
@@ -538,12 +524,13 @@ impl ProxyMetrics {
         unknown: u64,
         dead: u64,
     ) {
-        self.health.alive.store(alive, Ordering::Relaxed);
-        self.health.draining.store(draining, Ordering::Relaxed);
-        self.health.not_ready.store(not_ready, Ordering::Relaxed);
-        self.health.unknown.store(unknown, Ordering::Relaxed);
-        self.health.dead.store(dead, Ordering::Relaxed);
-        self.worker_pool_empty.store(u64::from(alive == 0), Ordering::Relaxed);
+        self.pool.set_health_counts([alive, draining, not_ready, unknown, dead]);
+    }
+
+    /// Publish the worker discovery's own health: whether it has a kube
+    /// client, and since when (Unix ms) its watch is broken.
+    pub fn set_discovery(&self, no_client: bool, watch_broken_since_unix_ms: Option<u64>) {
+        self.pool.set_discovery(no_client, watch_broken_since_unix_ms);
     }
 
     /// Publish how many recv shards are stalled (the readiness gate's reading).
@@ -650,7 +637,7 @@ impl ProxyMetrics {
         c::UDP_SEND_WOULD_BLOCK.render_value(&mut s, udp.send_would_block);
         c::UDP_KERNEL_RX_DROPPED.render_value(&mut s, udp.kernel_rx_dropped);
         c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));
-        c::WORKER_POOL_EMPTY.render_value(&mut s, load(&self.worker_pool_empty));
+        self.pool.render_pool(&mut s);
 
         // Overload-shed visibility. Without these a
         // worker that gets silently rate-capped (`bucket_empty`), filtered out
@@ -662,14 +649,7 @@ impl ProxyMetrics {
         c::WORKER_STALE_DECREASE.render_value(&mut s, load(&self.overload_stale_decrease));
         c::LB_EMERGENCY_BYPASSED.render_value(&mut s, load(&self.lb_emergency_bypassed));
 
-        let health = [
-            &self.health.alive,
-            &self.health.draining,
-            &self.health.not_ready,
-            &self.health.unknown,
-            &self.health.dead,
-        ];
-        c::WORKER_HEALTH.render(&mut s, |series| load(health[series.at(0)]));
+        self.pool.render_health(&mut s);
 
         // Per-peer failure/timeout family: internal = known worker
         // (registry), external = under the cap.

@@ -281,6 +281,18 @@ pub const WORKER_POOL_EMPTY: Family = Family::gauge(
     "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.",
 );
 
+pub const DISCOVERY_NO_CLIENT: Family = Family::gauge(
+    "sip_proxy_discovery_no_client",
+    Labels::None,
+    "1 while worker discovery has no kube client, so nothing is discovered; 0 once one is built, and with a fixed PROXY_WORKERS pool.",
+);
+
+pub const DISCOVERY_WATCH_BROKEN_SINCE: Family = Family::gauge(
+    "sip_proxy_discovery_watch_broken_since_seconds",
+    Labels::None,
+    "Unix time the worker EndpointSlice watch broke, 0 while it delivers and with a fixed PROXY_WORKERS pool. The last listed pool stays meanwhile and the OPTIONS probe keeps its health current.",
+);
+
 pub const OVERLOAD_REJECTIONS: Family = Family::counter(
     "sip_proxy_overload_rejections_total",
     Labels::Product(&[Dim::new("reason", &["no_target_critical_filtered", "bucket_empty"])]),
@@ -410,6 +422,8 @@ pub const PROXY: &[Family] = &[
     UDP_KERNEL_RX_DROPPED,
     RECV_SHARDS_STALLED,
     WORKER_POOL_EMPTY,
+    DISCOVERY_NO_CLIENT,
+    DISCOVERY_WATCH_BROKEN_SINCE,
     OVERLOAD_REJECTIONS,
     WORKER_STALE_DECREASE,
     LB_EMERGENCY_BYPASSED,

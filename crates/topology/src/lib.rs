@@ -38,7 +38,7 @@ use tokio::sync::broadcast;
 #[cfg(feature = "kube")]
 pub mod k8s;
 #[cfg(feature = "kube")]
-pub use k8s::K8sMembership;
+pub use k8s::{K8sMembership, WatchHealth};
 
 mod simulated;
 pub use simulated::SimulatedMembership;

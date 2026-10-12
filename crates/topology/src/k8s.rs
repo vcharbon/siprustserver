@@ -1,7 +1,7 @@
 //! `K8sMembership` — the real cluster-membership source, backed by a
 //! Kubernetes **EndpointSlice informer**. Behind the `kube` feature so the
 //! fake-clock test tiers and the proxy/b2bua *libraries* never compile the kube
-//! client stack; only the `b2bua-runner` (and a future proxy runner) opts in.
+//! client stack; the runners opt in.
 //!
 //! ADR-0011 X7: the k8s watcher is written **once**, here, and consumed by both
 //! the proxy and the b2bua replication engine — neither re-implements discovery.
@@ -37,6 +37,11 @@ use tokio::sync::broadcast;
 
 use crate::{reconcile_to_desired, MemberDelta, Membership, MembershipState, Peer};
 
+mod watch_health;
+
+pub use watch_health::WatchHealth;
+use watch_health::{ConnectEpisode, WatchEpisode, WatchHealthState};
+
 /// The standard label kube stamps on every EndpointSlice pointing back to its
 /// owning Service. Watching by this selector scopes the informer to one pool.
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
@@ -54,6 +59,7 @@ pub struct K8sMembership {
     /// Until then the snapshot is the constructor's empty placeholder, NOT an
     /// authoritative "this cluster has no peers" — see [`Membership::synced`].
     synced: Arc<std::sync::atomic::AtomicBool>,
+    health: Arc<WatchHealthState>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -92,10 +98,13 @@ impl K8sMembership {
         let state = Arc::new(MembershipState::new(vec![]));
         let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+        let health = Arc::new(WatchHealthState::default());
+
         let st = state.clone();
         let synced_flag = synced.clone();
+        let watch_health = health.clone();
         let task = tokio::spawn(async move {
-            let client = connect_with_backoff(connect).await;
+            let client = connect_with_backoff(connect, &watch_health).await;
             let api: Api<EndpointSlice> = Api::namespaced(client, &namespace);
             let cfg =
                 watcher::Config::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
@@ -106,9 +115,11 @@ impl K8sMembership {
             // emit spurious churn. `default_backoff` makes the watch self-heal.
             let stream = reflector(writer, watcher(api, cfg)).default_backoff();
             futures::pin_mut!(stream);
+            let mut episode = WatchEpisode::default();
             loop {
                 match stream.next().await {
                     Some(Ok(event)) => {
+                        episode.delivered(&watch_health);
                         let slices = reader.state();
                         let desired = peers_from_slices(slices.iter().map(|s| s.as_ref()));
                         reconcile_to_desired(&st, desired);
@@ -119,36 +130,39 @@ impl K8sMembership {
                             synced_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
-                    Some(Err(e)) => {
-                        tracing::warn!(error = %e, "EndpointSlice watch error (will retry)");
-                    }
+                    Some(Err(e)) => episode.error(&watch_health, &e.to_string()),
                     // The watcher stream is infinite; `None` only on shutdown.
                     None => break,
                 }
             }
         });
 
-        Self { state, synced, task }
+        Self { state, synced, health, task }
+    }
+
+    /// Whether the watch has its kube client and is delivering.
+    pub fn watch_health(&self) -> WatchHealth {
+        self.health.read()
     }
 }
 
 /// The client `connect` builds, built again after each failure with a backoff
 /// of 1 s doubling to 30 s.
-async fn connect_with_backoff<F, Fut>(connect: F) -> Client
+async fn connect_with_backoff<F, Fut>(connect: F, health: &WatchHealthState) -> Client
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<Client, String>>,
 {
     let mut wait = CONNECT_BACKOFF_FLOOR;
+    let mut episode = ConnectEpisode::default();
     loop {
         match connect().await {
-            Ok(client) => return client,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    retry_in_ms = wait.as_millis() as u64,
-                    "no kube client for the EndpointSlice watch (will retry)"
-                );
+            Ok(client) => {
+                episode.built(health);
+                return client;
+            }
+            Err(cause) => {
+                episode.failed(&cause, wait);
                 tokio::time::sleep(wait).await;
                 wait = (wait * 2).min(CONNECT_BACKOFF_CEILING);
             }
