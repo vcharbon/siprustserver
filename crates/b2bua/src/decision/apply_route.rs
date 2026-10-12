@@ -34,7 +34,8 @@ pub(crate) const MAX_LIMITER_FAILOVER: u32 = 5;
 /// failovers (start at 0); `invite_wire` is the a-leg INVITE's datagram, which a
 /// late trace activation backfills from. `now_ms` is the turn's timestamp (every
 /// CDR entry and timer deadline below reads it); `clock` measures the failover
-/// round trip.
+/// round trip and the instant the b-leg's INVITE leaves, after the admission
+/// the turn waited on (`OutboundInvite::sent_at_ms`).
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_route(
     mut call: Call,
@@ -216,6 +217,8 @@ pub async fn apply_route(
     // the route rather than originate toward a fabricated address. The
     // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
     // field; the malformed text itself stays off the wire.
+    // The INVITE leaves now, after the admission this turn awaited.
+    let sent_ms = clock.now_ms();
     let (mut leg, mut effect) = match relay::build_b_leg(
         relay::CallMarks::of(&call),
         leg_id,
@@ -298,6 +301,9 @@ pub async fn apply_route(
             BodyUpdate::Drop | BodyUpdate::Replace(_) => relay::Author::Stack,
         },
     );
+    if let Some(invite) = leg.outbound_invite.as_mut() {
+        invite.sent_at_ms = sent_ms;
+    }
     call = add_originated_b_leg(call, leg, now_ms);
     fx.outbound.push(effect);
     // The leg rings for the attempt's deadline from its first 18x
