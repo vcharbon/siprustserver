@@ -148,7 +148,7 @@ async fn positive_entry_expires_and_picks_up_new_address() {
 
 #[tokio::test(start_paused = true)]
 async fn concurrent_sends_to_same_name_are_single_flight() {
-    let resolver = Arc::new(FakeResolver::slow(dst(), Duration::from_secs(2)));
+    let resolver = Arc::new(FakeResolver::slow(dst(), Duration::from_secs(1)));
     let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
     let target = ProxyAddr::new("uas.example", 5060);
 
@@ -158,7 +158,7 @@ async fn concurrent_sends_to_same_name_are_single_flight() {
     tokio::task::yield_now().await; // let the resolve task start (it parks at its delay)
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "single-flight: one lookup per name");
 
-    tokio::time::advance(Duration::from_millis(2_001)).await;
+    tokio::time::advance(Duration::from_millis(1_000)).await;
     settle().await;
     assert_eq!(ep.sent.lock().unwrap().len(), 1, "the claiming packet is sent after resolve");
 }
@@ -189,6 +189,7 @@ async fn a_lookup_past_its_bound_drops_the_packet_and_never_sends_it_late() {
     let target = ProxyAddr::new("stuck.example", 5060);
 
     fwd.send(b"pkt1", &target).await;
+    tokio::task::yield_now().await; // the lookup starts, its bound armed at 0
     tokio::time::advance(Duration::from_millis(2_000)).await;
     settle().await;
     assert_eq!(metrics.named_send_count("lookup_timed_out"), 1, "dropped at the bound");

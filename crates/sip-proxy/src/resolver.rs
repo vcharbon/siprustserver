@@ -15,6 +15,17 @@
 //! 3. **Anything else** — handed to a spawned single-flight resolve task; the
 //!    recv loop never waits on DNS.
 //!
+//! Each lookup is bounded (`lookup_timeout_ms`, 2 s). At the bound the packet
+//! is dropped and a negative entry written: a packet is sent at once or never,
+//! so a request never leaves after its sender's transaction gave up. The
+//! lookup's slot stays taken until the lookup itself returns (a getaddrinfo
+//! thread cannot be cancelled), so at most `max_in_flight` lookup threads are
+//! stuck per forwarder.
+//!
+//! Of a name's addresses, the first in the family of the sending socket is
+//! used, and kept for the cache lifetime. Only A/AAAA records are used: no
+//! NAPTR/SRV selection (RFC 3263 §4.1-4.2, ADR-0046).
+//!
 //! The cache is bounded and TTL'd in both directions:
 //! - a **positive TTL** so a restarted callee pod's new A record is picked up
 //!   (a forever-cache would pin the dead IP for the process lifetime);
@@ -82,7 +93,7 @@ pub struct ResolverConfig {
     /// Max concurrent in-flight resolve tasks (each can park for the full
     /// resolver timeout, so this also bounds spawned-task buildup).
     pub max_in_flight: usize,
-    /// The bound on one name lookup.
+    /// The bound on one name lookup (see the module doc).
     pub lookup_timeout_ms: u64,
 }
 
@@ -203,9 +214,10 @@ pub(crate) mod outcome {
     pub const RESOLVE_FAILED: &str = "resolve_failed";
     pub const DROPPED_NEGATIVE: &str = "dropped_negative";
     pub const DROPPED_IN_FLIGHT: &str = "dropped_in_flight";
+    pub const LOOKUP_TIMED_OUT: &str = "lookup_timed_out";
     /// Every outcome.
-    pub const ALL: [&str; 5] =
-        [CACHED, RESOLVED, RESOLVE_FAILED, DROPPED_NEGATIVE, DROPPED_IN_FLIGHT];
+    pub const ALL: [&str; 6] =
+        [CACHED, RESOLVED, RESOLVE_FAILED, DROPPED_NEGATIVE, DROPPED_IN_FLIGHT, LOOKUP_TIMED_OUT];
 }
 
 /// Outcome labels for `sip_proxy_resolver_refresh_total{outcome}` (proactive
@@ -245,6 +257,16 @@ struct Inner {
 }
 
 impl Inner {
+    fn lookup_bound(&self) -> Duration {
+        Duration::from_millis(self.cache.cfg.lookup_timeout_ms)
+    }
+
+    /// The first of `addrs` in the family of the sending socket.
+    fn pick(&self, addrs: Vec<SocketAddr>) -> Option<SocketAddr> {
+        let v4 = self.endpoint.local_addr().is_ipv4();
+        addrs.into_iter().find(|a| a.is_ipv4() == v4)
+    }
+
     /// Store a resolve outcome (publishing the cache-size gauge) and, for a
     /// positive entry, arm the proactive refresh one-shot.
     fn store_and_arm(self: &Arc<Self>, target: &ProxyAddr, outcome: Option<SocketAddr>) {
@@ -339,7 +361,18 @@ impl Inner {
             self.arm_refresh(target);
             return;
         }
-        let resolved = self.resolver.resolve(&target.host, target.port).await.first().copied();
+        let mut lookup = self.resolver.resolve(&target.host, target.port);
+        let resolved = match tokio::time::timeout(self.lookup_bound(), &mut lookup).await {
+            Ok(addrs) => self.pick(addrs),
+            Err(_) => {
+                self.metrics.record_resolver_refresh(fail);
+                self.resolve_failures.record(&key, "timeouts", 1);
+                self.arm_refresh(target);
+                lookup.await;
+                self.in_flight.lock().unwrap().remove(&key);
+                return;
+            }
+        };
         self.in_flight.lock().unwrap().remove(&key);
         match resolved {
             Some(_) => {
@@ -438,8 +471,16 @@ impl NamedForwarder {
                 let bytes = bytes.to_vec();
                 let target = target.clone();
                 tokio::spawn(async move {
-                    let resolved =
-                        inner.resolver.resolve(&target.host, target.port).await.first().copied();
+                    let mut lookup = inner.resolver.resolve(&target.host, target.port);
+                    let Ok(addrs) = tokio::time::timeout(inner.lookup_bound(), &mut lookup).await
+                    else {
+                        inner.store_and_arm(&target, None);
+                        inner.metrics.record_named_send(outcome::LOOKUP_TIMED_OUT);
+                        lookup.await;
+                        inner.in_flight.lock().unwrap().remove(&key);
+                        return;
+                    };
+                    let resolved = inner.pick(addrs);
                     inner.store_and_arm(&target, resolved);
                     inner.in_flight.lock().unwrap().remove(&key);
                     match resolved {
