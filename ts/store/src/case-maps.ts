@@ -117,9 +117,20 @@ export const layer = Layer.effect(
       return { cases: Number(cases[0]!.n), refusals: Number(refusals[0]!.n) } satisfies Exported
     })
 
+    // The rows to locate and the Call-ID each names are read first, so the
+    // legs join them on equality alone.
     const locatePage = (hashes: ReadonlyArray<string>) =>
       sql<{ n: number }>`
-        WITH legs AS (
+        WITH targets AS MATERIALIZED (
+          SELECT m.prep_id, m.capture, m.case_id, cc.flows_hash,
+                 coalesce(
+                   split_part(m.call_key, '#', 1),
+                   (SELECT id FROM unnest(m.call_ids) AS id ORDER BY length(id), id LIMIT 1)
+                 ) AS call_id
+          FROM case_maps m JOIN capture_cuts cc ON cc.prep_id = m.prep_id AND cc.capture = m.capture
+          WHERE m.first_at IS NULL AND cc.flows_hash IN ${sql.in(hashes)}
+        ),
+        legs AS MATERIALIZED (
           SELECT l.flows_hash, p.leg->>'call_id' AS call_id,
                  (p.leg->'msgs'->0->>'ts_us')::bigint AS ts_us,
                  p.leg->'msgs'->0->>'src' AS src,
@@ -128,7 +139,7 @@ export const layer = Layer.effect(
                LATERAL (SELECT regexp_replace(convert_from(l.bytes, 'UTF8'), ',\\s*$', '')::jsonb AS leg) p
           WHERE l.flows_hash IN ${sql.in(hashes)}
         ),
-        first AS (
+        first AS MATERIALIZED (
           SELECT DISTINCT ON (flows_hash, call_id) flows_hash, call_id, ts_us, src, dst
           FROM legs WHERE ts_us IS NOT NULL
           ORDER BY flows_hash, call_id, ts_us
@@ -136,14 +147,8 @@ export const layer = Layer.effect(
         located AS (
           UPDATE case_maps m
           SET first_at = to_timestamp(f.ts_us / 1000000.0), src = f.src, dst = f.dst
-          FROM capture_cuts cc, first f
-          WHERE m.first_at IS NULL
-            AND cc.prep_id = m.prep_id AND cc.capture = m.capture AND cc.flows_hash IN ${sql.in(hashes)}
-            AND f.flows_hash = cc.flows_hash
-            AND f.call_id = coalesce(
-              split_part(m.call_key, '#', 1),
-              (SELECT id FROM unnest(m.call_ids) AS id ORDER BY length(id), id LIMIT 1)
-            )
+          FROM targets t JOIN first f ON f.flows_hash = t.flows_hash AND f.call_id = t.call_id
+          WHERE m.prep_id = t.prep_id AND m.capture = t.capture AND m.case_id = t.case_id
           RETURNING 1
         )
         SELECT count(*)::int AS n FROM located
