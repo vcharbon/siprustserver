@@ -15,7 +15,7 @@ use std::time::Duration;
 use failover_harness::FailoverHarness;
 use scenario_harness::agent::Inbound;
 use sip_message::generators::InDialogMethod;
-use sip_message::Method;
+use sip_message::{Method, SipMessage};
 
 use crate::inflight_resend::{
     assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
@@ -61,8 +61,13 @@ async fn a_taken_over_reinvite_round_the_callee_never_answers_gives_up_at_its_bo
     assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
     assert_eq!(round_invites_sent_to(&fh, bob.addr(), REOFFER), 1, "one b-leg INVITE");
 
-    // ── The seeded round gives up; the dialog ends on both sides ────────────
-    fh.advance(invite_bound() + Duration::from_millis(500)).await;
+    // ── The seeded round gives up at its bound, not before ──────────────────
+    fh.advance(invite_bound() - Duration::from_secs(1)).await;
+    while let Some(msg) = alice.take_queued().await {
+        let provisional = matches!(&msg, SipMessage::Response(r) if r.status() < 200);
+        assert!(provisional, "nothing but a provisional reaches the caller before the bound");
+    }
+    fh.advance(Duration::from_millis(1_500)).await;
     let round_final = loop {
         match alice.recv_any().await.expect("the caller draws a response to its re-INVITE") {
             Inbound::Response(r) if r.status() < 200 => continue,

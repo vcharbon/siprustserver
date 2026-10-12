@@ -5,8 +5,10 @@
 //! The call's first record is written by the turn that handles the INVITE,
 //! once the routing decision has answered, and the backup holds it a stream
 //! hop later: from the 100 until then, a node death leaves no replica behind,
-//! and the caller to its own timers. This cell measures that window with a
-//! decision that takes a known time to answer.
+//! and the caller's INVITE with no final from the platform (a `Proceeding`
+//! client transaction runs no Timer B: only the caller's own application timer
+//! ends it). This cell measures that window with a decision that takes a known
+//! time to answer.
 
 use std::sync::Arc;
 use std::time::Duration;

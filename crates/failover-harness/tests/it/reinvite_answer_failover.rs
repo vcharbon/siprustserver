@@ -2,8 +2,9 @@
 //! re-INVITE is relayed to the callee and the serving node's 100 reaches the
 //! caller, so the caller's client transaction is `Proceeding` and sends no
 //! retransmission that could take the call over (RFC 3261 §17.1.1.2). The
-//! callee's 2xx answers an in-dialog request and carries no Record-Route
-//! (§12.1.1, §16.6 step 4: only a dialog-creating response does): the front
+//! callee's 2xx answers an in-dialog request and carries no Record-Route of the
+//! proxy's (the proxy never Record-Routes an in-dialog request, and an answer
+//! carries the Record-Route only of a dialog-creating one, §12.1.1): the front
 //! proxy fails it over on the stickiness cookie of the Via it pushed on the
 //! request, and the survivor takes the call over on it and completes the round
 //! — the round is in the replica — so the caller gets its 200, both ACKs flow,
