@@ -19,6 +19,7 @@ import { rig } from "./harness.js"
 import { BIN, describeBinary } from "./pivot-schema-bin.js"
 
 type Node = {
+  type?: string | Array<string>
   $ref?: string
   $defs?: Record<string, Node>
   anyOf?: Array<Node>
@@ -30,23 +31,35 @@ type Node = {
 /**
  * The keys a value may state and the keys it must, `$ref`s resolved in `defs`.
  * A union of object arms (one shape per wire arm) may state any arm's key and
- * must state only the keys every arm requires.
+ * must state only the keys every arm requires; an arm that is no object
+ * schema has no keys to fold, and is refused.
  */
 const keysOf = (node: Node, defs: Record<string, Node>): { properties: Set<string>; required: Set<string> } => {
-  if (node.$ref !== undefined) {
-    const target = defs[node.$ref.split("/").pop() ?? ""]
-    if (target === undefined) throw new Error(`unresolvable $ref ${node.$ref}`)
-    return keysOf(target, defs)
-  }
-  const arms = node.anyOf ?? node.oneOf
+  const resolved = resolve(node, defs)
+  const arms = resolved.anyOf ?? resolved.oneOf
   if (arms !== undefined && arms.length > 0) {
+    for (const arm of arms) {
+      const shape = resolve(arm, defs)
+      const union = shape.anyOf !== undefined || shape.oneOf !== undefined
+      if (!union && shape.type !== "object") {
+        throw new Error(`a union arm is no object schema: ${JSON.stringify(arm)}`)
+      }
+    }
     const each = arms.map((arm) => keysOf(arm, defs))
     return {
       properties: new Set(each.flatMap((arm) => [...arm.properties])),
       required: new Set([...each[0]!.required].filter((key) => each.every((arm) => arm.required.has(key))))
     }
   }
-  return { properties: new Set(Object.keys(node.properties ?? {})), required: new Set(node.required ?? []) }
+  return { properties: new Set(Object.keys(resolved.properties ?? {})), required: new Set(resolved.required ?? []) }
+}
+
+/** `node` with its `$ref`s followed into `defs`. */
+const resolve = (node: Node, defs: Record<string, Node>): Node => {
+  if (node.$ref === undefined) return node
+  const target = defs[node.$ref.split("/").pop() ?? ""]
+  if (target === undefined) throw new Error(`unresolvable $ref ${node.$ref}`)
+  return resolve(target, defs)
 }
 
 const inventory = (node: Node, defs: Record<string, Node> = {}) => {
