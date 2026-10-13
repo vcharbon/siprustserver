@@ -76,4 +76,8 @@ pub trait WorkerRegistry: Send + Sync {
     /// Reverse-lookup the worker bound at `addr` (`None` for any non-worker
     /// source — Alice, Bob, an external SBC).
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry>;
+    /// A response for the worker bound at `addr` was seen: if that address
+    /// left the set and its departed window is open, the window is re-armed to
+    /// Timer H from now (ADR-0031 D4).
+    fn rearm_departed(&self, addr: &ProxyAddr);
 }

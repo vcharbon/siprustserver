@@ -443,6 +443,37 @@ async fn response_from_an_expired_departed_address_follows_the_via() {
     assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
 }
 
+// Every response for a departed address re-arms its window: one seen at T keeps
+// the address `Dead` until T + Timer H, whatever time it departed at, so a
+// worker whose drain outlasts Timer H keeps its INVITE responses on the backup.
+#[tokio::test(start_paused = true)]
+async fn a_response_for_a_departed_address_re_arms_its_window_to_timer_h() {
+    let (core, ep) = core_over(
+        registry_without_w1(Clock::test_at(0)),
+        Arc::new(BackupStrategy),
+        Clock::test_at(0),
+    );
+    let src: SocketAddr = format!("{W1_POD}:5060").parse().unwrap();
+    let seen_at = DEPARTED_ADDRESS_TTL_MS - 2_000;
+    tokio::time::advance(std::time::Duration::from_millis(seen_at)).await;
+    core.handle_response_from(keepalive_200(), src).await;
+
+    tokio::time::advance(std::time::Duration::from_millis(DEPARTED_ADDRESS_TTL_MS - 1)).await;
+    core.handle_response_from(invite_200(), src).await;
+    tokio::time::advance(std::time::Duration::from_millis(DEPARTED_ADDRESS_TTL_MS)).await;
+    core.handle_response_from(invite_200(), src).await;
+
+    let sent = ep.sent.lock().unwrap();
+    let snat: SocketAddr = format!("{SNAT_NODE}:63522").parse().unwrap();
+    let backup: SocketAddr = format!("{W2_POD}:5060").parse().unwrap();
+    assert_eq!(
+        sent.as_slice(),
+        &[snat, backup, snat],
+        "the keepalive's 200 follows its Via; the INVITE's 200 a Timer H later takes the \
+         backup, and one past the re-armed window follows the Via"
+    );
+}
+
 // An address the pool never knew is not a worker at all (Alice, Bob, an
 // external SBC): its response is relayed by the Via, unconditionally.
 #[tokio::test]

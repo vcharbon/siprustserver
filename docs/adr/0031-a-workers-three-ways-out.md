@@ -150,7 +150,8 @@ paths already take the backup on it. The response path takes the backup for
 **INVITE responses only**: a non-INVITE response answers a client transaction
 only its sender holds (RFC 3261 §17.1.2), so it follows the Via to its sender
 whatever that sender's health. The tombstone is **re-armed by every response the
-proxy sees from that address**, so it lives Timer H past the last sign of life, whatever
+proxy sees for that address** (its next Via's sent-by names it, whatever the method),
+so it lives Timer H past the last sign of life, whatever
 the drain grace is set to; a fixed TTL from departure would expire under a live elder
 whose grace was raised. The proxy's `Draining` grace (in-dialog traffic sticks to a draining
 primary for 5 s) is recorded as effectively unreachable under Kubernetes: a probe tick can

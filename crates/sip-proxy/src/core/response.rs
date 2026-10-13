@@ -17,8 +17,9 @@
 //! no cookie of this proxy names a backup to fail it over to, or when its top
 //! Via cannot be popped and the rest re-rendered.
 //!
-//! An address that LEFT the worker set counts as `Dead` here for Timer H
-//! (`registry::tombstone`): a node whose endpoint is withdrawn while its process
+//! An address that LEFT the worker set counts as `Dead` here for Timer H past
+//! the last response for it (`registry::tombstone`, re-armed by every response
+//! whose next Via names it): a node whose endpoint is withdrawn while its process
 //! still serves must not take an INVITE response back, so that response follows
 //! the cookie's backup. A non-INVITE response answers a client transaction only
 //! its sender holds (§17.1.2) and follows the Via whatever the sender's health.
@@ -91,6 +92,12 @@ impl ProxyCore {
         }
 
         let next = &hops[1];
+        // The worker a response is for is named by its Via sent-by (see the
+        // failover below); a response for a departed address, whatever its
+        // method, re-arms that address's window (ADR-0031 D4).
+        let (sent_by_host, sent_by_port) = next.sent_by().pair();
+        let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
+        self.registry.rearm_departed(&sent_by);
         let (mut host, mut port) = match face {
             // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
             Face::Internal => {
@@ -131,8 +138,6 @@ impl ProxyCore {
         // ephemeral port, which matches no registry entry. A departed address
         // answers `Dead` from the registry's tombstone, so this branch covers
         // it too.
-        let (sent_by_host, sent_by_port) = next.sent_by().pair();
-        let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         let dead_worker = (cseq.method() == Method::Invite)
             .then(|| self.registry.lookup_by_address(&sent_by))
             .flatten()

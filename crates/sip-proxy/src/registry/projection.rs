@@ -359,6 +359,11 @@ impl WorkerSet {
             .cloned()
             .or_else(|| self.tombstones.lookup(addr, self.now_ms()))
     }
+    /// A response for `addr` was seen: a departed address's open window is
+    /// re-armed to [`DEPARTED_ADDRESS_TTL_MS`] from now.
+    pub(crate) fn rearm_departed(&self, addr: &ProxyAddr) {
+        self.tombstones.rearm(addr, self.now_ms());
+    }
     pub(crate) fn membership(&self) -> &Arc<dyn Membership> {
         &self.membership
     }
