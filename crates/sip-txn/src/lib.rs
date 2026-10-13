@@ -23,6 +23,7 @@ pub mod catalogue;
 pub mod event;
 pub mod layer;
 pub mod metrics;
+pub mod pulse;
 pub mod rng;
 pub mod seed;
 mod stateless_tag;
@@ -44,3 +45,5 @@ pub use metrics::{RetransmitRow, TransactionMetrics};
 // identity of a stateless answer.
 pub use rng::IdGen;
 pub use stateless_tag::StatelessTagger;
+// Whether the owner loop is turning (`TransactionLayer::owner_pulse`).
+pub use pulse::LoopPulse;

@@ -13,13 +13,15 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::event::{ClientTransactionHandle, TransactionEvent, TxnKind};
 use crate::metrics::{MetricsInner, TransactionMetrics};
+use crate::pulse::LoopPulse;
 use crate::rng::IdGen;
 use crate::seed::{Reoffer, TxnSeed};
 
 use super::backlog::DeferredBound;
 use super::key::ServerTxnKey;
-use super::owner::{run, Owner};
+use super::owner::Owner;
 use super::refusals::InviteRefusals;
+use super::run::run;
 
 /// Tunables for the transaction layer.
 pub struct TransactionConfig {
@@ -178,6 +180,9 @@ pub struct TransactionLayer {
     /// drops, which a surviving per-call task would keep alive — so a "crashed"
     /// node would keep answering SIP. Cheap to clone.
     owner_abort: tokio::task::AbortHandle,
+    /// The owner loop's pulse: stamped from the instant a turn takes work
+    /// until it waits again.
+    owner_pulse: Arc<LoopPulse>,
 }
 
 impl TransactionLayer {
@@ -198,13 +203,27 @@ impl TransactionLayer {
         let metrics = TransactionMetrics::new(metrics_inner.clone(), events_tx.clone());
 
         let owner = Owner::new(parser, events_tx, metrics_inner, config);
-        let owner_abort = tokio::spawn(run(owner, endpoint, cmd_rx)).abort_handle();
+        let owner_pulse = Arc::new(LoopPulse::new());
+        let owner_abort =
+            tokio::spawn(run(owner, endpoint, cmd_rx, owner_pulse.clone())).abort_handle();
 
-        (Self { cmd_tx, metrics, owner_abort }, events_rx)
+        (Self { cmd_tx, metrics, owner_abort, owner_pulse }, events_rx)
     }
 
     pub fn metrics(&self) -> &TransactionMetrics {
         &self.metrics
+    }
+
+    /// The owner loop's pulse: how long its current turn has run, `None`
+    /// while it waits for work.
+    pub fn owner_pulse(&self) -> &Arc<LoopPulse> {
+        &self.owner_pulse
+    }
+
+    /// Whether the owner task has ended — every handle dropped, the endpoint
+    /// closed, aborted, or panicked. The layer answers nothing after it.
+    pub fn owner_ended(&self) -> bool {
+        self.owner_abort.is_finished()
     }
 
     /// Abort the owner task — and so drop the SIP endpoint it owns, silencing the

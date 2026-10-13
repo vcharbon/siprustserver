@@ -17,8 +17,8 @@
 //! ADR-0005 single-writer seam, preserved without a per-call dispatcher (which
 //! is a B2BUA-only concern; this layer is shared with the proxy).
 //!
-//! Module map: `handle` (public API + the command funnel) · `owner` (the actor
-//! loop + map/wheel bookkeeping) · `client` (RFC 3261 §17.1 UAC FSM) ·
+//! Module map: `handle` (public API + the command funnel) · `run` (the actor
+//! loop, one pulse-stamped turn per `select!`) · `owner` (map/wheel bookkeeping) · `client` (RFC 3261 §17.1 UAC FSM) ·
 //! `server` (§17.2 UAS FSM) · `lifetime` (when a transaction leaves the map:
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
@@ -37,6 +37,7 @@ mod lifetime;
 mod orphan;
 mod owner;
 mod refusals;
+mod run;
 mod seed;
 mod server;
 mod txn;

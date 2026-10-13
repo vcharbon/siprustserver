@@ -1,6 +1,6 @@
-//! The owner task: the `select!` loop, transaction-map + timer-wheel
-//! bookkeeping (kept in lockstep), timer dispatch, inbound-packet parsing, and
-//! the periodic sweep tick. Protocol behavior does NOT live here — the UAC FSM is
+//! The owner task's state: transaction-map + timer-wheel bookkeeping (kept in
+//! lockstep), timer dispatch, inbound-packet parsing, and the periodic sweep
+//! tick; its `select!` loop is `run`. Protocol behavior does NOT live here — the UAC FSM is
 //! `layer::client`, the UAS FSM is `layer::server`, output-queue discipline is
 //! `layer::events`.
 
@@ -16,7 +16,6 @@ use tokio_util::time::{delay_queue::Key, DelayQueue};
 use crate::event::TransactionEvent;
 use crate::metrics::MetricsInner;
 use crate::rng::IdGen;
-use crate::timers::{ms, TXN_SWEEP_INTERVAL};
 
 use super::backlog::DeferredBound;
 use super::handle::{Command, TransactionConfig};
@@ -126,73 +125,6 @@ pub(super) fn shrink_idle<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
     let cap = map.capacity();
     if cap > SHRINK_MIN_CAPACITY && map.len() < cap / 4 {
         map.shrink_to(map.len() * 2);
-    }
-}
-
-/// The next expired timer. Only ever awaited while `q` is non-empty — an empty
-/// `DelayQueue` resolves `poll_expired` to `Ready(None)`, which would busy-spin
-/// `select!`, so the call site guards with `if !timers.is_empty()`.
-async fn next_expired(q: &mut DelayQueue<Timer>) -> Timer {
-    std::future::poll_fn(|cx| q.poll_expired(cx))
-        .await
-        .expect("guarded by !is_empty()")
-        .into_inner()
-}
-
-pub(super) async fn run(
-    mut owner: Owner,
-    endpoint: Box<dyn UdpEndpoint>,
-    mut cmd_rx: mpsc::Receiver<Command>,
-) {
-    let endpoint: &dyn UdpEndpoint = endpoint.as_ref();
-    let mut sweep = tokio::time::interval(ms(TXN_SWEEP_INTERVAL));
-    // Coalesce missed ticks: after any owner stall the catch-up must be a single
-    // pass, not a burst of back-to-back full-map scans (default `Burst`).
-    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The first `interval` tick is immediate; skip it so the first sweep runs a
-    // full interval after start.
-    sweep.tick().await;
-
-    loop {
-        // `biased` polls the arms top-to-bottom and the INBOUND PACKET arm is LAST
-        // on purpose: a sustained packet flood keeps `endpoint.recv()` ready every
-        // iteration, so if it were polled first it would starve the timer wheel and
-        // the safety-net sweep indefinitely — retransmits/timeouts/cleanups would
-        // stall and the transaction maps + DelayQueue would grow unbounded exactly under
-        // the overload the sweep exists to bound. Polling commands, due timers, and
-        // the sweep ahead of new packets guarantees the internal machinery always
-        // makes progress; the flood source (packets) can only be drained once
-        // nothing else is pending. (cmd/timer can't themselves flood without
-        // packets — the router only issues commands in response to events.)
-        tokio::select! {
-            biased;
-            cmd = cmd_rx.recv() => match cmd {
-                Some(c) => owner.handle_command(endpoint, c).await,
-                None => break, // all handles dropped → shut down
-            },
-            timer = next_expired(&mut owner.timers), if !owner.timers.is_empty() => {
-                owner.fire_timer(endpoint, timer).await;
-            }
-            _ = sweep.tick() => owner.sweep(),
-            packet = endpoint.recv() => match packet {
-                Some(p) => owner.handle_packet(endpoint, p).await,
-                None => break, // endpoint closed
-            },
-        }
-        // End-of-turn: emit deferred CallQuiesced notices AFTER this turn's
-        // protocol events, so the router never self-releases a takeover copy ahead
-        // of the ACK/Timeout that cleared the call's last txn (ADR-0014 ordering).
-        owner.flush_pending_quiesce();
-        // Sample the DelayQueue depth (O(1)) so a timer/slab leak is visible even
-        // when active_transactions is flat (the no-chaos RSS-climb localisation).
-        owner
-            .metrics
-            .timer_queue_len
-            .store(owner.timers.len(), std::sync::atomic::Ordering::Relaxed);
-        owner
-            .metrics
-            .event_queue_deferred
-            .store(owner.deferred_events.len(), std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -425,7 +357,7 @@ impl Owner {
 
     // ── timer firing ─────────────────────────────────────────────────────────
 
-    async fn fire_timer(&mut self, endpoint: &dyn UdpEndpoint, timer: Timer) {
+    pub(super) async fn fire_timer(&mut self, endpoint: &dyn UdpEndpoint, timer: Timer) {
         // A fired entry has already left the `DelayQueue` (`poll_expired` freed its
         // slab slot), so the `Key` we still hold for it is now STALE — the next
         // `insert` reuses that exact slot and yields the SAME `Key`. Null the field
@@ -474,7 +406,7 @@ impl Owner {
 
     /// The periodic housekeeping pass: the lifetime safety net, the Timer L
     /// memo purge, and the idle-table shrink and buffer census.
-    fn sweep(&mut self) {
+    pub(super) fn sweep(&mut self) {
         self.reap_overdue();
         self.forget_expired_uas_tags();
         shrink_idle(&mut self.clients);
@@ -499,7 +431,7 @@ impl Owner {
 
     // ── send API command handling ─────────────────────────────────────────────
 
-    async fn handle_command(&mut self, endpoint: &dyn UdpEndpoint, cmd: Command) {
+    pub(super) async fn handle_command(&mut self, endpoint: &dyn UdpEndpoint, cmd: Command) {
         match cmd {
             Command::SendRequest { msg, dest, txn_type, reply } => {
                 let handle = self.do_send_request(endpoint, *msg, dest, txn_type).await;
@@ -558,7 +490,11 @@ impl Owner {
 
     // ── inbound packet dispatch ───────────────────────────────────────────────
 
-    async fn handle_packet(&mut self, endpoint: &dyn UdpEndpoint, packet: sip_net::UdpPacket) {
+    pub(super) async fn handle_packet(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        packet: sip_net::UdpPacket,
+    ) {
         use std::sync::atomic::Ordering::Relaxed;
         let src = packet.src;
         // Hand the receive buffer to the parser instead of lending it: the
