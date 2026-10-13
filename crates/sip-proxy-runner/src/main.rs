@@ -132,11 +132,12 @@ use sip_proxy::registry::WorkerHealth;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
-use sip_proxy::{ExternalFaceParts, ProxyCoreBuilder, RoutingStrategy};
+use sip_proxy::{ExternalFaceParts, RoutingStrategy};
 use sip_proxy_runner::config::{refuse_to_start, ExternalFace, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
 use sip_proxy_runner::intake_shed::{intake_shed_hook, intake_shed_watermark};
 use sip_proxy_runner::readiness::probes;
+use sip_proxy_runner::shards::SharedRouting;
 use sip_txn::IdGen;
 
 /// Log the buffer sizes the kernel granted one face's signalling socket,
@@ -461,13 +462,9 @@ async fn main() {
     // scope="internal",kind="response_timeout"}): worker OPTIONS timeouts.
     .with_metrics(metrics.clone());
 
-    // N recv-shard cores over the shared routing state: strategy/registry/
-    // metrics are `Arc`s, and the CANCEL/rtx LRU MUST be one instance across
-    // shards — a response or CANCEL can hash to a different socket than the
-    // INVITE that populated the entry.
+    // The CANCEL/rtx LRU and the refusal memo are ONE instance across shards
+    // (`SharedRouting`).
     let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
-    // ONE refusal memo and To-tag secret across shards: a copy of a refused
-    // request draws the same 503 whichever socket it arrives on.
     let refusals =
         Arc::new(sip_proxy::refusals::Refusals::new(&id_gen, cfg.retry_after_jitter_sec));
 
@@ -486,22 +483,25 @@ async fn main() {
     // "anything sampled?" flag bound the process, not a socket (ADR-0026).
     let traces = Arc::new(sip_proxy::ProxyTraces::from_env(clock.now_ms()));
 
+    let shared = SharedRouting {
+        advertised: advertised.clone(),
+        strategy,
+        registry: registry.clone(),
+        clock: clock.clone(),
+        id_gen: id_gen.clone(),
+        metrics: metrics.clone(),
+        cancel_lru,
+        refusals,
+        self_gate: gate_dyn,
+        intake_age,
+        resolver: resolver_cfg,
+        traces,
+        pulse: pulse.clone(),
+    };
     let mut cores = Vec::with_capacity(recv_shards);
     let mut ext_endpoints = ext_endpoints.into_iter();
     for (shard, endpoint) in endpoints.into_iter().enumerate() {
-        let mut builder =
-            ProxyCoreBuilder::new(advertised.clone(), strategy.clone(), registry.clone())
-                .clock(clock.clone())
-                .id_gen(id_gen.clone())
-                .metrics(metrics.clone())
-                .cancel_lru(cancel_lru.clone())
-                .refusals(refusals.clone())
-                .self_gate(gate_dyn.clone())
-                .intake_age(intake_age.clone())
-                .resolver_config(resolver_cfg)
-                .traces(traces.clone())
-                .pulse(pulse.clone())
-                .shard(shard);
+        let mut builder = shared.shard(shard);
         if let Some(ext) = &ext_face {
             builder = builder.external_face(ExternalFaceParts {
                 endpoint: ext_endpoints.next().expect("one external endpoint per shard"),
