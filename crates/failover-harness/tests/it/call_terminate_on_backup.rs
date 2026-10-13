@@ -45,8 +45,8 @@ use scenario_harness::{Agent, Dialog};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 
-const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
-const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+pub(crate) const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+pub(crate) const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 const PROXY: &str = "127.0.0.1:5080";
@@ -90,30 +90,30 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
 /// safe-point (post-ACK, replicated primary → backup). No `Drop` impl, so a cell
 /// can destructure it to independent owned locals (the `(primary, backup)`
 /// split-borrow needs `w_b1`/`w_b2` as separate bindings).
-struct Established {
-    fh: FailoverHarness,
-    alice: Agent,
-    bob: Agent,
-    proxy: ProxySut,
-    store: Arc<CallStore>,
+pub(crate) struct Established {
+    pub(crate) fh: FailoverHarness,
+    pub(crate) alice: Agent,
+    pub(crate) bob: Agent,
+    pub(crate) proxy: ProxySut,
+    pub(crate) store: Arc<CallStore>,
     /// The limiter HTTP server handle — must outlive the cell (drop closes it).
-    lh: Box<dyn HttpServerHandle>,
-    w_b1: ReplicatedB2buaSut,
-    w_b2: ReplicatedB2buaSut,
-    primary_ord: String,
-    bak_ord: String,
-    call_ref: String,
+    pub(crate) lh: Box<dyn HttpServerHandle>,
+    pub(crate) w_b1: ReplicatedB2buaSut,
+    pub(crate) w_b2: ReplicatedB2buaSut,
+    pub(crate) primary_ord: String,
+    pub(crate) bak_ord: String,
+    pub(crate) call_ref: String,
     /// alice's confirmed dialog (caller-initiated in-dialog requests).
-    dialog: Dialog,
+    pub(crate) dialog: Dialog,
     /// bob's confirmed dialog (callee-initiated in-dialog requests).
-    bob_dialog: Dialog,
+    pub(crate) bob_dialog: Dialog,
 }
 
 /// Establish one limited call through the proxy to the `Established` state and
 /// replicate it primary → backup. Leaves both nodes alive, no fault injected; the
 /// cell injects its own. Discovers the cluster `call_ref` from the backup's
 /// replica partition so the per-call CDR / trace assertions can key on it.
-async fn establish(name: &str) -> Established {
+pub(crate) async fn establish(name: &str) -> Established {
     establish_with(name, limited_decision()).await
 }
 
@@ -220,7 +220,7 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
 /// suite's baseline for the reclaim-origination path.
 ///
 /// The two limiter-HA cases and the takeover-span cell make the same distinction.
-fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
+pub(crate) fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     fh.accept_rfc_deviations_from_now(
         failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
         "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \

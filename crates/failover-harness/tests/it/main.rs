@@ -51,6 +51,8 @@ mod service_answer_deadline;
 mod silent_replication_stream;
 mod spiral_takeover;
 mod stale_no_answer_reclaim;
+mod stood_down_round;
+mod swept_call_answered_inside_the_lag;
 mod swept_call_primary_returns;
 mod takeover_request_uri_rewritten;
 mod timer_generation_takeover;

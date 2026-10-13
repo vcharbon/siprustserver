@@ -5,7 +5,9 @@
 //! response (RFC 3261 §13.2.2.4), the callee at most one CANCEL (§9.1), and the
 //! call settles to one CDR — whether the callee stays silent, answers at the
 //! returned node, answers at the backup while the node is down or not yet
-//! routable, or the backup's copy wrote before the node came back.
+//! routable, or the backup's copy wrote before the node came back, and
+//! whether the backup learns of the node's return from its reclaim write or
+//! from its delete of the call.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -30,13 +32,13 @@ const LONG_RING: Duration = Duration::from_secs(140);
 const PAST_TOMBSTONE: Duration = Duration::from_secs(100);
 
 /// The SIP port of a worker, every incarnation alike.
-fn port(worker: &str) -> u16 {
+pub(crate) fn port(worker: &str) -> u16 {
     worker.parse::<SocketAddr>().expect("a worker address").port()
 }
 
 /// Every message starting with `prefix` a worker sent toward `to`, by the
 /// sender's port, in wire order.
-fn sent(p: &Placed, to: SocketAddr, prefix: &[u8]) -> Vec<u16> {
+pub(crate) fn sent(p: &Placed, to: SocketAddr, prefix: &[u8]) -> Vec<u16> {
     let proxy = p.proxy.addr();
     p.fh.sip_entries()
         .iter()
@@ -47,7 +49,7 @@ fn sent(p: &Placed, to: SocketAddr, prefix: &[u8]) -> Vec<u16> {
 
 /// The departed node reboots at a new address; the front proxy still reads it
 /// dead and the backup has not seen it re-enter the membership.
-async fn reboot(p: &mut Placed) {
+pub(crate) async fn reboot(p: &mut Placed) {
     p.fh.mark("b1", None, "reboot", "restart empty, higher gen, new pod IP");
     let new_addr = p.w_b1.reboot().await;
     p.proxy.set_address("b1", new_addr);
@@ -56,13 +58,13 @@ async fn reboot(p: &mut Placed) {
 
 /// The departed node reboots at a new address and re-enters the membership;
 /// the front proxy still reads it dead.
-async fn rejoin(p: &mut Placed) {
+pub(crate) async fn rejoin(p: &mut Placed) {
     reboot(p).await;
     p.w_b2.simulate_peer_added("b1");
 }
 
 /// The rejoined node becomes ready and routable again.
-async fn ready(p: &mut Placed) {
+pub(crate) async fn ready(p: &mut Placed) {
     for _ in 0..40 {
         p.fh.advance(Duration::from_millis(250)).await;
         if p.w_b1.is_ready() {
@@ -82,7 +84,7 @@ async fn return_before_deadline(p: &mut Placed) {
 }
 
 /// The callee's 200 relayed to the caller, and the caller's ACK to the callee.
-async fn answer(p: &mut Placed) -> Dialog {
+pub(crate) async fn answer(p: &mut Placed) -> Dialog {
     p.at_bob.respond(200, "OK").with_sdp(ANSWER).await;
     p.ringing.expect(200).await;
     let answered = p.ringing.ack().await;
@@ -109,7 +111,7 @@ async fn answered_alone_past(p: &Placed, deadline: i64) {
 /// The established call ended by the caller; every call, `ended` included,
 /// settles to one CDR. A keepalive OPTIONS the returned node sends on the
 /// established call is answered 200 on the way (RFC 3261 §11.2).
-async fn hang_up_quiet_and_settle(mut p: Placed, ended: &[String]) {
+pub(crate) async fn hang_up_quiet_and_settle(mut p: Placed, ended: &[String]) {
     let mut quiet_bye = p.quiet.bye().await;
     p.bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     quiet_bye.expect_tolerating(200, &["OPTIONS"]).await;
@@ -122,7 +124,7 @@ async fn hang_up_quiet_and_settle(mut p: Placed, ended: &[String]) {
 
 /// Both calls ended by the caller; every call, `ended` included, settles to
 /// one CDR.
-async fn hang_up_and_settle(p: Placed, mut answered: Dialog, ended: &[String]) {
+pub(crate) async fn hang_up_and_settle(p: Placed, mut answered: Dialog, ended: &[String]) {
     let mut bye = answered.bye().await;
     p.bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS"]).await;
@@ -411,65 +413,49 @@ async fn a_swept_call_whose_node_returns_into_a_cold_backup_stream_gets_no_final
     hang_up_and_settle(p, answered, &[short_ref]).await;
 }
 
-/// Drain what the caller holds past its 200: the backup copy's 480, each copy
-/// a repeat of one final its answered transaction no longer takes.
-async fn drain_strays(p: &Placed) {
-    while let Some(msg) = p.alice.take_queued().await {
-        let stray = matches!(&msg, SipMessage::Response(r) if r.status() == 480);
-        assert!(stray, "nothing but the copy's 480 reaches the caller: {msg:?}");
+/// The departed node reboots, recovers its record from the backup and
+/// reclaims the call, but neither the backup nor the front proxy knows it is
+/// back: its writes wait in its changelog for the backup's stream.
+async fn reclaim_unannounced(p: &mut Placed) {
+    reboot(p).await;
+    for _ in 0..40 {
+        p.fh.advance(Duration::from_millis(250)).await;
+        if p.w_b1.is_ready() {
+            break;
+        }
     }
+    assert!(p.w_b1.serves(&p.ringing_ref), "the returning node reclaimed the call");
 }
 
-/// The returned node's writes reach the backup 2 s late, and the callee
-/// answers at the returned node 1.5 s before the ring deadline: the backup's
-/// copy has seen neither the reclaim nor the answer when its deadline fires,
-/// so it CANCELs the callee and refuses the caller 480 after the 200 — the
-/// residual of ADR-0047 D7. The call the caller and the callee hold stays up
-/// at the returned node: the copy's ending, which reaches it once the lag
-/// clears, stands behind its answer and never ends it; the call settles to
-/// one CDR when the caller hangs up.
+/// The node returns unannounced. The callee's 183 fails over to the backup,
+/// whose copy relays it and writes; then the callee refuses at the node, now
+/// routable, which relays its 486, ACKs it and deletes the call. The backup's
+/// stream from the node then opens: the call's only change waiting there is
+/// the delete — the reclaim write it compacted away never read the copy's 183
+/// — and the copy stands down on it (ADR-0047 D7). The caller's 486 is its
+/// only final; the backup neither CANCELs the callee nor refuses the caller at
+/// the deadline.
 #[tokio::test(start_paused = true)]
-async fn a_swept_call_answered_at_its_returned_node_inside_the_replication_lag_stays_up() {
-    let mut p = place("swept-call-answered-inside-the-lag", Callee::Ringing).await;
+async fn a_swept_call_refused_at_its_returned_node_stands_the_copy_down_on_the_delete() {
+    let mut p = place("swept-call-refused-delete-stands-down", Callee::Ringing).await;
     let deadline = depart(&mut p).await;
-    let wait = deadline - p.fh.now_ms() - 4_000;
-    p.fh.advance(Duration::from_millis(wait.max(0) as u64)).await;
-    reboot(&mut p).await;
-    p.fh.delay("b1", "b2", 2_000);
+    reclaim_unannounced(&mut p).await;
+
+    copy_writes_183(&mut p).await;
+    p.proxy.set_health("b1", WorkerHealth::Alive);
+    p.at_bob.respond(486, "Busy Here").await;
+    p.bob.receive("ACK").await;
+    p.ringing.expect(486).await;
+    let workers = [port(B1), port(B2)];
+    let acks: Vec<u16> =
+        sent(&p, p.bob.addr(), b"ACK").into_iter().filter(|s| workers.contains(s)).collect();
+    assert_eq!(acks.last(), Some(&port(B1)), "the node ACKs the 486");
+    p.fh.advance(Duration::from_millis(500)).await;
+    assert!(p.w_b2.serves(&p.ringing_ref), "the copy has heard nothing of it yet");
+
     p.w_b2.simulate_peer_added("b1");
-    ready(&mut p).await;
-    let answered = answer(&mut p).await;
-    assert!(p.fh.now_ms() < deadline, "the callee answers before the deadline");
-    // What the copy puts on the wire inside the lag is what this cell measures.
-    let lag = [
-        ("no-cancel-after-final", "the copy CANCELs the callee after its answer"),
-        (
-            "unacked-invite-non-2xx-final",
-            "the copy's 480 follows the caller's 200: no ACK takes it",
-        ),
-        ("no-bye-outside-or-early-dialog", "the copy's 480 reads as ending the answered dialog"),
-    ];
-    for (rule, why) in lag {
-        p.fh.accept_rfc_deviations_from_now(rule, why);
-    }
-
-    let past = deadline - p.fh.now_ms() + 5_000;
-    p.fh.advance(Duration::from_millis(past.max(0) as u64)).await;
-    let b2 = port(B2);
-    let cancels = sent(&p, p.bob.addr(), b"CANCEL");
-    assert!(!cancels.is_empty() && cancels.iter().all(|s| *s == b2), "the copy CANCELs the callee");
-    let refusals = sent(&p, p.alice.addr(), b"SIP/2.0 480");
-    assert!(!refusals.is_empty() && refusals.iter().all(|s| *s == b2), "the copy refuses");
-    // The callee's answered INVITE transaction is over: the CANCEL matches
-    // nothing (RFC 3261 §9.2). Its retransmissions are one transaction.
-    p.bob.receive("CANCEL").await.respond(481, "Call/Transaction Does Not Exist").await;
-    drain_strays(&p).await;
-
-    p.fh.heal("b1", "b2");
-    p.fh.advance(Duration::from_secs(40)).await;
-    drain_strays(&p).await;
-    assert!(p.w_b1.serves(&p.ringing_ref), "the returned node keeps the answered call");
-    assert!(!p.w_b2.serves(&p.ringing_ref), "the copy is gone");
-    assert!(sent(&p, p.bob.addr(), b"BYE").is_empty(), "nobody ends the answered call");
-    hang_up_and_settle(p, answered, &[]).await;
+    p.fh.advance(Duration::from_millis(500)).await;
+    assert!(!p.w_b2.serves(&p.ringing_ref), "the copy stands down on the node's delete");
+    one_final_past(&p, deadline, &[]).await;
+    hang_up_quiet_and_settle(p, &[]).await;
 }
