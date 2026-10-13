@@ -128,7 +128,8 @@ impl ActionExecutor<'_> {
             && call.a_leg.invite_final_sent.is_none();
         // The caller-facing tag of the dialog this 2xx creates: the one its
         // relayed provisional or `MapUnshownDialog` showed, or the one the
-        // relay of a live answer takes now (`a_face_tag`).
+        // relay of a live answer takes now (`a_face_tag`). A 2xx crossing the
+        // leg's CANCEL that no caller-facing dialog fronts gives her none.
         let preferred = match fronting_dialog(call, leg_id, winner) {
             Some(d) => Some(d.our_tag.clone()),
             None if answers_the_caller && !winner.is_empty() => {
@@ -136,7 +137,9 @@ impl ActionExecutor<'_> {
             }
             None => None,
         };
-        self.ensure_a_dialog_with(call, preferred.clone());
+        if preferred.is_some() || !crossed_cancel {
+            self.ensure_a_dialog_with(call, preferred.clone());
+        }
         if let Some(pref) = preferred.filter(|p| !p.is_empty() && answers_the_caller) {
             adopt_a_tag(call, &pref);
         }

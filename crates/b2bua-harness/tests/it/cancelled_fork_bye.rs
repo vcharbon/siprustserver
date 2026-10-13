@@ -409,10 +409,10 @@ async fn the_record_waits_for_the_487_of_a_fork_whose_callee_byed_its_early_dial
     let _ = h.finish().await;
 }
 
-/// A 2xx crossing the CANCEL of a fork that never rang is reaped; its turn
-/// mints the caller-facing dialog of the stack's own tag, which no
-/// provisional showed her. A request she sends under that tag names no
-/// dialog she holds: 481 (RFC 3261 §12.2.2), and the call goes on.
+/// A 2xx crossing the CANCEL of a fork that never rang is reaped and gives
+/// the caller no dialog: no provisional showed her one. A request she sends
+/// under a tag she was never shown names no dialog she holds: 481 (RFC 3261
+/// §12.2.2), and the call goes on.
 #[tokio::test(start_paused = true)]
 async fn a_caller_request_under_a_tag_she_was_never_shown_is_refused_481() {
     let h = Harness::with_transit_delay("cancelled-fork-unshown-face", 1);
@@ -451,19 +451,17 @@ async fn a_caller_request_under_a_tag_she_was_never_shown_is_refused_481() {
     h.advance(Duration::from_millis(100)).await;
 
     let live = b2bua.live_call(&call_ref).expect("the call is live");
-    let unshown = live
-        .a_leg
-        .dialogs
-        .iter()
-        .find(|d| !d.shown)
-        .expect("the caller-facing dialog no provisional showed")
-        .our_tag
-        .clone();
+    assert!(live.a_leg.dialogs.is_empty(), "the reaped 2xx gives the caller no dialog");
     h.allow_violation(
         "mid-dialog-tags",
         "a request under a tag the caller was never shown is the deviation under test",
     );
-    call.send_request(InDialogMethod::Info).with_to_tag(&unshown).send().await.expect(481).await;
+    call.send_request(InDialogMethod::Info)
+        .with_to_tag("never-shown")
+        .send()
+        .await
+        .expect(481)
+        .await;
 
     uas2.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
