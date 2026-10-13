@@ -125,6 +125,9 @@ describe("captured violations (§11.1)", () => {
     const uncovered = captured([], new Set(["another.pcap"]))
     expect(uncovered.out).toEqual([])
     expect(uncovered.flags.map((f) => f.kind)).toEqual(["census-uncovered"])
+    // A scripted party's finding there is unjudged, never gated on.
+    expect(uncovered.flags[0]!.detail).toContain("unjudged, information only")
+    expect(uncovered.flags[0]!.detail).not.toContain("gates")
     expect(captured([], new Set([CAPTURE])).flags).toEqual([])
     expect(captured([]).flags).toEqual([])
   })

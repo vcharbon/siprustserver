@@ -66,8 +66,9 @@ export const UNCOVERED = "census-uncovered"
 /**
  * The violations the case's own census hits charge a scripted party with at
  * this case's vantage, one per rule and step, and a flag where the census never
- * covered the case's capture — an empty list there is no reading at all, and a
- * scripted party's finding has nothing to be cancelled by. `covered` is the
+ * covered the case's capture — an empty list there is no reading at all, so a
+ * scripted party's finding is neither cancelled nor a harness fault: the run
+ * writes it `unjudged`, as information (§11.1). `covered` is the
  * report's coverage; absent, coverage is not judged. `hits` is the report's
  * index, so a case reads its own hits and never the whole report.
  *
@@ -75,7 +76,8 @@ export const UNCOVERED = "census-uncovered"
  * charged endpoint is that step's party: the message's sender on a `send`, its
  * receiver on an `expect`. A hit whose anchor no step carries, or carries from
  * the far side of the vantage, states nothing — the audit then has no
- * statement to cancel against, and the scripted party's finding gates.
+ * statement to cancel against, and the scripted party's finding is a harness
+ * fault.
  */
 export const capturedWith =
   (hits: HitIndex, covered?: ReadonlySet<string>) =>
@@ -88,7 +90,7 @@ export const capturedWith =
               kind: UNCOVERED,
               detail:
                 `the census report covers no capture '${input.capture}': nothing states what ` +
-                `its scripted parties broke, so every finding against one gates`
+                `its scripted parties broke, so a finding against one is unjudged, information only`
             }
           ]
     const mine = hits.ofCalls(input.capture, input.callIds)

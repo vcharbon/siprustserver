@@ -98,11 +98,15 @@ const askedDocument = Effect.fn("Bundle.askedDocument")(function*(runDir: string
   return yield* readJson(isDir ? path.join(target, "scenario.json") : target)
 })
 
-/** The gating count `rfc.json` states; null where the cell wrote none or was not audited. */
+/**
+ * How many findings of `rfc.json` fail the cell: the SUT's gating ones and the
+ * scripted parties' harness faults; null where the cell wrote none or was not
+ * audited.
+ */
 const rfcGatingOf = (rfc: Record<string, unknown> | null): number | null => {
   if (rfc === null || rfc["status"] !== "audited" || !Array.isArray(rfc["findings"])) return null
   return (rfc["findings"] as ReadonlyArray<unknown>)
-    .filter((f) => asRecord(f)?.["gating"] === true)
+    .filter((f) => asRecord(f)?.["gating"] === true || asRecord(f)?.["harness_fault"] === true)
     .length
 }
 

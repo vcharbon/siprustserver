@@ -140,7 +140,8 @@ describe("Bundle.read", () => {
     // not state reads as the harness's fault, naming the party; the SUT is
     // charged nothing.
     expect(cells.get("case11")!.passed).toBe(false)
-    expect(cells.get("case11")!.rfcGating).toEqual(0)
+    // Counted among the findings that fail it, so the row never reads 0 rfc.
+    expect(cells.get("case11")!.rfcGating).toEqual(1)
     expect(cells.get("case11")!.mainError).toEqual({
       kind: "harness-fault",
       rule: "no-200-after-cancel",
