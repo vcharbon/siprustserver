@@ -157,15 +157,18 @@ primary for 5 s) is recorded as effectively unreachable under Kubernetes: a prob
 stamp it inside the withdrawal window, but the ordinal leaves the projection first in
 practice. It stays for a static worker pool.
 
-**D5 — The leaving worker keeps serving what still reaches it, and never stands down on
-its own.** No "stop authoring on SIGTERM": a proxied worker receives nothing after
+**D5 — The leaving worker keeps serving what still reaches it, and stands down only
+through the drain.** No "stop authoring on SIGTERM": a proxied worker receives nothing after
 withdrawal, a direct-bound one must finish what it holds. What protects the caller from a
 second, *different* final is the fold: the primary pulls the survivor's reverse flush and
 inherits its obligations (D3 keeps the fold's inputs honest). A duplicate 2xx it re-emits
 from the survivor's retained datagram is tag-identical and merely harmless. Convergence is
 by folding, never by a primary going passive; the acting-backup self-release stays scoped
 to takeover copies (ADR-0014). The SIGTERM-versus-informer race (tens of milliseconds
-either way) is benign because of D1: an INVITE served in it is replicated.
+either way) is benign because of D1: an INVITE served in it is replicated. A withdrawal
+the worker observes with no SIGTERM following (D6: the endpoint gone without a kill, or a
+pod stuck `Terminating` behind a dead kubelet) runs the same D2 drain, and the process
+exits; the orchestrator restarts the ordinal. A worker never stays `Draining` while it runs.
 
 **D6 — A worker observes its own endpoint.** The worker already runs the informer; one
 predicate on its own `targetRef.name` tells it it is withdrawn (`terminating` and not
@@ -174,7 +177,8 @@ once it has seen its own endpoint `ready`: a pod not ready yet is not withdrawn.
 On that signal it latches `Draining` even if SIGTERM is late (a preStop hook, a stuck
 kubelet), and it is the precondition D2 needs to know that nothing new will arrive. A
 worker on a static membership never observes itself and keeps today's behaviour. This
-does not make the worker stand down (D5); it makes it know what the proxy knows.
+does not make the worker stop serving (D5); it makes it know what the proxy knows, and
+drain then exit as on SIGTERM.
 
 ## The cases after this decision
 
@@ -286,7 +290,7 @@ incarnation once it listens again (the same reconnect as today's reboot).
 | D2 caught-up drain exit | active | never holds: SIGKILL ends the drain | no drain | no drain |
 | D3 forward-flush guard | active on the last flushes | active for the park latency | **active on the heal** | inert |
 | D4 tombstone / probe `Dead` | tombstone, re-armed on sight | tombstone | probe, then tombstone in 3b | tombstone |
-| D5 keep serving, never stand down | drain finishes what reaches it | 2 s into a void | timers only | unchanged |
+| D5 keep serving, stand down only by the drain | drain finishes what reaches it | 2 s into a void | timers only | unchanged |
 | D6 self-observation | active | active (the endpoint is absent) | 3b only | inert (a flap is no withdrawal) |
 
 D3 is the one rule every case shares, and it is a refusal, not a new flow. D2 is the one

@@ -92,6 +92,14 @@ the one await with no timeout, no queue and no drop policy.
    `PROXY_SHARD_STALL_MS` (2 000) flips `/readyz` to NotReady and the gauge
    `sip_proxy_recv_shards_stalled`. This is the only signal that tells a
    parked shard from an idle one; the activity meters cannot.
+   The b2bua worker's two loops, the transaction owner (recv, timer wheel,
+   sweep) and the router, state theirs the same way (`sip_txn::LoopPulse`,
+   `b2bua::loops`): one on a piece of work past `B2BUA_LOOP_STALL_MS`
+   (5 000) turns `/ready` and `/healthz` to 503 and raises
+   `b2bua_loop_stalled{loop}`, and the worker's livenessProbe restarts it; a
+   loop task that ends exits the process non-zero. 5 s is fifty 100 ms CFS
+   periods: under the `cpu_starve` chaos (0.3 CPU) a turn would need 1.5 s
+   of CPU to read stalled, which no SIP event, timer or sweep takes.
 5. **The invariant, stated:** an ingress loop awaits nothing whose completion
    a third party controls. The `RoutingStrategy` trait is `async` and its
    three call sites sit on the recv loop; a strategy that consults a network

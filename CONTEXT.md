@@ -796,7 +796,8 @@ its address; the process is untouched but **observes** it: the informer shows a
 worker its own endpoint, and once it has seen itself routable, a `terminating` or
 absent own endpoint (never a readiness flap: `Draining` is terminal) latches
 `Draining` whether or not SIGTERM has come (ADR-0031 D6; `is_withdrawn`
-on the supervisor, the `b2bua_withdrawn_running` gauge). A static membership
+on the supervisor, the `b2bua_withdrawn_running` gauge), and the worker
+drains and exits as on SIGTERM (D5). A static membership
 never shows a worker itself. Four ways out — graceful, abrupt, vanished, restarted in
 place — in ADR-0031.
 
