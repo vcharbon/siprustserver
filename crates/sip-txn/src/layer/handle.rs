@@ -124,6 +124,12 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<()>,
     },
+    /// Delete every transaction of `call_ref` with nothing sent; replies with
+    /// how many.
+    RelinquishCall {
+        call_ref: String,
+        reply: oneshot::Sender<usize>,
+    },
     /// Count the transactions (any role/state) still attributed to `call_ref`.
     /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
     /// serving a takeover event: when it reaches **0** the backup's served
@@ -318,6 +324,16 @@ impl TransactionLayer {
     /// call). Idempotent.
     pub async fn cancel_txns_for_call(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
         self.roundtrip(|reply| Command::CancelTxnsForCall { call_ref: call_ref.to_string(), reply })
+            .await
+    }
+
+    /// Relinquish every transaction of `call_ref`, client and server, to the
+    /// node that serves the call now: each is deleted with its timers, nothing
+    /// sent and nothing owed, and no `CallQuiesced` follows. A message for one
+    /// of them arriving afterwards matches nothing here and is handed up as a
+    /// new arrival. Returns how many went. Idempotent.
+    pub async fn relinquish_call(&self, call_ref: &str) -> Result<usize, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::RelinquishCall { call_ref: call_ref.to_string(), reply })
             .await
     }
 

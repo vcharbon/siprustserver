@@ -458,6 +458,7 @@ impl Owner {
                 self.do_cancel_txns_for_call(&call_ref);
                 let _ = reply.send(());
             }
+            Command::RelinquishCall { call_ref, reply } => self.relinquish_call(&call_ref, reply),
             Command::ForgetUnanswered { key, call_id, from_tag } => {
                 self.forget_unanswered(&key, &call_id, &from_tag)
             }
@@ -471,8 +472,7 @@ impl Owner {
                 let _ = reply.send(answered);
             }
             Command::ActiveTxnCount { call_ref, reply } => {
-                let n = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::len);
-                let _ = reply.send(n);
+                let _ = reply.send(self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::len));
             }
             Command::WatchSelfRelease { call_ref, reply } => {
                 if self.has_txns_for(&call_ref) {

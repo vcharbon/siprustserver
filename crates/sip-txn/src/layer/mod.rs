@@ -22,6 +22,7 @@
 //! `server` (§17.2 UAS FSM) · `lifetime` (when a transaction leaves the map:
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
+//! `relinquish` (a call's transactions deleted for another node to serve) ·
 //! `events` (output-queue discipline) · `backlog` (new-call admission against
 //! the deferred backlog) · `refusals` (the node's shared refusals of new
 //! INVITEs) · `txn` (per-transaction state) · `key` (a server transaction's
@@ -37,6 +38,7 @@ mod lifetime;
 mod orphan;
 mod owner;
 mod refusals;
+mod relinquish;
 mod run;
 mod seed;
 mod server;
