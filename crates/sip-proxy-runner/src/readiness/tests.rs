@@ -47,11 +47,13 @@ async fn a_stalled_shard_fails_healthz_and_readyz() {
 }
 
 /// Shards waiting on their sockets, however long, or busy inside the
-/// threshold: both probes pass.
+/// threshold: both probes pass. The busy shard took its packet half the
+/// threshold before the reads, so the real time the server and the two reads
+/// take never carries it past the threshold.
 #[tokio::test]
 async fn an_idle_or_turning_proxy_passes_healthz_and_readyz() {
     let pulse = Arc::new(ShardPulse::new(2));
-    pulse.took_packet(0, 10_000 - STALL_MS);
+    pulse.took_packet(0, 10_000 - STALL_MS / 2);
     let s = server(pulse).await;
     assert!(get(s.addr(), "/healthz").await.starts_with("HTTP/1.1 200"));
     assert!(get(s.addr(), "/readyz").await.starts_with("HTTP/1.1 200"));
