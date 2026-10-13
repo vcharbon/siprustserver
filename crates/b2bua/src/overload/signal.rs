@@ -194,14 +194,14 @@ impl OverloadSignal {
     }
 
     /// Snapshot of the published EWMAs, the `adm` counter and the bucket
-    /// level (for `/status`). Reading `token_bucket_level` refills the bucket
-    /// as a side effect (lazy refill), which is harmless — it is the same
-    /// refill the next peek would do.
+    /// level (for `/status`). The level is projected on a copy of the bucket:
+    /// a read credits nothing to the bucket itself, so how often it is read
+    /// never changes what it admits.
     pub fn metrics(&self) -> OverloadMetrics {
         let (elu_ewma, gc_fraction_ewma, token_bucket_level) = {
-            let mut inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock().unwrap();
             let now = inner.now();
-            let level = inner.bucket.as_mut().map_or(0.0, |b| b.level(now));
+            let level = inner.bucket.clone().map_or(0.0, |mut b| b.level(now));
             (inner.elu_ewma.get(), inner.gc_fraction_ewma.get(), level)
         };
         OverloadMetrics {

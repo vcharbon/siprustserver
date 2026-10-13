@@ -183,6 +183,28 @@ async fn a_zero_bucket_size_admits_every_call() {
     assert_eq!(sig.metrics().non_emergency_admitted_total, 0, "the caller counts adm");
 }
 
+/// Reading the metrics never changes what the bucket admits: a signal read
+/// between every admission decision admits at exactly the instants its unread
+/// twin does.
+#[tokio::test(start_paused = true)]
+async fn reading_the_metrics_never_changes_what_the_bucket_admits() {
+    for rate in [1, 10, 100] {
+        let (read, _a) = admission_sig(1, rate, 1.0);
+        let (unread, _b) = admission_sig(1, rate, 1.0);
+        for step in 0..30 {
+            for _ in 0..10 {
+                tokio::time::advance(Duration::from_micros(100_000 / u64::from(rate))).await;
+                read.metrics();
+            }
+            assert_eq!(
+                admit(&read, false).is_ok(),
+                admit(&unread, false).is_ok(),
+                "rate {rate}/s, step {step}"
+            );
+        }
+    }
+}
+
 /// The bucket refills over time at `rate_per_sec` (lazy refill on the next
 /// peek). Drained at capacity 1 / rate 1/s, a call one second later is
 /// admitted again — driven by `tokio::time::advance`, no real sleep.
