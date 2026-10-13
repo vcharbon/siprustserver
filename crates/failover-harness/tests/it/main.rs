@@ -37,6 +37,7 @@ mod new_call_replication_window;
 mod not_ready_member_stays_pulled;
 mod prack_repeat_takeover;
 mod prack_takeover;
+mod reinvite_2xx_acked_through_the_primary;
 mod reinvite_answer_failover;
 mod reinvite_round_gives_up_after_takeover;
 mod reinvite_round_not_yet_replicated;
