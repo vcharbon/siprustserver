@@ -41,6 +41,7 @@ pub mod ingress_brake;
 pub mod initial_invite;
 pub mod lifecycle;
 pub mod limiter;
+pub mod loops;
 pub(crate) mod message_ring;
 pub mod metrics;
 pub mod new_calls;

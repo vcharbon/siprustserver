@@ -265,6 +265,9 @@ pub const CAPACITY: &[Family] = &[
     capacity::REPL_BACKUP_SHED,
 ];
 
+/// Whether the worker's loops turn.
+pub const LOOPS: &[Family] = &[worker::LOOP_STALLED];
+
 /// Every new call's admission outcome.
 pub const NEW_CALL_OUTCOMES: &[Family] = &[NEW_CALLS, NEW_CALL_REFUSED_COPIES];
 
@@ -289,7 +292,8 @@ pub const ADMISSION: &[Family] = &[
 ];
 
 /// The worker's sections, in `/metrics` order.
-pub const SECTIONS: &[&[Family]] = &[WORKER, TXN, UDP, OVERLOAD, CAPACITY, NEW_CALL_OUTCOMES];
+pub const SECTIONS: &[&[Family]] =
+    &[WORKER, TXN, UDP, OVERLOAD, CAPACITY, LOOPS, NEW_CALL_OUTCOMES];
 
 #[cfg(test)]
 mod tests;

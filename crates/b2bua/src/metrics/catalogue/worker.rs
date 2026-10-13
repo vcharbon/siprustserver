@@ -344,6 +344,15 @@ pub const WITHDRAWN_RUNNING: Family = Family::gauge(
     "1 while this worker has observed its own endpoint withdrawn from routing and still runs (ADR-0031 D6)",
 );
 
+/// One of the worker's two loops, as [`crate::loops::LOOP_NAMES`] names them.
+pub const LOOP: Dim = Dim::new("loop", &crate::loops::LOOP_NAMES);
+
+pub const LOOP_STALLED: Family = Family::gauge(
+    "b2bua_loop_stalled",
+    Labels::Product(&[LOOP]),
+    "1 while the loop (txn_owner: the transaction layer's recv/timer/sweep loop; router: the event router) has been on one piece of work past the stall threshold (B2BUA_LOOP_STALL_MS); an idle loop is never stalled. Readiness is 503 and /healthz 503 while any reads 1",
+);
+
 pub const REPL_PEERS_PULLED_NOT_READY: Family = Family::gauge(
     "b2bua_repl_peers_pulled_not_ready",
     Labels::None,

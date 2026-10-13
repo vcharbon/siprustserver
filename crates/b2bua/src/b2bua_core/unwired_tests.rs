@@ -23,7 +23,7 @@ use crate::{B2buaCore, B2buaDeps};
 
 /// A core on a simulated SIP fabric with replication not wired: the default
 /// of both runners.
-async fn unwired_core(ordinal: &str) -> B2buaCore {
+pub(super) async fn unwired_core(ordinal: &str) -> B2buaCore {
     let sip_addr = SocketAddr::from(([127, 0, 0, 3], 5080));
     let endpoint = SimulatedSignalingNetwork::new(1)
         .bind_udp(BindUdpOpts::new(sip_addr, 256))

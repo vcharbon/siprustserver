@@ -244,41 +244,64 @@ pub enum ReplCommand {
     PeerDeparted(String),
 }
 
+/// What one turn of the router took.
+enum Work {
+    Event(CallEvent),
+    Repl(ReplCommand),
+}
+
 /// Run the router loop over the txn-event + timer-fire channels until both close.
 /// `repl_rx` is the fail-back command receiver of a wired node; an unwired node
-/// passes `None` and the loop never polls for one.
+/// passes `None` and the loop never polls for one. Each turn is stamped on
+/// `pulse` from the instant it takes work until it waits again.
 pub async fn run(
     ctx: Arc<RouterCtx>,
     mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
     mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
+    pulse: Arc<sip_txn::LoopPulse>,
 ) {
     // A timer or re-entry channel whose senders are all gone retires its arm
     // instead of resolving `None` on every poll.
     let (mut timers_open, mut reentry_open) = (true, true);
     loop {
-        tokio::select! {
+        let work = tokio::select! {
             ev = txn_rx.recv() => match ev {
-                Some(ev) => ingress::on_event(&ctx, CallEvent::from_txn(ev)).await,
+                Some(ev) => Work::Event(CallEvent::from_txn(ev)),
                 None => break,
             },
             ev = timer_rx.recv(), if timers_open => match ev {
-                Some(ev) => ingress::on_event(&ctx, ev).await,
-                None => timers_open = false,
+                Some(ev) => Work::Event(ev),
+                None => {
+                    timers_open = false;
+                    continue;
+                }
             },
             ev = reentry_rx.recv(), if reentry_open => match ev {
-                Some(ev) => ingress::on_event(&ctx, ev).await,
-                None => reentry_open = false,
+                Some(ev) => Work::Event(ev),
+                None => {
+                    reentry_open = false;
+                    continue;
+                }
             },
             cmd = next_fail_back(&mut repl_rx) => match cmd {
-                Some(cmd) => on_repl_command(&ctx, cmd).await,
+                Some(cmd) => Work::Repl(cmd),
                 // Retires the arm if every sender is gone, instead of resolving
                 // `None` on every poll; no current wiring reaches it (the
                 // supervisor the router's readiness holds keeps a sender).
-                None => repl_rx = None,
+                None => {
+                    repl_rx = None;
+                    continue;
+                }
             },
+        };
+        pulse.turning();
+        match work {
+            Work::Event(ev) => ingress::on_event(&ctx, ev).await,
+            Work::Repl(cmd) => on_repl_command(&ctx, cmd).await,
         }
+        pulse.waiting();
     }
 }
 

@@ -43,15 +43,19 @@ fn value_of(text: &str, family: &Family, labels: &[(&str, &str)]) -> String {
 /// Every family this crate renders is in its renderer's text exactly as
 /// declared, every declared label set at 0 before any event (the
 /// transaction layer's are rendered by the runner).
-#[test]
-fn every_family_renders_as_declared() {
+#[tokio::test]
+async fn every_family_renders_as_declared() {
     let core = B2buaMetrics::new();
     let udp = udp();
+    let parked = || tokio::spawn(std::future::pending::<()>()).abort_handle();
+    let loops =
+        crate::loops::WorkerLoops::new((Arc::default(), parked()), (Arc::default(), parked()));
     let text = [
         core.prometheus_text(),
         udp.prometheus_text(),
         OverloadSignal::new(Arc::new(load_shed::simulated().0)).prometheus_text(),
         gate().prometheus_text(),
+        loops.prometheus_text(std::time::Duration::from_secs(5)),
         NewCallCounts::compose(
             core.new_calls(),
             StatelessCounts::default(),
