@@ -276,6 +276,12 @@ async fn loadgen_fake_net_abnormal_end_mix_classes_ok_by_branch() {
     b2bua.assert_fully_reaped();
 }
 
+/// A CPS bucket of one token that never refills: spent, it refuses every new call.
+fn one_token(c: &mut b2bua_sdk::B2buaConfig) {
+    c.cps_bucket_size = 1;
+    c.cps_bucket_rate = 0;
+}
+
 /// A failed call is counted by the step it failed at. An SUT whose admission
 /// bucket is empty refuses every non-emergency INVITE with 503, which a run
 /// declaring no overload refusal counts as a failure of alice's INVITE (goal
@@ -285,11 +291,8 @@ async fn loadgen_fake_net_abnormal_end_mix_classes_ok_by_branch() {
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_fake_net_counts_failures_by_failed_step() {
-    let (_h, b2bua, core, transport) = setup_fake_tuned(7410, |c| {
-        c.cps_bucket_size = 0;
-        c.cps_bucket_rate = 0;
-    })
-    .await;
+    let (_h, b2bua, core, transport) = setup_fake_tuned(7410, one_token).await;
+    b2bua.overload().spend_token();
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
     let driver = Driver::new(
@@ -326,11 +329,8 @@ async fn loadgen_fake_net_counts_failures_by_failed_step() {
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_fake_net_overload_refusal_is_ok_when_expected() {
-    let (_h, b2bua, core, transport) = setup_fake_tuned(7420, |c| {
-        c.cps_bucket_size = 0;
-        c.cps_bucket_rate = 0;
-    })
-    .await;
+    let (_h, b2bua, core, transport) = setup_fake_tuned(7420, one_token).await;
+    b2bua.overload().spend_token();
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
     let mut c = cfg(b2bua.addr, 20.0, 1, 16, 0x503E);

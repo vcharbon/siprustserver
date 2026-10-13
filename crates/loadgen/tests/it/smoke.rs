@@ -1049,21 +1049,21 @@ async fn loadgen_mux_unrouted_correlated_datagram_taps_for_the_ladder() {
     assert!(ep_alt.try_recv().is_none(), "no inbox got it");
 }
 
-/// Emergency / non-emergency split under overload. The b2bua's CPS bucket is
-/// exhausted (size 0, no refill), so EVERY non-emergency new INVITE is refused
-/// with a 503 while an emergency (`Resource-Priority: esnet.0`) call passes the
-/// empty bucket. Proves the loadgen REPORTING the user wants: non-emergency
-/// calls are classified `status_503` (the NOK side), emergency calls are all
-/// `ok` with ZERO loss, and the report keeps first-N samples for BOTH classes.
+/// Emergency / non-emergency split under overload: the b2bua's CPS bucket is
+/// empty (its one token spent, no refill), so every non-emergency new INVITE
+/// draws a 503 while emergency (`Resource-Priority: esnet.0`) calls pass. The
+/// loadgen classes the former `status_503`, the latter all `ok` with ZERO loss,
+/// and keeps first-N samples for BOTH classes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_mux_emergency_split_under_overload() {
     let (_h, b2bua, core, transport) =
         setup_with(6450, Correlation::header("X-Loadgen-Id"), 5, RECV, |c| {
-            c.cps_bucket_size = 0; // exhausted bucket → shed every non-emergency
+            c.cps_bucket_size = 1; // one token, spent below → shed every non-emergency
             c.cps_bucket_rate = 0; // …and never refill (deterministic).
         })
         .await;
+    b2bua.overload().spend_token();
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 

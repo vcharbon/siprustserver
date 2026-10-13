@@ -221,13 +221,14 @@ mod tests {
             &net,
             "w0",
             |c| {
-                c.cps_bucket_size = 0;
+                c.cps_bucket_size = 1;
                 c.cps_bucket_rate = 0;
                 c.overload_panic_elu_threshold = 1.1;
             },
             Vec::new(),
         )
         .await;
+        node.core.overload().spend_token();
         let peer = net.bind_udp(BindUdpOpts::new(PEER.parse().unwrap(), 64)).await.unwrap();
         let ctx = node.core.router_ctx().clone();
         let raw = new_invite();
