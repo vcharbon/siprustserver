@@ -4,10 +4,13 @@
 #
 # It parses `out_dir` and `lane.kind` out of the canonical spec with sed rather
 # than a JSON parser, which is exactly what a POSIX stub can do; the verdict's
-# status comes from the marker the spec's `case` path carries.
+# status comes from the marker the spec's `case` path carries in its file name
+# or its directory's; the directories above are the checkout's, whatever words
+# they hold.
 spec="$1"
 out_dir=$(sed -n 's/^  "out_dir": "\(.*\)",\{0,1\}$/\1/p' "$spec")
 case_path=$(sed -n 's/^  "case": "\(.*\)",\{0,1\}$/\1/p' "$spec")
+case_path="$(basename "$(dirname "$case_path")")/$(basename "$case_path")"
 
 if [ -z "$out_dir" ]; then
   printf 'the spec states no out_dir\n' >&2
