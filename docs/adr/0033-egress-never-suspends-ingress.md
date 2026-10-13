@@ -90,8 +90,9 @@ the one await with no timeout, no queue and no drop policy.
    it dequeued a packet and clears the stamp when it returns to waiting
    (`sip_proxy::liveness::ShardPulse`). A shard still on one packet past
    `PROXY_SHARD_STALL_MS` (2 000) fails `/readyz` and `/healthz` (ADR-0046
-   D4) and raises the gauge `sip_proxy_recv_shards_stalled`. This is the only signal that tells a
-   parked shard from an idle one; the activity meters cannot.
+   D4) and raises the gauge `sip_proxy_recv_shards_stalled`. This is the only
+   signal that tells a parked shard from an idle one; the activity meters
+   cannot.
    The b2bua worker's two loops, the transaction owner (recv, timer wheel,
    sweep) and the router, state theirs the same way (`sip_txn::LoopPulse`,
    `b2bua::loops`): one on a piece of work past `B2BUA_LOOP_STALL_MS` turns
@@ -124,10 +125,8 @@ the one await with no timeout, no queue and no drop policy.
 - `sip-net`'s slow lane reproduces the neighbour case in a network namespace
   (a veth pair with nobody at the far address): 62 of 64 sends refused in
   under 100 µs where the old path suspended 3 s.
-- Readiness does not by itself move traffic away from a stalled proxy in a
-  deployment whose data path is a VRRP VIP that tracks nothing of the proxy;
-  what should track the pulse (a keepalived `track_file`, an exit for
-  restart) is a deployment decision outside this ADR.
+- A stalled proxy fails `/healthz`, which the VRRP health check and the
+  livenessProbe read: the VIP moves and the proxy restarts (ADR-0046 D4).
 - The TCP peers (replication, the CDR broker) keep untimed writes on their
   own tasks; their blast radius is one task, not an ingress loop, and they
   are outside this ADR.
