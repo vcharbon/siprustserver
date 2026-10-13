@@ -15,7 +15,8 @@
 #     EndpointSlices (needs the 15-worker-rbac ServiceAccount/Role);
 #   - reaches every peer at peer-pod-IP:${REPL_PORT};
 #   - reports NotReady via /ready until re-hydrated + backup-current, and
-#     Draining on SIGTERM (terminationGracePeriodSeconds gives drain headroom).
+#     Draining on SIGTERM or on its own endpoint's withdrawal, then drains and
+#     exits (terminationGracePeriodSeconds gives drain headroom).
 #
 # Image: ${SUT_IMAGE} (default siprustserver:dev), command = b2bua-runner.
 apiVersion: apps/v1
@@ -213,6 +214,18 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 2
             failureThreshold: 2
+          # Liveness is the worker's loops: /healthz is 503 while the transaction
+          # owner or the router has been on one piece of work past
+          # B2BUA_LOOP_STALL_MS (default 5 s); a loop idle on its input never is.
+          # Three misses 10 s apart restart the container. The 5 s probe timeout
+          # holds under the cpu_starve chaos (0.3 CPU), where /ready already
+          # answers inside its 1 s default.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9091 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests: { cpu: "250m", memory: "128Mi" }
             # Headroom for a fully-ramped 2h profile: long(~6000) + short(~3000)
