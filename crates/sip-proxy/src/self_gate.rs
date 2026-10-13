@@ -348,13 +348,12 @@ impl EluCpsGate {
         self.inner.lock().unwrap().elu_ewma.get()
     }
 
-    /// Snapshot of the gate's published state. Reading `cps_bucket_level` refills
-    /// the bucket as a side effect (lazy refill).
+    /// Snapshot of the gate's published state. A read changes nothing:
+    /// `cps_bucket_level` is the level projected to now.
     pub fn metrics(&self) -> ProxySelfGateMetrics {
         let (elu_ewma, gc_fraction, cps_bucket_level, cps_bucket_max) = {
-            let mut inner = self.inner.lock().unwrap();
-            let now = inner.now();
-            let level = inner.bucket.level(now);
+            let inner = self.inner.lock().unwrap();
+            let level = inner.bucket.projected_level(inner.now());
             (inner.elu_ewma.get(), inner.gc_fraction, level, inner.bucket.capacity())
         };
         ProxySelfGateMetrics {

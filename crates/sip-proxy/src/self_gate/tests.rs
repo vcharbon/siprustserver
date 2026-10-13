@@ -137,6 +137,22 @@ async fn metrics_snapshot_reflects_config_and_counters() {
     assert_eq!(m.rejected_cps_total, 1);
 }
 
+/// A metrics read leaves the bucket as it was. Ten tenths of a second credited
+/// one read at a time sum to 0.9999999999999999 of a token in `f64`; one
+/// second credited at once is exactly one token. A read that credited the
+/// bucket would make the take at 1 s refuse.
+#[tokio::test(start_paused = true)]
+async fn a_metrics_read_leaves_the_bucket_unchanged() {
+    let (g, _ctl) = gate(1, 1, 0.8);
+    assert!(g.try_admit_external().is_admit(), "drains the lone token");
+    for _ in 0..10 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let level = g.metrics().cps_bucket_level;
+        assert!(level <= 1.0, "the projected level stays within the capacity: {level}");
+    }
+    assert!(g.try_admit_external().is_admit(), "one second at 1/s holds one token");
+}
+
 /// The EWMA smooths toward a sustained reading across repeated ticks
 /// (alpha 0.2): the first tick seats it, subsequent ticks pull it toward the
 /// new value but never past it.
