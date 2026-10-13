@@ -890,29 +890,21 @@ impl B2buaCore {
 
 /// The [`B2buaCore::backups_caught_up`] predicate over a context + changelog, so
 /// both the borrowing accessor and the owned [`B2buaCore::drain_probe`] closure
-/// read one implementation.
+/// read one implementation. The drain polls it every tick: it reads the distinct
+/// topologies of the resident calls under one lock, no call cloned, and asks
+/// each holder's flow once.
 fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> bool {
     use repl_net::frame::Partition;
     let me = &ctx.config.self_ordinal;
-    for call_ref in ctx.state.live_call_refs() {
-        // Released between the listing and the read: it holds nothing now.
-        let Some(live) = ctx.state.peek(&call_ref) else {
-            continue;
-        };
-        // No topology at all names no holder: nothing can be holding the call.
-        let Some(topology) = live.topology else {
-            return false;
-        };
-        let (holder, partition) = if topology.pri == *me {
-            (topology.bak, Partition::Bak)
-        } else {
-            (topology.pri, Partition::Pri)
-        };
-        if holder.is_empty() || !changelog.flow_caught_up(&holder, partition) {
-            return false;
-        }
-    }
-    true
+    // A call naming no topology names no holder: nothing can be holding it.
+    let Some(topologies) = ctx.state.live_topologies() else {
+        return false;
+    };
+    topologies.iter().all(|(pri, bak)| {
+        let (holder, partition) =
+            if pri == me { (bak, Partition::Bak) } else { (pri, Partition::Pri) };
+        !holder.is_empty() && changelog.flow_caught_up(holder, partition)
+    })
 }
 
 /// The transaction layer's tunables for this worker: its event queue, the

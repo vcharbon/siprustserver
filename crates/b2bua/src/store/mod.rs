@@ -10,6 +10,7 @@ mod call_store;
 mod faults;
 mod memory;
 mod poison;
+mod resident;
 mod scan;
 #[cfg(test)]
 mod setup_cancel_tests;
@@ -990,13 +991,6 @@ impl CallState {
 
     pub fn active_count(&self) -> usize {
         self.inner.lock().unwrap().calls.len()
-    }
-
-    /// Every callRef this node holds live. The core's teardown reads it to
-    /// release the per-call runtime state that is NOT in the store — the root
-    /// spans (ADR-0026) — and tests read it as ground truth.
-    pub fn live_call_refs(&self) -> Vec<String> {
-        self.inner.lock().unwrap().calls.keys().cloned().collect()
     }
 
     /// The number of live per-call serialization locks. Should track
