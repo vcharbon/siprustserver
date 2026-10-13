@@ -93,8 +93,8 @@ crates/rfc-rules/src/rules/cancel.rs 648
 crates/rfc-rules/src/rules/capability.rs 648
 crates/rfc-rules/src/rules/cseq.rs 626
 crates/rfc-rules/src/rules/cseq/tests.rs 874
-crates/rfc-rules/src/rules/dialog.rs 941
-crates/rfc-rules/src/rules/dialog/tests.rs 1212
+crates/rfc-rules/src/rules/dialog.rs 921
+crates/rfc-rules/src/rules/dialog/tests.rs 1159
 crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/reinvite.rs 670
 crates/rfc-rules/src/rules/wellformed.rs 656

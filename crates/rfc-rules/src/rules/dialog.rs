@@ -55,6 +55,9 @@ use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
+use message_facts::{record_route_set, remote_tag_of, set_if_empty};
+
+mod message_facts;
 
 crate::registry::rules! {
     /// RFC 3261 §12.2.1.1: an in-dialog request repeats the dialog's peer URIs — the From/To URIs
@@ -607,7 +610,8 @@ pub const BYE_CROSSING_WINDOW_US: u64 = 1_000_000;
 /// no dialog at all; a BYE whose sender ANSWERED the dialog-establishing INVITE
 /// but never accepted it ends a dialog that is still early; a BYE the caller
 /// sends more than [`BYE_CROSSING_WINDOW_US`] after this vantage saw her take
-/// a non-2xx final to that INVITE names the early dialog the final ended
+/// a non-2xx final to that INVITE, and no 2xx before it, names the early
+/// dialog the final ended
 /// (§12.3) — inside the window it is undecidable. Everything else —
 /// including a BYE the caller sends, whose own INVITE the dialog rests on — is
 /// compliant.
@@ -718,9 +722,14 @@ struct Dialog {
     /// One of those answers was a 2xx: the dialog it is the UAS of is
     /// confirmed, not early.
     accepted_establishing_invite: bool,
+    /// The endpoint, as UAC, took a 2xx on the establishing INVITE's branch:
+    /// the dialog is confirmed, and a non-2xx after it on that branch is a
+    /// stray that ends nothing (§13.2.2.4, §17.1.1.2).
+    took_establishing_2xx: bool,
     /// When the endpoint, as UAC, took a non-2xx final on the establishing
-    /// INVITE's branch (§12.3 ends the early dialog); cleared by any INVITE 2xx
-    /// it takes and by a provisional on a later INVITE (a challenge retried).
+    /// INVITE's branch before any 2xx on it (§12.3 ends the early dialog);
+    /// cleared by any INVITE 2xx it takes and by a provisional on a later
+    /// INVITE (a challenge retried).
     rejected_at_us: Option<u64>,
 }
 
@@ -869,10 +878,11 @@ impl<'a> Reading<'a> {
         if !sent && msg.cseq_method.eq_ignore_ascii_case("INVITE") {
             let on_initial = !dialog.initial_invite_sent_branch.is_empty()
                 && msg.via_branch.as_deref() == Some(dialog.initial_invite_sent_branch.as_str());
+            dialog.took_establishing_2xx |= on_initial && (200..300).contains(status);
             if (200..300).contains(status) || (*status > 100 && *status < 200 && !on_initial) {
                 dialog.rejected_at_us = None;
-            } else if *status >= 300 && on_initial && dialog.rejected_at_us.is_none() {
-                dialog.rejected_at_us = Some(msg.at_us);
+            } else if *status >= 300 && on_initial && !dialog.took_establishing_2xx {
+                dialog.rejected_at_us.get_or_insert(msg.at_us);
             }
         }
 
@@ -905,36 +915,6 @@ impl<'a> Reading<'a> {
             dialog.route_set = set;
         }
     }
-}
-
-/// The PEER's dialog tag on `msg` as `endpoint` sees it. A request names its
-/// peer in the header the OTHER side owns: To when the endpoint sent it, From
-/// when the endpoint took it; a response is the mirror. `""` where the peer has
-/// not minted one yet.
-fn remote_tag_of(msg: &Msg, sent: bool) -> &str {
-    let peer_is_to = match &msg.kind {
-        Kind::Request { .. } => sent,
-        Kind::Response { .. } => !sent,
-    };
-    let tag = if peer_is_to { msg.to_tag.as_deref() } else { msg.from_tag.as_deref() };
-    tag.unwrap_or_default()
-}
-
-/// Fill `slot` from `msg`'s address header when it is still empty and the
-/// header reads — the first establishing INVITE fixes the pair.
-fn set_if_empty(slot: &mut String, msg: &Msg, header: &str) {
-    if !slot.is_empty() {
-        return;
-    }
-    if let Some(uri) = msg.head.as_deref().and_then(|h| sniff::name_addr_uri(h, header)) {
-        *slot = uri;
-    }
-}
-
-/// The Record-Route stack `msg` carries, in wire order. A row no reader accepts
-/// contributes nothing: an unreadable header is the grammar rules' finding.
-fn record_route_set(msg: &Msg) -> Vec<UriFacts> {
-    msg.head.as_deref().and_then(|h| sniff::route_uris(h, "Record-Route")).unwrap_or_default()
 }
 
 #[cfg(test)]
