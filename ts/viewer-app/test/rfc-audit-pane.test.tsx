@@ -32,4 +32,49 @@ describe("rfc audit pane", () => {
     expect(html).toContain("caused by uac1")
     expect(html).toContain("originated by uac1 at s9; the reference relays it too")
   })
+
+  const party = {
+    rule: "no-200-after-cancel",
+    lane: "127.0.0.1:5060",
+    detail: "answered 200 after the CANCEL",
+    advisory: false,
+    gating: false,
+    charged: "127.0.0.1:5060",
+    actor: "uas1"
+  }
+
+  it("lists a scripted party's finding the reference shows as information, never as why the cell is red", () => {
+    const html = renderToStaticMarkup(
+      <RfcAuditPane
+        rfc={{
+          status: "audited",
+          findings: [{ ...party, cancelled_by: "rfc_violations: no-200-after-cancel at s12 by uas1" }]
+        }}
+      />
+    )
+    expect(html).toContain("rfc-badge-party")
+    expect(html).toContain("the reference shows it")
+    expect(html).not.toContain("rfc-audit-gating")
+    expect(html).not.toContain("rfc-audit-harness")
+  })
+
+  it("lists an unjudged scripted party's finding as information, with why it was not judged", () => {
+    const html = renderToStaticMarkup(
+      <RfcAuditPane
+        rfc={{ status: "audited", findings: [{ ...party, unjudged: "census-uncovered: no census of 'c'" }] }}
+      />
+    )
+    expect(html).toContain("rfc-badge-party")
+    expect(html).toContain("unjudged: census-uncovered: no census of &#x27;c&#x27;")
+    expect(html).not.toContain("rfc-audit-gating")
+  })
+
+  it("draws a harness fault in a section of its own, apart from the SUT's gating findings", () => {
+    const html = renderToStaticMarkup(
+      <RfcAuditPane rfc={{ status: "audited", findings: [{ ...party, harness_fault: true }] }} />
+    )
+    expect(html).toContain("rfc-audit-harness")
+    expect(html).toContain("rfc-badge-harness")
+    expect(html).not.toContain("rfc-audit-gating")
+  })
 })

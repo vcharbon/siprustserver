@@ -1,0 +1,16 @@
+{
+  "status": "audited",
+  "findings": [
+    {
+      "rule": "no-200-after-cancel",
+      "lane": "127.0.0.1:5060",
+      "detail": "Answered an INVITE it had already taken a CANCEL for with a 200 — RFC 3261 §9.2 has the cancelled UAS answer 487",
+      "advisory": false,
+      "gating": false,
+      "offending": 12,
+      "charged": "127.0.0.1:5060",
+      "actor": "uas1",
+      "cancelled_by": "rfc_violations: no-200-after-cancel at s12 by uas1"
+    }
+  ]
+}

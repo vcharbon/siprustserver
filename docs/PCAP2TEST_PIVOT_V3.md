@@ -2737,12 +2737,18 @@ a capture.
 
 **A violation is charged to the party that commits it, and an entry is the
 statement that cancels it.** The run's RFC audit names every finding by the
-party it charges, the scripted peers included. A finding against a SCRIPTED PEER
-gates like any other unless the document states the same violation against that
-peer on the same transaction — an entry here, whose `step` lands on that
-transaction — and then it is CANCELLED: still written, beside the statement that
-cancels it, and no longer gating. Replaying a peer is no licence for it to break
-a rule the source never saw it break. A captured document's entries come from
+party it charges, the scripted peers included. The run tests the system under
+test, so a finding against a SCRIPTED PEER never gates as the SUT's. Where the
+document states the same violation against that peer on the same transaction —
+an entry here, whose `step` lands on that transaction — it is CANCELLED: still
+written, beside the statement that cancels it, as information. Where the
+document does not state it, it is a HARNESS FAULT (`harness_fault` in
+`rfc.json`): replaying a peer is no licence for it to break a rule the source
+never saw it break, so the cell fails — as the harness's deviation from the
+source, never as the SUT's defect. A captured document flagged
+`census-uncovered` never read its source's violations, so it can state none:
+there the peer's finding is `unjudged`, written with that reason, as
+information. A captured document's entries come from
 the census over the captured trace, so the cancellation is the source's own
 evidence; an authored document's are its author's statement, and so is a
 `suppress-auto` deviation withholding the message the finding misses. An entry

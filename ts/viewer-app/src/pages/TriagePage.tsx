@@ -166,6 +166,12 @@ const MainErrorChip = (
         error.rule,
         <>{error.rule ?? "rfc"}{error.rfc !== null && <span className="cite"> · {error.rfc}</span>}</>
       )
+    case "harness-fault":
+      return chip(
+        "rule",
+        error.rule,
+        <>harness fault · {error.rule ?? "rfc"}{error.rfc !== null && <span className="cite"> · {error.rfc}</span>}</>
+      )
     case "died":
       return chip(
         "expected",

@@ -107,8 +107,8 @@ export interface TriageTicket {
 
 /** What a call failed on: the one line a queue row is picked on. */
 export interface TriageMainError {
-  /** rfc = a charged RFC finding; died = the replay stopped waiting; failure = any other verdict failure; bad-body = a body no rule accepts; refused = the cut made no case. */
-  readonly kind: "rfc" | "died" | "failure" | "bad-body" | "refused"
+  /** rfc = a charged RFC finding; harness-fault = a scripted party broke a rule the document does not state; died = the replay stopped waiting; failure = any other verdict failure; bad-body = a body no rule accepts; refused = the cut made no case. */
+  readonly kind: "rfc" | "harness-fault" | "died" | "failure" | "bad-body" | "refused"
   /** The RFC rule id, the failure tag, or the refusal reason; null for a died call. */
   readonly rule: string | null
   /** The citation the finding carries (`RFC 3581 §4`); null where it cites none. */
@@ -337,6 +337,8 @@ export interface TriageStudyCell {
   readonly writtenAt?: string
   /** `verdict.json`'s own status word; absent where the cell wrote none. */
   readonly status?: string
+  /** Whether the cell passed, as the run's index states it; absent where the run wrote no index naming it. */
+  readonly passed?: boolean
   /** The step the verdict says the replay died at. */
   readonly failedStep?: string
   /** The lane verdict this cell was SKIPPED on; absent where the cell ran. */

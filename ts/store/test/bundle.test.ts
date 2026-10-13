@@ -24,7 +24,20 @@ describe("Bundle.read", () => {
     expect(reading.status).toEqual("done")
     expect(reading.lane).toEqual("fake")
     const cells = byCase(reading)
-    expect([...cells.keys()]).toEqual(["case1", "case2", "case3", "case4", "case5", "case6", "case7", "case8", "case9", "case10"])
+    expect([...cells.keys()]).toEqual([
+      "case1",
+      "case2",
+      "case3",
+      "case4",
+      "case5",
+      "case6",
+      "case7",
+      "case8",
+      "case9",
+      "case10",
+      "case11",
+      "case12"
+    ])
 
     expect(cells.get("case1")!.mainError).toEqual({
       kind: "died",
@@ -122,6 +135,27 @@ describe("Bundle.read", () => {
       detail: "body:application/vnd.example.data:request:BYE:in-dialog: dwdHAIIDjQEB → (none)"
     })
     expect(cells.get("case10")!.bodyFailing).toEqual(2)
+
+    // A clean verdict failed by a scripted party's violation the document does
+    // not state reads as the harness's fault, naming the party; the SUT is
+    // charged nothing.
+    expect(cells.get("case11")!.passed).toBe(false)
+    expect(cells.get("case11")!.rfcGating).toEqual(0)
+    expect(cells.get("case11")!.mainError).toEqual({
+      kind: "harness-fault",
+      rule: "no-200-after-cancel",
+      rfc: "RFC 3261 §9.2",
+      step: null,
+      expected: null,
+      detail: "uas1: Answered an INVITE it had already taken a CANCEL for with a 200 — " +
+        "RFC 3261 §9.2 has the cancelled UAS answer 487"
+    })
+
+    // A scripted party's violation the reference shows is information: the
+    // cell passed and states no error.
+    expect(cells.get("case12")!.passed).toBe(true)
+    expect(cells.get("case12")!.rfcGating).toEqual(0)
+    expect(cells.get("case12")!.mainError).toBeNull()
   })
 
   it("honours the caller's ruling on the charges, and hands it the cell and the whole audit", async () => {

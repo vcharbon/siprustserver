@@ -12,12 +12,24 @@
     {
       "actor": "ep0",
       "advisory": false,
+      "cancelled_by": "deviation d1 (suppress-auto) withholds s8",
       "charged": "127.0.0.1:5060",
       "detail": "Took a 2xx confirming the dialog to its own INVITE and never ACKed it: the scripted caller's own withheld ACK",
       "gating": false,
       "lane": "127.0.0.1:5060",
       "offending": 7,
       "rule": "no-ack-to-dialog-creating-2xx"
+    },
+    {
+      "actor": "uas1",
+      "advisory": false,
+      "charged": "127.0.0.1:5071",
+      "detail": "Took a 487 to its own INVITE and never ACKed it",
+      "gating": false,
+      "harness_fault": true,
+      "lane": "127.0.0.1:5071",
+      "offending": 11,
+      "rule": "unacked-invite-non-2xx-final"
     },
     {
       "advisory": true,

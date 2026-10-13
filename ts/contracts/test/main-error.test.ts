@@ -134,6 +134,32 @@ describe("mainErrorOf", () => {
     })
   })
 
+  describe("a scripted party's harness fault", () => {
+    const fault: Bundle.RfcFinding = {
+      ...finding("no-200-after-cancel", "Answered with a 200 after the CANCEL — RFC 3261 §9.2 has it answer 487", 12),
+      gating: false,
+      actor: "uas1",
+      harness_fault: true
+    }
+
+    it("is its own kind, naming the party, ahead of the step the run died at", () => {
+      expect(mainErrorOf({ ...failed, verdict: verdict([died]), charged: [], harness: [fault] })).toEqual({
+        kind: "harness-fault",
+        rule: "no-200-after-cancel",
+        rfc: "RFC 3261 §9.2",
+        step: null,
+        expected: null,
+        detail: "uas1: Answered with a 200 after the CANCEL — RFC 3261 §9.2 has it answer 487"
+      })
+    })
+
+    it("comes after a charge the SUT answers for", () => {
+      const charge = finding("cseq-in-dialog-order", "CSeq reused — RFC 3261 §12.2.1.1", 20)
+      expect(mainErrorOf({ ...failed, verdict: verdict([]), charged: [charge], harness: [fault] })?.kind)
+        .toBe("rfc")
+    })
+  })
+
   it("picks the charge on the earliest offending message, an unplaced one last", () => {
     const error = mainErrorOf({
       ...failed,

@@ -5,8 +5,9 @@
  *
  * The precedence is the one {@link MainError} states: the interpreter's
  * refusal, else the charged audit finding on the earliest offending message,
- * else the step the run died waiting at, else the first failure under its own
- * tag, else the earliest body row no rule accepts. Where the body gate is
+ * else a scripted party's harness fault, else the step the run died waiting
+ * at, else the first failure under its own tag, else the earliest body row no
+ * rule accepts. Where the body gate is
  * what refused the cell (every verdict failure a named rule accepts), that row
  * leads right after the refusal and the charges. A cell that passed or was
  * skipped has no main error. A failing cell with nothing to read is said to
@@ -17,7 +18,7 @@ import * as Schema from "effect/Schema"
 import * as Bundle from "./bundle/index.js"
 import * as Records from "./confrontation.js"
 
-export const MainErrorKind = Schema.Literals(["rfc", "died", "failure", "bad-body", "refused"])
+export const MainErrorKind = Schema.Literals(["rfc", "harness-fault", "died", "failure", "bad-body", "refused"])
 export type MainErrorKind = typeof MainErrorKind.Type
 
 /**
@@ -26,7 +27,10 @@ export type MainErrorKind = typeof MainErrorKind.Type
  * not skipped: `refused` (the interpreter refused the cell — `rule`
  * `interpreter-refused`, `detail` its first line), else `rfc` (the charged
  * audit finding on the earliest offending message — `rule` the rule id, `rfc`
- * its citation), else `died` (the first `unmatched-datagram` /
+ * its citation), else `harness-fault` (a scripted party's violation the
+ * document does not state, on the earliest offending message — `rule` and
+ * `rfc` as for `rfc`, `detail` led by the party), else `died` (the first
+ * `unmatched-datagram` /
  * `expect-timed-out` — `step` where, `expected` the message it waited for),
  * else `failure` (the first failure, `rule` its tag), else `bad-body` (the first
  * body row no rule accepts, the session description's included — `rule`
@@ -53,6 +57,8 @@ export interface Input {
   readonly verdict?: Bundle.RunVerdict | null | undefined
   /** The gating findings that STAND against the SUT after the inheritance ruling. */
   readonly charged: ReadonlyArray<Bundle.RfcFinding>
+  /** The audit's harness faults: scripted parties' violations the document does not state. */
+  readonly harness?: ReadonlyArray<Bundle.RfcFinding> | undefined
   /** The cell's confrontation classification counts, where it wrote one. */
   readonly confrontation?: Confrontation | undefined
   /** The body rows no rule accepts, earliest step first ({@link failingBody}). */
@@ -193,6 +199,15 @@ export const mainErrorOf = (input: Input): MainError | null => {
   const charge = leading(input.charged)
   if (charge !== undefined) {
     return { ...none("rfc"), rule: charge.rule, rfc: citation(charge.detail), detail: charge.detail }
+  }
+  const fault = leading(input.harness ?? [])
+  if (fault !== undefined) {
+    return {
+      ...none("harness-fault"),
+      rule: fault.rule,
+      rfc: citation(fault.detail),
+      detail: `${fault.actor ?? "a scripted party"}: ${fault.detail}`
+    }
   }
   const body = input.body?.[0]
   if (input.bodyGated === true && body !== undefined) return badBody(body)

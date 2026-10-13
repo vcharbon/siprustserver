@@ -67,11 +67,13 @@ import { href, setQuery, useQuery } from "../router.ts"
 import { captureSteps, focusStep, recordingSteps, scenarioSteps, stepOfEvent, type Focus } from "../steps.ts"
 
 /**
- * A cell passed when its verdict says so. `ok-negative` is a pass — a case that
- * passed BY failing exactly as declared — and nothing else is.
+ * A cell passed when the run's index says so — the verdict the store records,
+ * the RFC audit and the bless included. A run that wrote no index answers by
+ * its interpreter's word: `ok-negative` is a pass — a case that passed BY
+ * failing exactly as declared — and nothing else is.
  */
 const cellPassed = (cell: TriageStudyCell): boolean =>
-  cell.status === "ok" || cell.status === "ok-negative"
+  cell.passed ?? (cell.status === "ok" || cell.status === "ok-negative")
 
 /** A ladder about no leg in particular: the capture's own first legs are drawn. */
 const NO_LEGS: readonly number[] = []

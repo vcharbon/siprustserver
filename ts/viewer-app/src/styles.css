@@ -604,6 +604,15 @@ h3 {
   color: var(--missing);
 }
 
+/* A harness fault fails the cell, but as the harness's: not the SUT's red. */
+.rfc-audit-harness {
+  border-left-color: var(--extra);
+}
+
+.rfc-audit-harness h4 {
+  color: var(--extra);
+}
+
 .rfc-audit-advisory,
 .rfc-audit-clean {
   border-left-style: dashed;
@@ -640,8 +649,15 @@ h3 {
   border-style: dashed;
 }
 
-.rfc-badge-relayed {
+.rfc-badge-relayed,
+.rfc-badge-party {
   color: var(--muted);
+}
+
+.rfc-badge-harness {
+  color: var(--extra);
+  background: #fdf6ec;
+  font-weight: 600;
 }
 
 /* Dashed, never red: an informative finding is a real miss the run did not
@@ -1069,7 +1085,8 @@ button.tag.main-error {
   background: color-mix(in srgb, var(--missing) 10%, transparent);
 }
 
-.tag.error-died {
+.tag.error-died,
+.tag.error-harness-fault {
   color: var(--extra);
   border-color: var(--extra);
   background: color-mix(in srgb, var(--extra) 10%, transparent);
@@ -1102,7 +1119,8 @@ button.tag.error-bad-body:hover {
   background: color-mix(in srgb, var(--missing) 20%, transparent);
 }
 
-button.tag.error-died:hover {
+button.tag.error-died:hover,
+button.tag.error-harness-fault:hover {
   background: color-mix(in srgb, var(--extra) 20%, transparent);
 }
 

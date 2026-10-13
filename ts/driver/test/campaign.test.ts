@@ -339,6 +339,38 @@ describe("a cell that never produced a result", () => {
   })
 })
 
+describe("the post-run RFC audit", () => {
+  const audited = async (name: string) => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([replayCell({ case: caseNamed(cases, `${name}.v3.json`) })])
+    return { cell: run.index.cells[0]!, detail: run.cells[0]!.detail }
+  }
+
+  it("passes a cell whose only finding is a scripted party's the reference shows", async () => {
+    expect((await audited("rfc-party-shown")).cell.passed).toBe(true)
+  })
+
+  it("passes a cell whose only finding is a scripted party's the document could not judge", async () => {
+    expect((await audited("rfc-party-unjudged")).cell.passed).toBe(true)
+  })
+
+  it("fails a scripted party's finding the reference does not show as a harness fault, not the SUT's", async () => {
+    const { cell, detail } = await audited("rfc-harness-fault")
+    expect(cell.passed).toBe(false)
+    expect(detail).toContain("harness fault")
+    expect(detail).toContain("no-200-after-cancel [127.0.0.1:5060] by uas1")
+    expect(detail).not.toContain("the RFC audit failed the cell")
+  })
+
+  it("fails the SUT's own finding as the RFC audit's", async () => {
+    const { cell, detail } = await audited("rfc-sut-charged")
+    expect(cell.passed).toBe(false)
+    expect(detail).toContain("the RFC audit failed the cell")
+    expect(detail).toContain("cseq-in-dialog-order")
+  })
+})
+
 describe("the post-run escape hatch", () => {
   it("lets a deployment restate a cell, and the reason rides the run", async () => {
     const run = await campaign([replayCell()], {

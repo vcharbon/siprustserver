@@ -143,7 +143,7 @@
     },
     "Annotations": {
       "additionalProperties": false,
-      "description": "Generator diagnostics and detection evidence that drives nothing.",
+      "description": "Generator diagnostics and detection evidence that drives nothing, save the\n`census-uncovered` flag, which a run's RFC audit reads as the document's\nword that it states none of its scripted parties' violations (§11.1).",
       "properties": {
         "flags": {
           "description": "Decisions the generator owes a human, one per diagnostic.",

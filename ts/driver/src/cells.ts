@@ -260,19 +260,21 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   )
   // The lane's post-run RFC audit is the one instrument that sees a SUT
   // violation the scripted peers answer without complaint: a gating finding
-  // fails the cell exactly as a failed verdict does. A bundle without the file
-  // was not audited, and says nothing.
+  // fails the cell exactly as a failed verdict does, and so does a harness
+  // fault, as the harness's. A scripted party's other findings are information.
+  // A bundle without the file was not audited, and says nothing.
   const rfcPath = path.join(absolute, RFC_FILE)
-  const rfcGating = (yield* fs.exists(rfcPath))
-    ? Bundle.rfcGating(
-      yield* Bundle.decodeRunRfcAudit(JSON.parse(yield* fs.readFileString(rfcPath)) as unknown)
-    )
-    : []
+  const audit = (yield* fs.exists(rfcPath))
+    ? yield* Bundle.decodeRunRfcAudit(JSON.parse(yield* fs.readFileString(rfcPath)) as unknown)
+    : undefined
+  const rfcGating = audit === undefined ? [] : Bundle.rfcGating(audit)
+  const harness = audit === undefined ? [] : Bundle.rfcHarnessFaults(audit)
   // A run whose body panicked never passes, and no restatement makes it pass:
   // whatever verdict it left was written before the unwind, so it cannot
   // answer for what came after.
   const panicked = report.outcome._tag === "panicked"
-  const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0
+  const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0 &&
+    harness.length === 0
 
   const caseId = Campaign.cellCaseId(cell)
   const classification = yield* confrontCell(cell, context, absolute, pivot, verdict, caseId)
@@ -296,10 +298,15 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       ? `replay exited ${report.exitCode} (panicked):\n${report.stderr}`
       : final.passed === gated
         ? gated === structural
-          ? rfcGating.length === 0
-            ? report.stderr
-            : `the RFC audit failed the cell (see ${RFC_FILE}):\n` +
+          ? rfcGating.length > 0
+            ? `the RFC audit failed the cell (see ${RFC_FILE}):\n` +
               rfcGating.map((f) => `  ${f.rule} [${f.lane}]: ${f.detail}`).join("\n")
+            : harness.length > 0
+            ? `a harness fault failed the cell: a scripted party broke a rule the document does not state ` +
+              `(see ${RFC_FILE}):\n` +
+              harness.map((f) => `  ${f.rule} [${f.lane}] by ${f.actor ?? "a scripted party"}: ${f.detail}`)
+                .join("\n")
+            : report.stderr
           : `classification failed the cell: ${classification.unlisted} unlisted, ` +
             `${classification.unknown} unknown (see ${CONFRONTATION_FILE})`
         : `${verdict.status} restated as ${final.passed ? "passed" : "failed"}: ` +

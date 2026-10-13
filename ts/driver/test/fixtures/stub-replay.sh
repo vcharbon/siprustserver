@@ -88,6 +88,25 @@ JSON
     ;;
 esac
 
+# A case about the post-run RFC audit leaves one finding of the kind its name
+# says: a scripted party's the document states, one it could not judge, one it
+# does not state (a harness fault), or the system under test's own.
+party='"actor": "uas1", "advisory": false, "charged": "127.0.0.1:5060", "detail": "answered 200 after the CANCEL", "lane": "127.0.0.1:5060", "offending": 12, "rule": "no-200-after-cancel"'
+case "$case_path" in
+  *rfc-party-shown*)
+    printf '{"status": "audited", "findings": [{%s, "gating": false, "cancelled_by": "rfc_violations: no-200-after-cancel at s12 by uas1"}]}\n' "$party" > "$out_dir/rfc.json"
+    ;;
+  *rfc-party-unjudged*)
+    printf '{"status": "audited", "findings": [{%s, "gating": false, "unjudged": "census-uncovered"}]}\n' "$party" > "$out_dir/rfc.json"
+    ;;
+  *rfc-harness-fault*)
+    printf '{"status": "audited", "findings": [{%s, "gating": false, "harness_fault": true}]}\n' "$party" > "$out_dir/rfc.json"
+    ;;
+  *rfc-sut-charged*)
+    printf '{"status": "audited", "findings": [{"advisory": false, "charged": "127.0.0.1:5080", "detail": "CSeq reused", "gating": true, "lane": "127.0.0.1:5080", "offending": 9, "rule": "cseq-in-dialog-order"}]}\n' > "$out_dir/rfc.json"
+    ;;
+esac
+
 # A case expecting a body leaves the reception the confrontation reads it off:
 # one in-dialog INFO on leg B, attributed to step s9, carrying another document
 # than the one the case stores — or, for a session description, another codec

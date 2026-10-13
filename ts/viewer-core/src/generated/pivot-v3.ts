@@ -773,7 +773,9 @@ export interface Case {
   variant: "repro" | "target"
 }
 /**
- * Generator diagnostics and detection evidence that drives nothing.
+ * Generator diagnostics and detection evidence that drives nothing, save the
+ * `census-uncovered` flag, which a run's RFC audit reads as the document's
+ * word that it states none of its scripted parties' violations (§11.1).
  *
  * This interface was referenced by `PivotV3`'s JSON-Schema
  * via the `definition` "Annotations".

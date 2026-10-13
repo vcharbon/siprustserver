@@ -432,6 +432,7 @@
                         "type": "string",
                         "enum": [
                           "rfc",
+                          "harness-fault",
                           "died",
                           "failure",
                           "bad-body",

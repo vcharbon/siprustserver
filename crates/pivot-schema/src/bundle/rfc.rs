@@ -2,13 +2,16 @@
 //! lane's recording fabric found when the full RFC suite ran over the run's
 //! wire, or the stated fact that no fabric recorded it.
 //!
-//! A gating finding fails the cell — the same mandatory gate the e2e lane
-//! rides, whichever party committed it. A document actor's violation is named
-//! as that actor's, and it is CANCELLED only by the document's statement of the
-//! same violation on the same transaction (§11.1): the cancellation is written
-//! beside it and the finding stops gating. An advisory finding is written so a
-//! triage session can read it, never counted. `not-audited` is a value of its own, so a lane that recorded
-//! nothing can never be read as a clean audit.
+//! The run tests the system under test: a gating finding is the SUT's, and it
+//! fails the cell. A document actor's violation is named as that actor's and
+//! never fails the cell as the SUT's (§11.1): the document's statement of the
+//! same violation on the same transaction cancels it (written beside it, for
+//! information); one the document does not state is a HARNESS FAULT — the
+//! scripted party left the captured trace — which fails the cell as such; one a
+//! document that never read its captured trace's violations cannot judge is
+//! `unjudged`, for information. An advisory finding is written so a triage
+//! session can read it, never counted. `not-audited` is a value of its own, so
+//! a lane that recorded nothing can never be read as a clean audit.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,8 +28,9 @@ pub struct RfcFinding {
     pub detail: String,
     /// `true` ⇒ informational only, never gating.
     pub advisory: bool,
-    /// `true` ⇒ the finding fails the cell: non-advisory, unwaived, and not
-    /// cancelled (`cancelled_by` absent).
+    /// `true` ⇒ the finding fails the cell as the system under test's:
+    /// non-advisory, unwaived, charged to no document actor, and not cancelled
+    /// (`cancelled_by` absent).
     pub gating: bool,
     /// The 1-based audit wire-entry index of the offending message, where the
     /// rule pinpoints one.
@@ -58,6 +62,17 @@ pub struct RfcFinding {
     /// `cancelled_by` names the statements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<String>,
+    /// `true` ⇒ a document actor's hard-gate violation the document does not
+    /// state: the scripted party broke a rule the captured trace (or the
+    /// author) never shows it breaking, so the harness deviated. Fails the cell
+    /// as a harness fault, never as the system under test's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub harness_fault: bool,
+    /// Why a document actor's uncancelled hard-gate violation is judged
+    /// neither cancelled nor a harness fault: the document states that it
+    /// never read its captured trace's violations. Information only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unjudged: Option<String>,
 }
 
 /// What the post-run audit came to.
@@ -75,18 +90,28 @@ pub enum RunRfcAudit {
 }
 
 impl RunRfcAudit {
-    /// The findings that fail the cell.
+    /// The findings that fail the cell as the system under test's.
     pub fn gating(&self) -> usize {
-        match self {
-            RunRfcAudit::NotAudited { .. } => 0,
-            RunRfcAudit::Audited { findings } => findings.iter().filter(|f| f.gating).count(),
-        }
+        self.count(|f| f.gating)
     }
 
-    /// The run passes the audit: audited with no gating finding, or not
-    /// audited at all (an absence the lane states, never a pass it claims).
+    /// The findings that fail the cell as a harness fault.
+    pub fn harness_faults(&self) -> usize {
+        self.count(|f| f.harness_fault)
+    }
+
+    /// The run passes the audit: audited with no gating finding and no
+    /// harness fault, or not audited at all (an absence the lane states, never
+    /// a pass it claims).
     pub fn passed(&self) -> bool {
-        self.gating() == 0
+        self.gating() == 0 && self.harness_faults() == 0
+    }
+
+    fn count(&self, admits: impl Fn(&RfcFinding) -> bool) -> usize {
+        match self {
+            RunRfcAudit::NotAudited { .. } => 0,
+            RunRfcAudit::Audited { findings } => findings.iter().filter(|f| admits(f)).count(),
+        }
     }
 }
 
@@ -106,7 +131,26 @@ mod tests {
             actor: None,
             cancelled_by: None,
             caused_by: None,
+            harness_fault: false,
+            unjudged: None,
         }
+    }
+
+    /// A scripted party's unstated violation fails the audit without counting
+    /// as the system under test's; its two marks are written only where set.
+    #[test]
+    fn a_harness_fault_fails_the_audit_and_is_not_the_systems() {
+        let fault =
+            RfcFinding { actor: Some("uas1".into()), harness_fault: true, ..finding(false) };
+        let audit = RunRfcAudit::Audited { findings: vec![fault] };
+        assert_eq!((audit.gating(), audit.harness_faults()), (0, 1));
+        assert!(!audit.passed());
+        let text = serde_json::to_string(&audit).unwrap();
+        assert!(text.contains(r#""harness_fault":true"#), "{text}");
+        assert!(!text.contains("unjudged"), "{text}");
+        assert_eq!(serde_json::from_str::<RunRfcAudit>(&text).unwrap(), audit);
+        let clean = serde_json::to_string(&finding(true)).unwrap();
+        assert!(!clean.contains("harness_fault"), "{clean}");
     }
 
     #[test]

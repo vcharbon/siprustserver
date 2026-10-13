@@ -32,6 +32,8 @@ const errorText = (error: TriageMainError | null): string => {
   switch (error.kind) {
     case "rfc":
       return `${error.rule ?? "rfc"}${error.rfc === null ? "" : ` · ${error.rfc}`}`
+    case "harness-fault":
+      return `harness fault · ${error.rule ?? "rfc"}${error.rfc === null ? "" : ` · ${error.rfc}`}`
     case "died":
       return `died${error.step === null ? "" : ` at ${error.step}`}${error.expected === null ? "" : ` · expected ${error.expected}`}`
     case "failure":

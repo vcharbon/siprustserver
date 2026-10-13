@@ -6,12 +6,16 @@
  * audit is the only thing on the page that says why. So it is drawn beside the
  * verdict rather than folded into it, and never dropped.
  *
- * A gating finding is what turns the cell red; an advisory one is a rule the
- * lane records and refuses to fail on; a relayed one is the SUT's, cancelled
- * as caused by the party the document states committing it. Gating findings
- * are drawn in a section of their own because collapsing them would make a
- * red cell and a clean one read alike — and for the same reason an audit that
- * found nothing states that it ran.
+ * A gating finding is the SUT's, and turns the cell red; a harness fault is a
+ * scripted party's violation the document does not state — the harness left
+ * the captured trace — and turns it red as the harness's; a scripted party's
+ * finding the document states (the reference shows it) or could not judge is
+ * information; an advisory one is a rule the lane records and refuses to fail
+ * on; a relayed one is the SUT's, cancelled as caused by the party the
+ * document states committing it. Gating findings and harness faults are drawn
+ * in sections of their own because collapsing them would make a red cell and
+ * a clean one read alike — and for the same reason an audit that found
+ * nothing states that it ran.
  *
  * `rfc.json` reaches the browser untyped, so every field is read through a
  * guard: a finding this pane cannot read is listed as raw JSON rather than
@@ -41,14 +45,18 @@ interface Finding {
   readonly lane: string | undefined
   /** The message the finding was raised at, as the audit numbers them. */
   readonly offending: number | undefined
-  /** This finding is why the cell is red. */
+  /** This finding is the SUT's, and why the cell is red. */
   readonly gating: boolean
+  /** A scripted party broke a rule the document does not state: the cell is red as the harness's. */
+  readonly harnessFault: boolean
   /** The rule is recorded and never failed on. */
   readonly advisory: boolean
   /** The document's statement that cancelled it, where one did. */
   readonly cancelledBy: string | undefined
   /** The party whose violation the system under test relayed onward, where the document states both. */
   readonly causedBy: string | undefined
+  /** Why a scripted party's finding was judged neither way, where the document never read its captured trace. */
+  readonly unjudged: string | undefined
 }
 
 const readFinding = (value: unknown): Finding => {
@@ -61,9 +69,11 @@ const readFinding = (value: unknown): Finding => {
       lane: undefined,
       offending: undefined,
       gating: false,
+      harnessFault: false,
       advisory: false,
       cancelledBy: undefined,
-      causedBy: undefined
+      causedBy: undefined,
+      unjudged: undefined
     }
   }
   return {
@@ -74,40 +84,52 @@ const readFinding = (value: unknown): Finding => {
     lane: str(value.lane),
     offending: num(value.offending),
     gating: value.gating === true,
+    harnessFault: value.harness_fault === true,
     advisory: value.advisory === true,
     cancelledBy: str(value.cancelled_by),
-    causedBy: str(value.caused_by)
+    causedBy: str(value.caused_by),
+    unjudged: str(value.unjudged)
   }
 }
 
-/**
- * What a non-gating finding is, in a word. A rule that is advisory never fails
- * anyone; a binding rule that does not gate was charged to a party this lane
- * does not hold to it, and both are worth telling apart from the one that did.
- */
-const weight = (finding: Finding): { readonly badge: string; readonly title: string } =>
+/** What a finding is, in a word: its badge, the class that draws it, and what the badge means. */
+const weight = (finding: Finding): { readonly badge: string; readonly tone: string; readonly title: string } =>
   finding.gating
-    ? { badge: "gates", title: "this finding is why the cell is red" }
+    ? { badge: "gates", tone: "gating", title: "the SUT's finding: this is why the cell is red" }
+    : finding.harnessFault
+    ? {
+      badge: "harness fault",
+      tone: "harness",
+      title: "a scripted party broke a rule the document does not state: the harness left the captured trace"
+    }
     : finding.causedBy !== undefined
     ? {
       badge: "relayed",
+      tone: "relayed",
       title: "the SUT relayed another party's violation, and the document states that party committing it and the captured platform relaying it"
     }
+    : finding.actor !== undefined && finding.cancelledBy !== undefined
+    ? {
+      badge: "scripted party · the reference shows it",
+      tone: "party",
+      title: "a scripted party's violation the document states: the captured trace holds the same one"
+    }
+    : finding.unjudged !== undefined
+    ? {
+      badge: "scripted party · unjudged",
+      tone: "party",
+      title: "a scripted party's violation the document could not judge: it never read its captured trace's violations"
+    }
     : finding.advisory
-    ? { badge: "advisory", title: "an advisory rule: recorded, failed on by nobody" }
-    : { badge: "does not gate", title: "a binding rule, charged to a party this lane does not gate on" }
+    ? { badge: "advisory", tone: "advisory", title: "an advisory rule: recorded, failed on by nobody" }
+    : { badge: "does not gate", tone: "bound", title: "a binding rule, charged to a party this lane does not gate on" }
 
 const FindingRow = ({ finding }: { finding: Finding }): JSX.Element => {
-  const { badge, title } = weight(finding)
+  const { badge, tone, title } = weight(finding)
   return (
     <p className="verdict-row">
       <code className="verdict-tag">{finding.rule}</code>
-      <span
-        className={`rfc-badge rfc-badge-${
-          finding.gating ? "gating" : finding.causedBy !== undefined ? "relayed" : finding.advisory ? "advisory" : "bound"
-        }`}
-        title={title}
-      >
+      <span className={`rfc-badge rfc-badge-${tone}`} title={title}>
         {badge}
       </span>
       <span className="verdict-detail">
@@ -118,17 +140,36 @@ const FindingRow = ({ finding }: { finding: Finding }): JSX.Element => {
         {finding.causedBy !== undefined && ` · caused by ${finding.causedBy}`}
         {finding.detail !== "" && ` — ${finding.detail}`}
         {finding.cancelledBy !== undefined && ` · cancelled by ${finding.cancelledBy}`}
+        {finding.unjudged !== undefined && ` · unjudged: ${finding.unjudged}`}
       </span>
     </p>
   )
 }
 
+/** One titled group of findings, drawn only where it holds one. */
+const Section = (
+  { tone, title, lead, findings }: {
+    tone: string
+    title: string
+    lead: string
+    findings: ReadonlyArray<Finding>
+  }
+): JSX.Element | null =>
+  findings.length === 0 ? null : (
+    <section className={`verdict-section rfc-audit rfc-audit-${tone}`}>
+      <h4>rfc audit — {title} ({findings.length})</h4>
+      <p className="muted">{lead}</p>
+      {findings.map((finding, index) => (
+        // The audit's own order and nothing else identifies a row.
+        <FindingRow key={index} finding={finding} />
+      ))}
+    </section>
+  )
+
 export const RfcAuditPane = ({ rfc }: { rfc: unknown }): JSX.Element | null => {
   if (!isRecord(rfc)) return null
   const status = str(rfc.status) ?? "unknown"
   const findings = list(rfc.findings).map(readFinding)
-  const gating = findings.filter((finding) => finding.gating)
-  const rest = findings.filter((finding) => !finding.gating)
 
   // An audit that ran and found nothing is a RESULT. Drawn as nothing it would
   // read as an audit that never ran, which is the opposite claim.
@@ -147,35 +188,25 @@ export const RfcAuditPane = ({ rfc }: { rfc: unknown }): JSX.Element | null => {
 
   return (
     <>
-      {gating.length > 0 && (
-        <section className="verdict-section rfc-audit rfc-audit-gating">
-          <h4>rfc audit — gating ({gating.length})</h4>
-          <p className="muted">
-            the post-run audit of what the wire carried. These are why this cell is red, whatever
-            the verdict and the delta sheet say.
-          </p>
-          {gating.map((finding, index) => (
-            // The audit's own order and nothing else identifies a row.
-            <FindingRow key={index} finding={finding} />
-          ))}
-        </section>
-      )}
-      {rest.length > 0 && (
-        <section className="verdict-section rfc-audit rfc-audit-advisory">
-          <h4>rfc audit — not gating ({rest.length})</h4>
-          <p className="muted">
-            recorded, and failed on by nobody: an advisory rule, or a binding one charged to a party
-            this lane does not gate on.
-          </p>
-          {rest.map((finding, index) => (
-            // The audit's own order and nothing else identifies a row.
-            <FindingRow key={index} finding={finding} />
-          ))}
-        </section>
-      )}
-      {status !== "audited" && (
-        <p className="muted">the audit states "{status}".</p>
-      )}
+      <Section
+        tone="gating"
+        title="gating"
+        lead="the post-run audit of what the wire carried. These are the SUT's, and why this cell is red, whatever the verdict and the delta sheet say."
+        findings={findings.filter((finding) => finding.gating)}
+      />
+      <Section
+        tone="harness"
+        title="harness fault"
+        lead="a scripted party broke a rule the document does not state: the replay left the captured trace. Not the SUT's, and the cell is not ok."
+        findings={findings.filter((finding) => !finding.gating && finding.harnessFault)}
+      />
+      <Section
+        tone="advisory"
+        title="not gating"
+        lead="recorded, and failed on by nobody: a scripted party's finding the reference shows or the document could not judge, an advisory rule, or a binding one charged to a party this lane does not gate on."
+        findings={findings.filter((finding) => !finding.gating && !finding.harnessFault)}
+      />
+      {status !== "audited" && <p className="muted">the audit states "{status}".</p>}
     </>
   )
 }
