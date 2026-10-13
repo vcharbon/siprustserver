@@ -23,7 +23,7 @@ use crate::dispatch::PerCallDispatcher;
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::overload::OverloadSignal;
-use crate::repl::{Readiness, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
+use crate::repl::{Readiness, ReplServer, ReplicatingCallStore, ReplicationSupervisor, RouterSink};
 use crate::router::{self, RouterCtx};
 use crate::rules::{compose_rules, default_rules_with, ServiceDef};
 use crate::store::{BufferedTerminateWriter, CallState, CallStore, StoreFaults};
@@ -288,7 +288,7 @@ impl B2buaCore {
                 );
                 // Pullers forward X11 fail-back commands to the router; wire the
                 // sink BEFORE `start` so the initial pullers carry it.
-                supervisor.set_repl_sink(repl_tx.clone());
+                supervisor.set_repl_sink(RouterSink::new(repl_tx.clone(), state.takeover_probe()));
                 supervisor.set_capacity(capacity.clone());
                 supervisor.start(setup.membership.clone());
 

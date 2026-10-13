@@ -16,6 +16,7 @@ mod scan;
 mod setup_cancel_tests;
 #[cfg(test)]
 mod spiral_index_tests;
+mod takeover;
 mod terminate_writer;
 #[cfg(test)]
 mod unwired_tests;
@@ -29,7 +30,7 @@ pub(crate) use poison::locked;
 pub use poison::poisoned_lock_recoveries;
 pub use terminate_writer::BufferedTerminateWriter;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use call::{
@@ -88,8 +89,10 @@ struct Inner {
     /// the backup [`drop_local`](CallState::drop_local)s the live copy (the `bak:`
     /// replica + reverse-flushed deltas remain). No wall-clock, no watermark
     /// handshake. Local-only; never serialized/replicated. Cleared on
-    /// drop_local/remove.
-    takeover: HashSet<String>,
+    /// drop_local/remove. Each entry keeps the copy's `b` (`bak_gen`) as it
+    /// was materialised: a copy whose `b` has moved since has authored a write
+    /// ([`takeover_authored`](CallState::takeover_authored)).
+    takeover: HashMap<String, i64>,
     /// **Last-touched stamps** (ADR-0020 X4) — the call reaper's only liveness
     /// input: epoch-ms of the last dispatched event that reached the handler
     /// (`router::process` touches), stamped at every entry
@@ -340,7 +343,7 @@ impl CallState {
             .touched
             .iter()
             .filter(|(call_ref, stamp)| {
-                now_ms - **stamp > idle_max_ms && !inner.takeover.contains(*call_ref)
+                now_ms - **stamp > idle_max_ms && !inner.takeover.contains_key(*call_ref)
             })
             .map(|(call_ref, stamp)| (call_ref.clone(), *stamp))
             .collect()
@@ -595,22 +598,6 @@ impl CallState {
         let mut inner = self.inner.lock().unwrap();
         inner.locks.remove(call_ref);
         inner.shrink_idle();
-    }
-
-    /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11 /
-    /// ADR-0014). Called by the router's `materialise` on a fresh takeover. The router
-    /// later reads it via [`is_takeover`](Self::is_takeover) to drive self-release
-    /// once the served transaction(s) finish. Idempotent per call_ref.
-    pub fn mark_takeover(&self, call_ref: &str) {
-        self.inner.lock().unwrap().takeover.insert(call_ref.to_string());
-    }
-
-    /// Is `call_ref` a live acting-backup **takeover copy** (ADR-0014)? The router
-    /// reads it after serving an event for the call: when true and the served
-    /// transaction(s) have all cleared, it self-releases the live copy via
-    /// [`drop_local`](Self::drop_local).
-    pub fn is_takeover(&self, call_ref: &str) -> bool {
-        self.inner.lock().unwrap().takeover.contains(call_ref)
     }
 
     /// Mark the initial INVITE of `call_ref` carrying CSeq `cseq` as
@@ -953,27 +940,6 @@ impl CallState {
             self.note_takeover(&hit.call_ref, "resolved");
         }
         Ok(hit)
-    }
-
-    /// Fold one takeover event for `call_ref` into its dead primary's episode
-    /// (ADR-0026 aggregation): the counter names what happened, the peer the
-    /// `call_ref` encodes keys the episode.
-    pub(crate) fn note_takeover(&self, call_ref: &str, counter: &'static str) {
-        self.note_takeover_count(call_ref, counter, 1);
-    }
-
-    /// [`note_takeover`](Self::note_takeover) for a counter that moves by `n`
-    /// at once — the transactions one materialisation seeded.
-    pub(crate) fn note_takeover_count(&self, call_ref: &str, counter: &'static str, n: u64) {
-        let (_, primary) = partition_of(&self.self_ordinal, call_ref);
-        self.takeover_log.record(&primary, counter, n);
-    }
-
-    /// Fold an acting-backup **self-release** into the dead peer's takeover
-    /// episode — the shedding that ends a takeover is part of the same story,
-    /// so it never gets its own line.
-    pub fn note_takeover_self_release(&self, call_ref: &str) {
-        self.note_takeover(call_ref, "self_released");
     }
 
     /// Acquire the per-callRef serialization lock (held across a handler run).

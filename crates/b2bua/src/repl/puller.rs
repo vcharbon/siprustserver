@@ -87,10 +87,10 @@ use std::time::Duration;
 use call::MsgpackCodec;
 use repl_net::frame::{Frame, Op, Partition, Watermark};
 use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use topology::Peer;
 
-use super::{AddrResolver, ReplicatingCallStore};
+use super::{AddrResolver, ReplicatingCallStore, RouterSink};
 use crate::router::ReplCommand;
 
 mod apply;
@@ -200,7 +200,7 @@ pub struct Puller {
     /// (Reclaim-flow tail `Put`) and the bulk reclaim on bootstrap completion.
     /// `None` outside a live `B2buaCore` (the sim/unit puller tests drive the
     /// store directly).
-    repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
+    repl_tx: Option<RouterSink>,
     /// The memory admission gate whose backup ceilings bound the replicas this
     /// node stores for its peers (ADR-0037). `None` stores every replica.
     capacity: Option<crate::capacity::CapacityGate>,
@@ -266,8 +266,8 @@ impl Puller {
     /// Attach the router command sink (ADR-0011 X11 fail-back). A puller built
     /// without it (sim + unit tests, which assert on the store directly) sends no
     /// router commands.
-    pub fn with_repl_sink(mut self, tx: mpsc::UnboundedSender<ReplCommand>) -> Self {
-        self.repl_tx = Some(tx);
+    pub fn with_repl_sink(mut self, sink: impl Into<RouterSink>) -> Self {
+        self.repl_tx = Some(sink.into());
         self
     }
 
@@ -464,8 +464,8 @@ impl Puller {
     /// completion (first `Noop` or best-effort hard-timer). Idempotent
     /// (`materialize_if_absent`), so a partial pass plus a later one self-heal.
     fn signal_reclaim_all(&self) {
-        if let Some(tx) = &self.repl_tx {
-            let _ = tx.send(ReplCommand::ReclaimAll);
+        if let Some(sink) = &self.repl_tx {
+            sink.send(ReplCommand::ReclaimAll);
         }
     }
 

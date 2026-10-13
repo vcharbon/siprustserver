@@ -226,7 +226,7 @@ struct SupervisorInner {
     /// `None` until [`set_repl_sink`](ReplicationSupervisor::set_repl_sink) wires it
     /// (the live `B2buaCore` does, before `start`); the sim/test supervisors leave
     /// it unset so pullers drive the store only.
-    repl_tx: Mutex<Option<mpsc::UnboundedSender<crate::router::ReplCommand>>>,
+    repl_tx: Mutex<Option<super::RouterSink>>,
     /// The memory admission gate handed to every spawned puller (ADR-0037).
     /// `None` until [`set_capacity`](ReplicationSupervisor::set_capacity).
     capacity: Mutex<Option<crate::capacity::CapacityGate>>,
@@ -325,8 +325,8 @@ impl ReplicationSupervisor {
     /// Wire the router command sink every puller forwards X11 fail-back commands
     /// to (reactive reclaim / bulk reclaim). Call **before** [`start`](Self::start)
     /// so the initial pullers pick it up; a re-spawned puller reads it too.
-    pub fn set_repl_sink(&self, tx: mpsc::UnboundedSender<crate::router::ReplCommand>) {
-        *self.inner.repl_tx.lock().unwrap() = Some(tx);
+    pub fn set_repl_sink(&self, sink: impl Into<super::RouterSink>) {
+        *self.inner.repl_tx.lock().unwrap() = Some(sink.into());
     }
 
     /// Wire the memory admission gate whose backup ceilings every puller
@@ -507,8 +507,8 @@ impl ReplicationSupervisor {
                         peer = %ord,
                         "replication peer parked (left the membership set)"
                     );
-                    if let Some(tx) = self.inner.repl_tx.lock().unwrap().as_ref() {
-                        let _ = tx.send(crate::router::ReplCommand::PeerDeparted(ord.clone()));
+                    if let Some(sink) = self.inner.repl_tx.lock().unwrap().as_ref() {
+                        sink.send(crate::router::ReplCommand::PeerDeparted(ord.clone()));
                     }
                 }
                 entry.park();
@@ -570,7 +570,7 @@ impl ReplicationSupervisor {
         );
         // Forward X11 fail-back commands to the router when a live core wired a sink.
         let puller = match self.inner.repl_tx.lock().unwrap().clone() {
-            Some(tx) => puller.with_repl_sink(tx),
+            Some(sink) => puller.with_repl_sink(sink),
             None => puller,
         };
         let puller = match self.inner.capacity.lock().unwrap().clone() {

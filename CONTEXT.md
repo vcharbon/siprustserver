@@ -483,6 +483,12 @@ survive, so the call lives on at its reclaiming primary. There is **no** waterma
 handshake and **no** time-based settle; correctness rests on `(p,b)` causality.
 _Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backup".
 
+**Stand-down** (ADR-0047 D7, `router::stand_down`): a takeover copy released because
+its primary wrote the call again — a returning node's reclaim write, or its answer —
+when the copy holds nothing the primary lacks. Local-only like a self-release, and
+its transactions are **relinquished** (deleted with nothing sent), never orphaned.
+_Avoid_: "self-release" for it (that waits for the copy's transactions to clear).
+
 **Version vector `(p, b)`** (per-context reconciliation) — replaces LWW-by-`gen` (ADR-0014):
 Each call carries `(p, b)` = `(primary_counter, backup_counter)` =
 `CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter on a local

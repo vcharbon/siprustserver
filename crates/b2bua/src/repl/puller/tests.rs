@@ -12,7 +12,7 @@ use sip_clock::Clock;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Mutex;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 /// A scripted client connection that delivers each pre-arranged bootstrap
 /// frame after a fixed clock-time `gap`, then parks (a quiet tail). Faithful
@@ -277,6 +277,40 @@ async fn a_shed_replica_signals_nothing() {
     p.signal_put_outcome(ApplyMode::Forward, ApplyOutcome::Shed, true, "w0|a|t", None, 0);
     p.signal_put_outcome(ApplyMode::Reverse, ApplyOutcome::Shed, true, "w0|a|t", None, 0);
     assert!(rx.try_recv().is_err());
+}
+
+/// An applied forward `Put` rides up with its body for a call the router
+/// serves as a live takeover copy, in a scan as on the tail; a write of any
+/// other call, a dominated re-delivery, and a puller with no probe hand
+/// nothing up.
+#[tokio::test]
+async fn an_applied_forward_put_rides_up_for_a_live_takeover_copy_alone() {
+    let (copy, other) = ("w0|copy|t", "w0|other|t");
+    let body: Arc<[u8]> = Arc::from(b"primary".to_vec().into_boxed_slice());
+    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let probe: crate::repl::TakeoverProbe = Arc::new(move |r: &str| r == copy);
+    let p = p.with_repl_sink(RouterSink::new(tx, probe));
+    let (forward, applied) = (ApplyMode::Forward, ApplyOutcome::Applied);
+    for bootstrapped in [false, true] {
+        p.signal_put_outcome(forward, applied, bootstrapped, copy, Some(body.clone()), 0);
+        match rx.try_recv() {
+            Ok(ReplCommand::ForwardFlushApplied { call_ref, body: sent }) => {
+                assert_eq!(call_ref, copy);
+                assert_eq!(&*sent, &*body, "the primary's body rides up");
+            }
+            other => panic!("expected the applied write (bootstrapped: {bootstrapped}): {other:?}"),
+        }
+    }
+    p.signal_put_outcome(forward, applied, true, other, Some(body.clone()), 0);
+    p.signal_put_outcome(forward, ApplyOutcome::Dominated, true, copy, Some(body.clone()), 0);
+    assert!(rx.try_recv().is_err(), "nothing else rides up");
+
+    let (unprobed, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let unprobed = unprobed.with_repl_sink(tx);
+    unprobed.signal_put_outcome(forward, applied, true, copy, Some(body), 0);
+    assert!(rx.try_recv().is_err(), "no probe, no signal");
 }
 
 /// A connection that plays a fixed script, one frame per `gap_ms`, and

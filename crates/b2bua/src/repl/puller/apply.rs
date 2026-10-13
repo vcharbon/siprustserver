@@ -363,10 +363,15 @@ impl Puller {
     /// read lifecycle progress in it that the counters cannot carry. A bootstrap
     /// import signals nothing — the bulk reclaim covers the whole partition once.
     ///
-    /// A pre-bootstrap Backup-flow frame signals nothing either: the bulk re-seed
-    /// replays the whole `bak:{peer}` keyspace, so its refusals are the state of
-    /// the two views and not an event, and folding each one would drive one fold
-    /// per resident call. They are counted; only the tail is handed up.
+    /// A pre-bootstrap Backup-flow refusal signals nothing either: the bulk
+    /// re-seed replays the whole `bak:{peer}` keyspace, so its refusals are the
+    /// state of the two views and not an event, and folding each one would drive
+    /// one fold per resident call. They are counted; only the tail is handed up.
+    ///
+    /// An applied forward flush rides up with its body only for a call this
+    /// node serves as a live takeover copy ([`RouterSink::takeovers`](crate::repl::RouterSink)),
+    /// in the scan and on the tail alike: either way it is a write of the
+    /// call's primary the copy has not seen (ADR-0047 D7).
     pub(super) fn signal_put_outcome(
         &self,
         mode: ApplyMode,
@@ -377,7 +382,16 @@ impl Puller {
         origin_now_ms: i64,
     ) {
         use ApplyOutcome::{Applied, Dominated, Refused, Shed, Superseded};
-        let Some(tx) = &self.repl_tx else { return };
+        let Some(sink) = &self.repl_tx else { return };
+        if (mode, outcome) == (ApplyMode::Forward, Applied) {
+            if let (Some(body), true) = (body, sink.serves_takeover(call_ref)) {
+                sink.send(ReplCommand::ForwardFlushApplied {
+                    call_ref: call_ref.to_string(),
+                    body,
+                });
+            }
+            return;
+        }
         if mode == ApplyMode::Forward && !bootstrapped {
             return;
         }
@@ -401,6 +415,6 @@ impl Puller {
             (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => return,
             (_, Shed | Superseded) => return,
         };
-        let _ = tx.send(cmd);
+        sink.send(cmd);
     }
 }

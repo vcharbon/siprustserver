@@ -77,8 +77,9 @@ pub enum DispatchClass {
     Cancelled,
     /// A timer the call armed, fired once.
     Timer,
-    /// An event the node raised itself: a reaper verdict, or the answer to a
-    /// request the call sent off its turn.
+    /// An event the node raised itself: a reaper verdict, the answer to a
+    /// request the call sent off its turn, or a takeover copy's stand-down
+    /// notice.
     Internal,
     /// The layer's notice that the last transaction of a takeover copy
     /// cleared: queued behind the turns of the messages that cleared them

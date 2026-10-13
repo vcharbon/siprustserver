@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use call::TimerType;
+use call::{Call, TimerType};
 
-use super::super::materialise::{materialise, Materialised, Origin, Reason};
+use super::super::materialise::{has_invite_in_flight, materialise, Materialised, Origin, Reason};
 use super::super::restore_hygiene::{reanchor_timers, Smoothing};
 use super::super::undecided::{is_undecided, settle_undecided};
 use super::super::RouterCtx;
@@ -98,7 +98,8 @@ fn largest_keepalive_gap(calls: &mut [(call::Call, i64)], now_ms: i64, beat: &dy
 /// Reclaim one call of this node's `pri:{self}` partition into the live map
 /// under its per-call lock (ADR-0011 X11). `smoothing = Some(_)` is the bulk
 /// reboot sweep ([`reclaim_all`]); `None` a single straggler. Neither has a
-/// message to serve, so a call still undecided is settled (ADR-0047). Returns
+/// message to serve, so a call still undecided is settled (ADR-0047), and a
+/// call with an INVITE in flight is announced ([`announce_reclaim`]). Returns
 /// `true` iff this pass did the work — freshly materialised, or a deferred
 /// terminal discharged — so the caller meters per-pass reclaim completeness;
 /// `false` for a call already resident (idempotent re-pass) or gone from the store.
@@ -110,14 +111,29 @@ pub(super) async fn reclaim_into_live(
     let _guard = ctx.state.lock(call_ref).await;
     match materialise(ctx, call_ref, Origin::Reclaim(smoothing)).await {
         Materialised::Served { call, seeded } => {
-            if let (Some(seeded), true) = (seeded, is_undecided(&call)) {
-                settle_undecided(ctx, call_ref, call, seeded).await;
+            match seeded {
+                Some(seeded) if is_undecided(&call) => {
+                    settle_undecided(ctx, call_ref, call, seeded).await;
+                }
+                _ if has_invite_in_flight(&call) => announce_reclaim(ctx, call),
+                _ => {}
             }
             true
         }
         Materialised::Refused(Reason::Terminated) => true,
         _ => false,
     }
+}
+
+/// Write the reclaimed `call` once: this node serving the call again is the
+/// change the write records, one `p` increment, and it reaches the backup's
+/// Element as the primary's write, where a takeover copy of the call the
+/// backup's departure sweep made stands down on it (ADR-0047 D7). Only a call
+/// with an INVITE in flight is written — a quiet call has no sweep copy — so
+/// the reclaim of a large partition stays write-free for those.
+fn announce_reclaim(ctx: &Arc<RouterCtx>, call: Call) {
+    ctx.state.update(call.clone());
+    ctx.state.flush(&call);
 }
 
 #[cfg(test)]

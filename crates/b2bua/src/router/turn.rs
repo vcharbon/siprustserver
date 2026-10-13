@@ -36,6 +36,12 @@ impl Runnable for Turn {
                     super::quiesced::self_release_turn(&self.ctx, call_ref).await;
                     return;
                 }
+                (CallEvent::InternalEvent { call_ref, topic, body, .. }, _)
+                    if topic == super::stand_down::TOPIC =>
+                {
+                    super::stand_down::stand_down_turn(&self.ctx, call_ref, body).await;
+                    return;
+                }
                 (CallEvent::Timer { .. }, Some(call_ref))
                     if super::quiesced::shed_if_quiesced(&self.ctx, call_ref).await =>
                 {

@@ -9,7 +9,7 @@ use crate::metrics::RemovalClass;
 /// How a call's per-node runtime state is being released. Every path that frees
 /// per-call state funnels through [`release_call`] — the ONE teardown executor —
 /// so no path can forget a step of the "all per-call state MUST be released at
-/// call end" invariant (CLAUDE.md). The three kinds differ ONLY in which side
+/// call end" invariant (CLAUDE.md). The kinds differ ONLY in which side
 /// effects they must NOT perform (encoded here, not in comments):
 pub(super) enum ReleaseKind {
     /// Terminated call: evict from map/index/store and **propagate the delete**
@@ -26,6 +26,13 @@ pub(super) enum ReleaseKind {
     /// request crossing the shed is still served, and a copy of it forgotten
     /// or answered here would be served twice.
     SelfRelease { ended: bool },
+    /// **Stand-down** of a takeover copy on its primary's write (ADR-0047 D7):
+    /// local-only as `SelfRelease`, and its transactions are relinquished —
+    /// deleted with nothing sent — instead of orphaned: they are images of the
+    /// ones its primary serves, so an orphan's ACK and BYE would end a dialog
+    /// the primary holds, and a message for one of them reaching this node
+    /// afterwards takes the call over afresh.
+    StandDown,
     /// Orphan reject: the 481 path hydrated NO call — only the lock entry and
     /// the dispatch queue exist. **No** store mutation (a `remove` would
     /// reverse-propagate a spurious delete), **no** timers/txns were armed.
@@ -75,6 +82,15 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
                 ctx.metrics.bump_repl_self_release();
                 // Folded into the dead peer's takeover episode, never its own
                 // line: shedding is the tail of the takeover it ends.
+                ctx.state.note_takeover_self_release(call_ref);
+            }
+        }
+        ReleaseKind::StandDown => {
+            if ctx.state.drop_local(call_ref) {
+                ctx.timers.cancel_all(call_ref.to_string()).await;
+                let _ = ctx.txn.relinquish_call(call_ref).await;
+                ctx.dispatcher.release(call_ref, RemovalClass::SelfRelease);
+                ctx.metrics.bump_repl_self_release();
                 ctx.state.note_takeover_self_release(call_ref);
             }
         }
