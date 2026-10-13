@@ -38,7 +38,7 @@ pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
 pub use puller::{Puller, PullerConfig, PullerStatus};
 pub use readiness::{Readiness, ReadinessSource, ReadinessState};
 pub use replication::{flush_replicated, replication_target, ReplicationPlan};
-pub use router_sink::{RouterSink, TakeoverProbe};
+pub use router_sink::RouterSink;
 pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};
 pub use server::{ReplServer, ServeConfig};
 pub use store::ReplicatingCallStore;

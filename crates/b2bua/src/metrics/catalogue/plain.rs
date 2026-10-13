@@ -241,6 +241,10 @@ plain_counters! {
         "b2bua_repl_self_release_total",
         "acting-backup takeover copies self-released once their served transaction(s) reached a terminal state (ADR-0014, replaces the Deactivate handback)",
     ) => repl_self_release, bump_repl_self_release, repl_self_release_total;
+    REPL_STAND_DOWN = (
+        "b2bua_repl_stand_down_total",
+        "acting-backup takeover copies stood down on a write of their primary that covers every write the copy made, or on its delete (ADR-0047 D7)",
+    ) => repl_stand_down, bump_repl_stand_down, repl_stand_down_total;
     // Model Y (ADR-0020 X3): a backup-held deferred terminal whose primary never
     // came back to reclaim it (crashed for good, past the replica TTL). The backup
     // is NOT a discharge authority, so its periodic reap releases the call's limiter

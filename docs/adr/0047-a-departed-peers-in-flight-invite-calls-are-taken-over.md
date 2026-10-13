@@ -13,7 +13,9 @@ the slice does not apply), `rules/lost_round.rs` and
 `rules/actions/lost_round.rs` (the lost round), `sip-message`'s
 `generate_ack_for_non_2xx_in_dialog`, `router/reclaim/bulk.rs` (the reclaim write),
 `repl/puller/apply.rs` and `repl/router_sink.rs` (an applied primary write handed up),
-`router/stand_down.rs` (the stand-down), `sip-txn`'s `layer/relinquish.rs`.
+`router/stand_down.rs` (the stand-down), `store/takeover.rs` (the takeover marks),
+`router/reclaim.rs` (the reverse fold of a copy's ending), `sip-txn`'s
+`layer/relinquish.rs`.
 
 ## Context
 
@@ -126,36 +128,50 @@ writes it once: one `p` increment, recording that the node serves the call again
 quiet call is not written, so the reclaim of a large partition stays write-free for
 it. On the backup that write is a forward flush. Applied to the Element of a call the
 backup serves as a takeover copy, on the stream's tail or inside a bootstrap scan of
-the returned node, it is handed to the router with its body; the puller reads the
-router's live takeover marks first, so no other call's write reaches it. The router
-queues the copy's **stand-down** as a turn of the call's own queue, so a message
-already queued for the copy is served first (ADR-0010 X2). Under the per-call lock the
-copy stands down when its primary's body is the same call and either:
+the returned node, it is handed to the router with its body; so is an applied forward
+delete of the call, with the incarnation it names. The puller reads the router's live
+takeover marks first, so no other call's write reaches the router. The router queues
+the copy's **stand-down** as a turn of the call's own queue, so a message already
+queued for the copy is served first (ADR-0010 X2). Under the per-call lock the copy
+stands down when:
 
-- **(i)** the copy has authored no write since it was materialised: its `b` has not
-  moved from the one it was marked with. One increment of a copy's `b` is one write
+- the primary's body is the same call and **covers every write the copy made**: its
+  `b` is at or past the copy's live `b`. One increment of a copy's `b` is one write
   this node made as the call's acting backup, a fold included; a quiet turn or an
-  adopted version moves nothing. The copy's transactions are then the seeds, images of
-  the record's in-flight INVITEs that the primary rebuilt on its own reclaim, so
-  nothing it holds is lost; or
-- **(ii)** the copy's call is live with its caller unanswered while the primary's
-  caller is answered: the answer supersedes the ringing state the copy serves. A copy
-  that is ending holds a teardown and plays on.
+  adopted version moves nothing. A primary reaches a `b` only by reading the copy's
+  write that carries it — applied or folded into its record, or refused with no
+  lifecycle progress its record lacks and its counter adopted (ADR-0031 D3) — so its
+  record decides everything the copy did, and the copy holds nothing to keep. A copy
+  that wrote nothing is covered by any write of its primary. The returning node's
+  recovery pulls the copy's writes before it reclaims, so its reclaim write covers
+  them; or
+- the primary deleted the call (the same incarnation, or one the delete does not name).
 
-Standing down releases the copy local-only: its timers are cancelled, nothing is
-written, no CDR (ADR-0020 X3). Its transactions are **relinquished**, deleted with
+The rule is read at the turn, not at the apply: the copy may have written again in
+between. Standing down releases the copy local-only: its timers are cancelled, nothing
+is written, no CDR (ADR-0020 X3). Its transactions are **relinquished**, deleted with
 nothing sent, rather than orphaned (ADR-0034). They are images of the primary's own,
-so an orphan's ACK and BYE would end the dialog the primary holds, and a callee's 2xx
-that still reaches the backup takes the call over afresh. Any other copy plays on and
-self-releases at quiescence, and a refused flush folds as before (ADR-0031 D3).
+so an orphan's ACK and BYE would end the dialog the primary holds, and every request
+the copy sent carries the route cookie naming the primary, so a response reaches the
+primary once the proxy reads it alive; one that still reaches the backup takes the
+call over afresh. Any other copy plays on and self-releases at quiescence, and a
+refused flush folds as before (ADR-0031 D3).
+
+A copy's ending never ends a call its primary answered behind the copy's back. A
+backup's `p` may be one it adopted without the body that carried it, so the live-map
+fold of a reverse flush takes the vector's verdict (`p` unchanged, `b` advanced) only
+for a body that stands behind the primary's on neither lifecycle axis; lifecycle
+progress folds as before (`router/reclaim/tests.rs`).
 
 The cells are in `swept_call_primary_returns.rs`. The callee stays silent and the
 returned primary alone CANCELs it, ACKs its 487 and refuses the caller 480. The callee
 answers at the returned node. The reclaim reaches the backup inside a bootstrap scan.
-The copy wrote before the return and stands down on the primary's answer (ii). Two
-guards: the callee answers at the backup while the node is down, or before it is
-routable. In `answer_lost_with_primary_no_answer.rs`, the cell where the ACK reaches
-the reclaimed copy first, a 2xx reaches the backup after the stand-down.
+The copy wrote before the return and stands down on the covering reclaim; then the
+callee answers, stays silent, or refuses, or the caller CANCELs at the returned node:
+one final, one node ending it. Two guards: the callee answers at the backup while the
+node is down, or before it is routable. In `answer_lost_with_primary_no_answer.rs`,
+the cell where the ACK reaches the reclaimed copy first, a 2xx reaches the backup
+after the stand-down.
 
 ## Residuals
 
@@ -190,6 +206,11 @@ the reclaimed copy first, a 2xx reaches the backup after the stand-down.
   window of ADR-0031 D3 (`undecided_call_settled_on_departure.rs`, the
   replacement-decision cell). A decision slower than the process's grace leaves one
   final, one CDR, one consult (the replacement cell).
+- **A returning node's answer inside the replication lag of the deadline.** The
+  copy's ring deadline fires before the returned node's reclaim and answer reach the
+  backup: the copy CANCELs the callee after its answer and refuses the caller 480
+  after its 200, repeated to Timer H. The answered call stays up at the returned node
+  and settles to one CDR (`swept_call_primary_returns.rs`, the replication-lag cell).
 - **A retransmission placed as a call of its own.** The departed call it duplicates is
   settled off the wire but still discharged, with a CDR, by its primary on its return
   (`undecided_call_settled_on_departure.rs`, the retransmission cell).

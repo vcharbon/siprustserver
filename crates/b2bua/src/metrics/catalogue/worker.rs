@@ -59,7 +59,7 @@ const DRAIN_REASON_VALUES: [&str; 4] = label_values!(DrainExit::ALL, DrainExit::
 /// Why a drain returned, indexed like [`DrainExit::ALL`].
 pub const DRAIN_REASON: Dim = Dim::new("reason", &DRAIN_REASON_VALUES);
 
-const REMOVAL_CLASS_VALUES: [&str; 3] = label_values!(RemovalClass::ALL, RemovalClass::label);
+const REMOVAL_CLASS_VALUES: [&str; 4] = label_values!(RemovalClass::ALL, RemovalClass::label);
 /// The release that tore a call's queue down, indexed like [`RemovalClass::ALL`].
 pub const REMOVAL_CLASS: Dim = Dim::new("class", &REMOVAL_CLASS_VALUES);
 
@@ -79,7 +79,7 @@ pub const PEER_FAILURE_KIND: Dim = Dim::new("kind", &PEER_FAILURE_KIND_VALUES);
 assert_exposition_order!(ObligationKind: AckOf2xx, AwaitPrack);
 assert_exposition_order!(QuietTurn: OwnRung, ReAck);
 assert_exposition_order!(DrainExit: Quiescent, CaughtUp, Grace, GracePeersBehind);
-assert_exposition_order!(RemovalClass: Terminated, SelfRelease, Orphan);
+assert_exposition_order!(RemovalClass: Terminated, SelfRelease, StandDown, Orphan);
 assert_exposition_order!(PeerScope: Internal, External);
 assert_exposition_order!(
     PeerFailureKind: ResponseTimeout,
@@ -212,7 +212,7 @@ pub const DRAIN_SECONDS: Family = Family::histogram(
 pub const CALL_REMOVALS_BY_CLASS: Family = Family::counter(
     "b2bua_call_removals_by_class_total",
     Labels::Product(&[REMOVAL_CLASS]),
-    "b2bua_call_removals_total by the release that tore the queue down (terminated: a call that owes its CDR; self_release: an acting backup's takeover copy; orphan: a queue that never held a call, e.g. a stateless admission shed or an event for a gone call)",
+    "b2bua_call_removals_total by the release that tore the queue down (terminated: a call that owes its CDR; self_release: an acting backup's takeover copy shed at quiescence; stand_down: a takeover copy stood down on its primary's write; orphan: a queue that never held a call, e.g. a stateless admission shed or an event for a gone call)",
 );
 
 pub const DISPATCH_PAST_BOUND: Family = Family::counter(

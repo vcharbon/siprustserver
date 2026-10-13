@@ -34,6 +34,7 @@ b2bua-runner b2bua_repl_reverse_flush_refused_total counter fixed {}
 b2bua-runner b2bua_repl_takeover_refused_terminated_total counter fixed {}
 b2bua-runner b2bua_repl_reclaimed_total counter fixed {}
 b2bua-runner b2bua_repl_self_release_total counter fixed {}
+b2bua-runner b2bua_repl_stand_down_total counter fixed {}
 b2bua-runner b2bua_repl_terminal_lost_total counter fixed {}
 b2bua-runner b2bua_repl_bootstrap_seeded_total counter fixed {}
 b2bua-runner b2bua_repl_bootstrap_stalled_total counter fixed {}

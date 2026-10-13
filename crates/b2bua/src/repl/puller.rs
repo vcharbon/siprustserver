@@ -85,7 +85,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use call::MsgpackCodec;
-use repl_net::frame::{Frame, Op, Partition, Watermark};
+use repl_net::frame::{Frame, Partition, Watermark};
 use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
 use tokio::sync::watch;
 use topology::Peer;
@@ -668,7 +668,7 @@ impl Puller {
                         (true, false) => ApplyMode::Bootstrap,
                         (false, _) => ApplyMode::Forward,
                     };
-                    let refused_body = body.clone();
+                    let write = apply::written(op, &body, &incarnation);
                     let outcome = self
                         .apply_to_store(
                             op,
@@ -698,16 +698,7 @@ impl Puller {
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
                     }
-                    if op == Op::Put {
-                        self.signal_put_outcome(
-                            mode,
-                            outcome,
-                            bootstrapped,
-                            &call_ref,
-                            refused_body,
-                            origin_now_ms,
-                        );
-                    }
+                    self.signal(mode, outcome, bootstrapped, &call_ref, write, origin_now_ms);
                     // Pre-bootstrap frames share `at = W`; only the post-bootstrap
                     // tail advances W.
                     if bootstrapped {

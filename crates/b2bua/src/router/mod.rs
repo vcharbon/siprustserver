@@ -243,14 +243,24 @@ pub enum ReplCommand {
     /// sends it: a bulk re-seed's refusals are the state of the two views, not
     /// events, and are counted alone.
     ForwardFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
-    /// A primary's forward flush this backup applied to the Element of a call
-    /// it serves as a live takeover copy, in a scan or on the tail: the body is
-    /// handed up so the copy can stand down on it (`stand_down`, ADR-0047 D7).
-    ForwardFlushApplied { call_ref: String, body: Arc<[u8]> },
+    /// A primary's forward write this backup applied to the Element of a call
+    /// it serves as a live takeover copy, in a scan or on the tail: handed up so
+    /// the copy can stand down on it (`stand_down`, ADR-0047 D7).
+    ForwardFlushApplied { call_ref: String, write: PrimaryWrite },
     /// The peer of this ordinal left the membership set while its flows ran: a
     /// real stop. Its calls this node backs up with an INVITE in flight are
     /// taken over at once (`departure`, ADR-0047). Sent once per stop.
     PeerDeparted(String),
+}
+
+/// A write of a call's primary, as a backup applied it to its Element.
+#[derive(Debug, Clone)]
+pub enum PrimaryWrite {
+    /// The primary's body of the call.
+    Put(Arc<[u8]>),
+    /// The primary ended the call and deleted it; the incarnation the delete
+    /// names, when it names one.
+    Delete(Option<String>),
 }
 
 /// What one turn of the router took.
@@ -339,8 +349,8 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
             let dir = reclaim::FlushDirection::Forward;
             reclaim::fold_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
         }
-        ReplCommand::ForwardFlushApplied { call_ref, body } => {
-            stand_down::offer(ctx, call_ref, &body).await
+        ReplCommand::ForwardFlushApplied { call_ref, write } => {
+            stand_down::offer(ctx, call_ref, write).await
         }
         ReplCommand::PeerDeparted(ordinal) => departure::take_over_departed(ctx, &ordinal),
     }

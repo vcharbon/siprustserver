@@ -89,9 +89,11 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
             if ctx.state.drop_local(call_ref) {
                 ctx.timers.cancel_all(call_ref.to_string()).await;
                 let _ = ctx.txn.relinquish_call(call_ref).await;
-                ctx.dispatcher.release(call_ref, RemovalClass::SelfRelease);
-                ctx.metrics.bump_repl_self_release();
-                ctx.state.note_takeover_self_release(call_ref);
+                ctx.dispatcher.release(call_ref, RemovalClass::StandDown);
+                ctx.metrics.bump_repl_stand_down();
+                // Folded into the departed peer's takeover episode (ADR-0026): a
+                // returning node stands down every copy its peer's sweep made.
+                ctx.state.note_takeover(call_ref, "stood_down");
             }
         }
         ReleaseKind::Orphan => {

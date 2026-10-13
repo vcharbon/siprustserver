@@ -1,16 +1,18 @@
 //! The stand-down rule, as a pure decision over the two bodies and as the
-//! turn a wired core runs on the notice: a takeover copy that authored nothing
-//! stands down on any write of its primary (i), one that authored stands down
-//! only on its primary's answer of the ringing call it serves (ii), and every
-//! other copy plays on.
+//! turn a wired core runs on the notice: a takeover copy stands down on a
+//! write of its primary that covers every write the copy made, and on its
+//! primary's delete of the call; every other copy plays on.
 
-use call::{Call, CallBodyCodec, CallModelState, MsgpackCodec};
+use std::sync::Arc;
 
-use super::{offer, stands_down};
+use call::{Call, CallBodyCodec, MsgpackCodec};
+
+use super::{covers, offer};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::router::materialise::{materialise, Materialised, Origin};
 use crate::router::test_support::{invite, node, src, Node};
+use crate::router::PrimaryWrite;
 use crate::store::{CallStore, PartitionRole, PutOpts};
 
 /// A ringing call `w0` owns and `w1` backs up: live, its caller unanswered.
@@ -19,15 +21,9 @@ fn ringing(cid: &str) -> Call {
     build_initial_call(&invite("w0", "w1", cid), src(), &config, &sip_txn::IdGen::seeded(1), 0)
 }
 
-/// `call` with its caller answered 200.
-fn answered(mut call: Call) -> Call {
-    call.a_leg.invite_final_sent = Some(200);
-    call
-}
-
-/// `call` ending: its teardown under way, its caller unanswered.
-fn ending(mut call: Call) -> Call {
-    call.state = CallModelState::Terminating;
+/// `call` at backup counter `b`.
+fn at_b(mut call: Call, b: i64) -> Call {
+    call.topology.as_mut().expect("a proxied call has a topology").bak_gen = b;
     call
 }
 
@@ -39,88 +35,68 @@ fn reborn(call: &Call) -> Call {
 }
 
 #[test]
-fn a_copy_that_authored_nothing_stands_down_on_any_write_of_its_primary() {
-    let copy = ringing("i");
-    assert!(stands_down(&copy, &copy, false), "on the reclaim's write of the ringing call");
-    assert!(stands_down(&answered(copy.clone()), &copy, false), "on the primary's answer");
+fn a_primary_at_or_past_the_copys_backup_counter_covers_it() {
+    let copy = ringing("covered");
+    assert!(covers(&copy, &copy), "a copy that wrote nothing: any write of its primary");
+    let wrote = at_b(copy.clone(), 2);
+    assert!(covers(&at_b(copy.clone(), 2), &wrote), "the primary read the copy's last write");
+    assert!(covers(&at_b(copy.clone(), 3), &wrote));
 }
 
 #[test]
-fn a_copy_that_authored_stands_down_on_its_primarys_answer_of_the_ringing_call() {
-    let copy = ringing("ii");
-    assert!(stands_down(&answered(copy.clone()), &copy, true));
+fn a_primary_behind_the_copys_backup_counter_does_not_cover_it() {
+    let copy = ringing("uncovered");
+    assert!(!covers(&at_b(copy.clone(), 1), &at_b(copy, 2)), "one write the primary never read");
 }
 
 #[test]
-fn a_copy_that_authored_plays_on_unless_its_ringing_call_was_answered_by_the_primary() {
-    let copy = ringing("plays-on");
-    assert!(!stands_down(&copy, &copy, true), "the primary's write of the ringing call");
-    let both = answered(copy.clone());
-    assert!(!stands_down(&both, &both, true), "a copy that answered the caller itself");
-    assert!(
-        !stands_down(&answered(copy.clone()), &ending(copy.clone()), true),
-        "a copy holding a teardown",
-    );
-}
-
-#[test]
-fn a_write_of_another_call_on_the_ref_never_stands_a_copy_down() {
+fn a_write_of_another_call_on_the_ref_never_covers_a_copy() {
     let copy = ringing("incarnation");
-    let other = reborn(&copy);
+    let other = at_b(reborn(&copy), 5);
     assert_ne!(other.incarnation(), copy.incarnation());
-    assert!(!stands_down(&other, &copy, false));
-    assert!(!stands_down(&answered(other), &copy, true));
+    assert!(!covers(&other, &copy));
 }
 
 /// `call`, stored as `w1`'s Element of `w0`'s call and taken over: the live
 /// takeover copy, its lock released.
 async fn taken_over(n: &Node, call: &Call) {
     let body = MsgpackCodec::new().encode(call);
-    n.store
-        .put_call(
-            PartitionRole::Backup,
-            "w0",
-            &call.call_ref,
-            body,
-            &[],
-            60_000,
-            1,
-            0,
-            &PutOpts::default(),
-        )
-        .await
-        .unwrap();
+    let ttl = 60_000;
+    let opts = PutOpts::default();
+    let r = &call.call_ref;
+    n.store.put_call(PartitionRole::Backup, "w0", r, body, &[], ttl, 1, 0, &opts).await.unwrap();
     let ctx = n.core.router_ctx();
-    let _guard = ctx.state.lock(&call.call_ref).await;
-    let served = materialise(ctx, &call.call_ref, Origin::Takeover).await;
+    let _guard = ctx.state.lock(r).await;
+    let served = materialise(ctx, r, Origin::Takeover).await;
     assert!(matches!(served, Materialised::Served { .. }), "taken over: {served:?}");
 }
 
 /// The copy of `call_ref` writes once, as a turn of its own would.
 fn authors(n: &Node, call_ref: &str) {
     let ctx = n.core.router_ctx();
-    let copy = ctx.state.peek(call_ref).expect("the live copy");
-    ctx.state.update(copy);
-    assert_eq!(ctx.state.takeover_authored(call_ref), Some(true));
+    ctx.state.update(ctx.state.peek(call_ref).expect("the live copy"));
 }
 
-/// The notice of `primary`'s applied write, offered and its turn run.
-async fn primary_wrote(n: &Node, primary: &Call) {
-    let body = MsgpackCodec::new().encode(primary);
-    offer(n.core.router_ctx(), primary.call_ref.clone(), &body).await;
+/// The notice of the primary's applied `write` of `call_ref`, offered and its
+/// turn run.
+async fn primary_wrote(n: &Node, call_ref: &str, write: PrimaryWrite) {
+    offer(n.core.router_ctx(), call_ref.to_string(), write).await;
     sip_clock::testkit::settle().await;
 }
 
+fn put(call: &Call) -> PrimaryWrite {
+    PrimaryWrite::Put(Arc::from(MsgpackCodec::new().encode(call)))
+}
+
 #[tokio::test(start_paused = true)]
-async fn the_turn_releases_a_copy_that_authored_nothing_off_the_store() {
+async fn the_turn_stands_a_covered_copy_down_off_the_store() {
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
-    let call = ringing("turn-i");
+    let call = ringing("turn-covered");
     let r = call.call_ref.clone();
     taken_over(&n, &call).await;
-    assert_eq!(ctx.state.takeover_authored(&r), Some(false));
 
-    primary_wrote(&n, &call).await;
+    primary_wrote(&n, &r, put(&call)).await;
 
     assert!(ctx.state.peek(&r).is_none(), "the copy stood down");
     assert!(!ctx.state.is_takeover(&r));
@@ -130,22 +106,46 @@ async fn the_turn_releases_a_copy_that_authored_nothing_off_the_store() {
     );
     assert!(n.cdr.snapshot().is_empty(), "the copy writes no CDR");
     assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
+    assert_eq!(n.metrics.repl_stand_down_total(), 1, "counted as a stand-down");
+    assert_eq!(n.metrics.repl_self_release_total(), 0, "not as a self-release");
+    let removals = n.metrics.removals_of_total(crate::metrics::RemovalClass::StandDown);
+    assert_eq!(removals, 1, "its queue is removed as a stand-down");
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_turn_keeps_a_copy_that_authored_until_its_primary_answers() {
+async fn the_turn_keeps_a_copy_until_its_primary_read_its_every_write() {
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
-    let call = ringing("turn-ii");
+    let call = ringing("turn-uncovered");
+    let r = call.call_ref.clone();
+    taken_over(&n, &call).await;
+    authors(&n, &r);
+    authors(&n, &r);
+
+    primary_wrote(&n, &r, put(&at_b(call.clone(), 1))).await;
+    assert!(ctx.state.is_takeover(&r), "a primary one write behind leaves the copy live");
+
+    primary_wrote(&n, &r, put(&at_b(call, 2))).await;
+    assert!(ctx.state.peek(&r).is_none(), "a primary at the copy's last write stands it down");
+    assert!(n.cdr.snapshot().is_empty(), "the copy writes no CDR");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_turn_stands_a_copy_down_on_its_primarys_delete_of_the_call_alone() {
+    let n = node("w1").await;
+    let ctx = n.core.router_ctx();
+    let call = ringing("turn-deleted");
     let r = call.call_ref.clone();
     taken_over(&n, &call).await;
     authors(&n, &r);
 
-    primary_wrote(&n, &call).await;
-    assert!(ctx.state.is_takeover(&r), "the primary's ringing write leaves the copy live");
+    let another = reborn(&call).incarnation().to_string();
+    primary_wrote(&n, &r, PrimaryWrite::Delete(Some(another))).await;
+    assert!(ctx.state.is_takeover(&r), "the delete of another call on the ref");
 
-    primary_wrote(&n, &answered(call)).await;
-    assert!(ctx.state.peek(&r).is_none(), "the primary's answer stands the copy down");
+    let own = call.incarnation().to_string();
+    primary_wrote(&n, &r, PrimaryWrite::Delete(Some(own))).await;
+    assert!(ctx.state.peek(&r).is_none(), "the primary ended and deleted the call");
     assert!(n.cdr.snapshot().is_empty(), "the copy writes no CDR");
 }
 
@@ -155,7 +155,7 @@ async fn a_notice_for_a_call_with_no_takeover_copy_here_queues_nothing() {
     let ctx = n.core.router_ctx();
     let call = ringing("no-copy");
 
-    primary_wrote(&n, &call).await;
+    primary_wrote(&n, &call.call_ref, put(&call)).await;
 
     assert!(!ctx.dispatcher.has_queue(&call.call_ref), "no queue opened for the call");
     assert_eq!(ctx.state.lock_count(), 0);

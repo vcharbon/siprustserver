@@ -8,7 +8,7 @@ use repl_net::frame::{Op, Partition};
 
 use super::super::incarnation::is_another_call;
 use super::Puller;
-use crate::router::ReplCommand;
+use crate::router::{PrimaryWrite, ReplCommand};
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
 
 /// How an inbound `Data` frame is reconciled into the local store
@@ -357,7 +357,7 @@ impl Puller {
         })
     }
 
-    /// Hand a `Put`'s outcome up to the router (ADR-0011 X11 / ADR-0014 /
+    /// Hand a frame's outcome up to the router (ADR-0011 X11 / ADR-0014 /
     /// ADR-0031 D3). An applied reverse flush is reclaimed; a refused one, in
     /// either direction, rides up **with its body**, because the call model can
     /// read lifecycle progress in it that the counters cannot carry. A bootstrap
@@ -368,53 +368,65 @@ impl Puller {
     /// state of the two views and not an event, and folding each one would drive
     /// one fold per resident call. They are counted; only the tail is handed up.
     ///
-    /// An applied forward flush rides up with its body only for a call this
-    /// node serves as a live takeover copy ([`RouterSink::takeovers`](crate::repl::RouterSink)),
-    /// in the scan and on the tail alike: either way it is a write of the
-    /// call's primary the copy has not seen (ADR-0047 D7).
-    pub(super) fn signal_put_outcome(
+    /// An applied forward write — a `Put` with its body, a `Delete` with the
+    /// incarnation it names — rides up only for a call this node serves as a
+    /// live takeover copy ([`RouterSink`](crate::repl::RouterSink)), in the scan
+    /// and on the tail alike: either way it is a write of the call's primary the
+    /// copy has not seen (ADR-0047 D7). No other `Delete` rides up.
+    pub(super) fn signal(
         &self,
         mode: ApplyMode,
         outcome: ApplyOutcome,
         bootstrapped: bool,
         call_ref: &str,
-        body: Option<Arc<[u8]>>,
+        write: PrimaryWrite,
         origin_now_ms: i64,
     ) {
         use ApplyOutcome::{Applied, Dominated, Refused, Shed, Superseded};
         let Some(sink) = &self.repl_tx else { return };
         if (mode, outcome) == (ApplyMode::Forward, Applied) {
-            if let (Some(body), true) = (body, sink.serves_takeover(call_ref)) {
-                sink.send(ReplCommand::ForwardFlushApplied {
-                    call_ref: call_ref.to_string(),
-                    body,
-                });
+            if sink.serves_takeover(call_ref) {
+                let call_ref = call_ref.to_string();
+                sink.send(ReplCommand::ForwardFlushApplied { call_ref, write });
             }
             return;
         }
+        let PrimaryWrite::Put(body) = write else { return };
         if mode == ApplyMode::Forward && !bootstrapped {
             return;
         }
-        let refused_body = || body.clone().unwrap_or_else(|| Arc::from(Vec::new()));
         let cmd = match (mode, outcome) {
             // Reclaim straggler: a backup reverse-flushed one of OUR calls after
             // the bulk sweep — re-materialise + re-serve it.
             (ApplyMode::Reverse, Applied) => ReplCommand::ReclaimCall(call_ref.to_string()),
             (ApplyMode::Reverse, Dominated | Refused) => ReplCommand::ReverseFlushRefused {
                 call_ref: call_ref.to_string(),
-                body: refused_body(),
+                body,
                 origin_now_ms,
             },
             // Forward: only a SPLIT rides up. A dominated re-delivery says nothing
             // the live copy does not already hold.
             (ApplyMode::Forward, Refused) => ReplCommand::ForwardFlushRefused {
                 call_ref: call_ref.to_string(),
-                body: refused_body(),
+                body,
                 origin_now_ms,
             },
             (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => return,
             (_, Shed | Superseded) => return,
         };
         sink.send(cmd);
+    }
+}
+
+/// What a `Data` frame wrote, as [`Puller::signal`] hands it up: a `Put`'s
+/// body (empty when the frame carries none), a `Delete`'s incarnation.
+pub(super) fn written(
+    op: Op,
+    body: &Option<Arc<[u8]>>,
+    incarnation: &Option<String>,
+) -> PrimaryWrite {
+    match op {
+        Op::Put => PrimaryWrite::Put(body.clone().unwrap_or_else(|| Arc::from(Vec::new()))),
+        Op::Delete => PrimaryWrite::Delete(incarnation.clone()),
     }
 }

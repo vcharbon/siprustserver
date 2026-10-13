@@ -100,13 +100,28 @@ fn an_unanswered_body_does_not_fold_into_an_answered_live_copy() {
     );
 }
 
-/// The vector clause is untouched: `p` unchanged since the backup branched
-/// and `b` advanced still folds, whatever the chain says.
+/// The vector clause: `p` unchanged since the backup branched and `b`
+/// advanced folds a body that stands behind the live copy on neither axis.
 #[test]
 fn the_vector_clause_still_folds_an_advanced_backup_counter() {
     let replica = answered(1, 2, CallModelState::Active);
     let live = answered(1, 1, CallModelState::Active);
     assert!(reverse_flush_dominates(&replica, &live), "p unchanged, b advanced");
+}
+
+/// A backup that adopted our `p` without the body that carried it (a refused
+/// forward flush, ADR-0031 D3) and then ended the call it saw ringing flushes
+/// at our `p` with its `b` advanced: the vector clause alone would end the
+/// call we answered. The body stands behind ours on the answer axis, so it is
+/// a branch and never folds.
+#[test]
+fn the_vector_clause_never_folds_a_teardown_of_a_call_it_never_saw_answered() {
+    let replica = unanswered(6, 3, CallModelState::Terminated);
+    let live = answered(6, 1, CallModelState::Active);
+    assert!(
+        !reverse_flush_dominates(&replica, &live),
+        "an adopted p does not make an unanswered teardown our call's end",
+    );
 }
 
 /// The `(p,b)` of the live copy `n` holds for `call_ref`.

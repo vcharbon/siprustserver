@@ -28,6 +28,7 @@ pub use faults::{FaultInjectingCallStore, StoreFaultPoint, StoreFaults};
 pub use memory::InMemoryCallStore;
 pub(crate) use poison::locked;
 pub use poison::poisoned_lock_recoveries;
+pub use takeover::TakeoverProbe;
 pub use terminate_writer::BufferedTerminateWriter;
 
 use std::collections::{BTreeMap, HashMap};
@@ -89,10 +90,8 @@ struct Inner {
     /// the backup [`drop_local`](CallState::drop_local)s the live copy (the `bak:`
     /// replica + reverse-flushed deltas remain). No wall-clock, no watermark
     /// handshake. Local-only; never serialized/replicated. Cleared on
-    /// drop_local/remove. Each entry keeps the copy's `b` (`bak_gen`) as it
-    /// was materialised: a copy whose `b` has moved since has authored a write
-    /// ([`takeover_authored`](CallState::takeover_authored)).
-    takeover: HashMap<String, i64>,
+    /// drop_local/remove.
+    takeover: takeover::TakeoverMarks,
     /// **Last-touched stamps** (ADR-0020 X4) — the call reaper's only liveness
     /// input: epoch-ms of the last dispatched event that reached the handler
     /// (`router::process` touches), stamped at every entry
@@ -343,7 +342,7 @@ impl CallState {
             .touched
             .iter()
             .filter(|(call_ref, stamp)| {
-                now_ms - **stamp > idle_max_ms && !inner.takeover.contains_key(*call_ref)
+                now_ms - **stamp > idle_max_ms && !inner.takeover.contains(call_ref)
             })
             .map(|(call_ref, stamp)| (call_ref.clone(), *stamp))
             .collect()

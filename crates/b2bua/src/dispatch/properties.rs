@@ -27,6 +27,7 @@ fn removal() -> impl Strategy<Value = RemovalClass> {
     proptest::sample::select(vec![
         RemovalClass::Terminated,
         RemovalClass::SelfRelease,
+        RemovalClass::StandDown,
         RemovalClass::Orphan,
     ])
 }

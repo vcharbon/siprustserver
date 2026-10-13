@@ -14,11 +14,13 @@ use catalogue::worker::DRAIN_BUCKETS;
 
 pub mod catalogue;
 mod limiter;
+mod removal_class;
 
 pub use limiter::{
     AdmitSite, LimiterCounters, LimiterFailure, LimiterOp, LimiterTask, RefreshDiscard,
     RefreshGiveUp, ReleaseGiveUp,
 };
+pub use removal_class::RemovalClass;
 
 /// A `b2bua_retransmits_total` row: method uppercased, the code's digits for
 /// a response.
@@ -76,6 +78,7 @@ struct Inner {
     removals: AtomicU64,
     removals_terminated: AtomicU64,
     removals_self_release: AtomicU64,
+    removals_stand_down: AtomicU64,
     removals_orphan: AtomicU64,
     // timer service (gauges): physical DelayQueue size (live entries + not-yet-
     // expired tombstones from cancelled/rescheduled timers) vs. the live
@@ -260,34 +263,6 @@ impl Default for B2buaMetrics {
     }
 }
 
-/// Why a per-call dispatch queue was torn down: the release that poisoned it.
-/// Every removal has exactly one class; they partition `b2bua_call_removals_total`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemovalClass {
-    /// A call that terminated: it owes its CDR.
-    Terminated,
-    /// A takeover copy shed by an acting backup (ADR-0014): the call lives on
-    /// at its primary, which owes the CDR.
-    SelfRelease,
-    /// A queue that never held a call: an initial INVITE shed statelessly
-    /// (overload, store fault) or an event naming no resident call. No CDR.
-    Orphan,
-}
-
-impl RemovalClass {
-    /// Every class, in declaration order.
-    pub const ALL: [RemovalClass; 3] =
-        [RemovalClass::Terminated, RemovalClass::SelfRelease, RemovalClass::Orphan];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            RemovalClass::Terminated => "terminated",
-            RemovalClass::SelfRelease => "self_release",
-            RemovalClass::Orphan => "orphan",
-        }
-    }
-}
-
 /// One discard of each site, in label order: a release of any class counts
 /// under `released`.
 pub(crate) const DISCARD_SITES: [Discard; 4] = [
@@ -425,6 +400,7 @@ impl B2buaMetrics {
         match class {
             RemovalClass::Terminated => &self.inner.removals_terminated,
             RemovalClass::SelfRelease => &self.inner.removals_self_release,
+            RemovalClass::StandDown => &self.inner.removals_stand_down,
             RemovalClass::Orphan => &self.inner.removals_orphan,
         }
     }

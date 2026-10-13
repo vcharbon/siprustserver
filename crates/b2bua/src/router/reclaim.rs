@@ -5,7 +5,8 @@
 
 use std::sync::Arc;
 
-use call::{helpers::lifecycle_advances, Call, CallModelState};
+use call::helpers::{lifecycle_advances, lifecycle_regresses};
+use call::{Call, CallModelState};
 
 use super::interpret::process_result;
 use super::restore_hygiene::sanitize_restored_timers;
@@ -410,15 +411,20 @@ fn adopt_seen_counter(
 
 /// The ADR-0014 **Reverse** apply rule for a live-map fold. The reverse-flushed
 /// `replica` dominates our `live` copy when the `(p,b)` vector says so (`p`
-/// unchanged since the backup branched, `b` advanced) OR when it carries
-/// lifecycle progress ([`lifecycle_advances`]) a reclaimed copy cannot have made
-/// on its own: a `p` bump from a turn on a stale record does not outrank the
-/// backup's answer or teardown. A call with no topology never folds.
+/// unchanged since the backup branched, `b` advanced) and its body stands
+/// behind ours on neither lifecycle axis, OR when it carries lifecycle
+/// progress ([`lifecycle_advances`]) a reclaimed copy cannot have made on its
+/// own: a `p` bump from a turn on a stale record does not outrank the backup's
+/// answer or teardown. A backup's `p` may be one it adopted without the body
+/// that carried it (ADR-0031 D3), so a body behind ours — the backup's ending
+/// of a call it never saw answered — is a branch, never our call's end. A call
+/// with no topology never folds.
 fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
     let (Some(r), Some(l)) = (replica.topology.as_ref(), live.topology.as_ref()) else {
         return false;
     };
-    (r.gen == l.gen && r.bak_gen > l.bak_gen) || lifecycle_advances(replica, live)
+    let newer = r.gen == l.gen && r.bak_gen > l.bak_gen && !lifecycle_regresses(replica, live);
+    newer || lifecycle_advances(replica, live)
 }
 
 /// The live timer service follows the folded ledger: every entry the folded
