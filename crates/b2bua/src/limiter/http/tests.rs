@@ -524,3 +524,37 @@ async fn a_refresh_the_open_breaker_keeps_counts_no_request_and_no_key() {
     assert_eq!(m.requests_total(LimiterOp::Refresh), 1);
     assert_eq!(m.refresh_keys_sent_total(), 2);
 }
+
+/// A request that found every in-flight slot taken for its whole budget never
+/// left: it counts as a failure, not as a request.
+#[tokio::test(start_paused = true)]
+async fn a_request_refused_a_slot_counts_as_no_request() {
+    let (net, _server) = served().await;
+    let client = Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), BUDGET));
+    let lease = LimiterLease::starting_at(Duration::from_secs(120));
+    let metrics = B2buaMetrics::new();
+    client.report_to(LimiterReports::new(&lease, metrics.clone()));
+    net.apply_fault(Fault::Stall { dst: laddr() });
+    // Refreshes hold every slot for their 2 s budget.
+    let held: Vec<_> = (0..MAX_IN_FLIGHT)
+        .map(|i| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let held = held_of(&["x".into()]);
+                client.refresh(&[RefreshCall { key: format!("held-{i}"), held }]).await
+            })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    // An admit waits its 150 ms budget for a slot and gives up.
+    let outcome = client.admit("c#k", 1, &LimiterHeld::default(), &entries(), false).await;
+    assert_eq!(outcome, AdmitOutcome::Unavailable);
+    let m = metrics.limiter();
+    assert_eq!(m.requests_total(LimiterOp::Admit), 0, "the admit never left");
+    assert_eq!(m.failures_total(LimiterOp::Admit, LimiterFailure::Timeout), 1);
+    for h in held {
+        let _ = h.await;
+    }
+    assert_eq!(m.requests_total(LimiterOp::Refresh), MAX_IN_FLIGHT as u64);
+    assert_eq!(m.refresh_keys_sent_total(), MAX_IN_FLIGHT as u64, "one key each");
+}

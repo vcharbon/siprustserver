@@ -22,8 +22,8 @@
 //! outcome per call) is a bad answer: handled as no answer. Every request,
 //! with the call keys it names, and every request with no usable answer is
 //! reported by its cause ([`LimiterFailure`]) and counted in the fail-open
-//! episode under it; one the open breaker kept never left and is reported as
-//! a failure only.
+//! episode under it; one that never left (the open breaker, no in-flight
+//! slot within its budget) is reported as a failure only.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -120,8 +120,9 @@ impl Endpoint {
     }
 
     /// Send `req` for `op`, naming `keys` call keys, under `budget`, once:
-    /// the 200 answer, or `None` after counting why none came back. One the
-    /// open breaker kept is no request: it is counted as a failure only.
+    /// the 200 answer, or `None` after counting why none came back. One that
+    /// never left — kept by the open breaker, or refused an in-flight slot
+    /// for its whole budget — is no request: it is counted as a failure only.
     async fn call(
         &self,
         op: LimiterOp,
@@ -130,7 +131,7 @@ impl Endpoint {
         budget: Duration,
     ) -> Option<HttpResponse> {
         let answer = self.client.attempt(req, budget).await;
-        if !matches!(answer, Err(AttemptError::BreakerOpen)) {
+        if !matches!(answer, Err(AttemptError::BreakerOpen | AttemptError::Saturated)) {
             self.sent(op, keys);
         }
         let cause = match answer {
