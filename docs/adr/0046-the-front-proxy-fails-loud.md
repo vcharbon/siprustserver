@@ -75,6 +75,16 @@ its family.
 
    A kubelet restart of the dead proxy can answer `/healthz` for a moment and
    reset the fall count, which adds up to 2 s (worst about 8.6 s).
+
+   `/healthz` fails (`503 stalled`) while a recv shard has held one packet
+   longer than `PROXY_SHARD_STALL_MS` (2 s), as `/readyz` does: such a proxy
+   black-holes the flows hashed to that shard while it still answers every
+   other probe. The address moves `PROXY_SHARD_STALL_MS` plus the move above
+   after the shard stops, and the livenessProbe restarts the container. A
+   shard waiting on an empty socket is never stalled, so an idle proxy keeps
+   both. A shard slowed but turning (CPU starved) restarts its clock on every
+   packet and trips only when one packet's handling alone exceeds the
+   threshold.
 5. **Strict configuration.** Every variable is read once, before the first
    bind. Unset takes the default. Set empty, malformed or out of its range
    refuses the boot, naming every problem at once; only `PROXY_UDP_SNDBUF` /
@@ -96,9 +106,9 @@ its family.
    supported: changing the key fails the cookie check (403) for the in-dialog
    requests of every call in progress.
 8. **Named-target lookups are bounded.** Each lookup is bounded at
-   `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` (2 s). At the bound the packet is
-   dropped and the negative entry (5 s) written: a packet is sent at once or
-   never. A lookup past its bound starts no further attempt (no second name
+   `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` (2 s). At the bound the packet, and
+   every packet waiting on the same lookup, is dropped and the negative entry
+   (5 s) written: a packet is sent at once or never. A lookup past its bound starts no further attempt (no second name
    form); its in-flight slot stays taken until the attempt already running
    returns, so stuck lookup threads stay at most `max_in_flight` (64) per recv
    shard, and a name is looked up again within about one resolver timeout
@@ -137,6 +147,7 @@ its family.
 | `PROXY_SELF_GATE` | one of `1`, `true`, `yes`, `on`, `0`, `false`, `no`, `off` | on |
 | `PROXY_SELF_GATE_ELU_CRITICAL` | (0, 1] | 0.8 |
 | `PROXY_SELF_GATE_CPS_SIZE`, `PROXY_SELF_GATE_CPS_RATE` | ≥ 1 | 50, 100 |
+| `PROXY_RETRY_AFTER_JITTER_SEC` | 0..3600 s | 5 |
 | `PROXY_RESOLVER_POSITIVE_TTL_MS`, `PROXY_RESOLVER_NEGATIVE_TTL_MS`, `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` | ≥ 1 ms | 60000, 5000, 2000 |
 | `PROXY_RESOLVER_PREWARM` | `host:port` list | none |
 
@@ -155,7 +166,9 @@ its family.
   empty namespace, a missing advertise, a name as a bind address, a missing
   key), `discovery::tests` (a kube client that fails then builds: NotReady
   with no stand-in worker, then the pool fills; a watch that restarts quietly
-  ends its broken episode); `sip-proxy` `resolver::tests` (a lookup past its
+  ends its broken episode), `readiness::tests` (a stalled shard fails
+  `/healthz` and `/readyz`, a proxy with none passes both); `sip-proxy`
+  `resolver::tests` (a lookup past its
   bound, no candidate past the deadline, the address family and a dual-stack
   bind). The VRRP behaviour is checked on a lab cluster: staggered starts, a
   crash-looping proxy on the address holder, established calls across the

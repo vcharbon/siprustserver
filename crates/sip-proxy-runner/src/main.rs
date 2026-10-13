@@ -56,8 +56,9 @@
 //!                    clamps at rmem_max). Overflow is counted in
 //!                    sip_proxy_udp_kernel_rx_dropped_total
 //!   PROXY_SHARD_STALL_MS  a recv shard still on one packet past this is
-//!                    stalled: /readyz NotReady, gauge
-//!                    sip_proxy_recv_shards_stalled, ms ≥ 1 (default 2000)
+//!                    stalled: /healthz and /readyz 503, gauge
+//!                    sip_proxy_recv_shards_stalled, ms ≥ 1 (default 2000);
+//!                    a shard waiting on an empty socket is never stalled
 //!   PROXY_RECV_SHARDS  N reuse-port recv sockets/cores, 1..1024 (default 1;
 //!                    >1 shards the serial recv loop across N sockets; kernel
 //!                    flow-hashing keeps each UAC src:port on one socket so
@@ -135,7 +136,7 @@ use sip_proxy::{ExternalFaceParts, ProxyCoreBuilder, RoutingStrategy};
 use sip_proxy_runner::config::{refuse_to_start, ExternalFace, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
 use sip_proxy_runner::intake_shed::{intake_shed_hook, intake_shed_watermark};
-use sip_proxy_runner::readiness::probe_state;
+use sip_proxy_runner::readiness::probes;
 use sip_txn::IdGen;
 
 /// Log the buffer sizes the kernel granted one face's signalling socket,
@@ -559,17 +560,10 @@ async fn main() {
     let draining = Arc::new(AtomicBool::new(false));
     // A stalled recv shard (parked on one packet past PROXY_SHARD_STALL_MS —
     // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
-    // flows while every activity meter reads idle: NotReady, and the gauge.
-    let ready: probe_http::ReadyFn = {
-        let reg = registry.clone();
-        let draining = draining.clone();
-        let pulse = pulse.clone();
-        let clk = clock.clone();
-        Arc::new(move || {
-            let stalled = !pulse.stalled(clk.now_ms().max(0) as u64, shard_stall_ms).is_empty();
-            probe_state(draining.load(Ordering::Relaxed), stalled, reg.as_ref())
-        })
-    };
+    // flows while every activity meter reads idle: it fails `/readyz` and
+    // `/healthz` (ADR-0046 D4), and raises the gauge.
+    let (ready, live) =
+        probes(draining.clone(), pulse.clone(), clock.clone(), shard_stall_ms, registry.clone());
 
     // Health sampler: publish the worker-health gauges, `sip_proxy_worker_pool_empty`
     // and the discovery's own health every 2 s, so an empty or unprobed pool
@@ -595,7 +589,7 @@ async fn main() {
                         tracing::error!(
                             shards = ?stalled,
                             threshold_ms = shard_stall_ms,
-                            "recv shard(s) stalled on one packet — /readyz NotReady"
+                            "recv shard(s) stalled on one packet — /healthz and /readyz fail"
                         );
                     }
                     stalled_before = stalled;
@@ -689,7 +683,7 @@ async fn main() {
     // The listener was bound FIRST (metrics-first bind order above); this only
     // starts the accept loop. A failure here is fatal — a proxy without its
     // health endpoint gets liveness-killed 30 s later with a lying /readyz.
-    let _metrics_server = probe_http::ProbeServer::serve_on(metrics_listener, routes)
+    let _metrics_server = probe_http::ProbeServer::serve_on_live(metrics_listener, routes, live)
         .unwrap_or_else(|e| {
             panic!("sip-proxy-runner FATAL: metrics server on {metrics_sa} failed to start: {e}")
         });

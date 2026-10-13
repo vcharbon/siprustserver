@@ -264,8 +264,9 @@ spec:
             - { name: sip,     containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9090, protocol: TCP }
           # Readiness gates on >=1 routable (Alive) worker (ADR-0012 D4). Liveness
-          # is separate (process up) so the warm backup is never killed for having
-          # no traffic. kubelet probes node-IP:9090 (hostNetwork).
+          # is separate (process up, every recv shard turning; ADR-0046 D4) so the
+          # warm backup is never killed for having no traffic: an idle shard is
+          # never stalled. kubelet probes node-IP:9090 (hostNetwork).
           # NOTE: /readyz deliberately does NOT gate on "this pod
           # is VRRP master / the VIP serves" — the warm backup must stay Ready or
           # the Deployment rollout could never complete. A same-node self-probe

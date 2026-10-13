@@ -142,6 +142,16 @@ impl ProbeServer {
         Self::serve_on_with(listener, routes, IDLE_TIMEOUT)
     }
 
+    /// [`serve_on`](Self::serve_on), with `/healthz` answering `503` while
+    /// `live` reports `false` ([`start_live`](Self::start_live)).
+    pub fn serve_on_live(
+        listener: TcpListener,
+        routes: ProbeRoutes,
+        live: LiveFn,
+    ) -> std::io::Result<Self> {
+        Self::serve(listener, Served { routes, live: Some(live) }, IDLE_TIMEOUT)
+    }
+
     /// [`serve_on`](Self::serve_on) with an explicit fully-idle cut window.
     pub fn serve_on_with(
         listener: TcpListener,
@@ -407,6 +417,19 @@ mod tests {
                 .unwrap();
         assert!(get(server.addr(), "/metrics").await.contains("pre-bound"));
         assert!(get(server.addr(), "/healthz").await.contains("200 OK"));
+    }
+
+    #[tokio::test]
+    async fn serve_on_live_fails_healthz_on_a_pre_bound_listener_while_not_live() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = ProbeServer::serve_on_live(
+            listener,
+            routes("", always(ProbeState::Ready)),
+            Arc::new(|| false),
+        )
+        .unwrap();
+        let r = get(server.addr(), "/healthz").await;
+        assert!(r.contains("503") && r.contains("stalled"), "{r}");
     }
 
     #[tokio::test]

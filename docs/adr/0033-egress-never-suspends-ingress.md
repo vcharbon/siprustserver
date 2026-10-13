@@ -89,8 +89,8 @@ the one await with no timeout, no queue and no drop policy.
 4. **A recv shard states its liveness.** Each proxy shard stamps the instant
    it dequeued a packet and clears the stamp when it returns to waiting
    (`sip_proxy::liveness::ShardPulse`). A shard still on one packet past
-   `PROXY_SHARD_STALL_MS` (2 000) flips `/readyz` to NotReady and the gauge
-   `sip_proxy_recv_shards_stalled`. This is the only signal that tells a
+   `PROXY_SHARD_STALL_MS` (2 000) fails `/readyz` and `/healthz` (ADR-0046
+   D4) and raises the gauge `sip_proxy_recv_shards_stalled`. This is the only signal that tells a
    parked shard from an idle one; the activity meters cannot.
    The b2bua worker's two loops, the transaction owner (recv, timer wheel,
    sweep) and the router, state theirs the same way (`sip_txn::LoopPulse`,
