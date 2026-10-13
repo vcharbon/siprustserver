@@ -1,7 +1,10 @@
 //! The worker's `/metrics` body: every metric source of a worker, rendered
 //! in one fixed order.
 
+use std::time::Duration;
+
 use b2bua::capacity::CapacityGate;
+use b2bua::loops::WorkerLoops;
 use b2bua::metrics::{catalogue, B2buaMetrics, UdpTransportMetrics};
 use b2bua::new_calls::NewCallCounts;
 use b2bua::overload::OverloadSignal;
@@ -22,6 +25,10 @@ pub struct WorkerMetrics {
     pub overload: OverloadSignal,
     /// The capacity gate.
     pub capacity: CapacityGate,
+    /// The transaction owner and router loops.
+    pub loops: WorkerLoops,
+    /// How long one turn may run before its loop reads stalled.
+    pub loop_stall: Duration,
 }
 
 /// The b2bua worker's `/metrics` catalogue: every family of
@@ -35,6 +42,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
         catalogue::UDP,
         catalogue::OVERLOAD,
         catalogue::CAPACITY,
+        catalogue::LOOPS,
         catalogue::NEW_CALL_OUTCOMES,
         observe::counters::FAMILIES,
         http_net::failures::FAMILIES,
@@ -58,14 +66,16 @@ impl WorkerMetrics {
     }
 
     /// The worker's families as Prometheus text: core registry, txn
-    /// backpressure, UDP transport, overload signal, capacity gate, then every
-    /// new call's admission outcome, every rung composed.
+    /// backpressure, UDP transport, overload signal, capacity gate, the loops'
+    /// stall gauge, then every new call's admission outcome, every rung
+    /// composed.
     pub fn prometheus_text(&self) -> String {
         let mut text = self.core.prometheus_text();
         text.push_str(&txn_metrics_text(&self.txn));
         text.push_str(&self.udp.prometheus_text());
         text.push_str(&self.overload.prometheus_text());
         text.push_str(&self.capacity.prometheus_text());
+        text.push_str(&self.loops.prometheus_text(self.loop_stall));
         text.push_str(
             &NewCallCounts::read(self.core.new_calls(), &self.txn, Some(self.udp.brake()))
                 .prometheus_text(),
@@ -149,12 +159,16 @@ mod tests {
             Arc::new(|| 0),
             Arc::new(|| 0),
         );
+        let pulse = || Arc::new(sip_txn::LoopPulse::new());
+        let parked = || tokio::spawn(std::future::pending::<()>()).abort_handle();
         WorkerMetrics {
             core: B2buaMetrics::new(),
             txn: txn.metrics().clone(),
             udp,
             overload: OverloadSignal::new(Arc::new(sampler)),
             capacity: CapacityGate::new(Arc::new(probe)),
+            loops: WorkerLoops::new((pulse(), parked()), (pulse(), parked())),
+            loop_stall: Duration::from_secs(5),
         }
     }
 

@@ -73,8 +73,11 @@
 //!   B2BUA_NAMESPACE / B2BUA_REPL_*_MS  the replication grammar and its link
 //!   bounds (see `b2bua_runner_kit::ReplicationSettings`, ADR-0045)
 //!
-//! SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
-//! probe fails) so k8s steers new calls away while in-flight calls finish.
+//! SIGTERM, or the worker's own endpoint withdrawn with no SIGTERM, latches
+//! the worker into `Draining` (OPTIONS 503 + readiness probe fails) so k8s
+//! steers new calls away while in-flight calls finish, then exits 0. A
+//! transaction owner or router loop stalled past `B2BUA_LOOP_STALL_MS` fails
+//! `/ready` and `/healthz`; one whose task ended exits the process non-zero.
 
 // Use jemalloc instead of the glibc system allocator. Under the many tokio worker
 // threads, glibc malloc spawns up to 8×ncpu arenas and retains freed chunks (it
@@ -114,7 +117,7 @@ fn stress_limiter_from_env() -> Option<LimiterEntry> {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) actually
     // parsed — a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms
     // gauges on /metrics.
@@ -190,5 +193,5 @@ async fn main() {
     let _probe = base.spawn_probe_server(&core, extra_metrics, heap).await;
 
     base.spawn_gauge_sampler(&core);
-    base.run_until_shutdown(&core).await;
+    base.run_until_shutdown(&core).await
 }

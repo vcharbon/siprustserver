@@ -25,8 +25,9 @@
 //!   to `deps.replication`;
 //! - [`RunnerBase::spawn`] / [`RunnerBase::spawn_probe_server`] /
 //!   [`RunnerBase::spawn_gauge_sampler`] / [`RunnerBase::run_until_shutdown`]
-//!   — core spawn, the `/metrics`+`/ready` probe, the memory-attribution
-//!   sampler, and SIGTERM-drain handling;
+//!   — core spawn, the `/metrics`+`/ready`+`/healthz` probe, the
+//!   memory-attribution sampler, and the stop handling (SIGTERM or the
+//!   worker's own withdrawal drains; a loop task ending exits non-zero);
 //! - the shared helpers ([`env_or`], [`env_flag`], [`resolve`],
 //!   [`split_host_port`], [`NullCdrWriter`]).
 //!
@@ -85,7 +86,9 @@ mod cdr_rabbitmq;
 mod drain_env;
 mod limiter_client;
 mod limiter_env;
+mod liveness_env;
 mod replication;
+mod shutdown;
 mod worker_metrics;
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
@@ -444,6 +447,9 @@ pub struct RunnerEnv {
     /// The memory ceilings (ADR-0037), every one off unless stated; the
     /// grammar is in `capacity_env`.
     pub capacity: CapacityConfig,
+    /// How long one turn of the transaction owner or router may run before
+    /// the loop reads stalled; the grammar and its default in `liveness_env`.
+    pub loop_stall: std::time::Duration,
 }
 
 impl RunnerEnv {
@@ -569,6 +575,8 @@ impl RunnerEnv {
             drain: drain_env::drain_from_lookup(|k| env::var(k).ok())
                 .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
             capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())
+                .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
+            loop_stall: liveness_env::loop_stall_from_lookup(|k| env::var(k).ok())
                 .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
         }
     }
@@ -960,8 +968,10 @@ impl RunnerBase {
     /// `/metrics` body concatenates the worker's metric sources per scrape
     /// (core registry + txn backpressure + UDP transport + overload signal +
     /// capacity gate + every new call's admission outcome, every rung
-    /// composed), then `extra_metrics` (e.g. allocator stats). Hold the returned server
-    /// for the process lifetime — its accept loop aborts on drop.
+    /// composed, the loops' stall gauge), then `extra_metrics` (e.g. allocator
+    /// stats). `/ready` reads NotReady and `/healthz` 503 while a worker loop is
+    /// stalled past `loop_stall`. Hold the returned server for the process
+    /// lifetime — its accept loop aborts on drop.
     pub async fn spawn_probe_server(
         &self,
         core: &Arc<B2buaCore>,
@@ -969,28 +979,34 @@ impl RunnerBase {
         heap: Option<probe_http::HeapDumpFn>,
     ) -> Option<probe_http::ProbeServer> {
         let core_ready = core.clone();
+        let stall = self.env.loop_stall;
+        let (loops, live_loops) = (core.loops().clone(), core.loops().clone());
         let worker = WorkerMetrics {
             core: self.metrics.clone(),
             txn: core.txn_metrics().clone(),
             udp: self.udp_metrics.clone(),
             overload: core.overload().clone(),
             capacity: core.capacity().clone(),
+            loops: core.loops().clone(),
+            loop_stall: stall,
         };
         let routes = probe_http::ProbeRoutes {
             metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
             ready: Arc::new(move || match core_ready.readiness_state() {
-                b2bua::repl::ReadinessState::Ready => probe_http::ProbeState::Ready,
                 b2bua::repl::ReadinessState::Draining => probe_http::ProbeState::Draining,
+                _ if !loops.stalled(stall).is_empty() => probe_http::ProbeState::NotReady,
+                b2bua::repl::ReadinessState::Ready => probe_http::ProbeState::Ready,
                 b2bua::repl::ReadinessState::NotReady => probe_http::ProbeState::NotReady,
             }),
             heap,
         };
-        match probe_http::ProbeServer::start(self.metrics_sa, routes).await {
+        let live: probe_http::LiveFn = Arc::new(move || live_loops.stalled(stall).is_empty());
+        match probe_http::ProbeServer::start_live(self.metrics_sa, routes, live).await {
             Ok(server) => {
                 tracing::info!(
                     service = %self.name,
                     addr = %server.addr(),
-                    "metrics server listening (/metrics, readiness /ready)"
+                    "metrics server listening (/metrics, readiness /ready, liveness /healthz)"
                 );
                 Some(server)
             }
@@ -1011,11 +1027,15 @@ impl RunnerBase {
     /// even when `active_calls` is flat. 5 s is well inside the scrape cadence;
     /// the sample is a couple of brief locks, off the call path. It evicts
     /// nothing: the core's paced replica reap is the one eviction site, since an
-    /// expired deferred terminal owes its limiter release on the way out.
+    /// expired deferred terminal owes its limiter release on the way out. Each
+    /// sample also logs a worker loop stalling past `loop_stall`, and turning
+    /// again, once per transition.
     pub fn spawn_gauge_sampler(&self, core: &Arc<B2buaCore>) {
         let core = core.clone();
+        let stall = self.env.loop_stall;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut stalled_before = Vec::new();
             loop {
                 tick.tick().await;
                 core.sample_gauges();
@@ -1023,104 +1043,22 @@ impl RunnerBase {
                     let (bodies, idx, _meta, tomb) = repl.map_lens();
                     core.metrics().set_store_map_sizes(bodies as u64, idx as u64, tomb as u64);
                 }
+                let stalled = core.loops().stalled(stall);
+                if stalled != stalled_before {
+                    if stalled.is_empty() {
+                        tracing::info!(loops = ?stalled_before, "worker loops turning again");
+                    } else {
+                        tracing::error!(
+                            loops = ?stalled,
+                            threshold_ms = stall.as_millis() as u64,
+                            "worker loop stalled on one piece of work — /ready and /healthz 503"
+                        );
+                    }
+                    stalled_before = stalled;
+                }
             }
         });
     }
-
-    /// Graceful shutdown: SIGTERM (k8s pod termination) latches Draining —
-    /// OPTIONS self-reports 503 and the readiness probe flips NotReady so the
-    /// proxy steers new calls away — then waits for the first of: the in-flight
-    /// calls finishing, a withdrawn worker's backups holding them past
-    /// `B2BUA_DRAIN_MIN_MS` (ADR-0031 D2), or `B2BUA_DRAIN_GRACE_MS`, the
-    /// queued limiter releases flushed before the exit within
-    /// `B2BUA_DRAIN_RELEASE_FLUSH_MS` (ADR-0040 decision 9). Ctrl-C
-    /// (interactive) latches Draining and waits for no call, only for the
-    /// release flush, which a second Ctrl-C cuts short. Returns when the
-    /// process should exit.
-    pub async fn run_until_shutdown(&self, core: &Arc<B2buaCore>) {
-        let name = &self.name;
-        let bounds = self.env.drain;
-        let drain_grace_ms = bounds.grace.as_millis() as u64;
-        let drain_min_ms = bounds.floor.as_millis() as u64;
-        let release_flush_ms = bounds.release_flush.as_millis() as u64;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!(
-                    service = name,
-                    signal = "SIGINT",
-                    release_flush_ms,
-                    "shutting down"
-                );
-                // Draining first, so no new call is admitted while the queued
-                // releases leave; a second Ctrl-C gives them up at once.
-                core.begin_draining();
-                tokio::select! {
-                    _ = core.limiter().flush(bounds.release_flush) => {}
-                    _ = tokio::signal::ctrl_c() => {
-                        let given_up = core.limiter().give_up_all();
-                        tracing::warn!(
-                            service = name,
-                            given_up,
-                            "second SIGINT: release flush cut short"
-                        );
-                    }
-                }
-            }
-            _ = wait_sigterm(name) => {
-                tracing::info!(
-                    service = name,
-                    signal = "SIGTERM",
-                    drain_grace_ms,
-                    drain_min_ms,
-                    release_flush_ms,
-                    "begin draining"
-                );
-                // Latch Draining, then wait. A node with no calls exits at once;
-                // a withdrawn node whose backups hold its calls exits past the
-                // floor; anything else is bounded by the grace. The queued
-                // limiter releases are then flushed within their bound. The exit
-                // reason and the residual are logged, never silently cut.
-                let out = core.drain(bounds).await;
-                let reason = out.exit.label();
-                let residual = out.residual;
-                match out.exit {
-                    b2bua::drain::DrainExit::Quiescent | b2bua::drain::DrainExit::CaughtUp => {
-                        tracing::info!(service = name, reason, residual, "drained — exiting");
-                    }
-                    b2bua::drain::DrainExit::Grace
-                    | b2bua::drain::DrainExit::GracePeersBehind => {
-                        tracing::warn!(
-                            service = name,
-                            reason,
-                            residual,
-                            "drain grace elapsed with calls still active — exiting"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Await a SIGTERM (k8s sends this on pod termination). On non-unix this future
-/// never resolves (only Ctrl-C drives shutdown there).
-#[cfg(unix)]
-async fn wait_sigterm(name: &str) {
-    use tokio::signal::unix::{signal, SignalKind};
-    match signal(SignalKind::terminate()) {
-        Ok(mut s) => {
-            s.recv().await;
-        }
-        Err(e) => {
-            tracing::warn!(service = name, error = %e, "cannot install SIGTERM handler");
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
-#[cfg(not(unix))]
-async fn wait_sigterm(_name: &str) {
-    std::future::pending::<()>().await;
 }
 
 #[cfg(test)]
