@@ -16,6 +16,7 @@ mod answer_lost_with_primary_no_answer;
 mod backup_capacity;
 mod call_terminate_on_backup;
 mod consult_answer_deadline;
+mod crossed_reinvite_round;
 mod departure_support;
 mod drain_exits_caught_up_inside_grace;
 mod drain_flushes_releases_before_a_verified_exit;

@@ -28,9 +28,7 @@ use scenario_harness::{Agent, Dialog, Inbound};
 use sip_message::generators::InDialogMethod;
 use sip_message::{Method, SipMessage, SipResponse};
 
-use crate::call_terminate_on_backup::{
-    accept_takeover_cseq_overlap, establish, Established, ANSWER, OFFER,
-};
+use crate::call_terminate_on_backup::{establish, Established, ANSWER, OFFER};
 
 /// Whether, and when, the primary writes the call before the caller's ACK.
 #[derive(Clone, Copy, PartialEq)]
@@ -68,7 +66,7 @@ const STEP: Duration = Duration::from_millis(100);
 /// relayed by the backup, the caller's ACK routed to the primary; then a BYE.
 async fn reinvite_2xx_acked_through_the_primary(name: &str, write: PrimaryWrite, heal: Heal) {
     let Established {
-        mut fh,
+        fh,
         alice,
         bob,
         proxy,
@@ -82,7 +80,6 @@ async fn reinvite_2xx_acked_through_the_primary(name: &str, write: PrimaryWrite,
         mut bob_dialog,
         ..
     } = establish(name).await;
-    accept_takeover_cseq_overlap(&mut fh);
     let backup = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
 
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
@@ -155,16 +152,27 @@ async fn info_through_the_primary(alice: &Agent, bob_dialog: &mut Dialog) {
 }
 
 /// The caller ACKs the 2xx — the re-INVITE carried the offer, the 2xx the
-/// answer, so the ACK is bodyless — and re-ACKs every copy of it that reaches
-/// her for [`ACK_WINDOW`] (RFC 3261 §13.2.2.4). Returns the ACKs the callee
-/// drew meanwhile; nothing else reaches either party.
-async fn ack_the_answer(
+/// answer, so the ACK is bodyless — then re-ACKs its copies
+/// ([`re_ack_copies`]). Returns the ACKs the callee drew meanwhile.
+pub(crate) async fn ack_the_answer(
     fh: &FailoverHarness,
     alice: &Agent,
     dialog: &mut Dialog,
     bob: &Agent,
 ) -> usize {
     dialog.ack(None).await;
+    re_ack_copies(fh, alice, dialog, bob).await
+}
+
+/// The caller re-ACKs every copy of the 2xx that reaches her for
+/// [`ACK_WINDOW`] (RFC 3261 §13.2.2.4). Returns the ACKs the callee drew
+/// meanwhile; nothing else reaches either party.
+pub(crate) async fn re_ack_copies(
+    fh: &FailoverHarness,
+    alice: &Agent,
+    dialog: &mut Dialog,
+    bob: &Agent,
+) -> usize {
     let mut acks = 0;
     let mut waited = Duration::ZERO;
     while waited < ACK_WINDOW {
@@ -231,6 +239,17 @@ async fn a_reinvite_2xx_relayed_by_a_copy_taken_over_afresh_is_acked_once_throug
         "reinvite-2xx-acked-at-primary-written-heal-after",
         PrimaryWrite::InRound,
         Heal::AfterAnswer,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_2xx_relayed_by_the_copy_is_acked_once_through_the_primary_written_after_the_answer_healed_before_it(
+) {
+    reinvite_2xx_acked_through_the_primary(
+        "reinvite-2xx-acked-at-primary-written-after-answer-heal-before",
+        PrimaryWrite::AfterAnswer,
+        Heal::BeforeAnswer,
     )
     .await;
 }
