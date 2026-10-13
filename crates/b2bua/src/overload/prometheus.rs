@@ -11,12 +11,15 @@ impl OverloadSignal {
     ///
     /// Series (declared in [`catalogue`]):
     ///   - `b2bua_overload_token_bucket_level` (gauge) — current CPS bucket level.
+    ///   - `b2bua_overload_cps_gate_enabled` (gauge) — whether the bucket rung
+    ///     gates at all; a level of 0 with the gate off is no empty bucket.
     ///   - `b2bua_overload_elu_ewma` / `b2bua_overload_gc_fraction` (gauges) —
     ///     the decision inputs (the EWMAs published on X-Overload).
     pub fn prometheus_text(&self) -> String {
         let m = self.metrics();
         let mut s = String::with_capacity(512);
         catalogue::OVERLOAD_TOKEN_BUCKET_LEVEL.render_value(&mut s, m.token_bucket_level);
+        catalogue::OVERLOAD_CPS_GATE_ENABLED.render_value(&mut s, u64::from(m.cps_gate_enabled));
         catalogue::OVERLOAD_ELU_EWMA.render_value(&mut s, m.elu_ewma);
         catalogue::OVERLOAD_GC_FRACTION.render_value(&mut s, m.gc_fraction_ewma);
         s

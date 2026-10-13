@@ -71,7 +71,13 @@ pub const DISPATCH_INVITE_DISCARD_ANSWERED: Family = Family::counter(
 pub const OVERLOAD_TOKEN_BUCKET_LEVEL: Family = Family::gauge(
     "b2bua_overload_token_bucket_level",
     Labels::None,
-    "Current CPS token-bucket level (tokens remaining, never below 0).",
+    "Current CPS token-bucket level (tokens remaining, never below 0); 0 too while b2bua_overload_cps_gate_enabled is 0.",
+);
+
+pub const OVERLOAD_CPS_GATE_ENABLED: Family = Family::gauge(
+    "b2bua_overload_cps_gate_enabled",
+    Labels::None,
+    "1 while the CPS bucket rung gates new calls, 0 when B2BUA_CPS_BUCKET_SIZE=0 turns it off (every call passes the bucket).",
 );
 
 pub const OVERLOAD_ELU_EWMA: Family = Family::gauge(
@@ -254,8 +260,12 @@ pub const UDP: &[Family] = &[
 ];
 
 /// The overload signal: rung inputs.
-pub const OVERLOAD: &[Family] =
-    &[OVERLOAD_TOKEN_BUCKET_LEVEL, OVERLOAD_ELU_EWMA, OVERLOAD_GC_FRACTION];
+pub const OVERLOAD: &[Family] = &[
+    OVERLOAD_TOKEN_BUCKET_LEVEL,
+    OVERLOAD_CPS_GATE_ENABLED,
+    OVERLOAD_ELU_EWMA,
+    OVERLOAD_GC_FRACTION,
+];
 
 /// The capacity gate: its level, RSS, ceiling and the backup replicas it shed.
 pub const CAPACITY: &[Family] = &[

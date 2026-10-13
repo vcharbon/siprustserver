@@ -181,6 +181,13 @@ async fn a_zero_bucket_size_admits_every_call() {
     }
     assert_eq!(sig.metrics().token_bucket_level, 0.0);
     assert_eq!(sig.metrics().non_emergency_admitted_total, 0, "the caller counts adm");
+    let text = sig.prometheus_text();
+    assert!(
+        text.contains("b2bua_overload_cps_gate_enabled 0"),
+        "a level of 0 is not empty:\n{text}"
+    );
+    let (on, _ctl) = admission_sig(1, 1, 1.0);
+    assert!(on.prometheus_text().contains("b2bua_overload_cps_gate_enabled 1"));
 }
 
 /// Reading the metrics never changes what the bucket admits: a signal read

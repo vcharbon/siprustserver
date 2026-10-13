@@ -32,6 +32,8 @@ pub struct OverloadMetrics {
     /// Current CPS token-bucket level, in `[0, capacity]`; 0 with the gate
     /// off.
     pub token_bucket_level: f64,
+    /// Whether the bucket rung gates new calls (`cps_bucket_size > 0`).
+    pub cps_gate_enabled: bool,
 }
 
 struct OverloadInner {
@@ -198,17 +200,18 @@ impl OverloadSignal {
     /// a read credits nothing to the bucket itself, so how often it is read
     /// never changes what it admits.
     pub fn metrics(&self) -> OverloadMetrics {
-        let (elu_ewma, gc_fraction_ewma, token_bucket_level) = {
+        let (elu_ewma, gc_fraction_ewma, token_bucket_level, cps_gate_enabled) = {
             let inner = self.inner.lock().unwrap();
             let now = inner.now();
             let level = inner.bucket.clone().map_or(0.0, |mut b| b.level(now));
-            (inner.elu_ewma.get(), inner.gc_fraction_ewma.get(), level)
+            (inner.elu_ewma.get(), inner.gc_fraction_ewma.get(), level, inner.bucket.is_some())
         };
         OverloadMetrics {
             elu_ewma,
             gc_fraction_ewma,
             non_emergency_admitted_total: self.non_emergency_admitted.load(Ordering::Relaxed),
             token_bucket_level,
+            cps_gate_enabled,
         }
     }
 }

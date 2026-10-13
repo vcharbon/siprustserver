@@ -198,10 +198,10 @@
       "id": 32,
       "type": "timeseries",
       "title": "b2bua_overload_token_bucket_level",
-      "description": "Current CPS token-bucket level (tokens remaining, never below 0).",
+      "description": "Current CPS token-bucket level (tokens remaining, never below 0), on the workers whose CPS gate is on (b2bua_overload_cps_gate_enabled == 1): a worker with the gate off has no bucket.",
       "gridPos": { "h": 7, "w": 8, "x": 8, "y": 34 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "b2bua_overload_token_bucket_level", "refId": "A" }],
+      "targets": [{ "expr": "b2bua_overload_token_bucket_level and b2bua_overload_cps_gate_enabled == 1", "refId": "A" }],
       "fieldConfig": { "defaults": { "min": 0 } }
     },
     {
