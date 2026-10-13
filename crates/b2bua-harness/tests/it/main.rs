@@ -32,6 +32,7 @@ mod cancel_200_crossing;
 mod cancel_200_crossing_internal;
 mod cancel_after_answer;
 mod cancel_before_provisional;
+mod cancel_crossed_by_late_answer;
 mod cancel_during_slow_decision;
 mod cancel_on_a_capped_call;
 mod cancel_reinvite_offering_100rel;
