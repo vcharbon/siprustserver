@@ -279,7 +279,7 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
     );
 
     // Reaches hydration: scan_partition pairs each call with its offset.
-    let scanned = state.scan_partition(PRI, "w0").await;
+    let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
     assert_eq!(scanned.len(), 1);
     assert_eq!(scanned[0].0.call_ref, r);
     assert_eq!(scanned[0].1, 30_000, "scan_partition surfaces the skew offset to the router");
@@ -391,7 +391,7 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     put(&repl, PRI, "w0", &call).await;
 
     // Bulk sweep sees it.
-    let scanned = state.scan_partition(PRI, "w0").await;
+    let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
     assert_eq!(scanned.len(), 1);
     assert_eq!(scanned[0].0.call_ref, r);
 
@@ -592,7 +592,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     // Materialise the reclaimed call into the live serving map (what `reclaim_all`
     // / the reactive `ReclaimCall` do on reboot) — this must re-establish the
     // denormalised backup from `topology.bak`.
-    let scanned = state.scan_partition(PRI, "w0").await;
+    let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
     assert_eq!(scanned.len(), 1);
     assert!(
         state.materialize_if_absent(scanned[0].0.clone(), MaterialiseOrigin::Reclaim),
@@ -649,7 +649,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
     let reclaim = {
         let state = state.clone();
         tokio::spawn(async move {
-            for (call, _skew) in state.scan_partition(PRI, "w0").await {
+            for (call, _skew) in state.scan_partition(PRI, "w0", &|| {}).await {
                 let cr = call.call_ref.clone();
                 let _g = state.lock(&cr).await;
                 state.materialize_if_absent(call, MaterialiseOrigin::Reclaim);
@@ -713,4 +713,30 @@ async fn churn_during_reclaim_keeps_state_consistent() {
         state.active_count(),
         "no per-call lock leak after concurrent churn + reclaim",
     );
+}
+
+/// A scan beats its caller once per body read, so a caller's loop pulse shows
+/// a scan of a large partition making progress (a paused clock cannot time
+/// the decode, so the beat is pinned by count).
+#[tokio::test]
+async fn a_scan_beats_once_per_body_read() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = call_state("w0", repl.clone());
+    for i in 0..5 {
+        let call = build_initial_call(
+            &invite("w0", "w1", &format!("beat-{i}")),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
+        put(&repl, PRI, "w0", &call).await;
+    }
+    let beats = std::sync::atomic::AtomicUsize::new(0);
+    let beat = || {
+        beats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    };
+    let scanned = state.scan_partition(PRI, "w0", &beat).await;
+    assert_eq!(scanned.len(), 5);
+    assert_eq!(beats.load(std::sync::atomic::Ordering::SeqCst), 5);
 }

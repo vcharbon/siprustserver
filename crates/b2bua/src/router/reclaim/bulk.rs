@@ -35,24 +35,14 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     let now_ms = start_ms;
     let active_before = ctx.state.active_count() as u64;
     let own = &ctx.config.self_ordinal;
-    let mut calls = ctx.state.scan_partition(PartitionRole::Primary, own).await;
+    // The whole turn works through the partition, one call at a time: each
+    // call read, re-anchored or reclaimed is a piece of work of its own, so
+    // the router's pulse shows the turn making progress, however large the
+    // partition.
+    let beat = || ctx.router_pulse.turning();
+    let mut calls = ctx.state.scan_partition(PartitionRole::Primary, own, &beat).await;
     let scanned = calls.len() as u64;
-    // The cohort classification below (past-due vs future-dated) and `l_max`
-    // read SKEW-CORRECTED deadlines: re-anchor every scanned copy by its own
-    // persisted offset first. These copies are discarded; `materialise` re-reads
-    // each body and re-anchors it once itself.
-    for (call, skew) in calls.iter_mut() {
-        reanchor_timers(&mut call.timers, *skew);
-    }
-    // L_max = the largest past-due keepalive gap across the whole partition, over
-    // the now skew-corrected deadlines.
-    let l_max = calls
-        .iter()
-        .flat_map(|(c, _)| c.timers.iter())
-        .filter(|t| *t.timer_type() == TimerType::Keepalive)
-        .map(|t| (now_ms - t.fire_at).max(0))
-        .max()
-        .unwrap_or(0);
+    let l_max = largest_keepalive_gap(&mut calls, now_ms, &beat);
     let smoothing = Smoothing {
         now_ms,
         l_max,
@@ -61,8 +51,7 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     };
     let mut materialized = 0u64;
     for (call, _skew) in calls {
-        // Each call is a piece of work of its own: the turn makes progress.
-        ctx.router_pulse.turning();
+        beat();
         if reclaim_into_live(ctx, &call.call_ref, Some(smoothing)).await {
             materialized += 1;
         }
@@ -83,6 +72,27 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
         duration_ms,
         "reboot reclaim"
     );
+}
+
+/// `L_max`: the largest past-due keepalive gap across the scanned partition,
+/// read on SKEW-CORRECTED deadlines — each copy is re-anchored by its own
+/// persisted offset first. The copies are then only named; `materialise`
+/// re-reads each body and re-anchors it once itself. `beat` runs once per call.
+fn largest_keepalive_gap(calls: &mut [(call::Call, i64)], now_ms: i64, beat: &dyn Fn()) -> i64 {
+    let mut l_max = 0;
+    for (call, skew) in calls.iter_mut() {
+        beat();
+        reanchor_timers(&mut call.timers, *skew);
+        let gap = call
+            .timers
+            .iter()
+            .filter(|t| *t.timer_type() == TimerType::Keepalive)
+            .map(|t| (now_ms - t.fire_at).max(0))
+            .max()
+            .unwrap_or(0);
+        l_max = l_max.max(gap);
+    }
+    l_max
 }
 
 /// Reclaim one call of this node's `pri:{self}` partition into the live map
@@ -109,3 +119,6 @@ pub(super) async fn reclaim_into_live(
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests;

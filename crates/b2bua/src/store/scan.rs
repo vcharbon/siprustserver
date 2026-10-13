@@ -12,15 +12,25 @@ impl CallState {
     /// when no replicating store is wired. Each entry pairs the decoded call with
     /// its persisted receive-time clock-skew offset (`0` when the record carries
     /// none) — the router re-anchors the call's absolute timer deadlines by this
-    /// offset before re-arming them (clock-skew hardening).
-    pub async fn scan_partition(&self, role: PartitionRole, primary: &str) -> Vec<(Call, i64)> {
+    /// offset before re-arming them (clock-skew hardening). `beat` runs once
+    /// per body read, so a caller's loop pulse shows a long scan making
+    /// progress.
+    pub async fn scan_partition(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        beat: &(dyn Fn() + Sync),
+    ) -> Vec<(Call, i64)> {
         let Some(repl) = self.repl_store() else {
             return Vec::new();
         };
         let bodies = repl.scan_calls(role, primary).await.unwrap_or_default();
         bodies
             .iter()
-            .filter_map(|b| self.codec.decode(b).ok())
+            .filter_map(|b| {
+                beat();
+                self.codec.decode(b).ok()
+            })
             .map(|c| {
                 let skew = repl.skew_offset_ms(&c.call_ref).unwrap_or(0);
                 (c, skew)
