@@ -13,12 +13,17 @@ struct CapturingEndpoint {
     sent: Mutex<Vec<(Vec<u8>, SocketAddr)>>,
     /// The bound address; 127.0.0.1:5060 when `None`.
     local: Option<SocketAddr>,
+    /// Each send records its packet, then yields once before it completes.
+    yields: bool,
 }
 
 #[async_trait]
 impl UdpEndpoint for CapturingEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
         self.sent.lock().unwrap().push((buf.to_vec(), dst));
+        if self.yields {
+            tokio::task::yield_now().await;
+        }
         Ok(())
     }
     async fn recv(&self) -> Option<UdpPacket> {
@@ -209,6 +214,65 @@ async fn packets_waiting_on_a_failed_resolve_are_each_counted_failed() {
 
     assert!(ep.sent.lock().unwrap().is_empty());
     assert_eq!(metrics.named_send_count("resolve_failed"), 2, "both packets fail, counted");
+}
+
+/// A forwarder over an endpoint whose sends yield, so a packet can arrive
+/// while the held ones go out.
+fn yielding_forwarder(
+    resolver: Arc<dyn HostResolver>,
+) -> (NamedForwarder, Arc<CapturingEndpoint>, Arc<ProxyMetrics>) {
+    let ep = Arc::new(CapturingEndpoint { yields: true, ..CapturingEndpoint::default() });
+    let metrics = Arc::new(ProxyMetrics::new());
+    let fwd = NamedForwarder::new(
+        ep.clone(),
+        resolver,
+        ResolverConfig::default(),
+        Clock::test_at(0),
+        metrics.clone(),
+    );
+    (fwd, ep, metrics)
+}
+
+/// A packet arriving while the held packets are going out leaves after them:
+/// the resolved address is published only once the wait is empty.
+#[tokio::test(start_paused = true)]
+async fn a_packet_arriving_while_the_held_ones_leave_goes_after_them() {
+    let resolver = Arc::new(FakeResolver::slow(dst(), Duration::from_secs(1)));
+    let (fwd, ep, _metrics) = yielding_forwarder(resolver.clone());
+    let target = ProxyAddr::new("uas.example", 5060);
+
+    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt2", &target).await;
+    tokio::task::yield_now().await; // the lookup starts, parked at its delay
+    tokio::time::advance(Duration::from_millis(1_000)).await;
+    tokio::task::yield_now().await; // the lookup returns; pkt1 is on its way out
+    fwd.send(b"pkt3", &target).await;
+    settle().await;
+
+    let order: Vec<Vec<u8>> = ep.sent.lock().unwrap().iter().map(|(b, _)| b.clone()).collect();
+    assert_eq!(order, vec![b"pkt1".to_vec(), b"pkt2".to_vec(), b"pkt3".to_vec()]);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+}
+
+/// A packet arriving while a prewarm's held packets go out joins them; it
+/// never starts a second lookup of the name.
+#[tokio::test(start_paused = true)]
+async fn a_packet_arriving_while_a_prewarm_releases_starts_no_second_lookup() {
+    let resolver = Arc::new(FakeResolver::slow(dst(), Duration::from_secs(1)));
+    let (fwd, ep, _metrics) = yielding_forwarder(resolver.clone());
+    let target = ProxyAddr::new("uas.example", 5060);
+
+    fwd.prewarm(vec![target.clone()]);
+    tokio::task::yield_now().await; // the prewarm lookup starts, parked at its delay
+    fwd.send(b"pkt1", &target).await; // waits on it
+    tokio::time::advance(Duration::from_millis(1_000)).await;
+    tokio::task::yield_now().await; // the lookup returns; pkt1 is on its way out
+    fwd.send(b"pkt2", &target).await;
+    settle().await;
+
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "one lookup of the name");
+    let order: Vec<Vec<u8>> = ep.sent.lock().unwrap().iter().map(|(b, _)| b.clone()).collect();
+    assert_eq!(order, vec![b"pkt1".to_vec(), b"pkt2".to_vec()]);
 }
 
 #[tokio::test(start_paused = true)]

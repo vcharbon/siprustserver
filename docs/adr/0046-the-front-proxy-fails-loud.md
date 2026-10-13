@@ -106,10 +106,12 @@ its family.
    supported: changing the key fails the cookie check (403) for the in-dialog
    requests of every call in progress.
 8. **Named-target lookups are bounded.** Each lookup is bounded at
-   `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` (2 s). At the bound the packet, and
-   every packet waiting on the same lookup, is dropped and the negative entry
-   (5 s) written: a packet is sent at once or never. A lookup past its bound starts no further attempt (no second name
-   form); its in-flight slot stays taken until the attempt already running
+   `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` (2 s). A packet whose name is being
+   looked up waits on that lookup (at most 32 per name) and leaves after the
+   packets ahead of it, to the address it finds. At the bound every packet
+   waiting on the lookup is dropped and the negative entry (5 s) written: a
+   packet leaves within the bound of its lookup or never. A lookup past its
+   bound starts no further attempt (no second name form); its in-flight slot stays taken until the attempt already running
    returns, so stuck lookup threads stay at most `max_in_flight` (64) per recv
    shard, and a name is looked up again within about one resolver timeout
    after DNS recovers. Of a name's addresses the first the egress socket can

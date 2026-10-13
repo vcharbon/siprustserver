@@ -15,9 +15,10 @@
 //! 3. **Anything else** — handed to a spawned single-flight resolve task; the
 //!    recv loop never waits on DNS.
 //!
-//! Each lookup is bounded (`lookup_timeout_ms`, 2 s). At the bound the packet
-//! is dropped and a negative entry written: a packet is sent at once or never,
-//! so a request never leaves after its sender's transaction gave up. The
+//! Each lookup is bounded (`lookup_timeout_ms`, 2 s). At the bound the packets
+//! waiting on it are dropped and a negative entry written: a packet leaves
+//! within the bound of the lookup it waits on, or never, so a request never
+//! leaves after its sender's transaction gave up. The
 //! lookup's slot stays taken until the lookup itself returns (a getaddrinfo
 //! thread cannot be cancelled), so at most `max_in_flight` lookup threads are
 //! stuck per forwarder.
@@ -168,6 +169,10 @@ enum Join {
     Claimed,
     /// It waits on the resolve already running.
     Waiting,
+    /// A resolve published the address since the packet missed the cache.
+    Cached(SocketAddr),
+    /// A resolve published a failure since the packet missed the cache.
+    Negative,
     /// No resolve can take it.
     Refused,
 }
@@ -175,9 +180,19 @@ enum Join {
 impl Inner {
     /// Join `bytes` (a packet for the name `key`, or a refresh with none) to
     /// that name's resolve: claim one when none runs and the in-flight cap
-    /// allows, else wait on the running one within the per-name bound.
+    /// allows, else wait on the running one within the per-name bound. A
+    /// packet finding no resolve reads the cache again first: a resolve
+    /// publishes its outcome and frees its slot in one step under this lock
+    /// ([`release`](Self::release)), so the packet sees one or the other.
     fn join(&self, key: &str, bytes: Option<&[u8]>) -> Join {
         let mut in_flight = self.in_flight.lock().unwrap();
+        if bytes.is_some() && !in_flight.contains_key(key) {
+            match self.cache.lookup(key) {
+                CacheLookup::Hit(dst) => return Join::Cached(dst),
+                CacheLookup::NegativeHit => return Join::Negative,
+                CacheLookup::Miss => {}
+            }
+        }
         let at_cap = in_flight.len() >= self.cache.cfg.max_in_flight;
         match in_flight.get_mut(key) {
             Some(Some(waiting)) if bytes.is_some() => {
@@ -207,18 +222,44 @@ impl Inner {
         }
     }
 
-    /// Free `key`'s slot and settle the packets waiting on it: each is sent to
-    /// `resolved` in arrival order, or counted `resolve_failed` without one.
-    async fn release(&self, key: &str, resolved: Option<SocketAddr>) {
-        let waiting = self.in_flight.lock().unwrap().remove(key).flatten();
-        for bytes in waiting.unwrap_or_default() {
-            let Some(dst) = resolved else {
-                self.metrics.record_named_send(outcome::RESOLVE_FAILED);
-                continue;
+    /// Settle the packets waiting on `target`'s resolve, then free its slot:
+    /// each is sent to `resolved` in arrival order, or counted
+    /// `resolve_failed` without one, packets joining meanwhile included. Once
+    /// the wait is empty the outcome is published (when `publish`) and the
+    /// slot freed in one step under the in-flight lock, so no later packet
+    /// overtakes a waiting one and none starts a second lookup in between.
+    async fn release(
+        self: &Arc<Self>,
+        target: &ProxyAddr,
+        resolved: Option<SocketAddr>,
+        publish: bool,
+    ) {
+        let key = target.to_string();
+        loop {
+            let waiting = {
+                let mut in_flight = self.in_flight.lock().unwrap();
+                let waiting = in_flight
+                    .get_mut(&key)
+                    .and_then(|w| w.as_mut().map(std::mem::take))
+                    .unwrap_or_default();
+                if waiting.is_empty() {
+                    if publish {
+                        self.store_and_arm(target, resolved);
+                    }
+                    in_flight.remove(&key);
+                    return;
+                }
+                waiting
             };
-            self.metrics.record_named_send(outcome::RESOLVED);
-            if self.endpoint.send_to(&bytes, dst).await.is_err() {
-                self.metrics.record_send_failure();
+            for bytes in waiting {
+                let Some(dst) = resolved else {
+                    self.metrics.record_named_send(outcome::RESOLVE_FAILED);
+                    continue;
+                };
+                self.metrics.record_named_send(outcome::RESOLVED);
+                if self.endpoint.send_to(&bytes, dst).await.is_err() {
+                    self.metrics.record_send_failure();
+                }
             }
         }
     }
@@ -328,16 +369,14 @@ impl Inner {
                 self.arm_refresh(target);
                 self.time_out_waiting(&key);
                 lookup.await;
-                self.release(&key, None).await;
+                self.release(target, None, false).await;
                 return;
             }
         };
-        self.release(&key, resolved).await;
+        // A failed refresh keeps the positive entry: it publishes nothing.
+        self.release(target, resolved, resolved.is_some()).await;
         match resolved {
-            Some(_) => {
-                self.metrics.record_resolver_refresh(ok);
-                self.store_and_arm(target, resolved);
-            }
+            Some(_) => self.metrics.record_resolver_refresh(ok),
             None => {
                 self.metrics.record_resolver_refresh(fail);
                 self.resolve_failures.record(&key, "failures", 1);
@@ -419,6 +458,13 @@ impl NamedForwarder {
             }
             CacheLookup::Miss => match inner.join(&key, Some(bytes)) {
                 Join::Waiting => {}
+                Join::Cached(dst) => {
+                    inner.metrics.record_named_send(outcome::CACHED);
+                    if inner.endpoint.send_to(bytes, dst).await.is_err() {
+                        inner.metrics.record_send_failure();
+                    }
+                }
+                Join::Negative => inner.metrics.record_named_send(outcome::DROPPED_NEGATIVE),
                 Join::Refused => inner.metrics.record_named_send(outcome::DROPPED_IN_FLIGHT),
                 Join::Claimed => {
                     let inner = self.0.clone();
@@ -431,12 +477,11 @@ impl NamedForwarder {
                             inner.store_and_arm(&target, None);
                             inner.time_out_waiting(&key);
                             lookup.await;
-                            inner.release(&key, None).await;
+                            inner.release(&target, None, false).await;
                             return;
                         };
                         let resolved = inner.pick(addrs);
-                        inner.store_and_arm(&target, resolved);
-                        inner.release(&key, resolved).await;
+                        inner.release(&target, resolved, true).await;
                     });
                 }
             },
