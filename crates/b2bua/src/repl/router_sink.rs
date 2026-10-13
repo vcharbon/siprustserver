@@ -1,6 +1,6 @@
 //! Where the replication pullers hand their commands to the router
 //! (ADR-0011 X11 fail-back), with the router's live takeover copies a Backup
-//! flow asks of each `Put` it applies (ADR-0047 D7).
+//! flow asks of each forward write it applies, `Put` or `Delete` (ADR-0047 D7).
 
 use tokio::sync::mpsc;
 

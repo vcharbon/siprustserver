@@ -3,7 +3,7 @@
 **Status:** accepted (2026-10-12)
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
-case table.
+case table and its D3 split rule (the lifecycle order the forward and reverse gates read).
 
 **Owner:** `crates/b2bua/src/repl/supervisor.rs` (the departure signal),
 `repl/self_endpoint.rs` (leaving the slice), `router/departure.rs` (the sweep),
@@ -14,8 +14,8 @@ the slice does not apply), `rules/lost_round.rs` and
 `generate_ack_for_non_2xx_in_dialog`, `router/reclaim/bulk.rs` (the reclaim write),
 `repl/puller/apply.rs` and `repl/router_sink.rs` (an applied primary write handed up),
 `router/stand_down.rs` (the stand-down), `store/takeover.rs` (the takeover marks),
-`router/reclaim.rs` (the reverse fold of a copy's ending), `sip-txn`'s
-`layer/relinquish.rs`.
+`router/reclaim.rs` (the reverse fold of a copy's ending), `call`'s
+`helpers/lifecycle.rs` (the lifecycle order), `sip-txn`'s `layer/relinquish.rs`.
 
 ## Context
 
@@ -139,9 +139,10 @@ stands down when:
   `b` is at or past the copy's live `b`. One increment of a copy's `b` is one write
   this node made as the call's acting backup, a fold included; a quiet turn or an
   adopted version moves nothing. A primary reaches a `b` only by reading the copy's
-  write that carries it — applied or folded into its record, or refused with no
-  lifecycle progress its record lacks and its counter adopted (ADR-0031 D3) — so its
-  record decides everything the copy did, and the copy holds nothing to keep. A copy
+  write that carries it — applied or folded into its record, or refused (a body
+  behind its record, or one with no lifecycle progress its record lacks) and its
+  counter adopted (ADR-0031 D3) — so its record decides everything the copy did, and
+  the copy holds nothing to keep. A copy
   that wrote nothing is covered by any write of its primary. The returning node's
   recovery pulls the copy's writes before it reclaims, so its reclaim write covers
   them; or
@@ -154,24 +155,41 @@ nothing sent, rather than orphaned (ADR-0034). They are images of the primary's 
 so an orphan's ACK and BYE would end the dialog the primary holds, and every request
 the copy sent carries the route cookie naming the primary, so a response reaches the
 primary once the proxy reads it alive; one that still reaches the backup takes the
-call over afresh. Any other copy plays on and self-releases at quiescence, and a
-refused flush folds as before (ADR-0031 D3).
+call over afresh (`stood_down_round.rs`: a copy stood down in the middle of a re-INVITE
+round it relayed; the callee's 200 takes the call over afresh and the round completes).
+Any other copy plays on and self-releases at quiescence, and a refused flush folds as
+before (ADR-0031 D3).
 
-A copy's ending never ends a call its primary answered behind the copy's back. A
-backup's `p` may be one it adopted without the body that carried it, so the live-map
-fold of a reverse flush takes the vector's verdict (`p` unchanged, `b` advanced) only
-for a body that stands behind the primary's on neither lifecycle axis; lifecycle
-progress folds as before (`router/reclaim/tests.rs`).
+**An unanswered teardown never ends an answered call.** Both replication gates order
+two bodies of one call the same way (`call::helpers::lifecycle_behind`): the answer
+ranks first, so an answered body is never behind an unanswered one however far toward
+its end the unanswered one went, and between bodies alike on the answer the one less
+far toward its end is behind.
+
+- **Reverse.** A backup's `p` may be one it adopted without the body that carried it,
+  so the live-map fold of a reverse flush takes the vector's verdict (`p` unchanged,
+  `b` advanced) only for a body not behind the primary's; lifecycle progress folds as
+  before (`router/reclaim/tests.rs`).
+- **Forward.** While the vector is split, a forward `Put` behind the Element is a
+  branch and is refused (ADR-0031 D3); an answered body is not behind an Element
+  holding a copy's ending of a call it never saw answered, so the authority's answer
+  replaces that Element. At the Element's own `(p,b)` — the authority adopted the
+  copy's `b` when it refused the copy's ending and republished its own call at that
+  version — the frame is no re-delivery: it applies, and the Element heals. The
+  refusal stays where it is owed: a backup that answered and then ended a call its
+  primary never saw answered keeps its Element
+  (`forward_flush_never_regresses_backup_progress.rs`).
 
 The cells are in `swept_call_primary_returns.rs`. The callee stays silent and the
 returned primary alone CANCELs it, ACKs its 487 and refuses the caller 480. The callee
 answers at the returned node. The reclaim reaches the backup inside a bootstrap scan.
 The copy wrote before the return and stands down on the covering reclaim; then the
 callee answers, stays silent, or refuses, or the caller CANCELs at the returned node:
-one final, one node ending it. Two guards: the callee answers at the backup while the
-node is down, or before it is routable. In `answer_lost_with_primary_no_answer.rs`,
-the cell where the ACK reaches the reclaimed copy first, a 2xx reaches the backup
-after the stand-down.
+one final, one node ending it. The callee refuses at the node, which deletes the call
+before the backup reads anything of it: the copy stands down on the delete. Two
+guards: the callee answers at the backup while the node is down, or before it is
+routable. In `answer_lost_with_primary_no_answer.rs`, the cell where the ACK reaches
+the reclaimed copy first, a 2xx reaches the backup after the stand-down.
 
 ## Residuals
 
@@ -209,8 +227,7 @@ after the stand-down.
 - **A returning node's answer inside the replication lag of the deadline.** The
   copy's ring deadline fires before the returned node's reclaim and answer reach the
   backup: the copy CANCELs the callee after its answer and refuses the caller 480
-  after its 200, repeated to Timer H. The answered call stays up at the returned node
-  and settles to one CDR (`swept_call_primary_returns.rs`, the replication-lag cell).
+  after its 200, repeated to Timer H (`swept_call_answered_inside_the_lag.rs`).
 - **A retransmission placed as a call of its own.** The departed call it duplicates is
   settled off the wire but still discharged, with a CDR, by its primary on its return
   (`undecided_call_settled_on_departure.rs`, the retransmission cell).

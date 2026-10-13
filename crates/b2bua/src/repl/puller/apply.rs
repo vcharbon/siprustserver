@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use call::helpers::lifecycle_behind;
 use call::{CallBodyCodec, CallModelState};
 use repl_net::frame::{Op, Partition};
 
@@ -250,18 +251,24 @@ impl Puller {
         }
     }
 
-    /// The Forward `Put` decision (ADR-0031 D3), in three checks:
+    /// The Forward `Put` decision (ADR-0031 D3), in three checks. Where the
+    /// bodies speak, they are ordered by `call::helpers::lifecycle_behind`: the
+    /// answer ranks first, so an unanswered teardown never ends an answered
+    /// call.
     ///
     /// 1. `(sp, sb)` dominates the frame ⇒ a re-delivery of a version already
-    ///    held. Not a split; nothing to report.
-    /// 2. `sb > 0` (an acting backup authored this Element) and the frame's body
-    ///    stands behind the Element on either lifecycle axis
-    ///    (`call::helpers::lifecycle_regresses`) ⇒ the authority is serving a
-    ///    BRANCH of this call. Refused. This is the one read that touches the
-    ///    Element; `sb == 0` skips it.
+    ///    held. Not a split; nothing to report. One exception: at the Element's
+    ///    own `(p,b)`, over an Element an acting backup authored (`sb > 0`) whose
+    ///    body stands behind the frame's, the authority adopted the backup's
+    ///    counter without its body (refusing it as behind its own) and published
+    ///    its own call at that version. The frame applies, so the Element heals.
+    /// 2. `sb > 0` and the frame's body stands behind the Element's ⇒ the
+    ///    authority is serving a BRANCH of this call. Refused.
     /// 3. `sb > b_in` ⇒ the frame names a version behind the one the Element
     ///    carries. Refused: whatever its body says, its sender has not seen what
     ///    an acting backup wrote here.
+    ///
+    /// The Element is read only when `sb > 0`, and only for checks 1 and 2.
     async fn forward_put_outcome(
         &self,
         role: PartitionRole,
@@ -275,11 +282,22 @@ impl Puller {
         let Some((sp, sb)) = stored else {
             return ApplyOutcome::Applied;
         };
+        let held = || self.authored_element(role, primary, call_ref, sb);
         if sp >= call_gen && sb >= call_bgen {
-            return ApplyOutcome::Dominated;
+            let adopted = (sp, sb) == version;
+            return match (adopted, incoming) {
+                (true, Some(incoming))
+                    if held().await.is_some_and(|h| lifecycle_behind(&h, incoming)) =>
+                {
+                    ApplyOutcome::Applied
+                }
+                _ => ApplyOutcome::Dominated,
+            };
         }
-        if sb > 0 && self.regresses_the_element(role, primary, call_ref, incoming).await {
-            return ApplyOutcome::Refused;
+        if let (Some(incoming), Some(held)) = (incoming, held().await) {
+            if lifecycle_behind(incoming, &held) {
+                return ApplyOutcome::Refused;
+            }
         }
         if sb > call_bgen {
             return ApplyOutcome::Refused;
@@ -287,27 +305,24 @@ impl Puller {
         ApplyOutcome::Applied
     }
 
-    /// Whether the flushed body stands behind the stored Element on either
-    /// lifecycle axis. The Element is read with the **non-evicting**
+    /// The stored Element's body when an acting backup authored it (`sb > 0`),
+    /// decoded; `None` for an Element only its authority wrote, an absent one,
+    /// or one the model cannot read — the counters stay the only gate there.
+    /// Read with the **non-evicting**
     /// [`peek_body_raw`](ReplicatingCallStore::peek_body_raw), so the compare
-    /// never destroys it. An undecodable or absent body on either side answers
-    /// `false` — the counters stay the only gate where the model cannot speak.
-    async fn regresses_the_element(
+    /// never destroys it.
+    async fn authored_element(
         &self,
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
-        incoming: Option<&call::Call>,
-    ) -> bool {
-        let Some(incoming) = incoming else {
-            return false;
-        };
-        let Some(raw) = self.store.peek_body_raw(role, primary, call_ref).await else {
-            return false;
-        };
-        self.codec
-            .decode(&raw)
-            .is_ok_and(|held| call::helpers::lifecycle_regresses(incoming, &held))
+        sb: i64,
+    ) -> Option<call::Call> {
+        if sb == 0 {
+            return None;
+        }
+        let raw = self.store.peek_body_raw(role, primary, call_ref).await?;
+        self.codec.decode(&raw).ok()
     }
 
     /// Whether the stored Element records a call this `Delete` must not end: an

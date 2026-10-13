@@ -85,9 +85,11 @@ pub(super) async fn stand_down_turn(
 /// past the copy's. One `b` increment is one write the copy made as the
 /// call's acting backup (`CallState::update` on this node, a fold included).
 /// A primary reaches a `b` only by reading the copy's write that carries it:
-/// applied or folded into its record, or refused with no lifecycle progress
-/// its record lacks and its counter adopted (ADR-0031 D3). Either way the
-/// primary's record decides everything the copy did.
+/// applied or folded into its record, or refused — a body behind its record
+/// (`call::helpers::lifecycle_behind`: an unanswered ending of a call the
+/// primary answered), or one with no lifecycle progress its record lacks —
+/// and its counter adopted (ADR-0031 D3). Either way the primary's record
+/// decides everything the copy did.
 pub(super) fn covers(primary: &Call, copy: &Call) -> bool {
     let bak_gen = |c: &Call| c.topology.as_ref().map_or(0, |t| t.bak_gen);
     primary.incarnation() == copy.incarnation() && bak_gen(primary) >= bak_gen(copy)

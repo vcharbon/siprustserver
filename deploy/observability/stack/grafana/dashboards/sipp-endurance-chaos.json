@@ -1657,7 +1657,7 @@
       "id": 39,
       "type": "timeseries",
       "title": "Reactive takeover vs self-release (rate/min)",
-      "description": "ADR-0014 reactive-only takeover: the backup hydrates a dialog on demand when the proxy reroutes (takeover_hydrated) and self-releases the copy once the served txn terminates (self_release). Balanced rates \u21d2 no double-serve buildup.",
+      "description": "ADR-0014 reactive-only takeover: the backup hydrates a dialog on demand when the proxy reroutes (takeover_hydrated) and self-releases the copy once the served txn terminates (self_release), or stands it down on a covering write of its returned primary (stand_down, ADR-0047 D7). Balanced rates \u21d2 no double-serve buildup.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1678,6 +1678,11 @@
           "expr": "sum by (pod)(rate(b2bua_repl_self_release_total[5m]))*60",
           "refId": "B",
           "legendFormat": "self_release/min {{pod}}"
+        },
+        {
+          "expr": "sum by (pod)(rate(b2bua_repl_stand_down_total[5m]))*60",
+          "refId": "C",
+          "legendFormat": "stand_down/min {{pod}}"
         }
       ],
       "fieldConfig": {

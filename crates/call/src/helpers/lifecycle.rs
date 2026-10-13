@@ -31,6 +31,19 @@ pub fn lifecycle_regresses(incoming: &Call, held: &Call) -> bool {
     i.0 < h.0 || i.1 < h.1
 }
 
+/// Does `incoming` stand behind `held` as a version of the call one owner
+/// would keep over the other? The answer axis ranks first: **an unanswered
+/// teardown never ends an answered call**, so an answered body is never
+/// behind an unanswered one, however far toward its end the unanswered one
+/// went, and an unanswered body is always behind an answered one. Between two
+/// bodies alike on the answer, the one less far toward its end is behind. The
+/// replication gates read it both ways: a reverse flush behind the primary's
+/// live copy never folds as the call's newer version, and a forward flush
+/// behind the backup's Element is a branch the Element refuses (ADR-0031 D3).
+pub fn lifecycle_behind(incoming: &Call, held: &Call) -> bool {
+    lifecycle_position(incoming) < lifecycle_position(held)
+}
+
 /// Does `incoming` carry progress `held` lacks — every step `held` made on BOTH
 /// axes, and at least one more? Progress is a chain, not a rank: a terminal body
 /// whose caller was never answered does not outrank a live answered one.

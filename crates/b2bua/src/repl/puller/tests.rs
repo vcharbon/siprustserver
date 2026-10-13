@@ -699,3 +699,72 @@ async fn a_deleted_call_is_not_resurrected_and_a_new_one_on_its_ref_is_stored() 
     put_of(&p, Partition::Bak, r, (1, 0), "w0|a|t#2", forward).await;
     assert_eq!(body_of(&store, PartitionRole::Backup, r).await, b"w0|a|t#2");
 }
+
+// ---- the lifecycle order of a split Element (ADR-0031 D3, ADR-0047 D7) ----
+
+/// A call `w0` owns and `w1` backs up, its caller answered `final_sent` and
+/// in `state`.
+fn body_at(final_sent: Option<u16>, state: call::CallModelState) -> Arc<[u8]> {
+    use call::CallBodyCodec;
+    let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+    let invite = crate::router::test_support::invite("w0", "w1", "split");
+    let id_gen = sip_txn::IdGen::seeded(1);
+    let src = crate::router::test_support::src();
+    let mut call = crate::initial_invite::build_initial_call(&invite, src, &config, &id_gen, 0);
+    call.a_leg.invite_final_sent = final_sent;
+    call.state = state;
+    Arc::from(call::MsgpackCodec::new().encode(&call))
+}
+
+/// A forward `Put` of `body` at `(p, b)`.
+async fn forward(p: &Puller, (gen, bgen): (i64, i64), body: Arc<[u8]>) -> ApplyOutcome {
+    p.apply_to_store(
+        Op::Put,
+        Partition::Bak,
+        "w0|split|t",
+        gen,
+        bgen,
+        60_000,
+        0,
+        &[],
+        Some(body),
+        false,
+        None,
+        ApplyMode::Forward,
+    )
+    .await
+}
+
+/// An Element an acting backup authored holding its ending of a call it
+/// never saw answered: the authority's answered call replaces it, at a newer
+/// version and at the Element's own `(p,b)` (the authority adopted the copy's
+/// `b` and republished its call there). An unanswered ending never replaces
+/// an answered Element, and an answered Element a backup ended keeps its
+/// ending against the authority's earlier answer.
+#[tokio::test]
+async fn an_unanswered_ending_never_outranks_an_answered_call_in_a_split_element() {
+    use call::CallModelState::{Active, Terminated};
+    let (answered, ended) = (Some(200), Some(480));
+    for at in [(7, 3), (6, 3)] {
+        let (p, store, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let r = "w0|split|t";
+        assert_eq!(forward(&p, (6, 3), body_at(ended, Terminated)).await, ApplyOutcome::Applied);
+        let outcome = forward(&p, at, body_at(answered, Active)).await;
+        assert_eq!(outcome, ApplyOutcome::Applied, "the answered call at {at:?}");
+        assert_eq!(store.current_cv(PartitionRole::Backup, "w0", r), Some(at));
+        let again = forward(&p, at, body_at(answered, Active)).await;
+        assert_eq!(again, ApplyOutcome::Dominated, "and a re-delivery of it is one");
+    }
+
+    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    assert_eq!(forward(&p, (6, 3), body_at(answered, Active)).await, ApplyOutcome::Applied);
+    let outcome = forward(&p, (7, 3), body_at(ended, Terminated)).await;
+    assert_eq!(outcome, ApplyOutcome::Refused, "an unanswered ending is a branch");
+    let outcome = forward(&p, (6, 3), body_at(ended, Terminated)).await;
+    assert_eq!(outcome, ApplyOutcome::Dominated, "at the Element's version too");
+
+    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    assert_eq!(forward(&p, (6, 3), body_at(answered, Terminated)).await, ApplyOutcome::Applied);
+    let outcome = forward(&p, (7, 3), body_at(answered, Active)).await;
+    assert_eq!(outcome, ApplyOutcome::Refused, "the backup's end of the answered call stays");
+}

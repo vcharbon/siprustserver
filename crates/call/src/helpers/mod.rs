@@ -73,7 +73,9 @@ pub use leg_end::{
     reject_early_dialogs, retire_early_dialogs,
 };
 pub use lens::{update_dialog, update_leg};
-pub use lifecycle::{lifecycle_advances, lifecycle_position, lifecycle_regresses};
+pub use lifecycle::{
+    lifecycle_advances, lifecycle_behind, lifecycle_position, lifecycle_regresses,
+};
 pub use message_ring::{record_message, seal_turn};
 pub use obligation::{
     acked_2xx, advance_ladder, answers_initial_invite, clear_retained, obligations_in,

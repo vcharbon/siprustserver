@@ -124,6 +124,16 @@ fn the_vector_clause_never_folds_a_teardown_of_a_call_it_never_saw_answered() {
     );
 }
 
+/// The mirror: a backup that answered the caller while our live copy was
+/// ending the call it never saw answered flushes at our `p` with its `b`
+/// advanced; the answer ranks first, so the vector clause folds it.
+#[test]
+fn the_vector_clause_folds_an_answer_into_a_live_copy_ending_unanswered() {
+    let replica = answered(6, 2, CallModelState::Active);
+    let live = unanswered(6, 1, CallModelState::Terminating);
+    assert!(reverse_flush_dominates(&replica, &live), "an answered call is never behind");
+}
+
 /// The `(p,b)` of the live copy `n` holds for `call_ref`.
 fn live_pb(n: &crate::router::test_support::Node, call_ref: &str) -> (i64, i64) {
     let t = n.core.router_ctx().state.peek(call_ref).expect("the copy is live").topology;

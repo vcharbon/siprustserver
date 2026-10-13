@@ -502,7 +502,8 @@ Element an acting backup authored holds a version the authority never saw);
 **Reverse** (backup→primary) applies iff `p_in == p_cur && b_in > b_cur`
 (untouched-by-primary since the backup branched, genuinely newer backup
 mutation). A Forward `Put` whose BODY stands behind the Element on the call's
-lifecycle is a **branch** of the call and is refused; **deletes** apply
+lifecycle — read answer first: an unanswered teardown never ends an answered call
+(ADR-0047 D7) — is a **branch** of the call and is refused; **deletes** apply
 unconditionally except Forward, which yields for the **answer** alone — an
 `Active` Element whose caller was answered and to which no forward flush, taken
 or refused, has ever carried the authority's own answer. A refused flush is folded into a live copy
