@@ -14,6 +14,7 @@ the slice does not apply), `rules/lost_round.rs` and
 `generate_ack_for_non_2xx_in_dialog`, `router/reclaim/bulk.rs` (the reclaim write),
 `repl/puller/apply.rs` and `repl/router_sink.rs` (an applied primary write handed up),
 `router/stand_down.rs` (the stand-down), `store/takeover.rs` (the takeover marks),
+`store/adoption.rs` and `repl/store/admission.rs` (an adopted version's write),
 `router/reclaim.rs` (the reverse fold of a copy's ending), `call`'s
 `helpers/lifecycle.rs` (the lifecycle order), `sip-txn`'s `layer/relinquish.rs`.
 
@@ -175,10 +176,18 @@ far toward its end is behind.
   holding a copy's ending of a call it never saw answered, so the authority's answer
   replaces that Element. At the Element's own `(p,b)` — the authority adopted the
   copy's `b` when it refused the copy's ending and republished its own call at that
-  version — the frame is no re-delivery: it applies, and the Element heals. The
-  refusal stays where it is owed: a backup that answered and then ended a call its
-  primary never saw answered keeps its Element
-  (`forward_flush_never_regresses_backup_progress.rs`).
+  version — the frame is no re-delivery: it applies, and the Element heals
+  (`swept_call_answered_inside_the_lag.rs`, the cut-stream cell and the node-dies
+  cell). The refusal stays where it is owed: a backup that answered a call its
+  primary never saw answered keeps its answered Element against the primary's
+  unanswered teardown (`forward_flush_never_regresses_backup_progress.rs`), and one
+  that answered and then ended the call keeps its ending against the primary's
+  earlier answer (`repl/puller/tests.rs`, the split-Element cell).
+- **Adoption.** A backup's write of a version it adopted never lands over the same
+  call held at that version or past it: the primary may have refused the copy's
+  write, adopted its `b` and republished its own call at that version first, and
+  the Element keeps it (`router/reclaim/tests.rs`,
+  `a_backups_adoption_never_overwrites_the_primarys_body_at_the_adopted_version`).
 
 The cells are in `swept_call_primary_returns.rs`. The callee stays silent and the
 returned primary alone CANCELs it, ACKs its 487 and refuses the caller 480. The callee

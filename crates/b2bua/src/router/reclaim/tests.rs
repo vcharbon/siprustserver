@@ -218,6 +218,42 @@ async fn a_forward_terminating_body_only_moves_the_counter() {
     assert_eq!(live_pb(&n, &call_ref), (4, 2), "the seen `p` is adopted, and only it");
 }
 
+/// The Element `w1` holds for `call_ref`, decoded.
+async fn element(n: &crate::router::test_support::Node, call_ref: &str) -> Call {
+    let body = n.store.get_call(PartitionRole::Backup, "w0", call_ref).await.unwrap();
+    MsgpackCodec::new().decode(&body.expect("the Element")).expect("it decodes")
+}
+
+/// **An adoption never writes over the version it adopted.** The takeover
+/// copy ends a call it never saw answered at `(3,2)`; the primary's answered
+/// `(6,1)` is refused here (`b` behind) and its fold is queued for the copy's
+/// turn. Meanwhile the primary refuses the copy's ending, adopts `(6,2)` and
+/// republishes its answered call there, which the Element takes. When the
+/// copy's turn then adopts `(6,2)` from the queued refusal, the Element
+/// already holds that version — the primary's — and keeps it.
+#[tokio::test(start_paused = true)]
+async fn a_backups_adoption_never_overwrites_the_primarys_body_at_the_adopted_version() {
+    let n = node("w1").await;
+    let ctx = n.core.router_ctx();
+    let copy = unanswered(3, 2, CallModelState::Terminating);
+    let call_ref = copy.call_ref.clone();
+    assert!(ctx.state.materialize_if_absent(copy, MaterialiseOrigin::Takeover));
+    let healed = answered(6, 2, CallModelState::Active);
+    let body = MsgpackCodec::new().encode(&healed);
+    let opts = PutOpts::default();
+    let bak = PartitionRole::Backup;
+    n.store.put_call(bak, "w0", &call_ref, body, &[], 60_000, 6, 2, &opts).await.unwrap();
+
+    let refused = MsgpackCodec::new().encode(&answered(6, 1, CallModelState::Active));
+    fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &refused, 0).await;
+    sip_clock::testkit::settle().await;
+
+    assert_eq!(live_pb(&n, &call_ref), (6, 2), "the copy adopts the primary's `p`");
+    let held = element(&n, &call_ref).await;
+    assert!(call::helpers::caller_answered(&held), "the Element keeps the primary's answer");
+    assert_eq!(held.state, CallModelState::Active);
+}
+
 /// The direction must match the role this node plays for the ref: a
 /// Forward-labelled command for a call this node is PRIMARY of is a
 /// misrouted frame and folds nothing.

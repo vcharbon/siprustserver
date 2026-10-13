@@ -6,6 +6,7 @@
 //! [`MsgpackCodec`] only for flush/replication. Routing uses the in-memory
 //! `sip_index`; the store's `get_index` is the fallback.
 
+mod adoption;
 mod call_store;
 mod faults;
 mod memory;
@@ -449,27 +450,6 @@ impl CallState {
         self.metrics.limiter().set_uncounted_calls(inner.uncounted);
     }
 
-    /// Raise the resident copy's `(p,b)` to at least `(gen, bak_gen)` and return
-    /// it, or `None` when nothing changed (not resident, not replicable, or
-    /// already at or past both counters).
-    ///
-    /// **Not a mutation.** Adopting a version another owner published is a read
-    /// this node records, so it carries none of [`update`](Self::update)'s
-    /// authoritative bump: bumping our own axis for it would make two live
-    /// owners raise each other in turn, one flush per round, and the two views
-    /// would never come level (ADR-0031 D3).
-    pub fn adopt_version(&self, call_ref: &str, gen: i64, bak_gen: i64) -> Option<Call> {
-        let mut inner = self.inner.lock().unwrap();
-        let call = inner.calls.get_mut(call_ref)?;
-        let t = call.topology.as_mut()?;
-        if t.gen >= gen && t.bak_gen >= bak_gen {
-            return None;
-        }
-        t.gen = t.gen.max(gen);
-        t.bak_gen = t.bak_gen.max(bak_gen);
-        Some((**call).clone())
-    }
-
     /// The backup peer for a call from its `CallTopology.bak`, or `None` when no
     /// replicating store is wired / the call has no topology / `bak` is empty.
     /// This is the resolver the write-side policy ([`ReplicationPlan`]) needs:
@@ -807,6 +787,12 @@ impl CallState {
     /// replicas keep the long backstop (refreshed every keepalive), so a held call's
     /// replica never expires mid-call.
     pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
+        self.submit_flush(call, ttl_ms, false);
+    }
+
+    /// The write behind [`flush`](Self::flush): `adopted` marks a version this
+    /// node adopted without its body ([`PutOpts::adopted`]).
+    fn submit_flush(&self, call: &Call, ttl_ms: i64, adopted: bool) {
         let Some(writer) = self.repl.as_ref().map(|r| &r.writer) else {
             return;
         };
@@ -851,6 +837,7 @@ impl CallState {
         };
         let (role, primary, mut opts) = self.store_target(&call.call_ref);
         opts.incarnation = Some(call.incarnation().to_string());
+        opts.adopted = adopted;
         // Observability: a propagating flush is one whose call carries a backup
         // peer (topology.bak from the proxy cookie). Rising on the PRIMARY proves
         // the b2bua is attempting replication — distinguishing a cookie/topology

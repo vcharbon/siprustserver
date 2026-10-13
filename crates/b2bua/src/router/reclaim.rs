@@ -391,6 +391,13 @@ fn adopt_counters(folded: &mut Call, live: &Call) {
 /// copy self-releases before the next local mutation, and until then this node's
 /// stored `(p,b)` still names the version the other owner refuses, so the split
 /// stays open and its next flush is refused in turn.
+///
+/// At a backup the flush never lands over the version it adopted
+/// ([`flush_adopted`](crate::store::CallState::flush_adopted)): the primary may
+/// have refused the copy's write, adopted its `b` and republished its own call
+/// at that very version, which the Element already took — the copy's body is
+/// not to replace it. At a primary the adopted flush is its own call over the
+/// backup's body its store took at that version, and lands.
 fn adopt_seen_counter(
     ctx: &Arc<RouterCtx>,
     direction: FlushDirection,
@@ -404,8 +411,10 @@ fn adopt_seen_counter(
         FlushDirection::Reverse => (l.gen, r.bak_gen),
         FlushDirection::Forward => (r.gen, l.bak_gen),
     };
-    if let Some(adopted) = ctx.state.adopt_version(&live.call_ref, gen, bak_gen) {
-        ctx.state.flush(&adopted);
+    let Some(adopted) = ctx.state.adopt_version(&live.call_ref, gen, bak_gen) else { return };
+    match direction {
+        FlushDirection::Reverse => ctx.state.flush(&adopted),
+        FlushDirection::Forward => ctx.state.flush_adopted(&adopted),
     }
 }
 

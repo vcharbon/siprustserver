@@ -498,7 +498,10 @@ mutation, so the *other* counter on a propagated update is the **branch point**.
 Merge is direction-aware: **Bootstrap** (a node recovering its own partition)
 applies unless the stored vector dominates; **Forward** (primary→backup) applies
 on that same rule *and* never behind the Element's own `b` (ADR-0031 D3 — an
-Element an acting backup authored holds a version the authority never saw);
+Element an acting backup authored holds a version the authority never saw),
+except that at the Element's own `(p,b)` an authored Element whose body is behind
+the frame's takes it: the authority adopted that version and republished its own
+call there (ADR-0047 D7);
 **Reverse** (backup→primary) applies iff `p_in == p_cur && b_in > b_cur`
 (untouched-by-primary since the backup branched, genuinely newer backup
 mutation). A Forward `Put` whose BODY stands behind the Element on the call's

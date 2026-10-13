@@ -356,7 +356,10 @@ BEHIND the Element is a **branch** of the call and is refused. Behind is read an
 (ADR-0047 D7): an unanswered teardown never ends an answered call, so an answered body is
 never behind an unanswered one, and between bodies alike on the answer the one less far
 toward its end is behind. So the `Put` rule is "refuse a branch, and refuse a `b'` behind
-the Element's `b`".
+the Element's `b`". One frame the stored vector dominates still applies: at the Element's
+own `(p,b)`, over an Element an acting backup authored whose body is behind the frame's —
+the authority refused that body, adopted its `b`, and republished its own call at that
+version (ADR-0047 D7).
 
 **The `Delete` guard keys on the answer.** The one fact worth refusing delete-wins for is an
 answer the authority never had: a forward `Delete` is refused exactly when the Element is
