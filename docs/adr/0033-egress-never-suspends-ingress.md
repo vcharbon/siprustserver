@@ -94,12 +94,19 @@ the one await with no timeout, no queue and no drop policy.
    parked shard from an idle one; the activity meters cannot.
    The b2bua worker's two loops, the transaction owner (recv, timer wheel,
    sweep) and the router, state theirs the same way (`sip_txn::LoopPulse`,
-   `b2bua::loops`): one on a piece of work past `B2BUA_LOOP_STALL_MS`
-   (5 000) turns `/ready` and `/healthz` to 503 and raises
-   `b2bua_loop_stalled{loop}`, and the worker's livenessProbe restarts it; a
-   loop task that ends exits the process non-zero. 5 s is fifty 100 ms CFS
-   periods: under the `cpu_starve` chaos (0.3 CPU) a turn would need 1.5 s
-   of CPU to read stalled, which no SIP event, timer or sweep takes.
+   `b2bua::loops`): one on a piece of work past `B2BUA_LOOP_STALL_MS` turns
+   `/ready` and `/healthz` to 503 and raises `b2bua_loop_stalled{loop}`, and
+   the worker's livenessProbe restarts it; a loop task that ends exits the
+   process non-zero after the limiter release flush. A router turn that needs
+   a call's lock waits out that call's turn, which holds it across its
+   decision round trip (`B2BUA_CALL_CONTROL_TIMEOUT_MS`), so the threshold
+   defaults to the larger of 10 s and that timeout plus 5 s, and boot refuses
+   one not above it by 2 s. A bulk reclaim beats the router's pulse per call.
+   Under the `cpu_starve` chaos the 0.3 CPU quota is shared by every runnable
+   thread: with N runtime threads busy, a turn reads stalled only when its own
+   work needs more than 3/N CPU-seconds. The pulse cannot see a loop that is
+   waiting yet never scheduled while input is queued for it: a starved
+   runtime reads as idle, and only the probe's own timeout catches it.
 5. **The invariant, stated:** an ingress loop awaits nothing whose completion
    a third party controls. The `RoutingStrategy` trait is `async` and its
    three call sites sit on the recv loop; a strategy that consults a network

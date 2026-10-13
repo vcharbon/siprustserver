@@ -216,10 +216,10 @@ spec:
             failureThreshold: 2
           # Liveness is the worker's loops: /healthz is 503 while the transaction
           # owner or the router has been on one piece of work past
-          # B2BUA_LOOP_STALL_MS (default 5 s); a loop idle on its input never is.
-          # Three misses 10 s apart restart the container. The 5 s probe timeout
-          # holds under the cpu_starve chaos (0.3 CPU), where /ready already
-          # answers inside its 1 s default.
+          # B2BUA_LOOP_STALL_MS (default 10 s, above the call-control timeout); a
+          # loop idle on its input never is. Three misses 10 s apart restart the
+          # container. The 5 s probe timeout holds under the cpu_starve chaos
+          # (0.3 CPU), where /ready already answers inside its 1 s default.
           livenessProbe:
             httpGet: { path: /healthz, port: 9091 }
             initialDelaySeconds: 10

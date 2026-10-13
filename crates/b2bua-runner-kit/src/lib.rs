@@ -59,6 +59,7 @@
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::admission::Refusals;
@@ -87,6 +88,7 @@ mod drain_env;
 mod limiter_client;
 mod limiter_env;
 mod liveness_env;
+mod probe;
 mod replication;
 mod shutdown;
 mod worker_metrics;
@@ -448,8 +450,9 @@ pub struct RunnerEnv {
     /// grammar is in `capacity_env`.
     pub capacity: CapacityConfig,
     /// How long one turn of the transaction owner or router may run before
-    /// the loop reads stalled; the grammar and its default in `liveness_env`.
-    pub loop_stall: std::time::Duration,
+    /// the loop reads stalled; the grammar, its default and the boot check
+    /// against the call-control timeout in `liveness_env`.
+    pub loop_stall: Duration,
 }
 
 impl RunnerEnv {
@@ -459,6 +462,10 @@ impl RunnerEnv {
         let (cdr_message_ring, cdr_captured_headers) = cdr_ring_from_lookup(|k| env::var(k).ok());
         let limiter = limiter_env::limiter_from_lookup(|k| env::var(k).ok())
             .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        let call_control_timeout_ms: i64 = env_or("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")
+            .parse()
+            .expect("B2BUA_CALL_CONTROL_TIMEOUT_MS");
+        let call_control = Duration::from_millis(call_control_timeout_ms.max(0) as u64);
         Self {
             listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
             advertise: env::var("B2BUA_ADVERTISE").ok(),
@@ -525,9 +532,7 @@ impl RunnerEnv {
             )
             .parse()
             .expect("B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC"),
-            call_control_timeout_ms: env_or("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")
-                .parse()
-                .expect("B2BUA_CALL_CONTROL_TIMEOUT_MS"),
+            call_control_timeout_ms,
             ack_timeout_sec: env_or("B2BUA_ACK_TIMEOUT_SEC", "32")
                 .parse()
                 .expect("B2BUA_ACK_TIMEOUT_SEC"),
@@ -576,7 +581,7 @@ impl RunnerEnv {
                 .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
             capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())
                 .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
-            loop_stall: liveness_env::loop_stall_from_lookup(|k| env::var(k).ok())
+            loop_stall: liveness_env::loop_stall_from_lookup(|k| env::var(k).ok(), call_control)
                 .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
         }
     }
@@ -773,6 +778,9 @@ impl RunnerEnv {
         // outside its supported range, an app setup deadline / reaper idle
         // window that does not sit strictly under that bound).
         config.validate().unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        let call_control = Duration::from_millis(config.call_control_timeout_ms.max(0) as u64);
+        liveness_env::check_loop_stall(self.loop_stall, call_control)
+            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
         tracing::info!(service = name, capacity = ?config.capacity, "capacity ceilings");
 
         RunnerBase {
@@ -960,66 +968,6 @@ impl RunnerBase {
     /// `services` (ADR-0016) above the defaults.
     pub fn spawn(&self, deps: B2buaDeps, services: Vec<ServiceDef>) -> Arc<B2buaCore> {
         Arc::new(B2buaCore::spawn_with_services(Box::new(self.endpoint.clone()), deps, services))
-    }
-
-    /// Readiness/metrics probe server (shared `probe-http`). The `/ready` state
-    /// is a single read of one source: `core.readiness_state()` already folds
-    /// in the Draining latch, so there is no second flag to drift from it. The
-    /// `/metrics` body concatenates the worker's metric sources per scrape
-    /// (core registry + txn backpressure + UDP transport + overload signal +
-    /// capacity gate + every new call's admission outcome, every rung
-    /// composed, the loops' stall gauge), then `extra_metrics` (e.g. allocator
-    /// stats). `/ready` reads NotReady and `/healthz` 503 while a worker loop is
-    /// stalled past `loop_stall`. Hold the returned server for the process
-    /// lifetime — its accept loop aborts on drop.
-    pub async fn spawn_probe_server(
-        &self,
-        core: &Arc<B2buaCore>,
-        extra_metrics: Option<probe_http::MetricsFn>,
-        heap: Option<probe_http::HeapDumpFn>,
-    ) -> Option<probe_http::ProbeServer> {
-        let core_ready = core.clone();
-        let stall = self.env.loop_stall;
-        let (loops, live_loops) = (core.loops().clone(), core.loops().clone());
-        let worker = WorkerMetrics {
-            core: self.metrics.clone(),
-            txn: core.txn_metrics().clone(),
-            udp: self.udp_metrics.clone(),
-            overload: core.overload().clone(),
-            capacity: core.capacity().clone(),
-            loops: core.loops().clone(),
-            loop_stall: stall,
-        };
-        let routes = probe_http::ProbeRoutes {
-            metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
-            ready: Arc::new(move || match core_ready.readiness_state() {
-                b2bua::repl::ReadinessState::Draining => probe_http::ProbeState::Draining,
-                _ if !loops.stalled(stall).is_empty() => probe_http::ProbeState::NotReady,
-                b2bua::repl::ReadinessState::Ready => probe_http::ProbeState::Ready,
-                b2bua::repl::ReadinessState::NotReady => probe_http::ProbeState::NotReady,
-            }),
-            heap,
-        };
-        let live: probe_http::LiveFn = Arc::new(move || live_loops.stalled(stall).is_empty());
-        match probe_http::ProbeServer::start_live(self.metrics_sa, routes, live).await {
-            Ok(server) => {
-                tracing::info!(
-                    service = %self.name,
-                    addr = %server.addr(),
-                    "metrics server listening (/metrics, readiness /ready, liveness /healthz)"
-                );
-                Some(server)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    service = %self.name,
-                    addr = %self.metrics_sa,
-                    error = %e,
-                    "metrics server failed to bind"
-                );
-                None
-            }
-        }
     }
 
     /// Memory-attribution sampler: push the store + replication map sizes into

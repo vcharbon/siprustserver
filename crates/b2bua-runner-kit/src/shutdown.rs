@@ -9,14 +9,15 @@
 //!   releases flushed within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (ADR-0040 decision
 //!   9). Exit 0; the orchestrator restarts the ordinal.
 //! - **A loop task ended** — the transaction owner or the router returned,
-//!   was aborted or panicked: nothing serves any more, so the process exits
-//!   non-zero at once, and the orchestrator restarts it.
+//!   was aborted or panicked, before or during a drain: nothing serves any
+//!   more. The queued limiter releases are flushed within the same bound,
+//!   and the process exits non-zero; the orchestrator restarts it.
 
 use std::future::Future;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use b2bua::drain::DrainExit;
+use b2bua::drain::{DrainBounds, DrainExit};
 use b2bua::B2buaCore;
 
 use crate::RunnerBase;
@@ -50,79 +51,107 @@ impl RunnerBase {
     /// Serve until a stop (see the module doc), act on it, and return the
     /// process's exit code.
     pub async fn run_until_shutdown(&self, core: &Arc<B2buaCore>) -> ExitCode {
-        let name = &self.name;
         let interrupt = async {
             let _ = tokio::signal::ctrl_c().await;
         };
-        let loops = core.loops();
-        let stop =
-            next_stop(interrupt, wait_sigterm(name), core.withdrawn(), loops.wait_ended()).await;
-        match stop {
-            Stop::Interrupt => self.interrupted(core).await,
-            Stop::Terminate | Stop::Withdrawn => self.drained(core, stop).await,
-            Stop::LoopEnded(ended) => {
-                tracing::error!(
-                    service = name,
-                    ended,
-                    "a worker loop task ended — nothing serves any more; exiting"
-                );
-                ExitCode::FAILURE
-            }
-        }
+        let terminate = wait_sigterm(&self.name);
+        serve_until_stop(core, &self.name, self.env.drain, interrupt, terminate).await
     }
+}
 
-    /// Ctrl-C: Draining first, so no new call is admitted while the queued
-    /// releases leave; a second Ctrl-C gives them up at once.
-    async fn interrupted(&self, core: &B2buaCore) -> ExitCode {
-        let name = &self.name;
-        let bounds = self.env.drain;
-        let release_flush_ms = bounds.release_flush.as_millis() as u64;
-        tracing::info!(service = name, signal = "SIGINT", release_flush_ms, "shutting down");
-        core.begin_draining();
-        tokio::select! {
-            _ = core.limiter().flush(bounds.release_flush) => {}
-            _ = tokio::signal::ctrl_c() => {
-                let given_up = core.limiter().give_up_all();
-                tracing::warn!(service = name, given_up, "second SIGINT: release flush cut short");
-            }
-        }
-        ExitCode::SUCCESS
+/// Serve `core` until `interrupt`, `terminate`, its own withdrawal or a loop
+/// task ending, act on it under `bounds`, and return the exit code.
+pub(crate) async fn serve_until_stop(
+    core: &B2buaCore,
+    name: &str,
+    bounds: DrainBounds,
+    interrupt: impl Future<Output = ()>,
+    terminate: impl Future<Output = ()>,
+) -> ExitCode {
+    let loops = core.loops().clone();
+    let stop = next_stop(interrupt, terminate, core.withdrawn(), loops.wait_ended()).await;
+    match stop {
+        Stop::Interrupt => interrupted(core, name, bounds).await,
+        Stop::Terminate | Stop::Withdrawn => drained(core, name, bounds, stop).await,
+        Stop::LoopEnded(ended) => loop_ended(core, name, bounds, ended).await,
     }
+}
 
-    /// SIGTERM or the worker's own withdrawal: the D2 drain. The exit reason
-    /// and the residual are logged, never silently cut.
-    async fn drained(&self, core: &B2buaCore, stop: Stop) -> ExitCode {
-        let name = &self.name;
-        let bounds = self.env.drain;
-        let cause = match stop {
-            Stop::Withdrawn => "own endpoint withdrawn",
-            _ => "SIGTERM",
-        };
-        tracing::info!(
-            service = name,
-            cause,
-            drain_grace_ms = bounds.grace.as_millis() as u64,
-            drain_min_ms = bounds.floor.as_millis() as u64,
-            release_flush_ms = bounds.release_flush.as_millis() as u64,
-            "begin draining"
-        );
-        let out = core.drain(bounds).await;
-        let (reason, residual) = (out.exit.label(), out.residual);
-        match out.exit {
-            DrainExit::Quiescent | DrainExit::CaughtUp => {
-                tracing::info!(service = name, reason, residual, "drained — exiting");
-            }
-            DrainExit::Grace | DrainExit::GracePeersBehind => {
-                tracing::warn!(
-                    service = name,
-                    reason,
-                    residual,
-                    "drain grace elapsed with calls still active — exiting"
-                );
-            }
+/// Ctrl-C: Draining first, so no new call is admitted while the queued
+/// releases leave; a second Ctrl-C gives them up at once.
+async fn interrupted(core: &B2buaCore, name: &str, bounds: DrainBounds) -> ExitCode {
+    let release_flush_ms = bounds.release_flush.as_millis() as u64;
+    tracing::info!(service = name, signal = "SIGINT", release_flush_ms, "shutting down");
+    core.begin_draining();
+    tokio::select! {
+        _ = core.limiter().flush(bounds.release_flush) => {}
+        _ = tokio::signal::ctrl_c() => {
+            let given_up = core.limiter().give_up_all();
+            tracing::warn!(service = name, given_up, "second SIGINT: release flush cut short");
         }
-        ExitCode::SUCCESS
     }
+    ExitCode::SUCCESS
+}
+
+/// SIGTERM or the worker's own withdrawal: the D2 drain, the loops still
+/// watched — one ending mid-drain cuts it short and exits non-zero. The exit
+/// reason and the residual are logged, never silently cut.
+async fn drained(core: &B2buaCore, name: &str, bounds: DrainBounds, stop: Stop) -> ExitCode {
+    let cause = match stop {
+        Stop::Withdrawn => "own endpoint withdrawn",
+        _ => "SIGTERM",
+    };
+    tracing::info!(
+        service = name,
+        cause,
+        drain_grace_ms = bounds.grace.as_millis() as u64,
+        drain_min_ms = bounds.floor.as_millis() as u64,
+        release_flush_ms = bounds.release_flush.as_millis() as u64,
+        "begin draining"
+    );
+    let loops = core.loops().clone();
+    let out = tokio::select! {
+        out = core.drain(bounds) => out,
+        ended = loops.wait_ended() => return loop_ended(core, name, bounds, ended).await,
+    };
+    let (reason, residual) = (out.exit.label(), out.residual);
+    match out.exit {
+        DrainExit::Quiescent | DrainExit::CaughtUp => {
+            tracing::info!(service = name, reason, residual, "drained — exiting");
+        }
+        DrainExit::Grace | DrainExit::GracePeersBehind => {
+            tracing::warn!(
+                service = name,
+                reason,
+                residual,
+                "drain grace elapsed with calls still active — exiting"
+            );
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// A loop task ended: nothing serves any more. The queued limiter releases
+/// still leave, within the drain's flush bound (ADR-0040 decision 9: the
+/// release queue runs on its own task), then the process exits non-zero.
+async fn loop_ended(
+    core: &B2buaCore,
+    name: &str,
+    bounds: DrainBounds,
+    ended: &'static str,
+) -> ExitCode {
+    tracing::error!(service = name, ended, "a worker loop task ended — nothing serves any more");
+    core.begin_draining();
+    let flush = core.limiter().flush(bounds.release_flush).await;
+    core.metrics().limiter().count_release_flush(&flush);
+    tracing::error!(
+        service = name,
+        ended,
+        releases_queued = flush.queued,
+        releases_given_up = flush.given_up,
+        "exiting non-zero"
+    );
+    ExitCode::FAILURE
 }
 
 /// Await a SIGTERM (k8s sends this on pod termination). On non-unix this future
@@ -147,26 +176,4 @@ async fn wait_sigterm(_name: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::future::{pending, ready};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn a_withdrawal_with_no_signal_is_a_stop() {
-        let stop = next_stop(pending(), pending(), ready(()), pending()).await;
-        assert_eq!(stop, Stop::Withdrawn);
-    }
-
-    #[tokio::test]
-    async fn a_loop_that_ended_wins_over_a_signal() {
-        let stop = next_stop(pending(), ready(()), pending(), ready("router")).await;
-        assert_eq!(stop, Stop::LoopEnded("router"));
-    }
-
-    #[tokio::test]
-    async fn sigterm_and_interrupt_are_stops() {
-        assert_eq!(next_stop(pending(), ready(()), pending(), pending()).await, Stop::Terminate);
-        assert_eq!(next_stop(ready(()), pending(), pending(), pending()).await, Stop::Interrupt);
-    }
-}
+mod tests;
