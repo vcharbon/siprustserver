@@ -5,10 +5,10 @@
 //! proxy routes to the same slice. So the one predicate the proxy applies to
 //! this worker's endpoint — is it routable — is a fact the worker can read for
 //! itself, instead of inferring it from SIGTERM alone. The observation is a
-//! monotone latch: `Unobserved` until the worker has seen itself routable once
-//! (a booting pod is absent or not ready before it is published, which is not a
-//! withdrawal), then `Routable`, then — sticky — `Withdrawn` with the condition
-//! that produced it; a `Terminating` withdrawal moves on to `Absent` when the
+//! monotone latch: `Unobserved` until the worker has seen itself in the slice
+//! and `ready` once (a booting pod is absent, or present and not ready, before
+//! its readiness probe passes, which is not a withdrawal), then `Routable`,
+//! then — sticky — `Withdrawn` with the condition that produced it; a `Terminating` withdrawal moves on to `Absent` when the
 //! endpoint then leaves the slice. An endpoint that left the slice belongs to a
 //! process its orchestrator removed: the ordinal, should it return, names a
 //! replacement. The worker latches Draining on it and still serves what
@@ -46,9 +46,9 @@ impl WithdrawalCondition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelfEndpoint {
     /// Never seen routable: the source does not show the worker itself, or the
-    /// worker is not published yet.
+    /// worker is not published or not ready yet.
     Unobserved,
-    /// Seen routable; the proxy can route new traffic here.
+    /// Seen in the slice and `ready`; the proxy can route new traffic here.
     Routable,
     /// Was routable, and is no longer (sticky).
     Withdrawn(WithdrawalCondition),
@@ -100,11 +100,13 @@ impl SelfObserver {
         let mut transition = None;
         self.state.send_if_modified(|state| {
             let next = match (*state, observed) {
-                (SelfEndpoint::Unobserved, None) => SelfEndpoint::Routable,
-                (SelfEndpoint::Routable, Some(condition)) => SelfEndpoint::Withdrawn(condition),
+                (SelfEndpoint::Unobserved, Sighting::Ready) => SelfEndpoint::Routable,
+                (SelfEndpoint::Routable, Sighting::Withdrawn(condition)) => {
+                    SelfEndpoint::Withdrawn(condition)
+                }
                 (
                     SelfEndpoint::Withdrawn(WithdrawalCondition::Terminating),
-                    Some(WithdrawalCondition::Absent),
+                    Sighting::Withdrawn(WithdrawalCondition::Absent),
                 ) => SelfEndpoint::Withdrawn(WithdrawalCondition::Absent),
                 _ => return false,
             };
@@ -143,17 +145,28 @@ impl SelfObserver {
     }
 }
 
-/// `None` when `self_ordinal` still belongs here in `snapshot`, else the
-/// condition that withdraws it: gone from the slice, or in it as a `terminating`
-/// endpoint the orchestrator is removing. A not-ready endpoint that is NOT
-/// terminating is a readiness flap on a member the orchestrator keeps
-/// (ADR-0031 case 4): `Draining` is terminal, so latching it there would remove
-/// for good a worker that is meant to come back.
-fn classify(snapshot: &[Peer], self_ordinal: &str) -> Option<WithdrawalCondition> {
+/// What one snapshot shows of the worker's own endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sighting {
+    /// In the slice and `ready`: routable.
+    Ready,
+    /// In the slice, not ready and not terminating: a pod not ready yet, or a
+    /// readiness flap on a member the orchestrator keeps (ADR-0031 case 4).
+    NotReady,
+    /// Gone from the slice, or in it as a `terminating` endpoint the
+    /// orchestrator is removing.
+    Withdrawn(WithdrawalCondition),
+}
+
+/// The [`Sighting`] of `self_ordinal` in `snapshot`. A not-ready endpoint that
+/// is NOT terminating is no withdrawal: `Draining` is terminal, so latching it
+/// on a readiness flap would remove for good a worker meant to come back.
+fn classify(snapshot: &[Peer], self_ordinal: &str) -> Sighting {
     match snapshot.iter().find(|p| p.ordinal == self_ordinal) {
-        Some(p) if p.terminating && !p.ready => Some(WithdrawalCondition::Terminating),
-        Some(_) => None,
-        None => Some(WithdrawalCondition::Absent),
+        Some(p) if p.ready => Sighting::Ready,
+        Some(p) if p.terminating => Sighting::Withdrawn(WithdrawalCondition::Terminating),
+        Some(_) => Sighting::NotReady,
+        None => Sighting::Withdrawn(WithdrawalCondition::Absent),
     }
 }
 
@@ -181,6 +194,17 @@ mod tests {
         assert_eq!(o.observe(&peers(&[]), true), None);
         assert_eq!(o.observe(&peers(&["w1"]), true), None);
         assert_eq!(o.current(), SelfEndpoint::Unobserved);
+    }
+
+    #[test]
+    fn a_published_endpoint_not_ready_yet_is_not_routable() {
+        // A booting pod: in the slice, `ready=false, terminating=false`.
+        let o = SelfObserver::new("w0");
+        o.enable();
+        let booting = vec![Peer::with_conditions("w0", "w0", false, false), Peer::new("w1", "w1")];
+        assert_eq!(o.observe(&booting, true), None);
+        assert_eq!(o.current(), SelfEndpoint::Unobserved);
+        assert_eq!(o.observe(&peers(&["w0", "w1"]), true), Some(SelfEndpoint::Routable));
     }
 
     #[test]

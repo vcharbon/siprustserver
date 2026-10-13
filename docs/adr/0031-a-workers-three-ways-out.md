@@ -168,7 +168,8 @@ either way) is benign because of D1: an INVITE served in it is replicated.
 
 **D6 — A worker observes its own endpoint.** The worker already runs the informer; one
 predicate on its own `targetRef.name` tells it it is withdrawn (`terminating` and not
-`ready`, or absent — a not-ready endpoint that is not terminating is a readiness flap).
+`ready`, or absent — a not-ready endpoint that is not terminating is a readiness flap),
+once it has seen its own endpoint `ready`: a pod not ready yet is not withdrawn.
 On that signal it latches `Draining` even if SIGTERM is late (a preStop hook, a stuck
 kubelet), and it is the precondition D2 needs to know that nothing new will arrive. A
 worker on a static membership never observes itself and keeps today's behaviour. This
