@@ -7,7 +7,10 @@
 //!   injected [`ProbeRoutes::metrics`] closure (each runner concatenates its own
 //!   metric sources: proxy text + txn/jemalloc for the worker, proxy text +
 //!   jemalloc for the proxy).
-//! - `GET /healthz` — `ok` (liveness: the process is up). Always `200`.
+//! - `GET /healthz` — liveness: `200 ok` while the process is up and, for a
+//!   server started with a [`LiveFn`] ([`ProbeServer::start_live`]), while it
+//!   reports itself live; `503 stalled` otherwise, so the k8s livenessProbe
+//!   restarts a process that runs but no longer turns its loops.
 //! - `GET /readyz` and its `GET /ready` alias — `200`/`503` driven by the
 //!   injected [`ProbeRoutes::ready`] closure's 3-valued [`ProbeState`], so the
 //!   k8s readinessProbe withholds traffic from a not-ready / draining pod.
@@ -64,6 +67,10 @@ pub type MetricsFn = Arc<dyn Fn() -> String + Send + Sync>;
 /// Readiness provider for `/readyz` — cheap + non-blocking, called per probe.
 pub type ReadyFn = Arc<dyn Fn() -> ProbeState + Send + Sync>;
 
+/// Liveness provider for `/healthz` — cheap + non-blocking, called per probe:
+/// `false` when the process runs but no longer serves.
+pub type LiveFn = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// On-demand heap-profile dump for `GET /debug/heap` (jemalloc `prof.dump` →
 /// jeprof/pprof bytes). Injected by the runner so the lib stays allocator-
 /// agnostic; `None` ⇒ the route reports profiling unavailable. May block on
@@ -106,6 +113,17 @@ impl ProbeServer {
         Self::start_with(addr, routes, IDLE_TIMEOUT).await
     }
 
+    /// Like [`start`](Self::start), with `/healthz` answering `503` while
+    /// `live` reports `false`.
+    pub async fn start_live(
+        addr: std::net::SocketAddr,
+        routes: ProbeRoutes,
+        live: LiveFn,
+    ) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
+        Self::serve(listener, Served { routes, live: Some(live) }, IDLE_TIMEOUT)
+    }
+
     /// Like [`start`](Self::start) but with an explicit fully-idle cut window —
     /// tests pass a short one to exercise the cut without waiting [`IDLE_TIMEOUT`].
     pub async fn start_with(
@@ -130,6 +148,14 @@ impl ProbeServer {
         routes: ProbeRoutes,
         idle_timeout: Duration,
     ) -> std::io::Result<Self> {
+        Self::serve(listener, Served { routes, live: None }, idle_timeout)
+    }
+
+    fn serve(
+        listener: TcpListener,
+        routes: Served,
+        idle_timeout: Duration,
+    ) -> std::io::Result<Self> {
         let local = listener.local_addr()?;
         let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         let task = tokio::spawn(async move {
@@ -152,6 +178,13 @@ impl ProbeServer {
     }
 }
 
+/// The routes one server answers: the runner's, and its liveness if any.
+#[derive(Clone)]
+struct Served {
+    routes: ProbeRoutes,
+    live: Option<LiveFn>,
+}
+
 impl Drop for ProbeServer {
     fn drop(&mut self) {
         self.task.abort();
@@ -160,9 +193,10 @@ impl Drop for ProbeServer {
 
 async fn handle_conn(
     mut stream: TcpStream,
-    routes: ProbeRoutes,
+    served: Served,
     idle_timeout: Duration,
 ) -> std::io::Result<()> {
+    let Served { routes, live } = served;
     let mut buf = [0u8; 1024];
     // Fully-idle cut: if no request line arrives within the window, drop the
     // connection (reclaim the fd). Only a connection that sent *nothing* trips
@@ -247,7 +281,10 @@ async fn handle_conn(
 
     let (status, content_type, body) = match path {
         "/metrics" => ("200 OK", "text/plain; version=0.0.4", (routes.metrics)()),
-        "/healthz" => ("200 OK", "text/plain", "ok\n".to_string()),
+        "/healthz" => match live.is_none_or(|live| live()) {
+            true => ("200 OK", "text/plain", "ok\n".to_string()),
+            false => ("503 Service Unavailable", "text/plain", "stalled\n".to_string()),
+        },
         // `/ready` (worker) and `/readyz` (proxy) are the same probe.
         "/readyz" | "/ready" => match (routes.ready)() {
             ProbeState::Ready => ("200 OK", "text/plain", "ready\n".to_string()),
@@ -303,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn healthz_is_always_ok() {
+    async fn healthz_without_a_liveness_is_always_ok() {
         let server = ProbeServer::start(
             "127.0.0.1:0".parse().unwrap(),
             routes("", always(ProbeState::Draining)),
@@ -312,6 +349,24 @@ mod tests {
         .unwrap();
         // Liveness is process-up, independent of readiness — ok even while draining.
         assert!(get(server.addr(), "/healthz").await.contains("200 OK"));
+    }
+
+    #[tokio::test]
+    async fn healthz_follows_the_liveness_a_server_is_started_with() {
+        let live = Arc::new(AtomicU8::new(1));
+        let reads = live.clone();
+        let server = ProbeServer::start_live(
+            "127.0.0.1:0".parse().unwrap(),
+            routes("", always(ProbeState::Ready)),
+            Arc::new(move || reads.load(Ordering::SeqCst) == 1),
+        )
+        .await
+        .unwrap();
+        assert!(get(server.addr(), "/healthz").await.contains("200 OK"));
+        live.store(0, Ordering::SeqCst);
+        let r = get(server.addr(), "/healthz").await;
+        assert!(r.contains("503") && r.contains("stalled"), "{r}");
+        assert!(get(server.addr(), "/ready").await.contains("200 OK"), "readiness is apart");
     }
 
     #[tokio::test]
