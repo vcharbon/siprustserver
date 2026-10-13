@@ -639,7 +639,7 @@ pub fn self_gate_text(gate: Option<&crate::self_gate::ProxySelfGateMetrics>) -> 
     c::SELF_GATE_CPS_BUCKET_MAX.render_value(&mut s, gauge(|m| m.cps_bucket_max));
     c::SELF_GATE_EXTERNAL_INVITES_ADMITTED
         .render_value(&mut s, count(|m| m.external_admitted_total));
-    let rejected = [count(|m| m.rejected_elu_total), count(|m| m.rejected_cps_total)];
+    let rejected = [count(|m| m.rejected_intake_age_total), count(|m| m.rejected_cps_total)];
     c::SELF_GATE_EXTERNAL_INVITES_REJECTED.render(&mut s, |series| rejected[series.at(0)]);
     c::SELF_GATE_EMERGENCY_BYPASSED.render_value(&mut s, count(|m| m.emergency_bypassed_total));
     c::SELF_GATE_INTERNAL_BYPASSED.render_value(&mut s, count(|m| m.internal_bypassed_total));

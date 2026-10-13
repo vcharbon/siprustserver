@@ -49,7 +49,7 @@ async fn cold_start_admits_until_the_first_sample() {
     assert_eq!(g.elu_ewma(), 0.0, "EWMA stays 0 until the first sample()");
 }
 
-/// ELU above `elu_critical` (once sampled) sheds with `proxy_overload_elu` +
+/// ELU above `elu_critical` (once sampled) sheds with `proxy_overload_intake_age` +
 /// `Retry-After: 1`, and crucially does NOT spend a CPS token (step 1 is
 /// before the bucket).
 #[tokio::test(start_paused = true)]
@@ -59,9 +59,9 @@ async fn elu_above_critical_503s_without_spending_a_token() {
     g.sample(); // seat the EWMA at 0.9 (> 0.8)
     assert_eq!(
         g.try_admit_external(),
-        AdmitDecision::Reject { reason: ShedReason::Elu, retry_after_sec: 1 }
+        AdmitDecision::Reject { reason: ShedReason::IntakeAge, retry_after_sec: 1 }
     );
-    assert_eq!(g.metrics().rejected_elu_total, 1);
+    assert_eq!(g.metrics().rejected_intake_age_total, 1);
     // The lone token was NOT consumed: once ELU recovers, the call admits.
     ctl.set_elu(0.0);
     g.sample();
@@ -199,7 +199,7 @@ fn intake_sampler_read_drains_the_window() {
 
 /// The production seam end-to-end: an `EluCpsGate::intake` gate over a
 /// recorder the "dequeue path" feeds. Sustained critical ages sampled into
-/// the EWMA flip the gate to `proxy_overload_elu`; once traffic drains
+/// the EWMA flip the gate to `proxy_overload_intake_age`; once traffic drains
 /// (empty windows read 0) the samples pull the EWMA back and it admits.
 #[tokio::test(start_paused = true)]
 async fn intake_gate_sheds_on_sustained_dequeue_age_then_recovers() {
@@ -218,7 +218,7 @@ async fn intake_gate_sheds_on_sustained_dequeue_age_then_recovers() {
         g.elu_ewma()
     );
     let d = g.try_admit_external();
-    assert!(matches!(d, AdmitDecision::Reject { reason: ShedReason::Elu, .. }), "{d:?}");
+    assert!(matches!(d, AdmitDecision::Reject { reason: ShedReason::IntakeAge, .. }), "{d:?}");
 
     // Intake drains: empty windows sample 0 and the EWMA recovers.
     for _ in 0..10 {
@@ -277,7 +277,7 @@ async fn running_sampler_task_drives_the_gate_to_shed_on_injected_elu() {
 
     let d = g.try_admit_external();
     assert!(
-        matches!(d, AdmitDecision::Reject { reason: ShedReason::Elu, .. }),
+        matches!(d, AdmitDecision::Reject { reason: ShedReason::IntakeAge, .. }),
         "a pegged ELU must shed the next external INVITE: {d:?}"
     );
 

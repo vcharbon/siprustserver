@@ -59,7 +59,7 @@ mod tests {
             cps_bucket_level: 3.0,
             cps_bucket_max: 50.0,
             external_admitted_total: 1,
-            rejected_elu_total: 2,
+            rejected_intake_age_total: 2,
             rejected_cps_total: 3,
             internal_bypassed_total: 4,
             emergency_bypassed_total: 5,

@@ -85,7 +85,7 @@ const REJECT_REASONS: [&str; 14] = [
     "no_target_selected",
     "no_target_available",
     "worker_rate_capped",
-    ShedReason::Elu.label(),
+    ShedReason::IntakeAge.label(),
     ShedReason::Cps.label(),
 ];
 
@@ -129,7 +129,7 @@ assert_exposition_order!(
 assert_exposition_order!(HmacFailureReason: Missing, Decode, Mismatch);
 assert_exposition_order!(CancelLookup: Hit, Miss);
 assert_exposition_order!(Promotion: FreshPod, NotReady);
-assert_exposition_order!(ShedReason: Elu, Cps);
+assert_exposition_order!(ShedReason: IntakeAge, Cps);
 assert_exposition_order!(PeerScope: Internal, External);
 assert_exposition_order!(
     PeerFailureKind: ResponseTimeout,

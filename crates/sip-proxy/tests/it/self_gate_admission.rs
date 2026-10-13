@@ -209,7 +209,14 @@ async fn rejected_invite_returns_503_with_cps_reason_and_retry_after() {
 
 #[tokio::test]
 async fn rejected_invite_returns_503_with_elu_reason_and_retry_after() {
-    assert_wire_503("self-gate-503-elu", ShedReason::Elu, 1, 1, "proxy_overload_elu").await;
+    assert_wire_503(
+        "self-gate-503-intake-age",
+        ShedReason::IntakeAge,
+        1,
+        1,
+        "proxy_overload_intake_age",
+    )
+    .await;
 }
 
 /// A gate hint of 0 goes on the wire as 1: a `Retry-After` of 0 (RFC 3261
@@ -310,11 +317,11 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     assert_eq!(resp.status(), 503);
     assert_eq!(
         resp.raw(HeaderName::Reason).next(),
-        Some("SIP;cause=503;text=\"proxy_overload_elu\"")
+        Some("SIP;cause=503;text=\"proxy_overload_intake_age\"")
     );
     // ELU rejection carries Retry-After: 1.
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("1"));
-    assert_eq!(gate.metrics().rejected_elu_total, 1);
+    assert_eq!(gate.metrics().rejected_intake_age_total, 1);
 
     // §17.1.1.3: ACK the shed 503 — absorbed at the proxy (self-generated).
     client.send_to(&ack_for_reject(ALICE, "z9hG4bK-elu", &resp), proxy.addr()).await.unwrap();

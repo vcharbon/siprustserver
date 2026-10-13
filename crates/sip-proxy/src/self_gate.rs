@@ -5,9 +5,10 @@
 //! sheds **external, new-dialog, non-emergency** INVITEs on two cheap binary
 //! checks:
 //!
-//!   - `proxy_elu > elu_critical` — hard rejection by intake pressure: the
-//!     "ELU" reading is packet age at dequeue, normalized by
-//!     [`IntakeAgeSampler`].
+//!   - smoothed intake age `> elu_critical` — hard rejection by intake
+//!     pressure (`proxy_overload_intake_age`): the reading is packet age at
+//!     dequeue, normalized by [`IntakeAgeSampler`]. The `elu_*` names of the
+//!     config, the EWMA and its gauge are the [`LoadSampler`] seam's.
 //!   - a per-class CPS token bucket — hard cap on the external new-dialog
 //!     non-emergency rate (`proxy_overload_cps`).
 //!
@@ -64,20 +65,21 @@ impl AdmitDecision {
 /// Why the gate rejected: its `Reason` phrase and the reject's metric label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShedReason {
-    /// The ELU EWMA is past `elu_critical`.
-    Elu,
+    /// The smoothed intake reading (packet age at dequeue, normalized by
+    /// [`AGE_CRITICAL_MS`]) is past `elu_critical`.
+    IntakeAge,
     /// The CPS bucket is empty.
     Cps,
 }
 
 impl ShedReason {
     /// Every reason, in declaration order.
-    pub const ALL: [ShedReason; 2] = [ShedReason::Elu, ShedReason::Cps];
+    pub const ALL: [ShedReason; 2] = [ShedReason::IntakeAge, ShedReason::Cps];
 
     /// The `Reason` phrase and metric label.
     pub const fn label(self) -> &'static str {
         match self {
-            ShedReason::Elu => "proxy_overload_elu",
+            ShedReason::IntakeAge => "proxy_overload_intake_age",
             ShedReason::Cps => "proxy_overload_cps",
         }
     }
@@ -238,8 +240,8 @@ pub struct ProxySelfGateMetrics {
     pub cps_bucket_max: f64,
     /// External new-dialog non-emergency INVITEs admitted by the gate.
     pub external_admitted_total: u64,
-    /// Rejections by ELU pressure (`proxy_overload_elu`).
-    pub rejected_elu_total: u64,
+    /// Rejections by intake age (`proxy_overload_intake_age`).
+    pub rejected_intake_age_total: u64,
     /// Rejections by the CPS bucket (`proxy_overload_cps`).
     pub rejected_cps_total: u64,
     /// Worker-originated INVITEs that bypassed the gate (`is_worker_outbound`).
@@ -283,7 +285,7 @@ pub struct EluCpsGate {
     shed: Arc<observe::WaveSet>,
     // Lock-free counters — bumped off the EWMA lock on the admission/bypass paths.
     external_admitted: Arc<AtomicU64>,
-    rejected_elu: Arc<AtomicU64>,
+    rejected_intake_age: Arc<AtomicU64>,
     rejected_cps: Arc<AtomicU64>,
     internal_bypassed: Arc<AtomicU64>,
     emergency_bypassed: Arc<AtomicU64>,
@@ -311,7 +313,7 @@ impl EluCpsGate {
             sampler_interval: config.sampler_interval,
             shed: shed_waves(),
             external_admitted: Arc::new(AtomicU64::new(0)),
-            rejected_elu: Arc::new(AtomicU64::new(0)),
+            rejected_intake_age: Arc::new(AtomicU64::new(0)),
             rejected_cps: Arc::new(AtomicU64::new(0)),
             internal_bypassed: Arc::new(AtomicU64::new(0)),
             emergency_bypassed: Arc::new(AtomicU64::new(0)),
@@ -362,7 +364,7 @@ impl EluCpsGate {
             cps_bucket_level,
             cps_bucket_max,
             external_admitted_total: self.external_admitted.load(Ordering::Relaxed),
-            rejected_elu_total: self.rejected_elu.load(Ordering::Relaxed),
+            rejected_intake_age_total: self.rejected_intake_age.load(Ordering::Relaxed),
             rejected_cps_total: self.rejected_cps.load(Ordering::Relaxed),
             internal_bypassed_total: self.internal_bypassed.load(Ordering::Relaxed),
             emergency_bypassed_total: self.emergency_bypassed.load(Ordering::Relaxed),
@@ -372,21 +374,22 @@ impl EluCpsGate {
 
 impl ProxySelfGate for EluCpsGate {
     /// Try to admit one external new-dialog non-emergency INVITE. Order:
-    /// 1. **ELU** — `elu_ewma > elu_critical` → reject `proxy_overload_elu`,
-    ///    `Retry-After: 1` (the bucket is NOT touched).
+    /// 1. **Intake age** — `elu_ewma > elu_critical` → reject
+    ///    `proxy_overload_intake_age`, `Retry-After: 1` (the bucket is NOT
+    ///    touched).
     /// 2. **CPS bucket** — `try_take`; on empty → reject `proxy_overload_cps`
     ///    with the time-to-token of that same failed consume as `Retry-After`.
     /// 3. Otherwise **admit** (a token was consumed in step 2).
     fn try_admit_external(&self) -> AdmitDecision {
         let mut inner = self.inner.lock().unwrap();
 
-        // 1. Event-loop pressure — hard reject before spending a token.
+        // 1. Intake pressure — hard reject before spending a token.
         if inner.elu_ewma.get() > self.elu_critical {
             drop(inner);
-            self.rejected_elu.fetch_add(1, Ordering::Relaxed);
-            self.shed.record(ShedReason::Elu.label(), "shed", 1);
+            self.rejected_intake_age.fetch_add(1, Ordering::Relaxed);
+            self.shed.record(ShedReason::IntakeAge.label(), "shed", 1);
             return AdmitDecision::Reject {
-                reason: ShedReason::Elu,
+                reason: ShedReason::IntakeAge,
                 retry_after_sec: load_shed::retry_after::MIN_SEC,
             };
         }

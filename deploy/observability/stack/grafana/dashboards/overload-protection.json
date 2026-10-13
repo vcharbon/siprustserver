@@ -19,11 +19,11 @@
       "id": 2,
       "type": "timeseries",
       "title": "Rejections per second — by gate",
-      "description": "Stacked rate of new-INVITE rejections, broken out by the migrated gate that dropped them. proxy_overload_elu/cps are the proxy-self EluCpsGate; all_workers_overloaded is the LB above_critical critical-filter emptying the candidate set; rate_cap_exhausted is the per-worker AIMD bucket; worker_panic_elu / worker_cps_hard_cap are the b2bua panic-ELU and CPS bucket rungs; udp_ingress_brake is the b2bua UDP ingress brake (each read from b2bua_new_calls_total by reason).",
+      "description": "Stacked rate of new-INVITE rejections, broken out by the migrated gate that dropped them. proxy_overload_intake_age/cps are the proxy-self EluCpsGate; all_workers_overloaded is the LB above_critical critical-filter emptying the candidate set; rate_cap_exhausted is the per-worker AIMD bucket; worker_panic_elu / worker_cps_hard_cap are the b2bua panic-ELU and CPS bucket rungs; udp_ingress_brake is the b2bua UDP ingress brake (each read from b2bua_new_calls_total by reason).",
       "gridPos": { "h": 9, "w": 18, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "sum(rate(sip_proxy_self_external_invites_rejected_total{reason=\"proxy_overload_elu\"}[1m]))", "refId": "A", "legendFormat": "proxy_overload_elu" },
+        { "expr": "sum(rate(sip_proxy_self_external_invites_rejected_total{reason=\"proxy_overload_intake_age\"}[1m]))", "refId": "A", "legendFormat": "proxy_overload_intake_age" },
         { "expr": "sum(rate(sip_proxy_self_external_invites_rejected_total{reason=\"proxy_overload_cps\"}[1m]))", "refId": "B", "legendFormat": "proxy_overload_cps" },
         { "expr": "sum(rate(sip_proxy_overload_rejections_total{reason=\"no_target_critical_filtered\"}[1m]))", "refId": "C", "legendFormat": "all_workers_overloaded" },
         { "expr": "sum(rate(sip_proxy_overload_rejections_total{reason=\"bucket_empty\"}[1m]))", "refId": "D", "legendFormat": "rate_cap_exhausted" },

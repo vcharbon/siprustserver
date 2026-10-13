@@ -94,7 +94,10 @@ struct SheddingGate;
 
 impl ProxySelfGate for SheddingGate {
     fn try_admit_external(&self) -> AdmitDecision {
-        AdmitDecision::Reject { reason: crate::self_gate::ShedReason::Elu, retry_after_sec: 7 }
+        AdmitDecision::Reject {
+            reason: crate::self_gate::ShedReason::IntakeAge,
+            retry_after_sec: 7,
+        }
     }
 }
 
@@ -254,14 +257,14 @@ async fn a_shed_call_records_the_503_it_was_answered_with() {
         "the INVITE as it arrived",
     );
     assert!(
-        log.matching("kind=route.shed").iter().any(|e| e.contains("proxy_overload_elu")),
+        log.matching("kind=route.shed").iter().any(|e| e.contains("proxy_overload_intake_age")),
         "the reason nothing was forwarded",
     );
     let out = log.matching("kind=sip.out");
     assert_eq!(out.len(), 1, "the synthesized final is the call's only datagram out");
     assert!(out[0].contains("503 Service Unavailable"), "with its status line");
     assert!(out[0].contains("Retry-After: 7"), "and the hints the caller acts on");
-    assert!(out[0].contains("proxy_overload_elu"), "and the Reason that explains it");
+    assert!(out[0].contains("proxy_overload_intake_age"), "and the Reason that explains it");
 
     assert_eq!(ep.0.lock().expect("sent buffer").len(), 1, "nothing was forwarded downstream");
     assert_eq!(traces.active(), 0, "a refused initial INVITE closes the span at once");

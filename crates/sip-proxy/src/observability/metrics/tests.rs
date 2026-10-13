@@ -164,6 +164,26 @@ fn reject_reason_counter_renders() {
     assert!(txt.contains("sip_proxy_rejects_total{reason=\"too_many_hops\"} 1"));
 }
 
+/// The self-gate's intake arm sheds on packet age at dequeue, and its reject
+/// series is labelled for that signal.
+#[tokio::test(start_paused = true)]
+async fn an_intake_age_shed_is_labelled_for_the_dequeue_age() {
+    use crate::self_gate::{EluCpsGate, IntakeAgeRecorder, ProxySelfGate, AGE_CRITICAL_MS};
+    let rec = IntakeAgeRecorder::default();
+    let g = EluCpsGate::intake(rec.clone(), Default::default());
+    for _ in 0..10 {
+        rec.record(AGE_CRITICAL_MS);
+        g.sample();
+    }
+    assert!(!g.try_admit_external().is_admit(), "a saturated intake sheds");
+    let txt = self_gate_text(Some(&g.metrics()));
+    assert!(
+        txt.contains("sip_proxy_self_external_invites_rejected_total{reason=\"proxy_overload_intake_age\"} 1"),
+        "{txt}"
+    );
+    assert!(!txt.contains("elu\""), "no reject series is labelled ELU: {txt}");
+}
+
 #[test]
 fn worker_health_gauges_render() {
     let m = ProxyMetrics::new();
