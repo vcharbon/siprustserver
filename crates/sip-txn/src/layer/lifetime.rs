@@ -157,7 +157,7 @@ impl Owner {
             });
         self.delete_txn(id);
         if let Some(server) = unanswered {
-            self.drop_deferred_requests_of(&[server]);
+            self.drop_deferred_request_of(&server);
         }
     }
 
