@@ -53,9 +53,13 @@ data:
         Skip_Long_Lines   On
         DB                /var/log/fluent-bit-tail.db
 
+    # The metadata cache is keyed by pod name; Cache_Use_Docker_Id fetches it
+    # again for a new container, so a restarted container or a pod re-created
+    # under the same name carries its own docker_id and pod_id.
     [FILTER]
         Name                kubernetes
         Match               kube.*
+        Cache_Use_Docker_Id On
         Kube_URL            https://kubernetes.default.svc:443
         Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
         Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
@@ -64,12 +68,14 @@ data:
         K8S-Logging.Parser  On
         K8S-Logging.Exclude On
 
+    # VictoriaLogs flattens the nested `kubernetes` map into dotted field
+    # names; the stream fields name them so, one stream per container output.
     [OUTPUT]
         Name              http
         Match             kube.*
         Host              __HOST_IP__
         Port              9428
-        URI               /insert/jsonline?_stream_fields=stream,kubernetes_pod_name,kubernetes_namespace_name,kubernetes_container_name&_msg_field=log&_time_field=date
+        URI               /insert/jsonline?_stream_fields=stream,kubernetes.pod_name,kubernetes.namespace_name,kubernetes.container_name&_msg_field=log&_time_field=date
         Format            json_lines
         Json_date_format  iso8601
         Json_date_key     date
