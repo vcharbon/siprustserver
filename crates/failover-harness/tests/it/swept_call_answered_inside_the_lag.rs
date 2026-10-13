@@ -138,3 +138,55 @@ async fn a_swept_call_answered_inside_the_lag_survives_its_returned_nodes_death(
         settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
     }
 }
+
+/// The returned node's writes stop reaching the backup a second past the
+/// deadline, for longer than a stream stays idle, and the caller re-INVITEs
+/// through the node meanwhile. When the stream heals, the backup reads the
+/// node's compacted log — one entry, the call at the node's newer `p` — over
+/// the copy's unanswered ending: the answered call is not behind that ending,
+/// so the backup's replica heals to it (ADR-0047 D7).
+#[tokio::test(start_paused = true)]
+async fn a_swept_call_answered_inside_the_lag_heals_its_replica_across_a_cut_stream() {
+    let mut p = place("swept-call-answered-inside-the-lag-cut-stream", Callee::Ringing).await;
+    let deadline = depart(&mut p).await;
+    let wait = deadline - p.fh.now_ms() - 4_000;
+    p.fh.advance(Duration::from_millis(wait.max(0) as u64)).await;
+    reboot(&mut p).await;
+    p.fh.delay("b1", "b2", 2_000);
+    p.w_b2.simulate_peer_added("b1");
+    ready(&mut p).await;
+    let mut answered = answer(&mut p).await;
+    for (rule, why) in LAG_DEVIATIONS {
+        p.fh.accept_rfc_deviations_from_now(rule, why);
+    }
+    let at = deadline - p.fh.now_ms() + 1_000;
+    p.fh.advance(Duration::from_millis(at.max(0) as u64)).await;
+    p.fh.stall("b1", "b2");
+    p.bob.receive("CANCEL").await.respond(481, "Call/Transaction Does Not Exist").await;
+    p.fh.advance(Duration::from_secs(17)).await;
+    drain_strays(&p).await;
+
+    let mut reinvite = answered.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut round = p.bob.receive_tolerating("INVITE", &["OPTIONS"]).await;
+    round.respond(200, "OK").with_sdp(REANSWER).await;
+    reinvite.expect_tolerating(200, &["OPTIONS"]).await;
+    answered.ack(None).await;
+    p.bob.receive("ACK").await;
+    p.fh.advance(Duration::from_secs(1)).await;
+    let (state, _, _) = replica(&p).await;
+    assert_ne!(state, call::CallModelState::Active, "the backup still holds the copy's ending");
+
+    p.fh.resume("b1", "b2");
+    p.fh.heal("b1", "b2");
+    p.fh.advance(Duration::from_secs(5)).await;
+    let (state, caller_answered, _) = replica(&p).await;
+    assert_eq!(state, call::CallModelState::Active, "the backup's replica heals to the live call");
+    assert!(caller_answered, "and to its answer");
+
+    p.fh.advance(Duration::from_secs(40)).await;
+    drain_strays(&p).await;
+    for (rule, _) in LAG_DEVIATIONS {
+        p.fh.resume_rfc_gate(rule);
+    }
+    hang_up_and_settle(p, answered, &[]).await;
+}
