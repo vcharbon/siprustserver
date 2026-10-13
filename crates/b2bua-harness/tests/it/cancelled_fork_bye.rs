@@ -410,11 +410,11 @@ async fn the_record_waits_for_the_487_of_a_fork_whose_callee_byed_its_early_dial
 }
 
 /// A 2xx crossing the CANCEL of a fork that never rang is reaped and gives
-/// the caller no dialog: no provisional showed her one. A request she sends
-/// under a tag she was never shown names no dialog she holds: 481 (RFC 3261
-/// §12.2.2), and the call goes on.
+/// the caller no dialog (RFC 3261 §12.1): no provisional showed her one. A
+/// request she then sends under an unknown To-tag names no dialog: 481
+/// (§12.2.2), and the call goes on.
 #[tokio::test(start_paused = true)]
-async fn a_caller_request_under_a_tag_she_was_never_shown_is_refused_481() {
+async fn a_reaped_crossing_2xx_gives_the_caller_no_dialog_and_an_unknown_tag_draws_481() {
     let h = Harness::with_transit_delay("cancelled-fork-unshown-face", 1);
     h.waive(
         WaiverScope::rule(
