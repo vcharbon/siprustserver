@@ -88,10 +88,6 @@ impl<'a> ServerTxnId<'a> {
         Self::new(via, &INVITE)
     }
 
-    pub(super) fn branch(&self) -> &'a str {
-        self.branch
-    }
-
     pub(super) fn sent_by(&self) -> SentByRef<'a> {
         self.sent_by
     }
