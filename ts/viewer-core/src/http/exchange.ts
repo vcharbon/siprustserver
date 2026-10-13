@@ -15,25 +15,29 @@ export interface HttpHeader {
   readonly value: string
 }
 
-/** One request the SUT made and the answer it was served. */
+/**
+ * One request the SUT made and the answer it was served. It crosses JSON as
+ * it is: what the exchange did not have is an absent key, never `undefined`,
+ * and a body it did not carry is null.
+ */
 export interface HttpExchange {
   /** Wire order within the run, from 1. */
   readonly ordinal: number
   /** When the request WENT OUT: ms from the start of the run, the recording's own origin. */
   readonly atMs: number
   /** Where the request went; absent where the run states no destination. */
-  readonly dst: string | undefined
+  readonly dst?: string
   readonly method: string
   /** Path and query, as the request stated it. */
   readonly path: string
   readonly requestHeaders: readonly HttpHeader[]
   readonly requestBody: unknown
   /** The answer's status; absent where the transport failed instead. */
-  readonly status: number | undefined
+  readonly status?: number
   readonly responseHeaders: readonly HttpHeader[]
   readonly responseBody: unknown
-  /** Why no answer came back, where none did. */
-  readonly error: string | undefined
+  /** Why no answer came back; absent where one did. */
+  readonly error?: string
   /** The row as the deployment's file held it, for a side panel. */
   readonly source: unknown
 }

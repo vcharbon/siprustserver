@@ -909,16 +909,14 @@ const search = (params: Record<string, string | number | ReadonlyArray<string> |
   return text === "" ? "" : `?${text}`
 }
 
+/** A request whose failure, of any status, is the server's stated reason where it states one. */
 const request = async <A>(path: string, method: "GET" | "POST" = "GET"): Promise<A> => {
   const response = await fetch(path, { method, headers: { accept: "application/json" } })
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`${response.status} ${response.statusText} — ${detail.slice(0, 400)}`)
-  }
+  if (!response.ok) throw new Error(await said(response))
   return await response.json() as A
 }
 
-/** A refusal the server states (400): its `detail` or `reason` is the message, not the status line. */
+/** A failure the server states: its `detail` or `reason` is the message, not the status line. */
 const said = async (response: Response): Promise<string> => {
   const text = await response.text()
   try {
