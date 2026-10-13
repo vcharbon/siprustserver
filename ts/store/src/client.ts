@@ -64,11 +64,11 @@ export const scratchDatabase = Effect.fn("Client.scratchDatabase")(function*(bas
   return `${head}_${hash}`
 })
 
-/** Whether a statement failed as not permitted (SQLSTATE 42501). */
-const notPermitted = (error: SqlError): boolean => {
-  const cause = error.cause as { readonly code?: unknown } | undefined
-  return cause?.code === "42501"
-}
+/**
+ * Whether a statement failed as not permitted: the client reads SQLSTATE 42501
+ * as an `AuthorizationError` reason, the only code it maps there.
+ */
+export const notPermitted = (error: SqlError): boolean => error.reason._tag === "AuthorizationError"
 
 /**
  * `database` gone, its sessions ended. A backend this role may not terminate
