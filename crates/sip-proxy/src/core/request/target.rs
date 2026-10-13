@@ -63,7 +63,8 @@ impl ProxyCore {
     /// the call's replica (ADR-0014). A cookie the strategy cannot place and a
     /// downstream target (a worker's own b-leg CANCEL) go where the INVITE
     /// went. With no entry, a worker's CANCEL goes to the Request-URI, where
-    /// its b-leg INVITE went, and any other to a fresh selection.
+    /// its b-leg INVITE went; the CANCEL of an INVITE this hop refused is
+    /// answered 200 here (`Err`, §9.2); any other goes to a fresh selection.
     pub(super) async fn cancel_target(
         &self,
         msg: &SipMessage,
@@ -78,10 +79,15 @@ impl ProxyCore {
             req.cseq().seq(),
         );
         let Some(found) = self.cancel_lru.lookup(&key) else {
-            self.metrics.record_cancel_lookup(CancelLookup::Miss);
             if worker_outbound {
+                self.metrics.record_cancel_lookup(CancelLookup::Miss);
                 return self.request_uri_target(req, src).await;
             }
+            if let Some(answered) = self.cancel_refused(req, src).await {
+                self.metrics.record_cancel_lookup(CancelLookup::Hit);
+                return Err(answered);
+            }
+            self.metrics.record_cancel_lookup(CancelLookup::Miss);
             return self.select_target(msg, req, src, SelectOpts::default()).await;
         };
         self.metrics.record_cancel_lookup(CancelLookup::Hit);

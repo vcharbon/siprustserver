@@ -85,6 +85,20 @@ impl ProxyCore {
         Some(RouteOutcome { decision: RoutingDecisionKind::Reject, target: None })
     }
 
+    /// Answer 200 to a CANCEL of an INVITE this hop refused within 64·T1: the
+    /// proxy is that INVITE's UAS and its final is already sent (RFC 3261
+    /// §9.2), so the CANCEL goes no further. `None` when `req` cancels no such
+    /// INVITE.
+    pub(super) async fn cancel_refused(
+        &self,
+        req: &SipRequest,
+        src: SocketAddr,
+    ) -> Option<RouteOutcome> {
+        let resp = self.refusals.cancel(req, self.now_ms())?;
+        self.send_own_final(req, src, &resp).await;
+        Some(RouteOutcome { decision: RoutingDecisionKind::Cancel, target: None })
+    }
+
     /// Synthesize a UAS response to the source.
     async fn reply(
         &self,

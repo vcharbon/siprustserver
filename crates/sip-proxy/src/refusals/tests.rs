@@ -74,9 +74,54 @@ fn a_refusal_is_forgotten_after_64_t1_or_past_capacity() {
     r.refuse(&invite("z9hG4bK-a"), 1, 0);
     assert!(r.repeat(&invite("z9hG4bK-a"), TIMER_B).is_none());
 
+    // One refusal per stripe: of 100 refused, at most one per stripe stays,
+    // and the latest is always among them.
     let small = Refusals::with_capacity(&IdGen::seeded(1), 0, 1);
-    small.refuse(&invite("z9hG4bK-a"), 1, 0);
-    small.refuse(&invite("z9hG4bK-b"), 1, 0);
-    assert!(small.repeat(&invite("z9hG4bK-a"), 0).is_none());
-    assert!(small.repeat(&invite("z9hG4bK-b"), 0).is_some());
+    for i in 0..100 {
+        small.refuse(&invite(&format!("z9hG4bK-{i}")), 1, 0);
+    }
+    let kept = (0..100).filter(|i| small.repeat(&invite(&format!("z9hG4bK-{i}")), 0).is_some());
+    assert!(kept.count() <= STRIPES);
+    assert!(small.repeat(&invite("z9hG4bK-99"), 0).is_some());
+}
+
+fn cancel(branch: &str) -> SipRequest {
+    let raw = format!(
+        "CANCEL sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@caller.test>;tag=alice-tag\r\n\
+To: <sip:bob@uas.test>\r\n\
+Call-ID: {branch}@10.0.0.1\r\n\
+CSeq: 1 CANCEL\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    match CustomParser::new().parse(raw.as_bytes()).expect("fixture parses") {
+        SipMessage::Request(r) => r,
+        SipMessage::Response(_) => panic!("expected a request"),
+    }
+}
+
+/// The CANCEL of a refused INVITE draws a 200 with the To-tag of the
+/// INVITE's 503 (RFC 3261 §9.2); the CANCEL of any other INVITE draws none.
+#[test]
+fn the_cancel_of_a_refused_invite_draws_200_with_its_final_s_tag() {
+    let r = Refusals::new(&IdGen::seeded(1), 0);
+    let refused = wire(r.refuse(&invite("z9hG4bK-a"), 1, 0));
+    let ok = wire(r.cancel(&cancel("z9hG4bK-a"), 0).expect("a refused INVITE"));
+    assert!(ok.starts_with("SIP/2.0 200 OK\r\n"), "{ok}");
+    assert!(ok.contains("CSeq: 1 CANCEL\r\n"), "{ok}");
+    assert!(!ok.contains("Retry-After"), "{ok}");
+    let to = |w: &str| w.lines().find(|l| l.starts_with("To:")).map(str::to_owned);
+    assert_eq!(to(&ok), to(&refused));
+    assert!(r.cancel(&cancel("z9hG4bK-b"), 0).is_none(), "an INVITE never refused");
+}
+
+/// A CANCEL refused for want of a target is answered but never remembered.
+#[test]
+fn a_refused_cancel_is_never_remembered() {
+    let r = Refusals::new(&IdGen::seeded(1), 0);
+    r.refuse(&cancel("z9hG4bK-a"), 1, 0);
+    assert!(r.repeat(&cancel("z9hG4bK-a"), 0).is_none());
+    assert!(r.cancel(&cancel("z9hG4bK-a"), 0).is_none());
 }

@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common::ProxySut;
 use load_shed::simulated;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::HeaderName;
@@ -171,16 +171,36 @@ async fn a_copy_of_a_self_gate_refusal_draws_the_same_503_after_the_bucket_refil
     let _ = h.finish().await;
 }
 
-/// A strategy whose first selection is rate-capped and every later one picks
-/// bob: the cap has cleared by the time the copy arrives.
-struct CapThenForward {
+/// A strategy whose first selection fails with `refusal` and every later one
+/// picks bob: the failure has cleared by the time a copy arrives.
+struct RefuseThenForward {
+    refusal: fn() -> SelectError,
     selections: AtomicU32,
 }
 
+impl RefuseThenForward {
+    fn rate_capped() -> Arc<Self> {
+        Arc::new(Self {
+            refusal: || SelectError::RateCapExhausted {
+                worker_id: "w1".into(),
+                retry_after_sec: 2,
+            },
+            selections: AtomicU32::new(0),
+        })
+    }
+
+    fn no_target() -> Arc<Self> {
+        Arc::new(Self {
+            refusal: || SelectError::NoTarget { reason: "no worker alive".into() },
+            selections: AtomicU32::new(0),
+        })
+    }
+}
+
 #[async_trait]
-impl RoutingStrategy for CapThenForward {
+impl RoutingStrategy for RefuseThenForward {
     fn name(&self) -> &str {
-        "CapThenForward"
+        "RefuseThenForward"
     }
     async fn select_for_new_dialog(
         &self,
@@ -188,10 +208,7 @@ impl RoutingStrategy for CapThenForward {
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         if self.selections.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err(SelectError::RateCapExhausted {
-                worker_id: "w1".into(),
-                retry_after_sec: 2,
-            });
+            return Err((self.refusal)());
         }
         Ok(ProxyAddr::from(BOB.parse::<SocketAddr>().unwrap()))
     }
@@ -212,7 +229,7 @@ impl RoutingStrategy for CapThenForward {
 async fn a_copy_of_a_rate_cap_refusal_draws_the_same_503_without_a_new_selection() {
     let h = Harness::with_transit_delay("refused-invite-copies-rate-cap", 1);
     let (bob, _) = h.bind_sut("bob", BOB).await;
-    let strategy = Arc::new(CapThenForward { selections: AtomicU32::new(0) });
+    let strategy = RefuseThenForward::rate_capped();
     let proxy = spawn_proxy(&h, strategy.clone(), None).await;
     let (alice, lost) = lossy_caller(&h, 1).await;
 
@@ -230,5 +247,93 @@ async fn a_copy_of_a_rate_cap_refusal_draws_the_same_503_without_a_new_selection
     alice.send_to(&ack_for(&resp), proxy.addr()).await.unwrap();
     h.advance(Duration::from_millis(50)).await;
     assert!(bob.try_recv().is_none(), "no copy of the refused INVITE is forwarded");
+    let _ = h.finish().await;
+}
+
+/// No worker is selectable for the INVITE and its 503 is lost; the copy at T1
+/// draws the same 503 though a worker is selectable by then.
+#[tokio::test(start_paused = true)]
+async fn a_copy_of_a_no_target_refusal_draws_the_same_503() {
+    let h = Harness::with_transit_delay("refused-invite-copies-no-target", 1);
+    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let strategy = RefuseThenForward::no_target();
+    let proxy = spawn_proxy(&h, strategy.clone(), None).await;
+    let (alice, lost) = lossy_caller(&h, 1).await;
+
+    alice.send_to(&invite(), proxy.addr()).await.unwrap();
+    h.advance(Duration::from_millis(500)).await;
+    alice.send_to(&invite(), proxy.addr()).await.unwrap();
+    let last = recv_raw(&*alice).await;
+
+    let lost = lost.lock().unwrap().clone();
+    assert_eq!(lost.len(), 1, "the first 503 was sent and lost");
+    let resp = assert_one_refusal(&lost, &last);
+    assert_eq!(strategy.selections.load(Ordering::SeqCst), 1, "the copy is not selected afresh");
+    assert_eq!(proxy.metrics.reject_count("no_target_available"), 1, "counted once");
+
+    alice.send_to(&ack_for(&resp), proxy.addr()).await.unwrap();
+    h.advance(Duration::from_millis(50)).await;
+    assert!(bob.try_recv().is_none(), "no copy of the refused INVITE is forwarded");
+    let _ = h.finish().await;
+}
+
+/// The CANCEL of an INVITE this hop refused (RFC 3261 §9.1: the INVITE's
+/// branch, sent-by, Call-ID, From-tag and CSeq number).
+fn cancel() -> Vec<u8> {
+    format!(
+        "CANCEL sip:bob@{BOB} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {ALICE};branch={BRANCH}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1>;tag=t-{BRANCH}\r\n\
+To: <sip:bob@127.0.0.1>\r\n\
+Call-ID: {BRANCH}-call@127.0.0.1\r\n\
+CSeq: 1 CANCEL\r\n\
+Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// The INVITE is refused and its 503 lost; the caller gives up and CANCELs.
+/// This hop answered the INVITE itself, so it is the UAS the CANCEL reaches
+/// (§9.2): a 200 carrying the INVITE final's To-tag, nothing forwarded. The
+/// INVITE's retransmission then draws its 503, which the caller ACKs.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_of_a_refused_invite_draws_200_and_is_never_forwarded() {
+    let h = Harness::with_transit_delay("refused-invite-cancel", 1);
+    h.waive(
+        WaiverScope::rule(
+            "cancel-after-1xx",
+            "alice CANCELs before any provisional (RFC 3261 §9.1): a stateless hop sends \
+             none, so only such a caller ever CANCELs an INVITE it refused, the case under test",
+        )
+        .on_party("alice"),
+    );
+    let (bob, _) = h.bind_sut("bob", BOB).await;
+    let strategy = RefuseThenForward::rate_capped();
+    let proxy = spawn_proxy(&h, strategy.clone(), None).await;
+    let (alice, lost) = lossy_caller(&h, 1).await;
+
+    alice.send_to(&invite(), proxy.addr()).await.unwrap();
+    h.advance(Duration::from_millis(100)).await;
+    alice.send_to(&cancel(), proxy.addr()).await.unwrap();
+    let cancel_ok = parse(&recv_raw(&*alice).await);
+    assert_eq!(cancel_ok.status(), 200);
+    assert_eq!(cancel_ok.cseq().method().as_str(), "CANCEL");
+
+    h.advance(Duration::from_millis(400)).await;
+    alice.send_to(&invite(), proxy.addr()).await.unwrap();
+    let last = recv_raw(&*alice).await;
+    let lost = lost.lock().unwrap().clone();
+    let resp = assert_one_refusal(&lost, &last);
+    assert_eq!(
+        cancel_ok.raw(HeaderName::To).next(),
+        resp.raw(HeaderName::To).next(),
+        "the CANCEL's 200 carries the To-tag of the INVITE's final"
+    );
+    assert_eq!(strategy.selections.load(Ordering::SeqCst), 1, "the CANCEL selects nothing");
+
+    alice.send_to(&ack_for(&resp), proxy.addr()).await.unwrap();
+    h.advance(Duration::from_millis(50)).await;
+    assert!(bob.try_recv().is_none(), "neither the CANCEL nor a copy is forwarded");
     let _ = h.finish().await;
 }

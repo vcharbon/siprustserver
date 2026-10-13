@@ -278,8 +278,10 @@ A request the front proxy refuses itself, at its self-gate or for a failed
 worker selection, draws a 503 with a jittered, floored `Retry-After` and no
 `Reason`, its To-tag derived from the request. It is remembered for 64·T1:
 every copy in that window draws the same bytes and is neither judged nor
-counted again, so a gate or a cap that cleared meanwhile never admits it. Why
-it was refused stays in the reject counters and the call's trace.
+counted again, so a gate or a cap that cleared meanwhile never admits it. The
+CANCEL of a refused INVITE draws a 200 from the proxy, that INVITE's UAS, and
+goes no further; a CANCEL is never remembered. Why it was refused stays in the
+reject counters and the call's trace.
 
 **Metric catalogue** (`metric-catalogue`):
 A process's Prometheus families declared as data: one **catalogue entry** per

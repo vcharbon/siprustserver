@@ -177,11 +177,22 @@ impl ProxyCore {
             rtx_key.as_ref().and_then(|k| self.cancel_lru.lookup(k))
         };
 
+        // ── §16.4 Route preprocessing + direction (`classify`) ──────────────
+        let Some((mut draft, c)) = self.classify(req, src, face, req.thaw()) else {
+            return self.drop_unforwardable();
+        };
+
         // ── A copy of a refused request (§8.2.7) ────────────────────────────
         // It draws the refusal's bytes and is neither counted as a new call
         // nor judged again: a gate or a cap that cleared since must not admit
-        // a transaction this hop already refused.
-        if rtx_hit.is_none() && method != Method::Ack && method != Method::Cancel {
+        // a transaction this hop already refused. A worker's request is never
+        // refused (it bypasses the gate and goes to its Request-URI), so it
+        // never looks.
+        if rtx_hit.is_none()
+            && !c.worker_outbound
+            && method != Method::Ack
+            && method != Method::Cancel
+        {
             if let Some(repeated) = self.repeat_refusal(req, src).await {
                 return repeated;
             }
@@ -197,11 +208,6 @@ impl ProxyCore {
             // taken once, on the call's first INVITE (ADR-0026).
             self.activate_trace(req, src, self.now_ms() as i64);
         }
-
-        // ── §16.4 Route preprocessing + direction (`classify`) ──────────────
-        let Some((mut draft, c)) = self.classify(req, src, face, req.thaw()) else {
-            return self.drop_unforwardable();
-        };
 
         // ── Proxy-self gate (`admission`) ───────────────────────────────────
         // A retransmission bypasses the gate entirely: its first copy was
