@@ -107,11 +107,12 @@ async fn answered_alone_past(p: &Placed, deadline: i64) {
 }
 
 /// The established call ended by the caller; every call, `ended` included,
-/// settles to one CDR.
+/// settles to one CDR. A keepalive OPTIONS the returned node sends on the
+/// established call is answered 200 on the way (RFC 3261 §11.2).
 async fn hang_up_quiet_and_settle(mut p: Placed, ended: &[String]) {
     let mut quiet_bye = p.quiet.bye().await;
-    p.bob.receive("BYE").await.respond(200, "OK").await;
-    quiet_bye.expect(200).await;
+    p.bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    quiet_bye.expect_tolerating(200, &["OPTIONS"]).await;
     p.fh.advance(Duration::from_secs(60)).await;
     for call_ref in [&p.ringing_ref, &p.quiet_ref].into_iter().chain(ended) {
         settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
@@ -123,8 +124,8 @@ async fn hang_up_quiet_and_settle(mut p: Placed, ended: &[String]) {
 /// one CDR.
 async fn hang_up_and_settle(p: Placed, mut answered: Dialog, ended: &[String]) {
     let mut bye = answered.bye().await;
-    p.bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    p.bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
     hang_up_quiet_and_settle(p, ended).await;
 }
 
@@ -206,24 +207,34 @@ async fn a_swept_call_answered_before_its_returning_node_is_routable_gets_no_fin
     hang_up_and_settle(p, answered, &[]).await;
 }
 
-/// The backup's takeover copy writes before the node returns: the callee's 183
-/// with early media fails over to it while the node is down, and it relays it.
-/// The node returns, reclaims the call, and the callee answers at it. The
-/// primary's answer supersedes the ringing state the copy serves: the caller
-/// gets the 200 alone.
+/// The backup's takeover copy writes while the node is down: the callee's 183
+/// with early media fails over to it, and it relays it.
+async fn copy_writes_183(p: &mut Placed) {
+    let authored = |p: &Placed| p.w_b2.call_bgen(PartitionRole::Backup, "b1", &p.ringing_ref);
+    let before = authored(p);
+    p.at_bob.respond(183, "Session Progress").with_sdp(ANSWER).await;
+    p.ringing.expect(183).await;
+    p.fh.advance(Duration::from_millis(500)).await;
+    assert!(authored(p) > before, "the takeover copy wrote the callee's 183");
+}
+
+/// The node returns after its backup's copy wrote: its recovery pulls that
+/// write, so its reclaim record holds everything the copy did, and the copy
+/// stands down on it.
+async fn return_over_the_copys_write(p: &mut Placed) {
+    copy_writes_183(p).await;
+    return_before_deadline(p).await;
+    assert!(!p.w_b2.serves(&p.ringing_ref), "the copy stands down on the covering reclaim");
+}
+
+/// The backup's copy wrote before the node returned; the callee answers at
+/// the returned node: the caller gets the 200 alone.
 #[tokio::test(start_paused = true)]
 async fn a_swept_call_whose_copy_wrote_and_whose_node_returns_then_answers_gets_no_final_but_its_200(
 ) {
     let mut p = place("swept-call-copy-wrote-node-returns", Callee::Ringing).await;
     let deadline = depart(&mut p).await;
-    let authored = |p: &Placed| p.w_b2.call_bgen(PartitionRole::Backup, "b1", &p.ringing_ref);
-    let before = authored(&p);
-
-    p.at_bob.respond(183, "Session Progress").with_sdp(ANSWER).await;
-    p.ringing.expect(183).await;
-    p.fh.advance(Duration::from_millis(500)).await;
-    assert!(authored(&p) > before, "the takeover copy wrote the callee's 183");
-    return_before_deadline(&mut p).await;
+    return_over_the_copys_write(&mut p).await;
 
     let primary_writes = |p: &Placed| p.w_b2.call_gen(PartitionRole::Backup, "b1", &p.ringing_ref);
     let ringing = primary_writes(&p);
@@ -237,6 +248,82 @@ async fn a_swept_call_whose_copy_wrote_and_whose_node_returns_then_answers_gets_
     assert!(primary_writes(&p) > ringing, "the backup holds the primary's answer");
     answered_alone_past(&p, deadline).await;
     hang_up_and_settle(p, answered, &[]).await;
+}
+
+/// The backup's copy wrote before the node returned; the callee stays
+/// silent: at the deadline the returned primary alone CANCELs the callee,
+/// ACKs its 487 and refuses the caller 480.
+#[tokio::test(start_paused = true)]
+async fn a_swept_call_whose_copy_wrote_and_whose_node_returns_is_ended_by_its_primary_alone() {
+    let mut p = place("swept-call-copy-wrote-silent", Callee::Ringing).await;
+    let deadline = depart(&mut p).await;
+    return_over_the_copys_write(&mut p).await;
+
+    ring_until(&p, deadline).await;
+    p.fh.advance(Duration::from_millis(600)).await;
+    p.bob.receive("CANCEL").await.respond(200, "OK").await;
+    p.at_bob.respond(487, "Request Terminated").await;
+    p.bob.receive("ACK").await;
+    final_at(&mut p, deadline).await;
+    p.fh.advance(Duration::from_secs(40)).await;
+    let b1 = port(B1);
+    assert_eq!(sent(&p, p.bob.addr(), b"CANCEL"), [b1], "the primary alone CANCELs the callee");
+    assert_eq!(
+        sent(&p, p.alice.addr(), b"SIP/2.0 480"),
+        [b1],
+        "the primary alone refuses the caller"
+    );
+    hang_up_quiet_and_settle(p, &[]).await;
+}
+
+/// The caller's final is the one it got, and nothing follows it to the past
+/// of the ring deadline: no 480, and the callee's CANCELs, all the returned
+/// node's, are `cancels`.
+async fn one_final_past(p: &Placed, deadline: i64, cancels: &[u16]) {
+    let past = deadline - p.fh.now_ms() + 5_000;
+    p.fh.advance(Duration::from_millis(past.max(0) as u64)).await;
+    assert!(sent(p, p.alice.addr(), b"SIP/2.0 480").is_empty(), "no 480 follows the final");
+    let workers = [port(B1), port(B2)];
+    let to_callee: Vec<u16> =
+        sent(p, p.bob.addr(), b"CANCEL").into_iter().filter(|s| workers.contains(s)).collect();
+    assert_eq!(to_callee, cancels, "the callee's CANCELs");
+}
+
+/// The backup's copy wrote before the node returned; the caller CANCELs at
+/// the returned node, which CANCELs the callee and ACKs its 487: the caller's
+/// 487 is its only final.
+#[tokio::test(start_paused = true)]
+async fn a_swept_call_whose_copy_wrote_and_whose_caller_cancels_at_its_returned_node_gets_one_final(
+) {
+    let mut p = place("swept-call-copy-wrote-caller-cancels", Callee::Ringing).await;
+    let deadline = depart(&mut p).await;
+    return_over_the_copys_write(&mut p).await;
+
+    let mut cancel = p.ringing.cancel().await;
+    cancel.expect(200).await;
+    p.bob.receive("CANCEL").await.respond(200, "OK").await;
+    p.at_bob.respond(487, "Request Terminated").await;
+    p.bob.receive("ACK").await;
+    p.ringing.expect(487).await;
+    one_final_past(&p, deadline, &[port(B1)]).await;
+    hang_up_quiet_and_settle(p, &[]).await;
+}
+
+/// The backup's copy wrote before the node returned; the callee refuses at
+/// the returned node, which relays its 486: the caller's 486 is its only
+/// final and the callee gets no CANCEL.
+#[tokio::test(start_paused = true)]
+async fn a_swept_call_whose_copy_wrote_and_whose_callee_refuses_at_its_returned_node_gets_one_final(
+) {
+    let mut p = place("swept-call-copy-wrote-callee-refuses", Callee::Ringing).await;
+    let deadline = depart(&mut p).await;
+    return_over_the_copys_write(&mut p).await;
+
+    p.at_bob.respond(486, "Busy Here").await;
+    p.bob.receive("ACK").await;
+    p.ringing.expect(486).await;
+    one_final_past(&p, deadline, &[]).await;
+    hang_up_quiet_and_settle(p, &[]).await;
 }
 
 /// The backup's stream from b1 falls off b1's compacted changelog: the
@@ -322,4 +409,67 @@ async fn a_swept_call_whose_node_returns_into_a_cold_backup_stream_gets_no_final
     let answered = answer(&mut p).await;
     answered_alone_past(&p, deadline).await;
     hang_up_and_settle(p, answered, &[short_ref]).await;
+}
+
+/// Drain what the caller holds past its 200: the backup copy's 480, each copy
+/// a repeat of one final its answered transaction no longer takes.
+async fn drain_strays(p: &Placed) {
+    while let Some(msg) = p.alice.take_queued().await {
+        let stray = matches!(&msg, SipMessage::Response(r) if r.status() == 480);
+        assert!(stray, "nothing but the copy's 480 reaches the caller: {msg:?}");
+    }
+}
+
+/// The returned node's writes reach the backup 2 s late, and the callee
+/// answers at the returned node 1.5 s before the ring deadline: the backup's
+/// copy has seen neither the reclaim nor the answer when its deadline fires,
+/// so it CANCELs the callee and refuses the caller 480 after the 200 — the
+/// residual of ADR-0047 D7. The call the caller and the callee hold stays up
+/// at the returned node: the copy's ending, which reaches it once the lag
+/// clears, stands behind its answer and never ends it; the call settles to
+/// one CDR when the caller hangs up.
+#[tokio::test(start_paused = true)]
+async fn a_swept_call_answered_at_its_returned_node_inside_the_replication_lag_stays_up() {
+    let mut p = place("swept-call-answered-inside-the-lag", Callee::Ringing).await;
+    let deadline = depart(&mut p).await;
+    let wait = deadline - p.fh.now_ms() - 4_000;
+    p.fh.advance(Duration::from_millis(wait.max(0) as u64)).await;
+    reboot(&mut p).await;
+    p.fh.delay("b1", "b2", 2_000);
+    p.w_b2.simulate_peer_added("b1");
+    ready(&mut p).await;
+    let answered = answer(&mut p).await;
+    assert!(p.fh.now_ms() < deadline, "the callee answers before the deadline");
+    // What the copy puts on the wire inside the lag is what this cell measures.
+    let lag = [
+        ("no-cancel-after-final", "the copy CANCELs the callee after its answer"),
+        (
+            "unacked-invite-non-2xx-final",
+            "the copy's 480 follows the caller's 200: no ACK takes it",
+        ),
+        ("no-bye-outside-or-early-dialog", "the copy's 480 reads as ending the answered dialog"),
+    ];
+    for (rule, why) in lag {
+        p.fh.accept_rfc_deviations_from_now(rule, why);
+    }
+
+    let past = deadline - p.fh.now_ms() + 5_000;
+    p.fh.advance(Duration::from_millis(past.max(0) as u64)).await;
+    let b2 = port(B2);
+    let cancels = sent(&p, p.bob.addr(), b"CANCEL");
+    assert!(!cancels.is_empty() && cancels.iter().all(|s| *s == b2), "the copy CANCELs the callee");
+    let refusals = sent(&p, p.alice.addr(), b"SIP/2.0 480");
+    assert!(!refusals.is_empty() && refusals.iter().all(|s| *s == b2), "the copy refuses");
+    // The callee's answered INVITE transaction is over: the CANCEL matches
+    // nothing (RFC 3261 §9.2). Its retransmissions are one transaction.
+    p.bob.receive("CANCEL").await.respond(481, "Call/Transaction Does Not Exist").await;
+    drain_strays(&p).await;
+
+    p.fh.heal("b1", "b2");
+    p.fh.advance(Duration::from_secs(40)).await;
+    drain_strays(&p).await;
+    assert!(p.w_b1.serves(&p.ringing_ref), "the returned node keeps the answered call");
+    assert!(!p.w_b2.serves(&p.ringing_ref), "the copy is gone");
+    assert!(sent(&p, p.bob.addr(), b"BYE").is_empty(), "nobody ends the answered call");
+    hang_up_and_settle(p, answered, &[]).await;
 }
