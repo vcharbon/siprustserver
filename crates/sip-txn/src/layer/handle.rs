@@ -220,10 +220,11 @@ impl TransactionLayer {
         &self.owner_pulse
     }
 
-    /// Whether the owner task has ended — every handle dropped, the endpoint
-    /// closed, aborted, or panicked. The layer answers nothing after it.
-    pub fn owner_ended(&self) -> bool {
-        self.owner_abort.is_finished()
+    /// The owner task, for a supervisor to see it end: every handle dropped,
+    /// the endpoint closed, aborted, or panicked. The layer answers nothing
+    /// after it. Holding it keeps neither the task nor the endpoint alive.
+    pub fn owner_task(&self) -> tokio::task::AbortHandle {
+        self.owner_abort.clone()
     }
 
     /// Abort the owner task — and so drop the SIP endpoint it owns, silencing the

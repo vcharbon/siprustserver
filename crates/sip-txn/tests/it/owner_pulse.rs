@@ -62,7 +62,7 @@ async fn an_idle_owner_is_never_stalled() {
     let (txn, _events) = layer(false).await;
     tokio::time::sleep(Duration::from_secs(3600)).await;
     assert_eq!(txn.owner_pulse().busy_for(), None, "waiting on its socket");
-    assert!(!txn.owner_ended());
+    assert!(!txn.owner_task().is_finished());
 }
 
 #[tokio::test(start_paused = true)]
@@ -75,7 +75,7 @@ async fn an_owner_parked_on_one_turn_reads_stalled_past_the_threshold() {
     assert!(!txn.owner_pulse().stalled(THRESHOLD), "not past the threshold yet");
     tokio::time::sleep(Duration::from_millis(1)).await;
     assert!(txn.owner_pulse().stalled(THRESHOLD));
-    assert!(!txn.owner_ended(), "parked, not ended");
+    assert!(!txn.owner_task().is_finished(), "parked, not ended");
 }
 
 #[tokio::test(start_paused = true)]
@@ -83,5 +83,5 @@ async fn an_aborted_owner_has_ended() {
     let (txn, _events) = layer(false).await;
     txn.abort_owner();
     tokio::time::sleep(Duration::from_millis(1)).await;
-    assert!(txn.owner_ended());
+    assert!(txn.owner_task().is_finished());
 }
