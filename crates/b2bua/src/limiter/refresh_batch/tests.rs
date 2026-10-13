@@ -146,7 +146,6 @@ async fn every_key_due_within_a_tick_leaves_in_one_request() {
     advance(TICK).await;
     assert_eq!(r.requests(), [ids(&["a", "b", "c"])]);
     assert_eq!(r.batch.due(), 0);
-    assert_eq!(r.metrics.limiter().refresh_keys_sent_total(), 3);
     assert_eq!(r.metrics.limiter().refresh_answers_total(RefreshOutcome::Extended), 3);
     assert!(r.answers.lock().unwrap().is_empty(), "an extended answer is not handed back");
 }
@@ -264,11 +263,6 @@ async fn a_request_with_no_answer_is_sent_again_at_the_next_tick() {
     advance(TICK).await;
     assert_eq!(r.requests()[2..], [ids(&["a", "b"]), ids(&["c"])]);
     assert_eq!(r.batch.due(), 0);
-    assert_eq!(
-        r.metrics.limiter().refresh_keys_sent_total(),
-        7,
-        "two unanswered requests of two, then all three"
-    );
 }
 
 #[tokio::test(start_paused = true)]

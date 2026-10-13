@@ -72,7 +72,7 @@ assert_exposition_order!(ReleaseFlushOutcome: Empty, Sent, GivenUp);
 pub const REQUESTS: Family = Family::counter(
     "b2bua_limiter_requests_total",
     Labels::Product(&[OP]),
-    "limiter requests this worker made, by request (op=admit|refresh|release|health), a name that did not resolve included",
+    "limiter requests this worker made, by request (op=admit|refresh|release|health), a name that did not resolve included, none the open breaker kept",
 );
 
 pub const FAILURES: Family = Family::counter(

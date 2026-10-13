@@ -487,3 +487,40 @@ async fn a_name_reaches_the_limiter_once_it_resolves() {
         AdmitOutcome::Admitted
     );
 }
+
+/// The refresh batch sends through the client, held only by the breaker
+/// policy following the breaker, so a round can meet the breaker open. Such
+/// a refresh leaves no request: it counts neither a request nor its keys. An
+/// answered one counts both.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_the_open_breaker_keeps_counts_no_request_and_no_key() {
+    use crate::limiter::refresh_batch::{RefreshBatch, RefreshBatchConfig};
+    let (net, _server) = served().await;
+    let client = Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), BUDGET));
+    let lease = LimiterLease::starting_at(Duration::from_secs(120));
+    let metrics = B2buaMetrics::new();
+    client.report_to(LimiterReports::new(&lease, metrics.clone()));
+    let config = RefreshBatchConfig {
+        tick: Duration::from_secs(1),
+        max: 100,
+        lease: lease.clone(),
+        cap: 10,
+    };
+    let batch = RefreshBatch::new(client.clone(), config, metrics.clone(), |_| {});
+    tokio::spawn(batch.clone().run());
+    net.apply_fault(Fault::Cut { dst: laddr() });
+    client.health().unwrap().trip();
+    batch.mark("a#k", "c-a", &held_of(&["x".into()]));
+    batch.mark("b#k", "c-b", &held_of(&["x".into()]));
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let m = metrics.limiter();
+    assert_eq!(batch.due(), 2, "the round met the open breaker");
+    assert_eq!(m.requests_total(LimiterOp::Refresh), 0, "no request left");
+    assert_eq!(m.refresh_keys_sent_total(), 0, "nor any key");
+
+    net.apply_fault(Fault::Resume { dst: laddr() });
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(batch.due(), 0, "sent once the breaker closed");
+    assert_eq!(m.requests_total(LimiterOp::Refresh), 1);
+    assert_eq!(m.refresh_keys_sent_total(), 2);
+}

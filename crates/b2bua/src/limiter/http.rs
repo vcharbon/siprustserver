@@ -19,9 +19,11 @@
 //! [`CallLimiter::report_to`]; a lease is learnt only from a body judged
 //! valid. A 200 whose body cannot be read (unknown shape, no lease or one
 //! below `MIN_LEASE_MS`, a contradiction, a refresh answer not naming one
-//! outcome per call) is a bad answer: handled as no answer. Every request and
-//! every request with no usable answer is reported by its cause
-//! ([`LimiterFailure`]) and counted in the fail-open episode under it.
+//! outcome per call) is a bad answer: handled as no answer. Every request,
+//! with the call keys it names, and every request with no usable answer is
+//! reported by its cause ([`LimiterFailure`]) and counted in the fail-open
+//! episode under it; one the open breaker kept never left and is reported as
+//! a failure only.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -93,10 +95,10 @@ impl Endpoint {
         }
     }
 
-    /// A request of `op` left.
-    fn sent(&self, op: LimiterOp) {
+    /// A request of `op` naming `keys` call keys left.
+    fn sent(&self, op: LimiterOp, keys: usize) {
         for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
-            to.sent(op);
+            to.sent(op, keys);
         }
     }
 
@@ -117,16 +119,21 @@ impl Endpoint {
         }
     }
 
-    /// Send `req` for `op` under `budget`, once: the 200 answer, or `None`
-    /// after counting why none came back.
+    /// Send `req` for `op`, naming `keys` call keys, under `budget`, once:
+    /// the 200 answer, or `None` after counting why none came back. One the
+    /// open breaker kept is no request: it is counted as a failure only.
     async fn call(
         &self,
         op: LimiterOp,
         req: HttpRequest,
+        keys: usize,
         budget: Duration,
     ) -> Option<HttpResponse> {
-        self.sent(op);
-        let cause = match self.client.attempt(req, budget).await {
+        let answer = self.client.attempt(req, budget).await;
+        if !matches!(answer, Err(AttemptError::BreakerOpen)) {
+            self.sent(op, keys);
+        }
+        let cause = match answer {
             Ok(resp) if resp.status == 200 => return Some(resp),
             Ok(_) => LimiterFailure::Status,
             Err(AttemptError::Timeout | AttemptError::Saturated) => LimiterFailure::Timeout,
@@ -140,7 +147,7 @@ impl Endpoint {
     /// One probe of the breaker's: a health request, its answer reported
     /// as an admit's is.
     fn probed(&self, answer: Result<&HttpResponse, &AttemptError>) {
-        self.sent(LimiterOp::Health);
+        self.sent(LimiterOp::Health, 0);
         match answer {
             Err(AttemptError::Timeout) => self.failed(LimiterOp::Health, LimiterFailure::Timeout),
             Err(_) => self.failed(LimiterOp::Health, LimiterFailure::Transport),
@@ -231,18 +238,19 @@ impl HttpCallLimiter {
         tokio::time::timeout(budget, target.resolve()).await.ok().flatten().is_some()
     }
 
-    /// One request of `op` whose body serializes `body`, under `budget`;
-    /// `None` when the limiter is unavailable (a timeout, a transport error,
-    /// a non-200 answer).
+    /// One request of `op` whose body serializes `body`, naming `keys` call
+    /// keys, under `budget`; `None` when the limiter is unavailable (a
+    /// timeout, a transport error, the breaker open, a non-200 answer).
     async fn post<T: serde::Serialize>(
         &self,
         op: LimiterOp,
         path: &str,
         body: &T,
+        keys: usize,
         budget: Duration,
     ) -> Option<HttpResponse> {
         let bytes = serde_json::to_vec(body).ok()?;
-        let resp = self.endpoint.call(op, HttpRequest::post(path, bytes), budget).await?;
+        let resp = self.endpoint.call(op, HttpRequest::post(path, bytes), keys, budget).await?;
         // The episode ends once the limiter stops failing, so a limiter
         // answering every other request stays one episode.
         self.endpoint.answered();
@@ -286,7 +294,8 @@ impl CallLimiter for HttpCallLimiter {
             entries: to_wire(entries),
             release_on_refusal,
         };
-        let Some(resp) = self.post(LimiterOp::Admit, "/v1/admit", &body, self.timeout).await else {
+        let Some(resp) = self.post(LimiterOp::Admit, "/v1/admit", &body, 1, self.timeout).await
+        else {
             return AdmitOutcome::Unavailable;
         };
         match read_admit(&resp.body) {
@@ -308,7 +317,10 @@ impl CallLimiter for HttpCallLimiter {
 
     async fn release(&self, keys: &[String]) -> ReleaseAnswer {
         let body = ReleaseRequest { keys: keys.to_vec() };
-        match self.post(LimiterOp::Release, "/v1/release", &body, self.release_timeout).await {
+        match self
+            .post(LimiterOp::Release, "/v1/release", &body, keys.len(), self.release_timeout)
+            .await
+        {
             Some(_) => ReleaseAnswer::Released,
             None => ReleaseAnswer::Unavailable,
         }
@@ -325,8 +337,9 @@ impl CallLimiter for HttpCallLimiter {
                 })
                 .collect(),
         };
-        let Some(resp) =
-            self.post(LimiterOp::Refresh, "/v1/refresh", &body, self.refresh_timeout).await
+        let Some(resp) = self
+            .post(LimiterOp::Refresh, "/v1/refresh", &body, calls.len(), self.refresh_timeout)
+            .await
         else {
             return RefreshAnswer::Unavailable;
         };

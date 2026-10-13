@@ -349,9 +349,7 @@ impl RefreshBatch {
             self.wait_round().await;
             self.lock().send_now = false;
             while let Some(calls) = self.take() {
-                let answer = self.limiter.refresh(&calls).await;
-                self.metrics.limiter().count_refresh_keys_sent(calls.len() as u64);
-                match answer {
+                match self.limiter.refresh(&calls).await {
                     RefreshAnswer::Answered(replies) => self.settle(&calls, replies),
                     RefreshAnswer::Unavailable => {
                         self.put_back();

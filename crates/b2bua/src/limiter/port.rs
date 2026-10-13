@@ -186,10 +186,14 @@ impl LimiterReports {
         }
     }
 
-    /// A request of `op` left for the limiter.
-    pub(crate) fn sent(&self, op: LimiterOp) {
+    /// A request of `op` naming `keys` call keys left for the limiter; a
+    /// refresh's keys are counted with it.
+    pub(crate) fn sent(&self, op: LimiterOp, keys: usize) {
         if self.is_live() {
             self.metrics.limiter().count_request(op);
+            if op == LimiterOp::Refresh {
+                self.metrics.limiter().count_refresh_keys_sent(keys as u64);
+            }
         }
     }
 
