@@ -61,6 +61,8 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     };
     let mut materialized = 0u64;
     for (call, _skew) in calls {
+        // Each call is a piece of work of its own: the turn makes progress.
+        ctx.router_pulse.turning();
         if reclaim_into_live(ctx, &call.call_ref, Some(smoothing)).await {
             materialized += 1;
         }

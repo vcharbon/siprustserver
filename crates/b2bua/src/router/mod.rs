@@ -144,6 +144,9 @@ pub struct RouterCtx {
     /// emission site it guards; default = never armed.
     pub wire_faults: crate::wire_faults::WireFaults,
     pub txn: TransactionLayer,
+    /// The router loop's pulse: stamped per turn, and per call by a turn that
+    /// works through many ([`reclaim::reclaim_all`]).
+    pub router_pulse: Arc<sip_txn::LoopPulse>,
     pub timers: TimerService,
     pub(crate) dispatcher: PerCallDispatcher<turn::Turn>,
     /// Hears a call past its lifetime cap or at its overflow ceiling, as the
@@ -253,15 +256,15 @@ enum Work {
 /// Run the router loop over the txn-event + timer-fire channels until both close.
 /// `repl_rx` is the fail-back command receiver of a wired node; an unwired node
 /// passes `None` and the loop never polls for one. Each turn is stamped on
-/// `pulse` from the instant it takes work until it waits again.
+/// `ctx.router_pulse` from the instant it takes work until it waits again.
 pub async fn run(
     ctx: Arc<RouterCtx>,
     mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
     mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
-    pulse: Arc<sip_txn::LoopPulse>,
 ) {
+    let pulse = ctx.router_pulse.clone();
     // A timer or re-entry channel whose senders are all gone retires its arm
     // instead of resolving `None` on every poll.
     let (mut timers_open, mut reentry_open) = (true, true);

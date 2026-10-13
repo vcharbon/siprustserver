@@ -34,7 +34,8 @@ pub struct WorkerLoops {
 }
 
 impl WorkerLoops {
-    pub(crate) fn new(
+    /// The loops of the owner's and the router's pulse and task.
+    pub fn new(
         owner: (Arc<LoopPulse>, AbortHandle),
         router: (Arc<LoopPulse>, AbortHandle),
     ) -> Self {

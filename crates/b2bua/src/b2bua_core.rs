@@ -410,6 +410,7 @@ impl B2buaCore {
             store_faults,
             wire_faults,
             txn,
+            router_pulse: Arc::new(sip_txn::LoopPulse::new()),
             timers,
             dispatcher,
             reaper: reaper.clone(),
@@ -438,17 +439,10 @@ impl B2buaCore {
             adaptation_http: adaptation_http.map(Arc::new),
         });
 
-        let pulse = Arc::new(sip_txn::LoopPulse::new());
-        let router = tokio::spawn(router::run(
-            ctx.clone(),
-            txn_rx,
-            timer_rx,
-            reentry_rx,
-            repl_rx,
-            pulse.clone(),
-        ));
+        let router = tokio::spawn(router::run(ctx.clone(), txn_rx, timer_rx, reentry_rx, repl_rx));
         let owner = (ctx.txn.owner_pulse().clone(), ctx.txn.owner_task());
-        let loops = crate::loops::WorkerLoops::new(owner, (pulse, router.abort_handle()));
+        let routing = (ctx.router_pulse.clone(), router.abort_handle());
+        let loops = crate::loops::WorkerLoops::new(owner, routing);
         tasks.push(router);
         // The single periodic sweep task, driving two concerns off ONE
         // `tokio::time::interval` (`sweep::run`), each step behind its own panic
