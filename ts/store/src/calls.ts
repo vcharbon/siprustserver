@@ -40,9 +40,9 @@ export interface CallRow {
   readonly kind: RowKind
   /**
    * The call key the row's call is named by in a request cell: a case's from
-   * the newest cut naming its id, a refused call's the root of the Call-IDs the
-   * refusal names (the shortest, as the cut's own rule picks it). Null where no
-   * cut of the store names the case.
+   * the newest cut naming its id, a refused call's the one its cut recorded,
+   * else the shortest of the Call-IDs the refusal names. Null where no cut of
+   * the store names the case.
    */
   readonly callKey: string | null
   /** The case's current run; null for a refused call, which no run holds. */
@@ -230,7 +230,7 @@ export const layer = Layer.effect(
         ),
         refused AS (
           SELECT r.capture, r.case_id, r.prep_id, r.reasons, r.detail, s.cut_at,
-                 (SELECT id FROM unnest(r.call_ids) AS id ORDER BY length(id), id LIMIT 1) AS call_key
+                 coalesce(r.call_key, (SELECT id FROM unnest(r.call_ids) AS id ORDER BY length(id), id LIMIT 1)) AS call_key
           FROM cut_refusals r
           JOIN standing_cut s ON s.prep_id = r.prep_id AND s.capture = r.capture
         ),

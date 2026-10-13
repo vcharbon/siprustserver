@@ -253,7 +253,7 @@ describe.skipIf(!served)("Calls", () => {
       expect(full.id).toBeGreaterThan(0)
     })))
 
-  it("names each row's call key: a case's from the cut, a refused call's the root of the Call-IDs it names", () =>
+  it("names each row's call key: a case's from the cut, a refused call's the one its cut recorded, else the root of the Call-IDs it names", () =>
     withStore(Effect.gen(function*() {
       const calls = yield* Calls.Service
       const cuts = yield* Cuts.Service
@@ -270,6 +270,13 @@ describe.skipIf(!served)("Calls", () => {
           reasons: ["source-call-incomplete"],
           callIds: ["1-SDroot@x", "SDroot@x"],
           detail: ""
+        }, {
+          // The key the cut recorded names the call, whatever the Call-IDs' order says.
+          caseId: `${capture}-cut3`,
+          reasons: ["source-call-incomplete"],
+          callIds: ["aa-other@x", "zz-first@x"],
+          detail: "",
+          callKey: "zz-first@x"
         }]
       })
       yield* run(capture, [caseOf(caseId, { mainError: DIED, failedStep: "s14" }), caseOf(`${capture}-ghost`, {})])
@@ -277,7 +284,8 @@ describe.skipIf(!served)("Calls", () => {
       expect(rows.map((row) => [row.caseId, row.callKey])).toEqual([
         [caseId, `${caseId}@key`],
         [`${capture}-ghost`, null],
-        [`${capture}-cut2`, "SDroot@x"]
+        [`${capture}-cut2`, "SDroot@x"],
+        [`${capture}-cut3`, "zz-first@x"]
       ])
     })))
 
