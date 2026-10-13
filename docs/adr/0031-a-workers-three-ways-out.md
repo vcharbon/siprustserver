@@ -107,7 +107,8 @@ served; (iii) for **every live call** this worker serves, the Backup flow from t
 call names as its backup (`topology.bak`) is connected and has **applied** this worker's
 changelog head. "Applied" is reported by the puller in a new position frame (the drain's
 own signal, never a takeover or readiness gate — the role ADR-0014 §12 retired `Ack`
-from). A call whose backup flow is absent or behind keeps the
+from); the puller answers every idle `Noop` with one, so a report older than two `Noop`
+intervals is unknown, never current. A call whose backup flow is absent or behind keeps the
 drain waiting; the grace (5 s) stays the ceiling and live calls clearing stays an exit. The
 exit reason is counted (`quiescent`, `caught_up`, `grace_peers_behind`): the last one is
 "a flush window was lost" and must be visible. A worker that is not withdrawn (direct-bound,

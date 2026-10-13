@@ -82,6 +82,14 @@ impl Default for ServeConfig {
     }
 }
 
+impl ServeConfig {
+    /// How long a puller's position claim vouches for its flow: two `Noop`
+    /// intervals, each `Noop` drawing a fresh claim (ADR-0031 D2).
+    pub fn claim_ttl(&self) -> Duration {
+        self.noop_interval * 2
+    }
+}
+
 /// Why a send did not complete.
 #[derive(Debug)]
 enum Unsent {
@@ -126,10 +134,13 @@ impl ReplServer {
             metrics: None,
             config: ServeConfig::default(),
         }
+        .with_config(ServeConfig::default())
     }
 
-    /// Serve under `config`'s link bounds.
+    /// Serve under `config`'s link bounds; the changelog's claims last
+    /// [`ServeConfig::claim_ttl`].
     pub fn with_config(mut self, config: ServeConfig) -> Self {
+        self.changelog.set_claim_ttl(config.claim_ttl());
         self.config = config;
         self
     }

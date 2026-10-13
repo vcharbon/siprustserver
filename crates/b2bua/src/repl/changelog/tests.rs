@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 
 fn changelog() -> Changelog {
@@ -71,6 +73,29 @@ fn a_disconnected_flow_holds_no_position() {
     // A fresh flow starts from "unknown", not from the cleared claim.
     let _again = cl.serving("A", Partition::Bak);
     assert!(!cl.flow_caught_up("A", Partition::Bak));
+}
+
+#[test]
+fn the_default_claim_ttl_is_two_default_noop_intervals() {
+    assert_eq!(DEFAULT_CLAIM_TTL, crate::repl::ServeConfig::default().claim_ttl());
+}
+
+/// A puller answers every idle `Noop` with its position, so a claim older
+/// than two `Noop` intervals belongs to a flow whose peer stopped answering —
+/// one that died without a FIN keeps its serve task, and its claim, alive.
+#[tokio::test(start_paused = true)]
+async fn a_claim_no_noop_answer_refreshed_goes_stale() {
+    let cl = changelog();
+    let _guard = cl.serving("A", Partition::Bak);
+    cl.bump_put("A", "call-1", Partition::Bak);
+    cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert!(cl.flow_caught_up("A", Partition::Bak), "fresh inside two intervals");
+    cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert!(cl.flow_caught_up("A", Partition::Bak), "the same position, re-stated");
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(!cl.flow_caught_up("A", Partition::Bak), "past two intervals: unknown");
 }
 
 #[test]

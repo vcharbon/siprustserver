@@ -28,11 +28,11 @@
 //! peer log reap-immune while a serve task is active.
 //!
 //! ## Flow progress (ADR-0031 D2)
-//! Each sub-log also carries the position its puller last reported applying and
-//! whether a flow is connected at all, so a draining worker can ask
+//! Each sub-log also carries the position its puller last reported applying,
+//! when, and whether a flow is connected at all, so a draining worker can ask
 //! [`flow_caught_up`](Changelog::flow_caught_up) whether a peer holds everything
-//! it ever logged for that peer. Purely observational — no apply or send
-//! decision reads it.
+//! it ever logged for that peer ([`progress`]). Purely observational — no apply
+//! or send decision reads it.
 //!
 //! ## Lock discipline (ADR-0011 X8)
 //! [`bump_put`](Changelog::bump_put) / [`bump_delete`](Changelog::bump_delete) take the lock *briefly* (move ref + bump counter).
@@ -52,6 +52,8 @@ use repl_net::frame::{Frame, Op, Partition, Watermark};
 use sip_clock::Clock;
 
 use crate::store::PartitionRole;
+
+pub use progress::DEFAULT_CLAIM_TTL;
 
 /// How long a delete tombstone is retained so a disconnected puller still learns
 /// of the removal before the ref is reaped.
@@ -168,7 +170,7 @@ struct SubLog {
     /// The position the flow's puller last reported applying
     /// ([`Frame::Position`]). `None` while no flow is connected or none has
     /// reported yet: a disconnected flow's position is unknown, never stale.
-    applied: Option<Watermark>,
+    applied: Option<progress::Claim>,
     /// Serve tasks currently streaming this sub-log. `0` ⇒ no flow carries this
     /// partition to the peer, so nothing it holds can be current.
     streams: usize,
@@ -278,6 +280,8 @@ impl Drop for ServeGuard {
 struct Inner {
     counter: u64,
     peers: HashMap<String, PeerLog>,
+    /// How long a flow's claim vouches for it ([`progress`]).
+    claim_ttl: std::time::Duration,
 }
 
 /// Node-global monotonic changelog over per-peer, per-partition compacted
@@ -299,7 +303,11 @@ impl Changelog {
             clock,
             tombstone_ttl_ms: DEFAULT_TOMBSTONE_TTL_MS,
             dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
-            inner: Arc::new(Mutex::new(Inner { counter: 0, peers: HashMap::new() })),
+            inner: Arc::new(Mutex::new(Inner {
+                counter: 0,
+                peers: HashMap::new(),
+                claim_ttl: DEFAULT_CLAIM_TTL,
+            })),
         }
     }
 
@@ -351,35 +359,6 @@ impl Changelog {
             sub.applied = None;
         }
         ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition }
-    }
-
-    /// Record a puller's reported applied position for `(peer, partition)`
-    /// ([`Frame::Position`], ADR-0031 D2). Monotonic — a lower report never
-    /// regresses the recorded one — and ignored for a peer with no log.
-    pub fn note_applied(&self, peer: &str, partition: Partition, at: Watermark) {
-        let mut inner = crate::store::locked(&self.inner, "replica changelog");
-        if let Some(log) = inner.peers.get_mut(peer) {
-            let sub = log.sub_mut(partition);
-            if sub.applied.is_none_or(|prev| at > prev) {
-                sub.applied = Some(at);
-            }
-        }
-    }
-
-    /// Whether `peer`'s flow on `partition` is connected AND has reported
-    /// applying everything this sub-log ever logged (ADR-0031 D2). A report is
-    /// required even for an empty sub-log: a reaped peer log restarts at head 0,
-    /// so an unreported flow is unknown, never vacuously current.
-    pub fn flow_caught_up(&self, peer: &str, partition: Partition) -> bool {
-        let inner = crate::store::locked(&self.inner, "replica changelog");
-        let Some(log) = inner.peers.get(peer) else {
-            return false;
-        };
-        let sub = log.sub(partition);
-        if sub.streams == 0 {
-            return false;
-        }
-        sub.applied.is_some_and(|a| a >= Watermark::new(self.gen, sub.head))
     }
 
     /// Whether a warm puller on `partition` resuming from `since` must
@@ -636,5 +615,6 @@ fn reap_sublog(sub: &mut SubLog, now_ms: i64) {
     }
 }
 
+mod progress;
 #[cfg(test)]
 mod tests;
