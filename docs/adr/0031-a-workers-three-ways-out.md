@@ -153,7 +153,8 @@ whatever that sender's health. The tombstone is **re-armed by every response the
 proxy sees for that address** (its next Via's sent-by names it, whatever the method),
 so it lives Timer H past the last sign of life, whatever
 the drain grace is set to; a fixed TTL from departure would expire under a live elder
-whose grace was raised. The proxy's `Draining` grace (in-dialog traffic sticks to a draining
+whose grace was raised. A worker rejoining at the address clears the tombstone; a
+non-worker reusing it stays tombstoned while responses for it keep coming. The proxy's `Draining` grace (in-dialog traffic sticks to a draining
 primary for 5 s) is recorded as effectively unreachable under Kubernetes: a probe tick can
 stamp it inside the withdrawal window, but the ordinal leaves the projection first in
 practice. It stays for a static worker pool.
