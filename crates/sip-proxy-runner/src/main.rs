@@ -14,7 +14,7 @@
 //!   - `EluCpsGate` self-gate: EWMA-smoothed intake pressure
 //!     (packet age at dequeue, recorded by every recv shard) + a per-class CPS
 //!     token bucket shed external new-dialog non-emergency INVITEs under
-//!     self-overload (a stateless 503 + `Retry-After`/`Reason`). A 100 ms
+//!     self-overload (a stateless 503 + `Retry-After`, the same for every copy). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
 //!   - Prometheus `/metrics` + `/healthz` + `/readyz` via the shared `probe-http`.
@@ -99,6 +99,9 @@
 //!   PROXY_SELF_GATE_ELU_CRITICAL  ELU shed threshold, (0, 1] (default 0.80)
 //!   PROXY_SELF_GATE_CPS_SIZE      CPS bucket capacity, ≥ 1 (default 50)
 //!   PROXY_SELF_GATE_CPS_RATE      CPS bucket refill /s, ≥ 1 (default 100)
+//!   PROXY_RETRY_AFTER_JITTER_SEC  spread added to a refusal's Retry-After
+//!                    base, seconds 0..3600; every copy of one request draws
+//!                    the same value                           (default 5)
 
 // Use jemalloc instead of glibc malloc (mirrors b2bua-runner). glibc retains
 // freed arena chunks and ratchets RSS under sustained churn; jemalloc's decay
@@ -119,7 +122,7 @@ use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
-use sip_net::types::{BindUdpOpts, PreIngressAction, PreIngressHook};
+use sip_net::types::BindUdpOpts;
 use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_proxy::health::HealthProbe;
 use sip_proxy::load_observer::WorkerLoadObserver;
@@ -131,6 +134,7 @@ use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
 use sip_proxy::{ExternalFaceParts, ProxyCoreBuilder, RoutingStrategy};
 use sip_proxy_runner::config::{refuse_to_start, ExternalFace, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
+use sip_proxy_runner::intake_shed::{intake_shed_hook, intake_shed_watermark};
 use sip_proxy_runner::readiness::probe_state;
 use sip_txn::IdGen;
 
@@ -165,30 +169,6 @@ fn log_socket_buffers(
             );
         }
     }
-}
-
-/// Depth-watermark selective intake shed: the LAST-line guard below the
-/// admission layer (the self-gate is the first-line brake). At or above
-/// `watermark` queued datagrams the socket pump drops only what
-/// [`sip_message::sniff::is_sheddable_new_invite`] classifies as a NEW
-/// non-emergency INVITE; in-dialog traffic, responses, ACK/BYE/CANCEL,
-/// emergency INVITEs, and garbage are always admitted. Drops land on the
-/// endpoint's `pre_ingress_dropped` counter → `sip_proxy_intake_shed_total`.
-fn intake_shed_hook(watermark: usize) -> PreIngressHook {
-    Arc::new(move |raw, _src, depth| {
-        if depth >= watermark && sip_message::sniff::is_sheddable_new_invite(raw) {
-            PreIngressAction::Drop
-        } else {
-            PreIngressAction::Accept
-        }
-    })
-}
-
-/// The shed watermark in queued datagrams: `pct` percent of `queue_max`,
-/// floored at 1 so `0%` sheds whenever anything is queued rather than on an
-/// idle socket; `100%` only sheds at a full queue.
-fn intake_shed_watermark(queue_max: usize, pct: u64) -> usize {
-    (queue_max.saturating_mul(pct as usize) / 100).max(1)
 }
 
 /// Bounded bind retry for a port a predecessor process may still hold.
@@ -485,6 +465,10 @@ async fn main() {
     // shards — a response or CANCEL can hash to a different socket than the
     // INVITE that populated the entry.
     let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
+    // ONE refusal memo and To-tag secret across shards: a copy of a refused
+    // request draws the same 503 whichever socket it arrives on.
+    let refusals =
+        Arc::new(sip_proxy::refusals::Refusals::new(&id_gen, cfg.retry_after_jitter_sec));
 
     // Named-target resolver tuning + startup prewarm. A COLD
     // name (fresh deploy, CoreDNS restart, TTL expiry) would cost the first
@@ -510,6 +494,7 @@ async fn main() {
                 .id_gen(id_gen.clone())
                 .metrics(metrics.clone())
                 .cancel_lru(cancel_lru.clone())
+                .refusals(refusals.clone())
                 .self_gate(gate_dyn.clone())
                 .intake_age(intake_age.clone())
                 .resolver_config(resolver_cfg)
@@ -781,6 +766,3 @@ fn sigterm() -> impl std::future::Future<Output = ()> {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod intake_shed_tests;

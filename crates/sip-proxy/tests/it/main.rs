@@ -14,6 +14,7 @@ mod load_balancer;
 mod load_balancer_routing;
 mod options_e2e;
 mod per_call_trace;
+mod refused_invite_copies;
 mod rfc_proxy_compliance;
 mod select_failure_503;
 mod self_gate_admission;

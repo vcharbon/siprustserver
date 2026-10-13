@@ -241,8 +241,8 @@ async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
     assert_eq!(traces.active(), 0);
 }
 
-// The shed 503 is synthesized by `reply` and never reaches a downstream hop, so
-// `reply` is the only place it can be recorded. Without it a traced shed shows
+// The shed 503 is synthesized by the proxy and never reaches a downstream hop,
+// so its own-final seam is the only place it can be recorded. Without it a traced shed shows
 // an INVITE arriving, a reason, and nothing leaving.
 #[tokio::test]
 async fn a_shed_call_records_the_503_it_was_answered_with() {
@@ -263,8 +263,8 @@ async fn a_shed_call_records_the_503_it_was_answered_with() {
     let out = log.matching("kind=sip.out");
     assert_eq!(out.len(), 1, "the synthesized final is the call's only datagram out");
     assert!(out[0].contains("503 Service Unavailable"), "with its status line");
-    assert!(out[0].contains("Retry-After: 7"), "and the hints the caller acts on");
-    assert!(out[0].contains("proxy_overload_intake_age"), "and the Reason that explains it");
+    assert!(out[0].contains("Retry-After: 7"), "and the hint the caller acts on");
+    assert!(!out[0].contains("Reason:"), "the reason stays in the trace, off the wire");
 
     assert_eq!(ep.0.lock().expect("sent buffer").len(), 1, "nothing was forwarded downstream");
     assert_eq!(traces.active(), 0, "a refused initial INVITE closes the span at once");

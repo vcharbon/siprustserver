@@ -1,5 +1,6 @@
 //! The 503 a failed worker selection answers a new INVITE with, on the wire:
-//! the `Reason` text naming the failure and a `Retry-After` of at least 1 s.
+//! a `Retry-After` of at least 1 s and no `Reason` (the failure is named in
+//! the reject counter only).
 
 use crate::common;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common::spawn_proxy;
 use scenario_harness::Harness;
-use sip_message::header::{ParamValue, Reason, RetryAfter};
+use sip_message::header::RetryAfter;
 use sip_message::parser::custom::CustomParser;
 use sip_message::HeaderName;
 use sip_message::{SipMessage, SipParser};
@@ -104,8 +105,8 @@ async fn a_rate_cap_hint_of_zero_goes_on_the_wire_as_one_second() {
     assert_eq!(resp.status(), 503);
     let retry_after = resp.header::<RetryAfter>().expect("503 carries Retry-After").expect("reads");
     assert_eq!(retry_after.token(), "1", "a reject's Retry-After is floored at 1 s");
-    let reason = resp.header::<Reason>().expect("503 carries Reason").expect("reads");
-    assert_eq!(reason.param("text").and_then(ParamValue::as_str), Some("worker_rate_capped"));
+    assert!(resp.raw(HeaderName::Reason).next().is_none(), "503 carries no Reason");
+    assert_eq!(proxy.metrics.reject_count("worker_rate_capped"), 1);
 
     client.send_to(&ack_for(&resp), proxy.addr()).await.unwrap();
     let _ = h.finish().await;

@@ -47,7 +47,7 @@ use load_shed::{clamp01, Ewma, LoadSampler, TokenBucket};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmitDecision {
     Admit,
-    /// Rejected for `reason`, which names the `Reason` phrase, with a
+    /// Rejected for `reason`, which names the reject in counters and traces, with a
     /// `Retry-After` hint the wire floors at 1 s.
     Reject {
         reason: ShedReason,
@@ -62,7 +62,7 @@ impl AdmitDecision {
     }
 }
 
-/// Why the gate rejected: its `Reason` phrase and the reject's metric label.
+/// Why the gate rejected: the reject's metric label and trace reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShedReason {
     /// The smoothed intake reading (packet age at dequeue, normalized by
@@ -76,7 +76,7 @@ impl ShedReason {
     /// Every reason, in declaration order.
     pub const ALL: [ShedReason; 2] = [ShedReason::IntakeAge, ShedReason::Cps];
 
-    /// The `Reason` phrase and metric label.
+    /// The metric label and trace reason.
     pub const fn label(self) -> &'static str {
         match self {
             ShedReason::IntakeAge => "proxy_overload_intake_age",

@@ -2,6 +2,7 @@
 //! — no socket needed — so each case invokes it directly.
 
 use super::*;
+use std::net::SocketAddr;
 
 const WATERMARK: usize = 8;
 

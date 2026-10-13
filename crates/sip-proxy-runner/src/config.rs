@@ -58,6 +58,8 @@ pub struct ProxyConfig {
     pub intake_shed_pct: u64,
     /// `None`: the always-admit gate.
     pub self_gate: Option<ProxySelfGateConfig>,
+    /// The spread, seconds, added to a refusal's `Retry-After` base.
+    pub retry_after_jitter_sec: u32,
     pub resolver: ResolverConfig,
     pub prewarm: Vec<ProxyAddr>,
     pub drain_grace: Duration,
@@ -103,6 +105,7 @@ impl ProxyConfig {
         let observer = observer_overrides(&mut env, LoadObserverConfig::default());
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);
         let self_gate = self_gate(&mut env);
+        let retry_after_jitter_sec = env.int("PROXY_RETRY_AFTER_JITTER_SEC", 5, 0, 3600) as u32;
         let resolver = resolver(&mut env);
         let prewarm = prewarm(&mut env);
         let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 5000, 1, MAX_MS));
@@ -135,6 +138,7 @@ impl ProxyConfig {
             observer,
             intake_shed_pct,
             self_gate,
+            retry_after_jitter_sec,
             resolver,
             prewarm,
             drain_grace,

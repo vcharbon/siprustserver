@@ -4,7 +4,7 @@
 //! [`AdmitDecision`]; this suite pins the **glue** in `core/request` that turns
 //! a gate decision into the user-visible contract: a rejected NEW external
 //! new-dialog INVITE gets a `503 Service Unavailable` with `Retry-After: <n>` and
-//! `Reason: SIP;cause=503;text="<phrase>"`, while emergency / worker-outbound
+//! no `Reason` (the gate's reason stays in its counters), while emergency / worker-outbound
 //! new-dialog INVITEs BYPASS the gate (no 503) and increment the right bypass
 //! counter. The reply is observed exactly the way `transit_only.rs`'s
 //! `max_forwards_zero_returns_483` does — a bound client endpoint `recv()`ing the
@@ -19,7 +19,7 @@ use common::ProxySut;
 use load_shed::simulated;
 use scenario_harness::Harness;
 use sip_clock::Clock;
-use sip_message::header::{ParamValue, Reason, RetryAfter};
+use sip_message::header::RetryAfter;
 use sip_message::parser::custom::CustomParser;
 use sip_message::HeaderName;
 use sip_message::{SipMessage, SipParser};
@@ -111,12 +111,9 @@ async fn recv_response(client: &dyn sip_net::UdpEndpoint) -> sip_message::SipRes
 //
 // A force-reject gate makes EVERY external new-dialog INVITE shed. This pins the
 // self-gate reject branch of `core/request/route.rs`: RouteOutcome.decision==Reject,
-// the source gets a 503 with Retry-After=<gate value> and the exact Reason
-// header, AND the `reason.unwrap_or_else("proxy_overload_cps")` fallback fires
-// when the gate hands back a `None` reason.
+// the source gets a 503 with Retry-After=<gate value> and no Reason header.
 
-/// Gate that always rejects, with a configurable Reason/Retry-After (or `None`
-/// reason to exercise the request-path fallback).
+/// Gate that always rejects, with a configurable reason and Retry-After.
 struct ForceRejectGate {
     reason: ShedReason,
     retry_after_sec: u32,
@@ -138,13 +135,7 @@ impl ProxySelfGate for ForceRejectGate {
 
 /// Drive a single new-dialog external INVITE through a gate that rejects with the
 /// given (reason, retry) and assert the on-wire 503 the source receives.
-async fn assert_wire_503(
-    name: &str,
-    gate_reason: ShedReason,
-    retry: u32,
-    expect_retry_after: u32,
-    expect_reason_text: &str,
-) {
+async fn assert_wire_503(name: &str, gate_reason: ShedReason, retry: u32, expect_retry_after: u32) {
     let h = Harness::with_transit_delay(name, 0);
     let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
@@ -163,14 +154,7 @@ async fn assert_wire_503(
         expect_retry_after.to_string(),
         "503 must carry the gate's Retry-After, floored at 1 s"
     );
-    let reason = resp.header::<Reason>().expect("503 carries Reason").expect("reads");
-    assert_eq!(reason.token(), "SIP");
-    assert_eq!(reason.param("cause").and_then(ParamValue::as_str), Some("503"));
-    assert_eq!(
-        reason.param("text").and_then(ParamValue::as_str),
-        Some(expect_reason_text),
-        "503 must name the gate's rejection reason"
-    );
+    assert!(resp.raw(HeaderName::Reason).next().is_none(), "503 carries no Reason");
     assert_eq!(gate.tries.load(Ordering::SeqCst), 1, "the gate is consulted exactly once");
 
     // §17.1.1.3: ACK the shed 503 (same branch/CSeq as the INVITE, To echoed
@@ -203,34 +187,27 @@ Content-Length: 0\r\n\r\n",
 }
 
 #[tokio::test]
-async fn rejected_invite_returns_503_with_cps_reason_and_retry_after() {
-    assert_wire_503("self-gate-503-cps", ShedReason::Cps, 3, 3, "proxy_overload_cps").await;
+async fn a_cps_refusal_returns_503_with_retry_after_and_no_reason() {
+    assert_wire_503("self-gate-503-cps", ShedReason::Cps, 3, 3).await;
 }
 
 #[tokio::test]
-async fn rejected_invite_returns_503_with_elu_reason_and_retry_after() {
-    assert_wire_503(
-        "self-gate-503-intake-age",
-        ShedReason::IntakeAge,
-        1,
-        1,
-        "proxy_overload_intake_age",
-    )
-    .await;
+async fn an_intake_age_refusal_returns_503_with_retry_after_and_no_reason() {
+    assert_wire_503("self-gate-503-intake-age", ShedReason::IntakeAge, 1, 1).await;
 }
 
 /// A gate hint of 0 goes on the wire as 1: a `Retry-After` of 0 (RFC 3261
 /// §20.33) asks for no wait, which a reject must never invite.
 #[tokio::test]
 async fn a_gate_hint_of_zero_goes_on_the_wire_as_one_second() {
-    assert_wire_503("self-gate-503-zero", ShedReason::Cps, 0, 1, "proxy_overload_cps").await;
+    assert_wire_503("self-gate-503-zero", ShedReason::Cps, 0, 1).await;
 }
 
 // ── End-to-end through the REAL EluCpsGate (not a double) ────────────────────
 //
 // Pins that the real gate, wired into the proxy, produces the documented wire
-// 503 for BOTH rejection reasons — the CPS bucket draining and the ELU EWMA
-// crossing critical — so a Reason/Retry-After drift in either the gate or the
+// 503 for BOTH rejection reasons — the CPS bucket draining and the intake-age
+// EWMA crossing critical — so a Retry-After drift in either the gate or the
 // glue is caught together.
 
 #[tokio::test(start_paused = true)]
@@ -268,14 +245,11 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     }
     assert!(delivered, "the first (admitted) INVITE reaches bob");
 
-    // Second INVITE: bucket empty → 503 proxy_overload_cps, Retry-After 60.
+    // Second INVITE: bucket empty → 503, Retry-After 60, counted as CPS.
     client.send_to(&new_invite(ALICE, "z9hG4bK-shed", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
     assert_eq!(resp.status(), 503);
-    assert_eq!(
-        resp.raw(HeaderName::Reason).next(),
-        Some("SIP;cause=503;text=\"proxy_overload_cps\"")
-    );
+    assert_eq!(resp.raw(HeaderName::Reason).next(), None);
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("60"));
     assert_eq!(gate.metrics().rejected_cps_total, 1);
 
@@ -315,11 +289,8 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     client.send_to(&new_invite(ALICE, "z9hG4bK-elu", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
     assert_eq!(resp.status(), 503);
-    assert_eq!(
-        resp.raw(HeaderName::Reason).next(),
-        Some("SIP;cause=503;text=\"proxy_overload_intake_age\"")
-    );
-    // ELU rejection carries Retry-After: 1.
+    assert_eq!(resp.raw(HeaderName::Reason).next(), None);
+    // An intake-age rejection carries Retry-After: 1.
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("1"));
     assert_eq!(gate.metrics().rejected_intake_age_total, 1);
 

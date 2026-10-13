@@ -27,6 +27,16 @@ fn a_complete_boot_is_accepted() {
     let cfg = boot(&[]).expect("valid");
     assert_eq!(cfg.listen, "127.0.0.1:5060".parse().unwrap());
     assert_eq!(cfg.workers, WorkerSource::Static("w0@10.0.0.1:5060".into()));
+    assert_eq!(cfg.retry_after_jitter_sec, 5);
+}
+
+/// The refusal jitter takes 0..=3600 s; past it the boot is refused.
+#[test]
+fn the_retry_after_jitter_is_bounded() {
+    let cfg = boot(&[("PROXY_RETRY_AFTER_JITTER_SEC", "0")]).expect("0 turns the jitter off");
+    assert_eq!(cfg.retry_after_jitter_sec, 0);
+    let errors = boot(&[("PROXY_RETRY_AFTER_JITTER_SEC", "3601")]).expect_err("out of range");
+    assert!(errors.iter().any(|e| e.contains("PROXY_RETRY_AFTER_JITTER_SEC")), "{errors:?}");
 }
 
 // ── parse_ext_face_cidrs — dual-face boot rule ───────────────────────────

@@ -1,6 +1,7 @@
-//! Which requests are new calls, and the proxy-self gate (ELU/CPS admission)
-//! a new call meets: a refused one is answered 503 with Retry-After, an
-//! emergency call bypasses the gate.
+//! Which requests are new calls, and the proxy-self gate (intake-age/CPS
+//! admission) a new call meets: a refused one is answered 503 with
+//! Retry-After and no Reason, the same bytes for every copy; an emergency
+//! call bypasses the gate.
 //!
 //! A new call is an initial INVITE (no To-tag), first transmission only, that
 //! is not worker-outbound. On the external face an INVITE with a To-tag that
@@ -19,7 +20,6 @@ use crate::strategy::RouteParams;
 use crate::trace::emit;
 
 use super::super::ProxyCore;
-use super::reply::{extra_header, proxy_reason, reject_retry_after};
 use super::RouteOutcome;
 
 impl ProxyCore {
@@ -56,14 +56,10 @@ impl ProxyCore {
             return Ok(());
         };
         let reason = reason.label();
-        let extra = [
-            extra_header(reject_retry_after(retry_after_sec)),
-            extra_header(proxy_reason(503, reason)),
-        ];
-        // The shed fact precedes the 503 it explains: `reply` is itself an
+        // The shed fact precedes the 503 it explains: the refusal is itself an
         // emission site (the datagram it synthesizes).
         emit::shed(&self.traces, req.call_id().as_str(), self.now_ms() as i64, reason);
         // A closed set: the gate's `ShedReason` labels.
-        Err(self.reply_reject(req, src, 503, "Service Unavailable", &extra, reason).await)
+        Err(self.refuse_new(req, src, retry_after_sec, reason).await)
     }
 }

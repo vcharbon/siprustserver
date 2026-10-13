@@ -4,13 +4,14 @@
 //! It binds one UDP endpoint, runs a recv loop, parses each datagram, and
 //! dispatches to [`request`](self) / [`response`](self) handling. It owns the
 //! routing-policy seam ([`RoutingStrategy`]), the worker registry, the
-//! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for the To-tags of the finals it
-//! generates itself, a [`Clock`], metrics, a logger, and the self-gate
-//! (ELU/CPS admission). A hop thaws the received
+//! `(Call-ID|CSeq#)` LRU, the [`Refusals`] that answer the requests it refuses
+//! itself, a [`Clock`], metrics, a logger, and the self-gate (intake-age/CPS
+//! admission). A hop thaws the received
 //! message into a draft, touches only the routing headers, and freezes it to
 //! the wire bytes it forwards — every untouched line is memcpy'd, never
-//! re-parsed (ADR-0025).
+//! re-parsed (ADR-0025). Its defaults live in [`ProxyCoreBuilder`].
 
+mod builder;
 #[cfg(test)]
 mod dual_face_tests;
 mod face_pick;
@@ -27,7 +28,6 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::UdpEndpoint;
-use sip_txn::IdGen;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
@@ -35,11 +35,13 @@ use crate::face::FaceCidrs;
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
 use crate::observability::{ProxyMetrics, UdpShardStats};
+use crate::refusals::Refusals;
 use crate::registry::WorkerRegistry;
-use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
-use crate::self_gate::{AlwaysAdmitGate, IntakeAgeRecorder, ProxySelfGate};
+use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig};
+use crate::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 use crate::trace::ProxyTraces;
+pub use builder::ProxyCoreBuilder;
 use face_pick::FacePickSendEndpoint;
 
 /// The per-peer bucket a failed send belongs in: an oversize datagram accuses
@@ -95,7 +97,8 @@ pub(crate) struct ProxyCoreParts {
     pub strategy: Arc<dyn RoutingStrategy>,
     pub registry: Arc<dyn WorkerRegistry>,
     pub cancel_lru: Arc<CancelBranchLru>,
-    pub id_gen: Arc<IdGen>,
+    /// The answers to requests the proxy refuses itself, shared by every shard.
+    pub refusals: Arc<Refusals>,
     pub clock: Clock,
     pub metrics: Arc<ProxyMetrics>,
     pub self_gate: Arc<dyn ProxySelfGate>,
@@ -130,7 +133,7 @@ pub struct ProxyCore {
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
     cancel_lru: Arc<CancelBranchLru>,
-    id_gen: Arc<IdGen>,
+    refusals: Arc<Refusals>,
     clock: Clock,
     metrics: Arc<ProxyMetrics>,
     self_gate: Arc<dyn ProxySelfGate>,
@@ -177,7 +180,7 @@ impl ProxyCore {
             strategy: parts.strategy,
             registry: parts.registry,
             cancel_lru: parts.cancel_lru,
-            id_gen: parts.id_gen,
+            refusals: parts.refusals,
             clock: parts.clock,
             metrics: parts.metrics,
             self_gate: parts.self_gate,
@@ -429,145 +432,6 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
-    }
-}
-
-/// Convenience builder for the common all-defaults wiring (AlwaysAdmitGate +
-/// fresh metrics + entropy IdGen + system clock).
-pub struct ProxyCoreBuilder {
-    advertised: ProxyAddr,
-    external: Option<ExternalFaceParts>,
-    strategy: Arc<dyn RoutingStrategy>,
-    registry: Arc<dyn WorkerRegistry>,
-    cancel_lru: Option<Arc<CancelBranchLru>>,
-    id_gen: Option<Arc<IdGen>>,
-    clock: Option<Clock>,
-    metrics: Option<Arc<ProxyMetrics>>,
-    self_gate: Option<Arc<dyn ProxySelfGate>>,
-    intake_age: Option<IntakeAgeRecorder>,
-    resolver: Option<Arc<dyn HostResolver>>,
-    resolver_cfg: Option<ResolverConfig>,
-    shard: usize,
-    traces: Option<Arc<ProxyTraces>>,
-    pulse: Option<Arc<ShardPulse>>,
-}
-
-impl ProxyCoreBuilder {
-    pub fn new(
-        advertised: ProxyAddr,
-        strategy: Arc<dyn RoutingStrategy>,
-        registry: Arc<dyn WorkerRegistry>,
-    ) -> Self {
-        Self {
-            advertised,
-            external: None,
-            strategy,
-            registry,
-            cancel_lru: None,
-            id_gen: None,
-            clock: None,
-            metrics: None,
-            self_gate: None,
-            intake_age: None,
-            resolver: None,
-            resolver_cfg: None,
-            shard: 0,
-            traces: None,
-            pulse: None,
-        }
-    }
-
-    pub fn clock(mut self, clock: Clock) -> Self {
-        self.clock = Some(clock);
-        self
-    }
-    /// Enable **dual-face mode**: a second socket on the external (caller)
-    /// plane with its own advertise, and the internal CIDR list that picks the
-    /// egress face per destination IP. Absent → single-face.
-    pub fn external_face(mut self, parts: ExternalFaceParts) -> Self {
-        self.external = Some(parts);
-        self
-    }
-    pub fn id_gen(mut self, id_gen: Arc<IdGen>) -> Self {
-        self.id_gen = Some(id_gen);
-        self
-    }
-    pub fn metrics(mut self, metrics: Arc<ProxyMetrics>) -> Self {
-        self.metrics = Some(metrics);
-        self
-    }
-    pub fn self_gate(mut self, gate: Arc<dyn ProxySelfGate>) -> Self {
-        self.self_gate = Some(gate);
-        self
-    }
-    /// The shared max-dequeue-age recorder feeding the self-gate's ELU arm.
-    /// Pass ONE clone to every recv-shard core so the window max spans the
-    /// whole intake; defaults to a private (unread) recorder.
-    pub fn intake_age(mut self, recorder: IntakeAgeRecorder) -> Self {
-        self.intake_age = Some(recorder);
-        self
-    }
-    pub fn cancel_lru(mut self, lru: Arc<CancelBranchLru>) -> Self {
-        self.cancel_lru = Some(lru);
-        self
-    }
-    pub fn resolver(mut self, resolver: Arc<dyn HostResolver>) -> Self {
-        self.resolver = Some(resolver);
-        self
-    }
-    /// Cache TTLs / caps for the named-target resolver (defaults:
-    /// [`ResolverConfig::default`] — positive 60 s, negative 5 s). The runner
-    /// env-exposes the TTLs as `PROXY_RESOLVER_POSITIVE_TTL_MS` /
-    /// `PROXY_RESOLVER_NEGATIVE_TTL_MS`.
-    pub fn resolver_config(mut self, cfg: ResolverConfig) -> Self {
-        self.resolver_cfg = Some(cfg);
-        self
-    }
-    /// Recv-shard index (the endpoint-stats slot). Defaults to 0; the sharded
-    /// runner numbers its cores 0..N.
-    pub fn shard(mut self, shard: usize) -> Self {
-        self.shard = shard;
-        self
-    }
-    /// The per-call trace registry (ADR-0026). Pass ONE clone to every recv
-    /// shard so the active-trace cap bounds the process; the default is an
-    /// environment-read registry, inert without an OTLP endpoint.
-    pub fn traces(mut self, traces: Arc<ProxyTraces>) -> Self {
-        self.traces = Some(traces);
-        self
-    }
-    /// The liveness stamps ([`ShardPulse`]) — ONE across every recv shard,
-    /// sized to the shard count, read by the runner's readiness gate. The
-    /// default is a private one nobody reads.
-    pub fn pulse(mut self, pulse: Arc<ShardPulse>) -> Self {
-        self.pulse = Some(pulse);
-        self
-    }
-
-    /// Finish into a [`ProxyCore`] bound on `endpoint`.
-    pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
-        let clock = self.clock.unwrap_or_else(Clock::system);
-        let traces = self.traces.unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
-        ProxyCore::new(ProxyCoreParts {
-            endpoint,
-            advertised: self.advertised,
-            external: self.external,
-            strategy: self.strategy,
-            registry: self.registry,
-            cancel_lru: self
-                .cancel_lru
-                .unwrap_or_else(|| Arc::new(CancelBranchLru::with_clock(clock.clone()))),
-            id_gen: self.id_gen.unwrap_or_else(|| Arc::new(IdGen::from_entropy())),
-            clock,
-            metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
-            self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
-            intake_age: self.intake_age.unwrap_or_default(),
-            resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
-            resolver_cfg: self.resolver_cfg.unwrap_or_default(),
-            shard: self.shard,
-            traces,
-            pulse: self.pulse.unwrap_or_else(|| Arc::new(ShardPulse::new(self.shard + 1))),
-        })
     }
 }
 

@@ -177,6 +177,16 @@ impl ProxyCore {
             rtx_key.as_ref().and_then(|k| self.cancel_lru.lookup(k))
         };
 
+        // ── A copy of a refused request (§8.2.7) ────────────────────────────
+        // It draws the refusal's bytes and is neither counted as a new call
+        // nor judged again: a gate or a cap that cleared since must not admit
+        // a transaction this hop already refused.
+        if rtx_hit.is_none() && method != Method::Ack && method != Method::Cancel {
+            if let Some(repeated) = self.repeat_refusal(req, src).await {
+                return repeated;
+            }
+        }
+
         // A new call = an initial dialog-creating INVITE (no To-tag yet), first
         // transmission only.
         let to = req.to();
