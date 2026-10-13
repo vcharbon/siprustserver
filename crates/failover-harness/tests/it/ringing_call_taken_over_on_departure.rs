@@ -25,8 +25,8 @@ use crate::departure_support::{
 };
 use crate::inflight_resend::{reboot_and_reclaim, settle_to_one_cdr};
 
-const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
-const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+pub(crate) const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+pub(crate) const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
@@ -36,12 +36,13 @@ const NO_ANSWER: Duration = Duration::from_secs(10);
 /// How late after its deadline the caller's final may arrive.
 const DEADLINE_SLACK_MS: i64 = 1_000;
 
-/// Every call is routed to bob with a ring deadline and no failover.
-fn ring_deadline_decision() -> Arc<dyn CallDecisionEngine> {
+/// Every call is routed to bob with the ring deadline `no_answer` and no
+/// failover.
+fn ring_deadline_decision(no_answer: Duration) -> Arc<dyn CallDecisionEngine> {
     let engine = ScriptedDecisionEngine::builder()
-        .fallback(|_| {
+        .fallback(move |_| {
             let mut r = route_to("127.0.0.1", 5070);
-            r.no_answer_ms = Some(NO_ANSWER.as_millis() as i64);
+            r.no_answer_ms = Some(no_answer.as_millis() as i64);
             NewCallResponse::Route(r)
         })
         .build();
@@ -50,7 +51,7 @@ fn ring_deadline_decision() -> Arc<dyn CallDecisionEngine> {
 
 /// What the callee does once the INVITE reaches it.
 #[derive(Clone, Copy)]
-enum Callee {
+pub(crate) enum Callee {
     /// Nothing at all.
     Silent,
     /// A 100 Trying, then nothing.
@@ -61,25 +62,32 @@ enum Callee {
 
 /// The cluster with one established call and one ringing call, both placed on
 /// `b1` and both replicated to `b2`.
-struct Placed {
-    fh: FailoverHarness,
-    alice: Agent,
-    bob: Agent,
-    proxy: ProxySut,
-    w_b1: ReplicatedB2buaSut,
-    w_b2: ReplicatedB2buaSut,
-    quiet: scenario_harness::agent::Dialog,
-    quiet_ref: String,
-    ringing: ClientInvite,
-    at_bob: ServerTxn,
-    ringing_ref: String,
+pub(crate) struct Placed {
+    pub(crate) fh: FailoverHarness,
+    pub(crate) alice: Agent,
+    pub(crate) bob: Agent,
+    pub(crate) proxy: ProxySut,
+    pub(crate) w_b1: ReplicatedB2buaSut,
+    pub(crate) w_b2: ReplicatedB2buaSut,
+    pub(crate) quiet: scenario_harness::agent::Dialog,
+    pub(crate) quiet_ref: String,
+    pub(crate) ringing: ClientInvite,
+    pub(crate) at_bob: ServerTxn,
+    pub(crate) ringing_ref: String,
+    /// The route's ring deadline.
+    pub(crate) no_answer: Duration,
 }
 
-async fn place(name: &str, callee: Callee) -> Placed {
+pub(crate) async fn place(name: &str, callee: Callee) -> Placed {
+    place_ringing_for(name, callee, NO_ANSWER).await
+}
+
+/// [`place`] with the route's ring deadline at `no_answer`.
+pub(crate) async fn place_ringing_for(name: &str, callee: Callee, no_answer: Duration) -> Placed {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, ring_deadline_decision()).await;
+    let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, ring_deadline_decision(no_answer)).await;
 
     let quiet_cid = call_id_placed_on("b1", "quiet");
     let mut call = alice
@@ -118,17 +126,30 @@ async fn place(name: &str, callee: Callee) -> Placed {
     assert_eq!(refs.len(), 2, "both calls replicated to b2");
     refs.sort_by_key(|r| !r.contains("ringing"));
     let (ringing_ref, quiet_ref) = (refs[0].clone(), refs[1].clone());
-    Placed { fh, alice, bob, proxy, w_b1, w_b2, quiet, quiet_ref, ringing, at_bob, ringing_ref }
+    Placed {
+        fh,
+        alice,
+        bob,
+        proxy,
+        w_b1,
+        w_b2,
+        quiet,
+        quiet_ref,
+        ringing,
+        at_bob,
+        ringing_ref,
+        no_answer,
+    }
 }
 
-/// The ring deadline of `b2`'s replica of `call_ref`: the one it carries, or,
+/// The ring deadline of `b2`'s replica of the ringing call: the one it carries, or,
 /// its callee not having rung, the one a takeover presumes from its INVITE.
-async fn replicated_deadline(b2: &ReplicatedB2buaSut, call_ref: &str) -> i64 {
-    let body = b2.get(PartitionRole::Backup, "b1", call_ref).await.expect("the replica");
+async fn replicated_deadline(p: &Placed) -> i64 {
+    let body = p.w_b2.get(PartitionRole::Backup, "b1", &p.ringing_ref).await.expect("the replica");
     let call = MsgpackCodec::new().decode(&body).expect("the replica decodes");
     let presumed = || {
         let invite = call.b_legs[0].outbound_invite.as_ref().expect("the callee was dialled");
-        invite.sent_at_ms + NO_ANSWER.as_millis() as i64
+        invite.sent_at_ms + p.no_answer.as_millis() as i64
     };
     call.timers
         .iter()
@@ -145,8 +166,8 @@ async fn resent_invite(p: &Placed) {
 
 /// The departure of `b1` announced: `b2` takes the ringing call over, and the
 /// established one stays where it is. Returns the ring deadline.
-async fn depart(p: &mut Placed) -> i64 {
-    let deadline = replicated_deadline(&p.w_b2, &p.ringing_ref).await;
+pub(crate) async fn depart(p: &mut Placed) -> i64 {
+    let deadline = replicated_deadline(p).await;
     let before = kill_announced(&mut p.fh, &mut p.w_b1, &p.w_b2, "b1", &p.proxy).await;
     assert_eq!(
         p.w_b2.metrics().repl_takeover_hydrated_total(),
@@ -159,7 +180,7 @@ async fn depart(p: &mut Placed) -> i64 {
 }
 
 /// Run the clock to just before `deadline`, asserting the caller has no final.
-async fn ring_until(p: &Placed, deadline: i64) {
+pub(crate) async fn ring_until(p: &Placed, deadline: i64) {
     let wait = deadline - p.fh.now_ms() - 500;
     p.fh.advance(Duration::from_millis(wait.max(0) as u64)).await;
     while let Some(msg) = p.alice.take_queued().await {
@@ -169,7 +190,7 @@ async fn ring_until(p: &Placed, deadline: i64) {
 }
 
 /// The caller's 480, at the deadline.
-async fn final_at(p: &mut Placed, deadline: i64) {
+pub(crate) async fn final_at(p: &mut Placed, deadline: i64) {
     p.ringing.expect(480).await;
     let late = p.fh.now_ms() - deadline;
     assert!(
@@ -249,118 +270,4 @@ async fn a_call_whose_callee_is_silent_ends_at_its_replicated_deadline() {
     p.bob.receive_absorbing("ACK", &["INVITE"]).await;
     p.bob.receive_absorbing("BYE", &["INVITE"]).await.respond(200, "OK").await;
     finish(p).await;
-}
-
-/// The workers that sent `prefix` toward `to`, by source address.
-fn senders(p: &Placed, to: std::net::SocketAddr, prefix: &[u8]) -> std::collections::HashSet<u16> {
-    let proxy = p.proxy.addr();
-    p.fh.sip_entries()
-        .iter()
-        .filter(|e| e.to == proxy && e.from != to && e.raw.starts_with(prefix))
-        .map(|e| e.from.port())
-        .collect()
-}
-
-/// The departed node returns, reclaims the ringing call from its own record,
-/// and becomes ready well before the call's deadline.
-async fn return_before_deadline(p: &mut Placed) {
-    p.fh.mark("b1", None, "reboot", "restart empty, higher gen, new pod IP");
-    let new_addr = p.w_b1.reboot().await;
-    p.proxy.set_address("b1", new_addr);
-    p.fh.note_worker_rebound("b1", new_addr);
-    p.w_b2.simulate_peer_added("b1");
-    for _ in 0..40 {
-        p.fh.advance(Duration::from_millis(250)).await;
-        if p.w_b1.is_ready() {
-            break;
-        }
-    }
-    assert!(p.w_b1.is_ready(), "the returning node became ready before the deadline");
-    p.proxy.set_health("b1", failover_harness::WorkerHealth::Alive);
-    assert!(p.w_b1.serves(&p.ringing_ref), "the returning node serves the call it reclaimed");
-}
-
-/// The departed node returns before the ringing call's deadline and reclaims
-/// it while the backup's copy is still live: neither copy has written since
-/// the takeover, so the version vector shows the reclaimed record nothing of
-/// the other, and at the deadline both end the call — each node CANCELs the
-/// callee and refuses the caller 480 (ADR-0047, residual). The callee's 487
-/// to the CANCELled INVITE reaches neither copy and is never ACKed; the call
-/// still settles to one CDR.
-#[tokio::test(start_paused = true)]
-async fn a_ringing_call_whose_node_returns_before_its_deadline_is_ended_by_both_copies() {
-    let mut p = place("ringing-call-node-returns", Callee::Ringing).await;
-    // What the two copies put on the wire from the departure is what this cell
-    // measures.
-    p.fh.accept_rfc_deviations_from_now(
-        "rung-byte-identical",
-        "two live copies send the same CANCEL from two addresses",
-    );
-    p.fh.accept_rfc_deviations_from_now(
-        "unacked-invite-non-2xx-final",
-        "the callee's 487 reaches neither copy's transaction",
-    );
-    let deadline = depart(&mut p).await;
-    return_before_deadline(&mut p).await;
-    assert!(p.w_b2.serves(&p.ringing_ref), "and the backup's copy is still live");
-
-    ring_until(&p, deadline).await;
-    p.fh.advance(Duration::from_millis(600)).await;
-    final_at(&mut p, deadline).await;
-    p.bob.receive("CANCEL").await.respond(200, "OK").await;
-    p.at_bob.respond(487, "Request Terminated").await;
-    p.fh.advance(Duration::from_secs(40)).await;
-    p.bob.drain_expecting(Duration::from_millis(100), &["CANCEL"]).await;
-    assert_eq!(senders(&p, p.bob.addr(), b"CANCEL").len(), 2, "both copies CANCEL the callee");
-    assert_eq!(senders(&p, p.alice.addr(), b"SIP/2.0 480").len(), 2, "both refuse the caller");
-
-    let mut bye = p.quiet.bye().await;
-    p.bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-    p.fh.advance(Duration::from_secs(60)).await;
-    for call_ref in [&p.ringing_ref, &p.quiet_ref] {
-        settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
-    }
-    drop(p.proxy);
-}
-
-/// The departed node returns while the call still rings and reclaims it; the
-/// callee then answers. The 200 reaches the returned node, which relays it, and
-/// the caller ACKs: the call is answered, and the departure's takeover copy
-/// stands down. The caller gets exactly one final, the 200 — no 480 at the
-/// replicated deadline — the callee no CANCEL, and the call settles to one CDR.
-#[tokio::test(start_paused = true)]
-async fn a_ringing_call_whose_node_returns_and_is_then_answered_gets_no_final_but_its_200() {
-    let mut p = place("ringing-call-node-returns-answered", Callee::Ringing).await;
-    let deadline = depart(&mut p).await;
-    return_before_deadline(&mut p).await;
-
-    p.at_bob.respond(200, "OK").with_sdp(ANSWER).await;
-    p.ringing.expect(200).await;
-    let mut answered = p.ringing.ack().await;
-    p.bob.receive("ACK").await;
-
-    let past = deadline - p.fh.now_ms() + 5_000;
-    p.fh.advance(Duration::from_millis(past.max(0) as u64)).await;
-    assert!(
-        senders(&p, p.alice.addr(), b"SIP/2.0 480").is_empty(),
-        "no copy refuses the answered call",
-    );
-    assert!(senders(&p, p.bob.addr(), b"CANCEL").is_empty(), "no copy CANCELs the callee");
-    while let Some(msg) = p.alice.take_queued().await {
-        let final_ = matches!(&msg, sip_message::SipMessage::Response(r) if r.status() >= 300);
-        assert!(!final_, "the caller gets no final after its 200: {msg:?}");
-    }
-
-    let mut bye = answered.bye().await;
-    p.bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-    let mut quiet_bye = p.quiet.bye().await;
-    p.bob.receive("BYE").await.respond(200, "OK").await;
-    quiet_bye.expect(200).await;
-    p.fh.advance(Duration::from_secs(60)).await;
-    for call_ref in [&p.ringing_ref, &p.quiet_ref] {
-        settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
-    }
-    drop(p.proxy);
 }
