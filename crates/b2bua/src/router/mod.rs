@@ -145,7 +145,7 @@ pub struct RouterCtx {
     pub wire_faults: crate::wire_faults::WireFaults,
     pub txn: TransactionLayer,
     /// The router loop's pulse: stamped per turn, and per call by a turn that
-    /// works through many ([`reclaim::reclaim_all`]).
+    /// works through many (the bulk reboot reclaim).
     pub router_pulse: Arc<sip_txn::LoopPulse>,
     pub timers: TimerService,
     pub(crate) dispatcher: PerCallDispatcher<turn::Turn>,
