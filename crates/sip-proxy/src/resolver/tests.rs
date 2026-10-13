@@ -150,20 +150,65 @@ async fn positive_entry_expires_and_picks_up_new_address() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn concurrent_sends_to_same_name_are_single_flight() {
+async fn concurrent_sends_to_same_name_are_single_flight_and_bounded() {
     let resolver = Arc::new(FakeResolver::slow(dst(), Duration::from_secs(1)));
-    let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
+    let cfg = ResolverConfig { max_waiting_per_name: 2, ..ResolverConfig::default() };
+    let (fwd, ep, metrics) = forwarder(resolver.clone(), cfg);
     let target = ProxyAddr::new("uas.example", 5060);
 
     fwd.send(b"pkt1", &target).await;
-    fwd.send(b"pkt2", &target).await; // races the in-flight resolve → dropped
+    fwd.send(b"pkt2", &target).await; // waits on the in-flight resolve
+    fwd.send(b"pkt3", &target).await; // past the per-name bound → dropped
     assert_eq!(metrics.named_send_count("dropped_in_flight"), 1);
     tokio::task::yield_now().await; // let the resolve task start (it parks at its delay)
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "single-flight: one lookup per name");
 
     tokio::time::advance(Duration::from_millis(1_000)).await;
     settle().await;
-    assert_eq!(ep.sent.lock().unwrap().len(), 1, "the claiming packet is sent after resolve");
+    assert_eq!(ep.sent.lock().unwrap().len(), 2, "the held packets are sent after resolve");
+}
+
+/// A packet that races the resolve of its name waits for it and leaves after
+/// the packet that started it, to the same address. Neither a 2xx ACK nor a
+/// non-INVITE response is retransmitted, so a drop here would be a loss.
+#[tokio::test(start_paused = true)]
+async fn a_packet_racing_a_resolve_waits_for_it_and_follows_in_order() {
+    let resolver = Arc::new(FakeResolver::slow(dst(), Duration::from_secs(1)));
+    let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
+    let target = ProxyAddr::new("uas.example", 5060);
+
+    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt2", &target).await;
+    tokio::task::yield_now().await; // the lookup starts, parked at its delay
+    tokio::time::advance(Duration::from_millis(1_000)).await;
+    settle().await;
+
+    let sent = ep.sent.lock().unwrap().clone();
+    assert_eq!(sent, vec![(b"pkt1".to_vec(), dst()), (b"pkt2".to_vec(), dst())]);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "one lookup for both");
+    assert_eq!(metrics.named_send_count("resolved"), 2);
+    assert_eq!(metrics.named_send_count("dropped_in_flight"), 0);
+}
+
+/// Packets waiting on a resolve that fails are failed with it, each counted.
+#[tokio::test(start_paused = true)]
+async fn packets_waiting_on_a_failed_resolve_are_each_counted_failed() {
+    let resolver = Arc::new(FakeResolver {
+        calls: AtomicU64::new(0),
+        delay: Duration::from_secs(1),
+        answer: Vec::new(),
+    });
+    let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
+    let target = ProxyAddr::new("gone.example", 5060);
+
+    fwd.send(b"pkt1", &target).await;
+    fwd.send(b"pkt2", &target).await;
+    tokio::task::yield_now().await; // the lookup starts, parked at its delay
+    tokio::time::advance(Duration::from_millis(1_000)).await;
+    settle().await;
+
+    assert!(ep.sent.lock().unwrap().is_empty());
+    assert_eq!(metrics.named_send_count("resolve_failed"), 2, "both packets fail, counted");
 }
 
 #[tokio::test(start_paused = true)]
@@ -193,9 +238,10 @@ async fn a_lookup_past_its_bound_drops_the_packet_and_never_sends_it_late() {
 
     fwd.send(b"pkt1", &target).await;
     tokio::task::yield_now().await; // the lookup starts, its bound armed at 0
+    fwd.send(b"pkt1-copy", &target).await; // waits on that lookup
     tokio::time::advance(Duration::from_millis(2_000)).await;
     settle().await;
-    assert_eq!(metrics.named_send_count("lookup_timed_out"), 1, "dropped at the bound");
+    assert_eq!(metrics.named_send_count("lookup_timed_out"), 2, "both dropped at the bound");
     fwd.send(b"pkt2", &target).await;
     assert_eq!(metrics.named_send_count("dropped_negative"), 1, "the negative entry holds");
 

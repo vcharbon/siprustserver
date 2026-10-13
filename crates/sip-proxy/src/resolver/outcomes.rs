@@ -6,6 +6,8 @@ pub(crate) mod outcome {
     pub const RESOLVED: &str = "resolved";
     pub const RESOLVE_FAILED: &str = "resolve_failed";
     pub const DROPPED_NEGATIVE: &str = "dropped_negative";
+    /// No resolve could hold the packet: its name's wait is full, the
+    /// in-flight cap is reached, or its name's lookup is past its bound.
     pub const DROPPED_IN_FLIGHT: &str = "dropped_in_flight";
     pub const LOOKUP_TIMED_OUT: &str = "lookup_timed_out";
     /// Every outcome.

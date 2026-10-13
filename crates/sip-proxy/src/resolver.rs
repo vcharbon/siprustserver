@@ -38,8 +38,13 @@
 //!   a single-face proxy, ADR-0048) can steer arbitrary R-URI hostnames into
 //!   resolution — uncapped, each distinct name would be a permanent map entry.
 //!
-//! Packets that race an in-flight resolve for the same name are dropped (and
-//! counted).
+//! A packet that races an in-flight resolve for its name waits for it, behind
+//! the packets already waiting, and leaves in arrival order to the address the
+//! resolve found: neither a 2xx ACK nor a non-INVITE response is retransmitted,
+//! so a drop here would be a loss. The wait is bounded per name
+//! (`max_waiting_per_name`); a packet past it, or one racing a lookup already
+//! past its bound, is dropped (`dropped_in_flight`). Packets waiting on a
+//! resolve that fails are each counted under its outcome.
 //!
 //! Cold-cache latency is attacked from three sides, so the
 //! FIRST b-leg forward after a deploy / CoreDNS restart / TTL expiry is
@@ -67,6 +72,7 @@
 //! clobbers the still-valid positive entry (it keeps serving until its TTL)
 //! and never stores a negative entry — it just retries at the same cadence.
 
+mod cache;
 mod lookup;
 mod outcomes;
 
@@ -81,6 +87,7 @@ use sip_net::UdpEndpoint;
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
 
+use cache::{CacheLookup, NameCache};
 #[cfg(test)]
 use lookup::{resolution_candidates, resolve_first};
 pub use lookup::{HostResolver, SystemResolver};
@@ -100,6 +107,9 @@ pub struct ResolverConfig {
     pub max_in_flight: usize,
     /// The bound on one name lookup (see the module doc).
     pub lookup_timeout_ms: u64,
+    /// The most packets held on one name's in-flight resolve, the one that
+    /// started it included.
+    pub max_waiting_per_name: usize,
 }
 
 impl Default for ResolverConfig {
@@ -110,6 +120,7 @@ impl Default for ResolverConfig {
             max_entries: 4096,
             max_in_flight: 64,
             lookup_timeout_ms: 2_000,
+            max_waiting_per_name: 32,
         }
     }
 }
@@ -125,99 +136,14 @@ impl ResolverConfig {
     }
 }
 
-/// One cached resolution outcome. `None` = negative entry (lookup failed).
-struct CacheEntry {
-    outcome: Option<SocketAddr>,
-    expires_at_ms: u64,
-    /// Set on every cache Hit; the proactive refresh reads-and-clears it to
-    /// decide refresh-vs-idle-stop (see the module doc).
-    used_since_refresh: bool,
-}
-
-enum CacheLookup {
-    Hit(SocketAddr),
-    NegativeHit,
-    Miss,
-}
-
-/// Bounded, two-sided-TTL name cache. Lock-only (`std::sync::Mutex`, never
-/// held across an await).
-struct NameCache {
-    entries: Mutex<HashMap<String, CacheEntry>>,
-    clock: Clock,
-    cfg: ResolverConfig,
-}
-
-impl NameCache {
-    fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
-    }
-
-    fn lookup(&self, key: &str) -> CacheLookup {
-        let now = self.now_ms();
-        let mut entries = self.entries.lock().unwrap();
-        match entries.get_mut(key) {
-            Some(e) if e.expires_at_ms <= now => {
-                entries.remove(key);
-                CacheLookup::Miss
-            }
-            Some(e) => match e.outcome {
-                Some(addr) => {
-                    e.used_since_refresh = true;
-                    CacheLookup::Hit(addr)
-                }
-                None => CacheLookup::NegativeHit,
-            },
-            None => CacheLookup::Miss,
-        }
-    }
-
-    /// Read-and-clear the used-since-refresh flag for the refresh decision.
-    /// `None` when there is no live positive entry (missing, expired, or
-    /// negative) — the refresh treats that like "unused".
-    fn take_used(&self, key: &str) -> Option<bool> {
-        let now = self.now_ms();
-        let mut entries = self.entries.lock().unwrap();
-        let e = entries.get_mut(key)?;
-        if e.expires_at_ms <= now || e.outcome.is_none() {
-            return None;
-        }
-        let used = e.used_since_refresh;
-        e.used_since_refresh = false;
-        Some(used)
-    }
-
-    /// Store an outcome (positive or negative TTL by kind); returns the new
-    /// size for the gauge. At the cap, expired entries are reclaimed first,
-    /// then an arbitrary live entry is evicted — new names must always be able
-    /// to enter, else a name-flood would pin the cache against real targets.
-    fn store(&self, key: &str, outcome: Option<SocketAddr>) -> usize {
-        let now = self.now_ms();
-        let ttl =
-            if outcome.is_some() { self.cfg.positive_ttl_ms } else { self.cfg.negative_ttl_ms };
-        let mut entries = self.entries.lock().unwrap();
-        if entries.len() >= self.cfg.max_entries && !entries.contains_key(key) {
-            entries.retain(|_, e| e.expires_at_ms > now);
-            if entries.len() >= self.cfg.max_entries {
-                if let Some(victim) = entries.keys().next().cloned() {
-                    entries.remove(&victim);
-                }
-            }
-        }
-        entries.insert(
-            key.to_string(),
-            CacheEntry { outcome, expires_at_ms: now + ttl, used_since_refresh: false },
-        );
-        entries.len()
-    }
-}
-
 struct Inner {
     endpoint: Arc<dyn UdpEndpoint>,
     resolver: Arc<dyn HostResolver>,
     cache: NameCache,
-    /// Names with a resolve task currently running — the single-flight set.
-    in_flight: Mutex<HashSet<String>>,
+    /// Names with a resolve task currently running — the single-flight set —
+    /// each with the packets waiting on it in arrival order; `None` once the
+    /// lookup passed its bound, when no packet waits on it any more.
+    in_flight: Mutex<HashMap<String, Option<Vec<Vec<u8>>>>>,
     /// Names pinned by [`NamedForwarder::prewarm`] — refreshed every cycle
     /// regardless of use (permanently warm).
     pinned: Mutex<HashSet<String>>,
@@ -236,7 +162,67 @@ struct Inner {
     resolve_failures: Arc<observe::WaveSet>,
 }
 
+/// What a packet missing the cache does about its name's resolve.
+enum Join {
+    /// It starts the resolve, and waits on it first.
+    Claimed,
+    /// It waits on the resolve already running.
+    Waiting,
+    /// No resolve can take it.
+    Refused,
+}
+
 impl Inner {
+    /// Join `bytes` (a packet for the name `key`, or a refresh with none) to
+    /// that name's resolve: claim one when none runs and the in-flight cap
+    /// allows, else wait on the running one within the per-name bound.
+    fn join(&self, key: &str, bytes: Option<&[u8]>) -> Join {
+        let mut in_flight = self.in_flight.lock().unwrap();
+        let at_cap = in_flight.len() >= self.cache.cfg.max_in_flight;
+        match in_flight.get_mut(key) {
+            Some(Some(waiting)) if bytes.is_some() => {
+                if waiting.len() >= self.cache.cfg.max_waiting_per_name {
+                    return Join::Refused;
+                }
+                waiting.extend(bytes.map(<[u8]>::to_vec));
+                Join::Waiting
+            }
+            Some(_) => Join::Refused,
+            None if at_cap => Join::Refused,
+            None => {
+                let first = bytes.map(<[u8]>::to_vec).into_iter().collect();
+                in_flight.insert(key.to_string(), Some(first));
+                Join::Claimed
+            }
+        }
+    }
+
+    /// Fail the packets waiting on `key`'s lookup, which passed its bound,
+    /// each counted `lookup_timed_out`; the slot stays taken until the lookup
+    /// returns ([`release`](Self::release)).
+    fn time_out_waiting(&self, key: &str) {
+        let waiting = self.in_flight.lock().unwrap().get_mut(key).and_then(Option::take);
+        for _ in waiting.unwrap_or_default() {
+            self.metrics.record_named_send(outcome::LOOKUP_TIMED_OUT);
+        }
+    }
+
+    /// Free `key`'s slot and settle the packets waiting on it: each is sent to
+    /// `resolved` in arrival order, or counted `resolve_failed` without one.
+    async fn release(&self, key: &str, resolved: Option<SocketAddr>) {
+        let waiting = self.in_flight.lock().unwrap().remove(key).flatten();
+        for bytes in waiting.unwrap_or_default() {
+            let Some(dst) = resolved else {
+                self.metrics.record_named_send(outcome::RESOLVE_FAILED);
+                continue;
+            };
+            self.metrics.record_named_send(outcome::RESOLVED);
+            if self.endpoint.send_to(&bytes, dst).await.is_err() {
+                self.metrics.record_send_failure();
+            }
+        }
+    }
+
     /// When a lookup starting now reaches its bound.
     fn lookup_deadline(&self) -> tokio::time::Instant {
         tokio::time::Instant::now() + Duration::from_millis(self.cache.cfg.lookup_timeout_ms)
@@ -328,16 +314,7 @@ impl Inner {
         fail: &'static str,
     ) {
         let key = target.to_string();
-        let claimed = {
-            let mut in_flight = self.in_flight.lock().unwrap();
-            if in_flight.contains(&key) || in_flight.len() >= self.cache.cfg.max_in_flight {
-                false
-            } else {
-                in_flight.insert(key.clone());
-                true
-            }
-        };
-        if !claimed {
+        if !matches!(self.join(&key, None), Join::Claimed) {
             self.arm_refresh(target);
             return;
         }
@@ -349,12 +326,13 @@ impl Inner {
                 self.metrics.record_resolver_refresh(fail);
                 self.resolve_failures.record(&key, "timeouts", 1);
                 self.arm_refresh(target);
+                self.time_out_waiting(&key);
                 lookup.await;
-                self.in_flight.lock().unwrap().remove(&key);
+                self.release(&key, None).await;
                 return;
             }
         };
-        self.in_flight.lock().unwrap().remove(&key);
+        self.release(&key, resolved).await;
         match resolved {
             Some(_) => {
                 self.metrics.record_resolver_refresh(ok);
@@ -390,8 +368,8 @@ impl NamedForwarder {
         Self(Arc::new(Inner {
             endpoint,
             resolver,
-            cache: NameCache { entries: Mutex::new(HashMap::new()), clock, cfg },
-            in_flight: Mutex::new(HashSet::new()),
+            cache: NameCache::new(clock, cfg),
+            in_flight: Mutex::new(HashMap::new()),
             pinned: Mutex::new(HashSet::new()),
             refresh_armed: Mutex::new(HashSet::new()),
             metrics,
@@ -424,8 +402,8 @@ impl NamedForwarder {
     }
 
     /// Send `bytes` to a named target. Cache hits go out inline; a miss spawns
-    /// a single-flight resolve-then-send task so the caller (the recv loop)
-    /// never waits on DNS.
+    /// a single-flight resolve-then-send task, or waits on the one running, so
+    /// the caller (the recv loop) never waits on DNS.
     pub async fn send(&self, bytes: &[u8], target: &ProxyAddr) {
         let inner = &self.0;
         let key = target.to_string();
@@ -439,48 +417,29 @@ impl NamedForwarder {
             CacheLookup::NegativeHit => {
                 inner.metrics.record_named_send(outcome::DROPPED_NEGATIVE);
             }
-            CacheLookup::Miss => {
-                let claimed = {
-                    let mut in_flight = inner.in_flight.lock().unwrap();
-                    if in_flight.contains(&key) || in_flight.len() >= inner.cache.cfg.max_in_flight
-                    {
-                        false
-                    } else {
-                        in_flight.insert(key.clone());
-                        true
-                    }
-                };
-                if !claimed {
-                    inner.metrics.record_named_send(outcome::DROPPED_IN_FLIGHT);
-                    return;
+            CacheLookup::Miss => match inner.join(&key, Some(bytes)) {
+                Join::Waiting => {}
+                Join::Refused => inner.metrics.record_named_send(outcome::DROPPED_IN_FLIGHT),
+                Join::Claimed => {
+                    let inner = self.0.clone();
+                    let target = target.clone();
+                    tokio::spawn(async move {
+                        let deadline = inner.lookup_deadline();
+                        let mut lookup =
+                            inner.resolver.resolve(&target.host, target.port, deadline);
+                        let Ok(addrs) = tokio::time::timeout_at(deadline, &mut lookup).await else {
+                            inner.store_and_arm(&target, None);
+                            inner.time_out_waiting(&key);
+                            lookup.await;
+                            inner.release(&key, None).await;
+                            return;
+                        };
+                        let resolved = inner.pick(addrs);
+                        inner.store_and_arm(&target, resolved);
+                        inner.release(&key, resolved).await;
+                    });
                 }
-                let inner = self.0.clone();
-                let bytes = bytes.to_vec();
-                let target = target.clone();
-                tokio::spawn(async move {
-                    let deadline = inner.lookup_deadline();
-                    let mut lookup = inner.resolver.resolve(&target.host, target.port, deadline);
-                    let Ok(addrs) = tokio::time::timeout_at(deadline, &mut lookup).await else {
-                        inner.store_and_arm(&target, None);
-                        inner.metrics.record_named_send(outcome::LOOKUP_TIMED_OUT);
-                        lookup.await;
-                        inner.in_flight.lock().unwrap().remove(&key);
-                        return;
-                    };
-                    let resolved = inner.pick(addrs);
-                    inner.store_and_arm(&target, resolved);
-                    inner.in_flight.lock().unwrap().remove(&key);
-                    match resolved {
-                        Some(dst) => {
-                            inner.metrics.record_named_send(outcome::RESOLVED);
-                            if inner.endpoint.send_to(&bytes, dst).await.is_err() {
-                                inner.metrics.record_send_failure();
-                            }
-                        }
-                        None => inner.metrics.record_named_send(outcome::RESOLVE_FAILED),
-                    }
-                });
-            }
+            },
         }
     }
 }
