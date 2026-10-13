@@ -98,6 +98,20 @@ async fn a_claim_no_noop_answer_refreshed_goes_stale() {
     assert!(!cl.flow_caught_up("A", Partition::Bak), "past two intervals: unknown");
 }
 
+/// The latest claim stands, lower or not: a peer that shed what it held
+/// claims less, and its earlier, higher claim no longer vouches for it.
+#[test]
+fn a_lower_claim_replaces_a_higher_one() {
+    let cl = changelog();
+    let _guard = cl.serving("A", Partition::Bak);
+    cl.bump_put("A", "call-1", Partition::Bak);
+    cl.bump_put("A", "call-2", Partition::Bak);
+    cl.note_applied("A", Partition::Bak, Watermark::new(7, 2));
+    assert!(cl.flow_caught_up("A", Partition::Bak));
+    cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+    assert!(!cl.flow_caught_up("A", Partition::Bak), "the peer now claims less than the head");
+}
+
 #[test]
 fn the_head_survives_compaction_of_the_same_ref() {
     let cl = changelog();

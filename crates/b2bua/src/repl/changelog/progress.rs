@@ -33,16 +33,14 @@ impl Changelog {
     }
 
     /// Record a puller's reported applied position for `(peer, partition)`
-    /// ([`repl_net::frame::Frame::Position`]), stamped now. Monotonic — a
-    /// lower report never regresses the recorded one, an equal one refreshes
-    /// it — and ignored for a peer with no log.
+    /// ([`repl_net::frame::Frame::Position`]), stamped now. The latest report
+    /// stands, lower or not: a peer that shed what it held claims less, and
+    /// its earlier claim no longer vouches for it. Ignored for a peer with no
+    /// log.
     pub fn note_applied(&self, peer: &str, partition: Partition, at: Watermark) {
         let mut inner = crate::store::locked(&self.inner, "replica changelog");
         if let Some(log) = inner.peers.get_mut(peer) {
-            let sub = log.sub_mut(partition);
-            if sub.applied.is_none_or(|prev| at >= prev.at) {
-                sub.applied = Some(Claim { at, made: Instant::now() });
-            }
+            log.sub_mut(partition).applied = Some(Claim { at, made: Instant::now() });
         }
     }
 
