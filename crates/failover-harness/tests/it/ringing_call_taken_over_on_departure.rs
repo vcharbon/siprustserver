@@ -261,6 +261,25 @@ fn senders(p: &Placed, to: std::net::SocketAddr, prefix: &[u8]) -> std::collecti
         .collect()
 }
 
+/// The departed node returns, reclaims the ringing call from its own record,
+/// and becomes ready well before the call's deadline.
+async fn return_before_deadline(p: &mut Placed) {
+    p.fh.mark("b1", None, "reboot", "restart empty, higher gen, new pod IP");
+    let new_addr = p.w_b1.reboot().await;
+    p.proxy.set_address("b1", new_addr);
+    p.fh.note_worker_rebound("b1", new_addr);
+    p.w_b2.simulate_peer_added("b1");
+    for _ in 0..40 {
+        p.fh.advance(Duration::from_millis(250)).await;
+        if p.w_b1.is_ready() {
+            break;
+        }
+    }
+    assert!(p.w_b1.is_ready(), "the returning node became ready before the deadline");
+    p.proxy.set_health("b1", failover_harness::WorkerHealth::Alive);
+    assert!(p.w_b1.serves(&p.ringing_ref), "the returning node serves the call it reclaimed");
+}
+
 /// The departed node returns before the ringing call's deadline and reclaims
 /// it while the backup's copy is still live: neither copy has written since
 /// the takeover, so the version vector shows the reclaimed record nothing of
@@ -282,19 +301,7 @@ async fn a_ringing_call_whose_node_returns_before_its_deadline_is_ended_by_both_
         "the callee's 487 reaches neither copy's transaction",
     );
     let deadline = depart(&mut p).await;
-    let new_addr = p.w_b1.reboot().await;
-    p.proxy.set_address("b1", new_addr);
-    p.fh.note_worker_rebound("b1", new_addr);
-    p.w_b2.simulate_peer_added("b1");
-    for _ in 0..40 {
-        p.fh.advance(Duration::from_millis(250)).await;
-        if p.w_b1.is_ready() {
-            break;
-        }
-    }
-    assert!(p.w_b1.is_ready(), "the returning node became ready before the deadline");
-    p.proxy.set_health("b1", failover_harness::WorkerHealth::Alive);
-    assert!(p.w_b1.serves(&p.ringing_ref), "the returning node serves the call it reclaimed");
+    return_before_deadline(&mut p).await;
     assert!(p.w_b2.serves(&p.ringing_ref), "and the backup's copy is still live");
 
     ring_until(&p, deadline).await;
@@ -310,6 +317,47 @@ async fn a_ringing_call_whose_node_returns_before_its_deadline_is_ended_by_both_
     let mut bye = p.quiet.bye().await;
     p.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    p.fh.advance(Duration::from_secs(60)).await;
+    for call_ref in [&p.ringing_ref, &p.quiet_ref] {
+        settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
+    }
+    drop(p.proxy);
+}
+
+/// The departed node returns while the call still rings and reclaims it; the
+/// callee then answers. The 200 reaches the returned node, which relays it, and
+/// the caller ACKs: the call is answered, and the departure's takeover copy
+/// stands down. The caller gets exactly one final, the 200 — no 480 at the
+/// replicated deadline — the callee no CANCEL, and the call settles to one CDR.
+#[tokio::test(start_paused = true)]
+async fn a_ringing_call_whose_node_returns_and_is_then_answered_gets_no_final_but_its_200() {
+    let mut p = place("ringing-call-node-returns-answered", Callee::Ringing).await;
+    let deadline = depart(&mut p).await;
+    return_before_deadline(&mut p).await;
+
+    p.at_bob.respond(200, "OK").with_sdp(ANSWER).await;
+    p.ringing.expect(200).await;
+    let mut answered = p.ringing.ack().await;
+    p.bob.receive("ACK").await;
+
+    let past = deadline - p.fh.now_ms() + 5_000;
+    p.fh.advance(Duration::from_millis(past.max(0) as u64)).await;
+    assert!(
+        senders(&p, p.alice.addr(), b"SIP/2.0 480").is_empty(),
+        "no copy refuses the answered call",
+    );
+    assert!(senders(&p, p.bob.addr(), b"CANCEL").is_empty(), "no copy CANCELs the callee");
+    while let Some(msg) = p.alice.take_queued().await {
+        let final_ = matches!(&msg, sip_message::SipMessage::Response(r) if r.status() >= 300);
+        assert!(!final_, "the caller gets no final after its 200: {msg:?}");
+    }
+
+    let mut bye = answered.bye().await;
+    p.bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    let mut quiet_bye = p.quiet.bye().await;
+    p.bob.receive("BYE").await.respond(200, "OK").await;
+    quiet_bye.expect(200).await;
     p.fh.advance(Duration::from_secs(60)).await;
     for call_ref in [&p.ringing_ref, &p.quiet_ref] {
         settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
