@@ -45,6 +45,7 @@ mod process;
 #[cfg(test)]
 mod provisional_turn_tests;
 mod quiesced;
+mod quiet_turn;
 mod reclaim;
 mod refer_result;
 mod release;

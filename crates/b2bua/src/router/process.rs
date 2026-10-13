@@ -603,11 +603,7 @@ pub(super) fn rule_chain_turn(
             }
         }
     }
-    // A re-ACK leaves the body as the rules read it; a rule that also wrote
-    // into it (a CDR event, a disposition) made the turn a write.
-    if result.effects.quiet == Some(QuietTurn::ReAck) && result.call != call {
-        result.effects.quiet = None;
-    }
+    super::quiet_turn::name_candidate(&mut result, &call, event, discharged.as_ref());
     // The ladder's own effects (its cancels) precede the rule's.
     ladder_fx.extend(std::mem::take(&mut result.effects));
     result.effects = ladder_fx;

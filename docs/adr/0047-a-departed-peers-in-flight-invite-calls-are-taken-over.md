@@ -138,8 +138,8 @@ stands down when:
 
 - the primary's body is the same call and **covers every write the copy made**: its
   `b` is at or past the copy's live `b`. One increment of a copy's `b` is one write
-  this node made as the call's acting backup, a fold included; a quiet turn or an
-  adopted version moves nothing. A primary reaches a `b` only by reading the copy's
+  this node made as the call's acting backup; a quiet turn, a fold or an adopted
+  version moves nothing. A primary reaches a `b` only by reading the copy's
   write that carries it — applied or folded into its record, or refused (a body
   behind its record, or one with no lifecycle progress its record lacks) and its
   counter adopted (ADR-0031 D3) — so its record decides everything the copy did, and
@@ -165,7 +165,9 @@ before (ADR-0031 D3).
 two bodies of one call the same way (`call::helpers::lifecycle_behind`): the answer
 ranks first, so an answered body is never behind an unanswered one however far toward
 its end the unanswered one went, and between bodies alike on the answer the one less
-far toward its end is behind.
+far toward its end is behind; between bodies alike on both, the one holding open a
+re-INVITE round the other holds answered (ADR-0031, "a re-INVITE round is a third
+chain").
 
 - **Reverse.** A backup's `p` may be one it adopted without the body that carried it,
   so the live-map fold of a reverse flush takes the vector's verdict (`p` unchanged,

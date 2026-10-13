@@ -1,7 +1,8 @@
 //! Replication-driven reclaim and the terminal-discharge funnels (ADR-0011 X11
 //! / ADR-0014 / ADR-0020 X3): the reactive reverse-flush reconcile, on-reboot
 //! discharge of deferred terminals, and the periodic replica-store reap; the
-//! bulk reboot reclaim and the straggler reclaim live in `bulk`.
+//! bulk reboot reclaim and the straggler reclaim live in `bulk`, how a fold
+//! lands in `fold`.
 
 use std::sync::Arc;
 
@@ -9,13 +10,14 @@ use call::helpers::{lifecycle_advances, lifecycle_behind};
 use call::{Call, CallModelState};
 
 use super::interpret::process_result;
-use super::restore_hygiene::sanitize_restored_timers;
 use super::RouterCtx;
 use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 
 mod bulk;
+mod fold;
 pub(super) use bulk::reclaim_all;
 use bulk::reclaim_into_live;
+use fold::fold_quietly;
 
 /// Apply a backup's reverse-flushed mutation that the puller just landed in our
 /// `pri:{self}` partition into our **live** map (ADR-0014 Reclaim-tail
@@ -38,8 +40,9 @@ use bulk::reclaim_into_live;
 /// The reverse gate ([`reverse_flush_dominates`]) is re-checked under the
 /// per-call lock; a primary that mutated the call since the backup branched
 /// keeps its own copy unless the flush carries lifecycle progress it could not
-/// have made itself. Idempotent: `update` bumps our `p` and the fold takes the
-/// progress, so a re-delivered flush no longer dominates.
+/// have made itself. A fold is not this node's write ([`fold_quietly`]): the
+/// live copy then holds the backup's version, so a re-delivered flush no
+/// longer dominates and the backup's next write is the next version.
 pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
     // A read that sees an expired body too: an expired reverse-flushed terminal
     // is still folded and discharged here.
@@ -56,7 +59,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
     let guard = ctx.state.lock(call_ref).await;
     // Read again under the lock: a turn that held it may have ended the call
     // and deleted the body, its CDR written; the body read before is stale.
-    let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
+    let Some((replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
         if ctx.state.peek(call_ref).is_none() {
             drop(guard);
             ctx.state.discard_orphan(call_ref);
@@ -98,9 +101,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
                 // state in and let the timer service follow the folded ledger. No
                 // discharge — the call continues.
                 CallModelState::Active => {
-                    adopt_counters(&mut replica, &live);
-                    resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
-                    ctx.state.update(replica);
+                    fold_quietly(ctx, call_ref, &live, replica, skew_offset_ms, now_ms).await;
                 }
                 // Transient teardown-in-progress; wait for the Terminated flush.
                 CallModelState::Terminating => {}
@@ -303,7 +304,7 @@ pub(super) async fn fold_refused_flush(
     if role_of(&ctx.config.self_ordinal, call_ref) != direction.expected_role() {
         return;
     }
-    let Some(mut replica) = ctx.state.decode_body(body) else {
+    let Some(replica) = ctx.state.decode_body(body) else {
         return;
     };
     // No live copy ⇒ nothing to fold — tested BEFORE the per-call lock, because
@@ -361,22 +362,7 @@ pub(super) async fn fold_refused_flush(
         discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
         return;
     }
-    adopt_counters(&mut replica, &live);
-    resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
-    ctx.state.update(replica);
-}
-
-/// A fold adopts BOTH counters: the folded body takes `max` of the two views on
-/// each axis before [`CallState::update`](crate::store::CallState::update) bumps
-/// this node's own. The next flush this node sends therefore dominates every
-/// version either owner published, so the split vector heals instead of each
-/// side refusing the other for ever (ADR-0031 D3). A body without topology is
-/// not replicable and is left alone.
-fn adopt_counters(folded: &mut Call, live: &Call) {
-    if let (Some(f), Some(l)) = (folded.topology.as_mut(), live.topology.as_ref()) {
-        f.gen = f.gen.max(l.gen);
-        f.bak_gen = f.bak_gen.max(l.bak_gen);
-    }
+    fold_quietly(ctx, call_ref, &live, replica, skew_offset_ms, now_ms).await;
 }
 
 /// A REFUSED flush still moves the counter: seeing a version is not taking it,
@@ -435,32 +421,6 @@ fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
     };
     let newer = r.gen == l.gen && r.bak_gen > l.bak_gen && !lifecycle_behind(replica, live);
     newer || lifecycle_advances(replica, live)
-}
-
-/// The live timer service follows the folded ledger: every entry the folded
-/// body no longer carries is cancelled, every entry it carries is (re)armed in
-/// this node's clock frame through the restore-hygiene seam, and the folded
-/// body keeps the re-anchored ledger it was armed from.
-async fn resync_timers(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    live: &Call,
-    folded: &mut Call,
-    skew_offset_ms: i64,
-    now_ms: i64,
-) {
-    for stale in live.timers.iter().filter(|t| !folded.timers.iter().any(|f| f.key == t.key)) {
-        ctx.timers.cancel(call_ref.to_string(), stale.key.clone()).await;
-    }
-    sanitize_restored_timers(
-        &mut folded.timers,
-        call_ref,
-        now_ms,
-        Some(skew_offset_ms),
-        ctx.config.keepalive_interval_sec * 1000,
-        None,
-    );
-    ctx.timers.restore(folded.timers.clone(), call_ref.to_string(), folded.incarnation()).await;
 }
 
 /// Force the last persisted snapshot of `call_ref` terminal and run it through

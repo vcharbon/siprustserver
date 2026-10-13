@@ -5,7 +5,9 @@
 //! the caller; the caller's ACK is a new request the proxy routes on its
 //! health view, which reads the primary alive again. RFC 3261 §13.2.2.4 owes
 //! the callee exactly one ACK for its 2xx, whichever node the caller's ACK
-//! reaches; the call then ends with a BYE and settles to one CDR.
+//! reaches; the caller re-ACKs every copy of the 2xx that reaches her, so an
+//! ACK the primary drops before it holds the round is recovered by the next
+//! copy. The call then ends with a BYE and settles to one CDR.
 //!
 //! Two timing axes:
 //! - `PrimaryWrite`: whether the primary writes the call (an INFO the callee
@@ -21,10 +23,10 @@
 
 use std::time::Duration;
 
-use failover_harness::{assert_call_fully_over, WorkerHealth};
-use scenario_harness::{Agent, Dialog};
+use failover_harness::{assert_call_fully_over, FailoverHarness, WorkerHealth};
+use scenario_harness::{Agent, Dialog, Inbound};
 use sip_message::generators::InDialogMethod;
-use sip_message::{Method, SipMessage};
+use sip_message::{Method, SipMessage, SipResponse};
 
 use crate::call_terminate_on_backup::{
     accept_takeover_cseq_overlap, establish, Established, ANSWER, OFFER,
@@ -54,6 +56,13 @@ enum Heal {
 
 /// How long the replication between the two nodes takes to settle.
 const SETTLE: Duration = Duration::from_millis(500);
+
+/// How long the caller keeps re-ACKing copies of the 2xx after her ACK: past
+/// the third rung of the §13.3.1.4 ladder (T1, 2·T1, 4·T1).
+const ACK_WINDOW: Duration = Duration::from_secs(4);
+
+/// The clock step the caller and the callee read their sockets at.
+const STEP: Duration = Duration::from_millis(100);
 
 /// Run one cell: a misrouted re-INVITE round on an established call, its 2xx
 /// relayed by the backup, the caller's ACK routed to the primary; then a BYE.
@@ -106,11 +115,8 @@ async fn reinvite_2xx_acked_through_the_primary(name: &str, write: PrimaryWrite,
         info_through_the_primary(&alice, &mut bob_dialog).await;
         fh.advance(SETTLE).await;
     }
-    // The re-INVITE carried the offer, the 2xx the answer: a bodyless ACK.
-    dialog.ack(None).await;
-    bob.receive("ACK").await;
-    fh.advance(Duration::from_secs(2)).await;
-    assert_no_further_ack(&bob).await;
+    let acks = ack_the_answer(&fh, &alice, &mut dialog, &bob).await;
+    assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
 
     let mut bye = dialog.bye().await;
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
@@ -130,20 +136,59 @@ async fn reinvite_2xx_acked_through_the_primary(name: &str, write: PrimaryWrite,
 }
 
 /// The callee sends an INFO the proxy routes to the primary; the caller
-/// answers it 200.
+/// answers it 200. A copy of the 2xx that reaches her first is acknowledged by
+/// the ACK she sends next.
 async fn info_through_the_primary(alice: &Agent, bob_dialog: &mut Dialog) {
     let mut info = bob_dialog.request(InDialogMethod::Info, None).await;
-    alice.receive("INFO").await.respond(200, "OK").await;
+    loop {
+        match alice.recv_any().await.expect("the INFO reaches the caller") {
+            Inbound::Request(mut t) if t.request().method() == "INFO" => {
+                t.respond(200, "OK").await;
+                break;
+            }
+            Inbound::Response(r) if copy_of_the_answer(&r) => {}
+            Inbound::Request(t) => panic!("unexpected {} toward the caller", t.request().method()),
+            Inbound::Response(r) => panic!("unexpected {} toward the caller", r.status()),
+        }
+    }
     info.expect(200).await;
 }
 
-/// The callee drew one ACK for its 2xx (RFC 3261 §13.2.2.4): nothing queued
-/// at it since is a second.
-async fn assert_no_further_ack(bob: &Agent) {
-    while let Some(msg) = bob.take_queued().await {
-        let ack = matches!(&msg, SipMessage::Request(r) if *r.method() == Method::Ack);
-        assert!(!ack, "the callee draws exactly one ACK for its 2xx");
+/// The caller ACKs the 2xx — the re-INVITE carried the offer, the 2xx the
+/// answer, so the ACK is bodyless — and re-ACKs every copy of it that reaches
+/// her for [`ACK_WINDOW`] (RFC 3261 §13.2.2.4). Returns the ACKs the callee
+/// drew meanwhile; nothing else reaches either party.
+async fn ack_the_answer(
+    fh: &FailoverHarness,
+    alice: &Agent,
+    dialog: &mut Dialog,
+    bob: &Agent,
+) -> usize {
+    dialog.ack(None).await;
+    let mut acks = 0;
+    let mut waited = Duration::ZERO;
+    while waited < ACK_WINDOW {
+        fh.advance(STEP).await;
+        waited += STEP;
+        while let Some(msg) = alice.take_queued().await {
+            match msg {
+                SipMessage::Response(r) if copy_of_the_answer(&r) => dialog.ack(None).await,
+                other => panic!("unexpected toward the caller: {other:?}"),
+            }
+        }
+        while let Some(msg) = bob.take_queued().await {
+            match msg {
+                SipMessage::Request(r) if *r.method() == Method::Ack => acks += 1,
+                other => panic!("unexpected toward the callee: {other:?}"),
+            }
+        }
     }
+    acks
+}
+
+/// A copy of the re-INVITE's 2xx (RFC 3261 §13.3.1.4).
+fn copy_of_the_answer(r: &SipResponse) -> bool {
+    r.status() == 200 && *r.cseq().method() == Method::Invite
 }
 
 #[tokio::test(start_paused = true)]

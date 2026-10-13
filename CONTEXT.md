@@ -493,8 +493,9 @@ transactions to clear).
 
 **Version vector `(p, b)`** (per-context reconciliation) — replaces LWW-by-`gen` (ADR-0014):
 Each call carries `(p, b)` = `(primary_counter, backup_counter)` =
-`CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter on a local
-mutation, so the *other* counter on a propagated update is the **branch point**.
+`CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter, once per
+write it makes that changes the call, so the *other* counter on a propagated update
+is the **branch point**; a quiet turn and a fold are not writes.
 Merge is direction-aware: **Bootstrap** (a node recovering its own partition)
 applies unless the stored vector dominates; **Forward** (primary→backup) applies
 on that same rule *and* never behind the Element's own `b` (ADR-0031 D3 — an
@@ -510,8 +511,10 @@ lifecycle — read answer first: an unanswered teardown never ends an answered c
 unconditionally except Forward, which yields for the **answer** alone — an
 `Active` Element whose caller was answered and to which no forward flush, taken
 or refused, has ever carried the authority's own answer. A refused flush is folded into a live copy
-when it carries lifecycle progress the vector cannot see. A **fold** adopts
-`max` of both counters before the store's own bump, so the split heals; a
+when it carries lifecycle progress the vector cannot see (an answer, an ending, a
+re-INVITE round answered that the live copy holds open). A **fold** adopts
+`max` of both counters and moves neither, so the split heals and the next write
+of either owner orders against the version the other published; a
 **refusal** adopts only the axis the other owner bumps — `b` at a primary, `p`
 at a backup — and without that bump, because recording a version somebody else
 published is a read, not a mutation. Closes the latent equal-`gen` divergence

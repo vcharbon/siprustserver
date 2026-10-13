@@ -75,6 +75,7 @@ pub use leg_end::{
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{
     lifecycle_advances, lifecycle_behind, lifecycle_position, lifecycle_regresses,
+    round_answered_over,
 };
 pub use message_ring::{record_message, seal_turn};
 pub use obligation::{

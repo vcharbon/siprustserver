@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::helpers::{seal_termination_seq, seal_turn};
-use call::{CallModelState, TimerType};
+use call::CallModelState;
 use sip_message::{Method, SipRequest};
 use sip_txn::TxnKind;
 
@@ -16,37 +16,8 @@ use super::release::{release_call, ReleaseKind};
 use super::RouterCtx;
 use crate::effects::{
     BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
-    OutboundBody, OutboundTxnMode, QuietTurn, SoftBoundedEffect,
+    OutboundBody, OutboundTxnMode, SoftBoundedEffect,
 };
-
-/// The quiet class the turn is persisted under, or `None` for a write. An
-/// author's class is a candidate; the turn's effect set decides. A quiet turn
-/// is exactly: an `Active` call, one outbound effect and it the retained
-/// datagram's repeat, no soft, buffered or fire-and-forget effect, and no
-/// critical effect but the rung's own re-arm for [`QuietTurn::OwnRung`]. A
-/// rule that reaches the re-ACK beside anything else — a BYE, a CDR event, a
-/// timer — is a write, as is a re-ACK on a terminating call, whose flush the
-/// teardown needs.
-fn quiet_class(result: &HandlerResult) -> Option<QuietTurn> {
-    let kind = result.effects.quiet?;
-    let fx = &result.effects;
-    let one_repeat =
-        matches!(fx.outbound.as_slice(), [eff] if matches!(eff.body, OutboundBody::Datagram(_)));
-    let critical_is_own = match (kind, fx.critical.as_slice()) {
-        (QuietTurn::ReAck, []) => true,
-        (QuietTurn::OwnRung, [CriticalStateEffect::ScheduleTimer(entry)]) => {
-            entry.key.timer_type == TimerType::Rung
-        }
-        _ => false,
-    };
-    let quiet = result.call.state == CallModelState::Active
-        && one_repeat
-        && critical_is_own
-        && fx.soft.is_empty()
-        && fx.buffered.is_empty()
-        && fx.fire_and_forget.is_empty();
-    quiet.then_some(kind)
-}
 
 /// The budgets this node answers the requests sent off a call's turn by: the
 /// adaptation port's default, the limiter's admit budget, and a
@@ -115,7 +86,7 @@ pub(super) async fn process_result(
     // Persist first (state lands before effects run). A quiet turn replaces
     // the live copy without a bump and skips the flush gate below: the armed
     // rung advances, the backup keeps the last write that changed the call.
-    let quiet = quiet_class(&result);
+    let quiet = super::quiet_turn::class(&result);
     match quiet {
         Some(kind) => {
             ctx.state.update_quiet(result.call.clone());

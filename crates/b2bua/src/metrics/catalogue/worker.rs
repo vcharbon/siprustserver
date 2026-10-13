@@ -51,7 +51,7 @@ const OBLIGATION_VALUES: [&str; 2] = label_values!(ObligationKind::ALL, Obligati
 /// A dialog-level ladder's obligation, indexed like [`ObligationKind::ALL`].
 pub const OBLIGATION: Dim = Dim::new("obligation", &OBLIGATION_VALUES);
 
-const QUIET_TURN_VALUES: [&str; 2] = label_values!(QuietTurn::ALL, QuietTurn::kind);
+const QUIET_TURN_VALUES: [&str; 3] = label_values!(QuietTurn::ALL, QuietTurn::kind);
 /// A quiet turn's kind, indexed like [`QuietTurn::ALL`].
 pub const QUIET_TURN: Dim = Dim::new("kind", &QUIET_TURN_VALUES);
 
@@ -77,7 +77,7 @@ const PEER_FAILURE_KIND_VALUES: [&str; 4] =
 pub const PEER_FAILURE_KIND: Dim = Dim::new("kind", &PEER_FAILURE_KIND_VALUES);
 
 assert_exposition_order!(ObligationKind: AckOf2xx, AwaitPrack);
-assert_exposition_order!(QuietTurn: OwnRung, ReAck);
+assert_exposition_order!(QuietTurn: OwnRung, ReAck, AbsorbedAck);
 assert_exposition_order!(DrainExit: Quiescent, CaughtUp, Grace, GracePeersBehind);
 assert_exposition_order!(RemovalClass: Terminated, SelfRelease, StandDown, Orphan);
 assert_exposition_order!(PeerScope: Internal, External);

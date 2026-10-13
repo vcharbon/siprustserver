@@ -195,10 +195,11 @@ pub enum FireAndForgetEffect {
     Reenter(Box<CallEvent>),
 }
 
-/// A dialog-level retransmission turn that changes no replicated fact — the
-/// closed list of turns the store replaces without a version bump and the
-/// router persists without a flush (ADR-0014, "a counter counts writes that
-/// change the call, not progress"). A third member is an ADR line first.
+/// A dialog-level turn that changes no replicated fact — a retransmission, or
+/// an ACK owed nowhere — the closed list of turns the store replaces without a
+/// version bump and the router persists without a flush (ADR-0014, "a counter
+/// counts writes that change the call, not progress"). A further member is an
+/// ADR line first.
 ///
 /// A transaction-level retransmission never reaches the call model; every
 /// other turn is a write.
@@ -214,17 +215,22 @@ pub enum QuietTurn {
     /// ACK's bytes leave again and the body records nothing but the in-dialog
     /// message count.
     ReAck,
+    /// An inbound ACK the rules absorb: it discharges nothing this node awaits
+    /// and no ACK is owed toward the peer for it (§13.2.2.4), so nothing
+    /// leaves and the body records nothing but the in-dialog message count.
+    AbsorbedAck,
 }
 
 impl QuietTurn {
     /// Every kind, in declaration order.
-    pub const ALL: [QuietTurn; 2] = [QuietTurn::OwnRung, QuietTurn::ReAck];
+    pub const ALL: [QuietTurn; 3] = [QuietTurn::OwnRung, QuietTurn::ReAck, QuietTurn::AbsorbedAck];
 
     /// The `kind` label of `b2bua_repl_quiet_turns_total`.
     pub const fn kind(self) -> &'static str {
         match self {
             QuietTurn::OwnRung => "own-rung",
             QuietTurn::ReAck => "re-ack",
+            QuietTurn::AbsorbedAck => "absorbed-ack",
         }
     }
 }
@@ -237,9 +243,10 @@ pub struct HandlerEffects {
     pub soft: Vec<SoftBoundedEffect>,
     pub buffered: Vec<BufferedObservabilityEffect>,
     pub fire_and_forget: Vec<FireAndForgetEffect>,
-    /// The [`QuietTurn`] candidate, set by exactly two authors — the
-    /// framework's rung turn and the bodyless re-ACK; the router persists the
-    /// turn quietly only when its whole effect set is that repeat.
+    /// The [`QuietTurn`] candidate, set by exactly three authors — the
+    /// framework's rung turn, the bodyless re-ACK and the framework's ACK turn
+    /// the rules absorbed; the router persists the turn quietly only when its
+    /// whole effect set is that repeat, or nothing for an absorbed ACK.
     pub quiet: Option<QuietTurn>,
     /// The attempts the turn opened, each with the routing answer it dials:
     /// what the turn's `AttemptStarted` deliveries carry

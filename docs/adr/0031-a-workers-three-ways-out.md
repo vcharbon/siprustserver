@@ -337,8 +337,19 @@ not progress — and is refused in both directions. "Answered" is read from the 
 a-leg's initial INVITE server transaction took (`call::helpers::caller_answered`), which is
 durable: it stays true once the leg is `Terminated`, where `LegState::Confirmed` does not.
 
+**A re-INVITE round is a third chain.** A round is the INVITE client transaction one dialog
+relays toward its peer (`call::helpers::round_answered_over`): *open* while its relay awaits
+a final, *answered* once a 2xx was taken there, the ACK awaited or sent; it never goes back.
+Only the node holding the round's client transaction sees its final, so a body holding a
+round answered that the live copy holds open, on the same dialog and transaction, carries
+progress that copy cannot make itself, and folds; the order the gates read
+(`lifecycle_behind`) ranks the round after the answer and the ending
+(`reinvite_2xx_acked_through_the_primary.rs`).
+
 **A fold adopts both counters, and so does a refusal.** A fold takes `max(p)` and `max(b)`
-of the two views before the store bumps this node's own. A *refusal* takes only the axis the
+of the two views and is not a write of this node: neither axis moves and nothing flushes,
+so the live copy holds the version the other owner published (ADR-0014, "a fold is not an
+increment"). A *refusal* takes only the axis the
 other owner bumps — `b` at a primary, `p` at a backup — and takes it **without** the
 authoritative bump an ordinary mutation makes: adopting a version another owner published is
 a read this node records, and bumping our own axis for it would make two live owners raise

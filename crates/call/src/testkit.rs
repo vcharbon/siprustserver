@@ -1,10 +1,11 @@
 //! Fixture support: a bare dialled [`Leg`], the facts its derived state
-//! reads ([`Leg::state`]), and a shown reliable provisional, for tests that
-//! start a call mid-flight.
+//! reads ([`Leg::state`]), a shown reliable provisional and a re-INVITE round
+//! relayed into a dialog, for tests that start a call mid-flight.
 
 use crate::model::{
-    CSeq, Dialog, DialogEnd, DialogState, Ladder, Leg, LegKind, LegState, OutboundInvite,
-    Provisional, ProvisionalId, RSeq, RemoteInfo, ResponderAck, Shown,
+    CSeq, Dialog, DialogEnd, DialogState, Direction, HostPort, InviteTxnHandle, Ladder, Leg,
+    LegKind, LegState, OutboundInvite, PendingRequest, Provisional, ProvisionalId, RSeq,
+    RemoteInfo, ResponderAck, Shown,
 };
 
 /// A reliable provisional `rseq` of the responder `responder_tag` on
@@ -115,5 +116,57 @@ pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
         ring: crate::model::Ring::Silent,
         messages: Default::default(),
         sdp_session: Default::default(),
+    }
+}
+
+/// Where a staged re-INVITE round stands (RFC 3261 §13.2.2.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoundStage {
+    /// The relay awaits its final.
+    Open,
+    /// A 2xx was taken; the originator's ACK is awaited.
+    Answered,
+    /// The originator's ACK left toward the answerer.
+    Acked,
+}
+
+/// The CSeq the originator of a staged round sent its re-INVITE with.
+pub const STAGED_ROUND_CSEQ: i64 = 7;
+
+/// Relay a re-INVITE round into `leg`'s confirmed dialog (staged first when
+/// the leg has none) on the client transaction `branch`, and stand it at
+/// `stage`. The dialog's own sequence takes the next number.
+pub fn stage_reinvite_round(leg: &mut Leg, branch: &str, stage: RoundStage) {
+    if leg.dialogs.confirmed().is_none() {
+        stage_leg(leg, LegState::Confirmed);
+    }
+    let d = leg.dialogs.confirmed_mut().expect("a confirmed dialog");
+    d.our_cseq += 1;
+    d.pending_invite_txn = Some(InviteTxnHandle {
+        branch: branch.into(),
+        original_invite: Vec::new(),
+        destination: HostPort { host: "staged.invalid".into(), port: 5060 },
+    });
+    d.inbound_pending_requests.retain(|p| !p.method.eq_ignore_ascii_case("INVITE"));
+    d.ack_branch = None;
+    d.emitted_ack = None;
+    d.awaited_ack_cseq = None;
+    match stage {
+        RoundStage::Open => d.inbound_pending_requests.push(PendingRequest {
+            method: "INVITE".into(),
+            outbound_cseq: d.our_cseq,
+            inbound_cseq: STAGED_ROUND_CSEQ,
+            source_vias: Vec::new(),
+            source_call_id: String::new(),
+            source_from: String::new(),
+            source_to: String::new(),
+            direction: Direction::FromA,
+            cancelled: false,
+            offered_100rel: false,
+            offered: true,
+            source_timestamp: None,
+        }),
+        RoundStage::Answered => d.awaited_ack_cseq = Some(STAGED_ROUND_CSEQ),
+        RoundStage::Acked => d.ack_branch = Some(format!("{branch}-ack")),
     }
 }

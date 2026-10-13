@@ -83,7 +83,8 @@ pub(super) async fn stand_down_turn(
 /// Whether the primary's body `primary` covers every write the takeover
 /// `copy` made: the same call (one incarnation), and the primary's `b` at or
 /// past the copy's. One `b` increment is one write the copy made as the
-/// call's acting backup (`CallState::update` on this node, a fold included).
+/// call's acting backup (`CallState::update` on this node); a fold of the
+/// primary's body is not one.
 /// A primary reaches a `b` only by reading the copy's write that carries it:
 /// applied or folded into its record, or refused — a body behind its record
 /// (`call::helpers::lifecycle_behind`: an unanswered ending of a call the

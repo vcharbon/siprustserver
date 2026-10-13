@@ -1,8 +1,10 @@
 //! Pins the fold predicate ([`reverse_flush_dominates`]) directly — which
 //! bodies carry lifecycle progress a live copy lacks, and which are a branch
-//! off a stale view — and the direction rule of [`fold_refused_flush`]
-//! itself: who may end a call on a folded body (ADR-0031 D3).
+//! off a stale view — the direction rule of [`fold_refused_flush`] itself:
+//! who may end a call on a folded body (ADR-0031 D3), and that a fold is not
+//! this node's write (ADR-0014).
 
+use call::testkit::{stage_reinvite_round, RoundStage, STAGED_ROUND_CSEQ};
 use call::{Call, CallBodyCodec, CallModelState, CallTopology, LegState, MsgpackCodec};
 
 use super::{
@@ -134,6 +136,14 @@ fn the_vector_clause_folds_an_answer_into_a_live_copy_ending_unanswered() {
     assert!(reverse_flush_dominates(&replica, &live), "an answered call is never behind");
 }
 
+/// The answered call at `(p, b)`, a re-INVITE round on the caller's dialog
+/// standing at `stage`.
+fn in_round(p: i64, b: i64, stage: RoundStage) -> Call {
+    let mut call = answered(p, b, CallModelState::Active);
+    stage_reinvite_round(&mut call.a_leg, "z9hG4bK-round", stage);
+    call
+}
+
 /// The `(p,b)` of the live copy `n` holds for `call_ref`.
 fn live_pb(n: &crate::router::test_support::Node, call_ref: &str) -> (i64, i64) {
     let t = n.core.router_ctx().state.peek(call_ref).expect("the copy is live").topology;
@@ -192,9 +202,9 @@ async fn a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it()
     assert_eq!(after.state, CallModelState::Active, "the fold ends no call");
     assert!(call::helpers::caller_answered(&after), "the copy took the authority's answer");
     assert!(n.cdr.snapshot().is_empty(), "a fold that ends nothing writes no record");
-    // A fold adopts `max` on BOTH axes — (3,2) — and the write that lands it
-    // is this node's own mutation, so its own axis bumps once on top.
-    assert_eq!(live_pb(&n, &call_ref), (3, 3), "both counters adopted, ours bumped once");
+    // A fold adopts `max` on BOTH axes — (3,2) — and is not this node's
+    // write: its own axis does not move.
+    assert_eq!(live_pb(&n, &call_ref), (3, 2), "both counters adopted, ours not bumped");
 }
 
 /// A `Terminating` body ends no call in either direction — it is a teardown
@@ -485,4 +495,60 @@ async fn a_deferred_terminal_another_call_replaced_is_released_by_its_own_key() 
     reap_expired_replicas(ctx, n.clock.now_ms()).await;
     assert_eq!(ctx.limiter.waiting(), 1, "released once");
     assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "counted once");
+}
+
+/// **A fold is not this node's write.** The backup's flush at our `p` with
+/// its `b` advanced folds, and the live copy then holds the backup's version
+/// exactly: our own axis does not move. The backup's next write — the same
+/// `p`, its `b` once more, still no lifecycle progress — is then the next
+/// version and folds in its turn, where a bumped `p` would refuse it.
+#[tokio::test(start_paused = true)]
+async fn a_reverse_fold_holds_the_backups_version_so_its_next_write_folds() {
+    let n = node("w0").await;
+    let ctx = n.core.router_ctx();
+    let live = answered(4, 1, CallModelState::Active);
+    let call_ref = live.call_ref.clone();
+    assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+    let relayed = in_round(4, 2, RoundStage::Open);
+    let body = MsgpackCodec::new().encode(&relayed);
+    let opts = PutOpts::default();
+    let pri = PartitionRole::Primary;
+    n.store.put_call(pri, "w0", &call_ref, body, &[], 60_000, 4, 2, &opts).await.unwrap();
+
+    reconcile_reverse_flush(ctx, &call_ref).await;
+    sip_clock::testkit::settle().await;
+
+    assert_eq!(live_pb(&n, &call_ref), (4, 2), "the fold takes the backup's version, no bump");
+    let after = ctx.state.peek(&call_ref).expect("the call plays on");
+    let next = in_round(4, 3, RoundStage::Open);
+    assert!(reverse_flush_dominates(&next, &after), "the backup's next write is the next version");
+}
+
+/// **An answered re-INVITE round folds over the vector.** The primary wrote
+/// the call since the backup's copy branched, so the store refused the copy's
+/// write; that write answers the round the live copy holds open, which only
+/// the copy holding the round's client transaction could see. It folds, and
+/// quietly: the live copy awaits the caller's ACK for the 2xx, its own axis
+/// unmoved. The same write with the round still open is refused, its `b`
+/// adopted alone.
+#[tokio::test(start_paused = true)]
+async fn a_refused_flush_answering_the_round_the_live_copy_holds_open_folds() {
+    for (stage, folds) in [(RoundStage::Answered, true), (RoundStage::Open, false)] {
+        let n = node("w0").await;
+        let ctx = n.core.router_ctx();
+        let live = in_round(6, 1, RoundStage::Open);
+        let call_ref = live.call_ref.clone();
+        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+
+        let replica = in_round(4, 2, stage);
+        let body = MsgpackCodec::new().encode(&replica);
+        fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
+        sip_clock::testkit::settle().await;
+
+        let after = ctx.state.peek(&call_ref).expect("the call plays on");
+        let awaited = after.a_leg.dialogs.confirmed().and_then(|d| d.awaited_ack_cseq);
+        let expected = folds.then_some(STAGED_ROUND_CSEQ);
+        assert_eq!(awaited, expected, "{stage:?}: the round's ACK is awaited iff it folded");
+        assert_eq!(live_pb(&n, &call_ref), (6, 2), "{stage:?}: the backup's `b`, our `p`");
+    }
 }
