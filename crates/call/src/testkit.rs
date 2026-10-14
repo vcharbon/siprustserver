@@ -128,6 +128,8 @@ pub enum RoundStage {
     Answered,
     /// The originator's ACK left toward the answerer.
     Acked,
+    /// A non-2xx ended it: nothing of it is left on the dialog.
+    Refused,
 }
 
 /// The CSeq the originator of a staged round sent its re-INVITE with.
@@ -168,5 +170,6 @@ pub fn stage_reinvite_round(leg: &mut Leg, branch: &str, stage: RoundStage) {
         }),
         RoundStage::Answered => d.awaited_ack_cseq = Some(STAGED_ROUND_CSEQ),
         RoundStage::Acked => d.ack_branch = Some(format!("{branch}-ack")),
+        RoundStage::Refused => d.pending_invite_txn = None,
     }
 }

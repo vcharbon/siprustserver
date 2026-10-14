@@ -338,18 +338,35 @@ a-leg's initial INVITE server transaction took (`call::helpers::caller_answered`
 durable: it stays true once the leg is `Terminated`, where `LegState::Confirmed` does not.
 
 **A re-INVITE round is a third chain.** A round is the INVITE client transaction one dialog
-relays toward its peer (`call::helpers::round_answered_over`): *open* while its relay awaits
-a final, *answered* once a 2xx was taken there, the ACK awaited or sent; it never goes back.
-Only the node holding the round's client transaction sees its final, so a body holding a
-round answered that the live copy holds open, on the same dialog and transaction, carries
-progress that copy cannot make itself, and folds; the order the gates read
-(`lifecycle_behind`) ranks the round after the answer and the ending
-(`reinvite_2xx_acked_through_the_primary.rs`).
+relays toward its peer (`call::helpers::round`): *open* while its relay awaits a final, then
+*answered* (a 2xx taken, the originator's ACK awaited) and *ACKed*, or ended by a non-2xx;
+it never goes back. Only the node holding the round's client transaction sees its final. A
+body stands further along a round the live copy holds open when its same dialog no longer
+holds the relay at the round's CSeq and its own sequence is at or past it — it saw the round
+end, however it ended, and perhaps the next round begin — and further along an answered
+round when that transaction's ACK left. That end is progress the live copy cannot make
+itself. The fold, the regression and the order the gates read (`lifecycle_behind`, the
+round ranked after the answer and the ending) read the same rule (`call/tests/it/lifecycle.rs`:
+`a_round_ended_in_the_other_copy_advances_the_record_holding_it_open`,
+`an_acked_round_advances_the_record_awaiting_its_ack`,
+`crossed_rounds_are_no_progress_either_way`; `crossed_reinvite_round.rs`, the refused and
+the next-round cells).
+
+**A round's end folds alone.** The answer and the ending start or end the call, and a body
+further along on either folds whole. A body whose only progress is a round's end folds only
+that round's facts into the live copy (`call::helpers::merge_rounds`): on the round's dialog
+its INVITE relays, its INVITE client transaction, the ACK state of that transaction's 2xx,
+the offer it owes an answer to and the higher of the two sequences; on the originator's
+dialog the 2xx it awaits an ACK for, that 2xx's ladder timers and the higher remote
+sequence; the session state of both legs. Everything else stays the live copy's, notably
+the requests it relayed on its own since the other owner branched and the sequence they
+advanced (RFC 3261 §12.2.1.1; `crossed_reinvite_round.rs`, the two answered cells;
+`call/tests/it/round.rs`).
 
 **A fold adopts both counters, and so does a refusal.** A fold takes `max(p)` and `max(b)`
 of the two views and is not a write of this node: neither axis moves and nothing flushes,
-so the live copy holds the version the other owner published (ADR-0014, "a fold is not an
-increment"). A *refusal* takes only the axis the
+and the store keeps the version this node last flushed (ADR-0014, "a fold is not an
+increment", for what the live copy holds on each path). A *refusal* takes only the axis the
 other owner bumps — `b` at a primary, `p` at a backup — and takes it **without** the
 authoritative bump an ordinary mutation makes: adopting a version another owner published is
 a read this node records, and bumping our own axis for it would make two live owners raise

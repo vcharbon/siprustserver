@@ -490,14 +490,19 @@ counter moved: a rung of this node's own ladder never counts toward
 the next write.
 
 **A fold is not an increment.** A node that folds the other owner's body — the
-reverse reconcile, or a refused flush folded in either direction — takes that
-body and `max` of both counters, moves neither axis and flushes nothing. Its
-live copy then holds the version the other owner published, and the next
-write of either owner orders against it. A fold that bumped would read that
-owner's next write as made on a version it has moved past and refuse it; not
-bumping, a takeover copy's write after its relay folded is the next version. The folded body differs from the one
-published only by this node's timer hygiene (deadlines re-anchored into its
-clock, a stale keepalive guard dropped), which no peer reads.
+reverse reconcile, or a refused flush folded in either direction — moves
+neither axis and flushes nothing: its live copy carries `max` of the two
+views on each axis, and its store keeps the version it last flushed. What the
+live copy holds depends on the path. The reverse reconcile of a flush the
+vector took holds the other owner's body at the version it published. A
+refused flush folded whole holds the other owner's content at `(max p, max b)`,
+a vector neither owner published. A round's end folded alone (ADR-0031, "a
+round's end folds alone") holds this node's own content with the round merged
+in, at that same vector. On every path the other owner's next write orders
+against what it published: a fold that bumped would read that write as made on
+a version this node has moved past and refuse it. Timers a fold takes are
+re-anchored into this node's clock and a stale keepalive guard is dropped,
+which no peer reads.
 
 **Accepted degradation.** A node restoring the call — the reclaiming primary,
 since a survivor's takeover copy is reactive and sheds when its last
@@ -525,8 +530,8 @@ cell that pins the rule:
 | Re-ACK is quiet, the repeated 2xx counts | `b2bua-harness/tests/it/reack_retransmitted_2xx.rs` | `retransmission_turn_is_quiet.rs` (`a_re_ack_of_a_repeated_2xx_replicates_nothing`), `retransmission_turn_and_message_cap.rs` (`a_repeated_inbound_2xx_counts_toward_the_message_cap`) |
 | The vector answers equality and strict-greater only | `failover-harness/tests/it/forward_flush_never_regresses_backup_progress.rs` (both `HealAt` cells), `answer_lost_with_primary_no_answer.rs`, `b2bua/src/repl/s12_tests.rs` | the same cells, unchanged |
 | A restored ladder restarts from the last write, bounded by the deadline | — (a residual, not a rule) | `retransmission_turn_is_quiet.rs` (`a_reclaim_after_three_rungs_restarts_the_2xx_ladder_from_the_answer`) |
-| An absorbed ACK is quiet; the ACK that discharges is a write | `b2bua-harness/tests/it/duplicate_ack_absorbed.rs`, `reack_retransmitted_2xx.rs` | `duplicate_ack_absorbed.rs` (`a_duplicate_ack_on_a_fresh_branch_draws_no_second_b_leg_ack`, `a_duplicate_reinvite_ack_draws_no_third_b_leg_ack`), `failover-harness/tests/it/reinvite_2xx_acked_through_the_primary.rs` (the cells healed before the answer) |
-| A fold is not an increment | `call_terminate_on_backup.rs` (`c11_reinvite_on_backup__primary_alive__no_terminal`), `reinvite_answer_failover.rs`, `forward_flush_never_regresses_backup_progress.rs`, `answer_lost_with_primary_no_answer.rs` | `b2bua/src/router/reclaim/tests.rs` (`a_reverse_fold_holds_the_backups_version_so_its_next_write_folds`, `a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it`), `reinvite_2xx_acked_through_the_primary.rs` |
+| An absorbed ACK is quiet; the ACK that discharges is a write | `b2bua-harness/tests/it/duplicate_ack_absorbed.rs`, `reack_retransmitted_2xx.rs` | `duplicate_ack_absorbed.rs` (`a_duplicate_ack_on_a_fresh_branch_draws_no_second_b_leg_ack`, `a_duplicate_reinvite_ack_draws_no_third_b_leg_ack`) |
+| A fold is not an increment | `call_terminate_on_backup.rs` (`c11_reinvite_on_backup__primary_alive__no_terminal`), `reinvite_answer_failover.rs`, `forward_flush_never_regresses_backup_progress.rs`, `answer_lost_with_primary_no_answer.rs` | `b2bua/src/router/reclaim/tests.rs` (`a_reverse_fold_holds_the_backups_version_so_its_next_write_folds`, `a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it`, `a_refused_flush_answering_the_round_the_live_copy_holds_open_folds`, `a_round_fold_keeps_what_the_live_copy_wrote_since_the_branch`) |
 
 `b2bua_repl_quiet_turns_total{kind}` counts the turns persisted this way, so
 N rungs in `b2bua_retransmits_total` against 0 in `b2bua_repl_flush_propagated_total`

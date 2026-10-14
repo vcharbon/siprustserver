@@ -511,10 +511,11 @@ lifecycle — read answer first: an unanswered teardown never ends an answered c
 unconditionally except Forward, which yields for the **answer** alone — an
 `Active` Element whose caller was answered and to which no forward flush, taken
 or refused, has ever carried the authority's own answer. A refused flush is folded into a live copy
-when it carries lifecycle progress the vector cannot see (an answer, an ending, a
-re-INVITE round answered that the live copy holds open). A **fold** adopts
-`max` of both counters and moves neither, so the split heals and the next write
-of either owner orders against the version the other published; a
+when it carries lifecycle progress the vector cannot see: an answer or an ending,
+folded whole, or the end of a re-INVITE round the live copy holds unfinished,
+whose facts alone are merged in. A **fold** adopts `max` of both counters and
+moves neither, so the split heals and the other owner's next write orders
+against what it published; a
 **refusal** adopts only the axis the other owner bumps — `b` at a primary, `p`
 at a backup — and without that bump, because recording a version somebody else
 published is a read, not a mutation. Closes the latent equal-`gen` divergence

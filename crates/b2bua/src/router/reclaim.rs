@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use call::helpers::{lifecycle_advances, lifecycle_behind};
+use call::helpers::{lifecycle_behind, lifecycle_progress};
 use call::{Call, CallModelState};
 
 use super::interpret::process_result;
@@ -17,7 +17,7 @@ mod bulk;
 mod fold;
 pub(super) use bulk::reclaim_all;
 use bulk::reclaim_into_live;
-use fold::fold_quietly;
+use fold::{fold_quietly, Fold};
 
 /// Apply a backup's reverse-flushed mutation that the puller just landed in our
 /// `pri:{self}` partition into our **live** map (ADR-0014 Reclaim-tail
@@ -37,7 +37,7 @@ use fold::fold_quietly;
 /// discharge (no keepalive arming); anything else is the existing reactive
 /// straggler, materialised + re-armed by [`reclaim_into_live`].
 ///
-/// The reverse gate ([`reverse_flush_dominates`]) is re-checked under the
+/// The reverse gate ([`reverse_fold`]) is re-checked under the
 /// per-call lock; a primary that mutated the call since the backup branched
 /// keeps its own copy unless the flush carries lifecycle progress it could not
 /// have made itself. A fold is not this node's write ([`fold_quietly`]): the
@@ -72,11 +72,11 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
         // the stored call is still queued): it is not this call's progress.
         Some(live) if replica.incarnation() != live.incarnation() => {}
         Some(live) => {
-            if !reverse_flush_dominates(&replica, &live) {
+            let Some(fold) = reverse_fold(&replica, &live) else {
                 ctx.metrics.bump_repl_reverse_flush_refused();
                 adopt_seen_counter(ctx, FlushDirection::Reverse, &live, &replica);
                 return;
-            }
+            };
             // Rare by construction (a backup served an in-dialog request for a
             // call we still own), so it gets its own line with the identity an
             // operator correlates by: the call and both `(p,b)` views.
@@ -101,7 +101,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
                 // state in and let the timer service follow the folded ledger. No
                 // discharge — the call continues.
                 CallModelState::Active => {
-                    fold_quietly(ctx, call_ref, &live, replica, skew_offset_ms, now_ms).await;
+                    fold_quietly(ctx, call_ref, &live, replica, fold, skew_offset_ms, now_ms).await;
                 }
                 // Transient teardown-in-progress; wait for the Terminated flush.
                 CallModelState::Terminating => {}
@@ -289,9 +289,10 @@ impl FlushDirection {
 
 /// Fold a flush the store's `(p,b)` gate refused (the body rides the command,
 /// the store never took it): the call model reads it for lifecycle progress
-/// ([`lifecycle_advances`]) our live copy lacks — the other owner's answer or
-/// teardown of a call we read one step behind — and folds exactly as an applied
-/// flush would. Anything else stays refused. **A live copy is required**: an
+/// ([`lifecycle_progress`]) our live copy lacks — the other owner's answer or
+/// teardown of a call we read one step behind, folded whole as an applied flush
+/// would be, or the end of a re-INVITE round we hold unfinished, whose facts
+/// alone are folded. Anything else stays refused. **A live copy is required**: an
 /// Element alone is kept as it is, its merge deferred to the next
 /// materialisation, and a call we do not serve live is never resurrected here.
 pub(super) async fn fold_refused_flush(
@@ -328,11 +329,11 @@ pub(super) async fn fold_refused_flush(
     if replica.incarnation() != live.incarnation() {
         return;
     }
-    if !lifecycle_advances(&replica, &live) {
+    let Some(progress) = lifecycle_progress(&replica, &live) else {
         direction.count_refused(&ctx.metrics);
         adopt_seen_counter(ctx, direction, &live, &replica);
         return;
-    }
+    };
     let skew_offset_ms = if origin_now_ms > 0 { now_ms - origin_now_ms } else { 0 };
     // Whose ending signals end the call is the direction: toward a PRIMARY the
     // live copy defers to the record it owns, so a folded terminal is discharged
@@ -362,7 +363,7 @@ pub(super) async fn fold_refused_flush(
         discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
         return;
     }
-    fold_quietly(ctx, call_ref, &live, replica, skew_offset_ms, now_ms).await;
+    fold_quietly(ctx, call_ref, &live, replica, Fold::of(progress), skew_offset_ms, now_ms).await;
 }
 
 /// A REFUSED flush still moves the counter: seeing a version is not taking it,
@@ -404,23 +405,36 @@ fn adopt_seen_counter(
     }
 }
 
-/// The ADR-0014 **Reverse** apply rule for a live-map fold. The reverse-flushed
-/// `replica` dominates our `live` copy when the `(p,b)` vector says so (`p`
-/// unchanged since the backup branched, `b` advanced) and its body is not
-/// behind ours ([`lifecycle_behind`], the order the forward gate reads too:
-/// an unanswered teardown never ends an answered call), OR when it carries
-/// lifecycle progress ([`lifecycle_advances`]) a reclaimed copy cannot have
-/// made on its own: a `p` bump from a turn on a stale record does not outrank
-/// the backup's answer or teardown. A backup's `p` may be one it adopted
-/// without the body that carried it (ADR-0031 D3), so a body behind ours — the
-/// backup's ending of a call it never saw answered — is a branch, never our
-/// call's end. A call with no topology never folds.
-fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
+/// The ADR-0014 **Reverse** apply rule for a live-map fold, and how the
+/// reverse-flushed `replica` folds into our `live` copy. It folds whole when
+/// the `(p,b)` vector says it is newer (`p` unchanged since the backup
+/// branched, `b` advanced) and its body is not behind ours
+/// ([`lifecycle_behind`], the order the forward gate reads too: an unanswered
+/// teardown never ends an answered call), or when it carries lifecycle
+/// progress a reclaimed copy cannot have made on its own: a `p` bump from a
+/// turn on a stale record does not outrank the backup's answer or teardown. It
+/// folds only its rounds when its sole progress is the end of a re-INVITE round
+/// we hold unfinished ([`lifecycle_progress`]): our own writes since the backup
+/// branched stay. A backup's `p` may be one it adopted without the body that
+/// carried it (ADR-0031 D3), so a body behind ours — the backup's ending of a
+/// call it never saw answered — is a branch, never our call's end. A call with
+/// no topology never folds.
+fn reverse_fold(replica: &Call, live: &Call) -> Option<Fold> {
     let (Some(r), Some(l)) = (replica.topology.as_ref(), live.topology.as_ref()) else {
-        return false;
+        return None;
     };
     let newer = r.gen == l.gen && r.bak_gen > l.bak_gen && !lifecycle_behind(replica, live);
-    newer || lifecycle_advances(replica, live)
+    if newer {
+        return Some(Fold::Whole);
+    }
+    lifecycle_progress(replica, live).map(Fold::of)
+}
+
+/// Whether the reverse-flushed `replica` folds into `live` at all
+/// ([`reverse_fold`]).
+#[cfg(test)]
+fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
+    reverse_fold(replica, live).is_some()
 }
 
 /// Force the last persisted snapshot of `call_ref` terminal and run it through

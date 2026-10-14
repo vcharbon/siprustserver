@@ -552,3 +552,29 @@ async fn a_refused_flush_answering_the_round_the_live_copy_holds_open_folds() {
         assert_eq!(live_pb(&n, &call_ref), (6, 2), "{stage:?}: the backup's `b`, our `p`");
     }
 }
+
+/// **A round's end folds alone.** The refused write's only progress is the
+/// end of the round the live copy holds open, so only the round's facts come
+/// in: what the live copy wrote since the backup branched — here its message
+/// count — stays, and its counters follow the quiet fold.
+#[tokio::test(start_paused = true)]
+async fn a_round_fold_keeps_what_the_live_copy_wrote_since_the_branch() {
+    let n = node("w0").await;
+    let ctx = n.core.router_ctx();
+    let mut live = in_round(6, 1, RoundStage::Open);
+    live.message_count = Some(42);
+    let call_ref = live.call_ref.clone();
+    assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+
+    let mut replica = in_round(4, 2, RoundStage::Answered);
+    replica.message_count = Some(3);
+    let body = MsgpackCodec::new().encode(&replica);
+    fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
+    sip_clock::testkit::settle().await;
+
+    let after = ctx.state.peek(&call_ref).expect("the call plays on");
+    let awaited = after.a_leg.dialogs.confirmed().and_then(|d| d.awaited_ack_cseq);
+    assert_eq!(awaited, Some(STAGED_ROUND_CSEQ), "the round's end came in");
+    assert_eq!(after.message_count, Some(42), "the live copy's own write stays");
+    assert_eq!(live_pb(&n, &call_ref), (6, 2), "the backup's `b`, our `p`, no bump");
+}

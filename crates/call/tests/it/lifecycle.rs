@@ -5,7 +5,9 @@
 //! one holds answered is ahead of the same round held open.
 
 use crate::common;
-use call::helpers::{lifecycle_advances, lifecycle_behind, round_answered_over};
+use call::helpers::{
+    lifecycle_advances, lifecycle_behind, lifecycle_progress, round_further, Progress,
+};
 use call::model::{Call, CallModelState};
 use call::testkit::{stage_reinvite_round, RoundStage};
 
@@ -60,39 +62,49 @@ fn round(state: CallModelState, branch: &str, stage: RoundStage) -> Call {
 const ROUND: &str = "z9hG4bK-round-1";
 
 #[test]
-fn an_answered_round_advances_the_record_holding_it_open() {
+fn a_round_ended_in_the_other_copy_advances_the_record_holding_it_open() {
     let open = round(CallModelState::Active, ROUND, RoundStage::Open);
-    for stage in [RoundStage::Answered, RoundStage::Acked] {
-        let answered = round(CallModelState::Active, ROUND, stage);
-        assert!(round_answered_over(&answered, &open), "{stage:?} over open");
-        assert!(
-            lifecycle_advances(&answered, &open),
-            "{stage:?} is progress the open record lacks"
-        );
-        assert!(lifecycle_behind(&open, &answered), "the open record is behind {stage:?}");
-        assert!(!lifecycle_behind(&answered, &open));
+    for stage in [RoundStage::Answered, RoundStage::Acked, RoundStage::Refused] {
+        let ended = round(CallModelState::Active, ROUND, stage);
+        assert!(round_further(&ended, &open), "{stage:?} over open");
+        assert_eq!(lifecycle_progress(&ended, &open), Some(Progress::Round), "{stage:?}");
+        assert!(lifecycle_behind(&open, &ended), "the open record is behind {stage:?}");
+        assert!(!lifecycle_behind(&ended, &open));
     }
 }
 
 #[test]
-fn a_round_never_goes_back_to_open() {
+fn a_next_round_begun_in_the_other_copy_ended_the_one_held_open() {
     let open = round(CallModelState::Active, ROUND, RoundStage::Open);
-    let answered = round(CallModelState::Active, ROUND, RoundStage::Answered);
-    assert!(!round_answered_over(&open, &answered));
-    assert!(!lifecycle_advances(&open, &answered), "an open round is no progress over its answer");
-    let acked = round(CallModelState::Active, ROUND, RoundStage::Acked);
-    assert!(
-        !lifecycle_advances(&acked, &answered) && !lifecycle_advances(&answered, &acked),
-        "the axis is the answer the open record cannot see, not the ACK"
-    );
+    let mut next = round(CallModelState::Active, ROUND, RoundStage::Acked);
+    stage_reinvite_round(&mut next.b_legs[0], "z9hG4bK-round-2", RoundStage::Open);
+    assert!(lifecycle_advances(&next, &open), "the first round's end, seen in the next one");
 }
 
 #[test]
-fn another_round_answered_is_not_this_ones_answer() {
+fn an_acked_round_advances_the_record_awaiting_its_ack() {
+    let answered = round(CallModelState::Active, ROUND, RoundStage::Answered);
+    let acked = round(CallModelState::Active, ROUND, RoundStage::Acked);
+    assert!(lifecycle_advances(&acked, &answered), "the ACK left in the other copy");
+    assert!(lifecycle_behind(&answered, &acked));
+}
+
+#[test]
+fn a_round_never_goes_back() {
     let open = round(CallModelState::Active, ROUND, RoundStage::Open);
-    let other = round(CallModelState::Active, "z9hG4bK-round-2", RoundStage::Answered);
-    assert!(!round_answered_over(&other, &open), "a round is named by its transaction");
-    assert!(!lifecycle_advances(&other, &open) && !lifecycle_behind(&open, &other));
+    let answered = round(CallModelState::Active, ROUND, RoundStage::Answered);
+    let acked = round(CallModelState::Active, ROUND, RoundStage::Acked);
+    assert!(!round_further(&open, &answered) && !round_further(&open, &acked));
+    assert!(!lifecycle_advances(&open, &answered), "an open round is no progress over its end");
+    assert!(!lifecycle_advances(&answered, &acked), "an ACK awaited is no progress over it sent");
+}
+
+#[test]
+fn a_body_that_never_saw_the_round_is_not_past_it() {
+    let open = round(CallModelState::Active, ROUND, RoundStage::Open);
+    let before = at(ANSWERED, CallModelState::Active);
+    assert!(!round_further(&before, &open), "its sequence stands before the round's CSeq");
+    assert!(!lifecycle_advances(&before, &open) && !lifecycle_behind(&open, &before));
 }
 
 #[test]

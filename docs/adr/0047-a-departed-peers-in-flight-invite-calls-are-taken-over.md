@@ -165,9 +165,8 @@ before (ADR-0031 D3).
 two bodies of one call the same way (`call::helpers::lifecycle_behind`): the answer
 ranks first, so an answered body is never behind an unanswered one however far toward
 its end the unanswered one went, and between bodies alike on the answer the one less
-far toward its end is behind; between bodies alike on both, the one holding open a
-re-INVITE round the other holds answered (ADR-0031, "a re-INVITE round is a third
-chain").
+far toward its end is behind; between bodies alike on both, the one holding unfinished a
+re-INVITE round the other saw end (ADR-0031, "a re-INVITE round is a third chain").
 
 - **Reverse.** A backup's `p` may be one it adopted without the body that carried it,
   so the live-map fold of a reverse flush takes the vector's verdict (`p` unchanged,
