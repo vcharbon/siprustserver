@@ -32,10 +32,11 @@ afterEach(() => {
 
 const PREP = 200
 
-/** Side rows under `rows/`, each stating its call key as `anchor`. */
+/** Side rows under `rows/`, one `<number>.row` each, stating its call key as `anchor`. */
 const layout = CaseLayout.layerWith({
   rowsDir: "rows",
-  rowFile: (number) => `${number}.json`,
+  rowFile: (number) => `${number}.row`,
+  rowNumberOf: (name) => /^(.+)\.row$/.exec(name)?.[1],
   callKeyOf: (row) => {
     const anchor = (row.document as { anchor?: unknown }).anchor
     return typeof anchor === "string" && anchor !== "" ? anchor : undefined
@@ -83,7 +84,7 @@ const cutCapture = (
     )
     fs.writeFileSync(path.join(caseDir, "resources", "uac1_0_0.sdp"), `v=0\r\no=${id}\r\n`)
     fs.writeFileSync(
-      path.join(caseDir, "rows", `100${at}.json`),
+      path.join(caseDir, "rows", `100${at}.row`),
       `${JSON.stringify({ number: `100${at}`, dialled: "route", anchor: `call${at}-${capture}` })}\n`
     )
     cases.push({ id, dir: caseDir, egressEndpoint: "ep2" })
@@ -211,12 +212,12 @@ describe("the rows a cut becomes", () => {
   it("refuses to make a key up for a case whose side rows state none, or two", async () => {
     const none = cutCapture("capture_keyless.pcap.gz")
     const ledger = path.join(none.cases[0]!.dir, "rows")
-    fs.writeFileSync(path.join(ledger, "1001.json"), `${JSON.stringify({ number: "1001" })}\n`)
+    fs.writeFileSync(path.join(ledger, "1001.row"), `${JSON.stringify({ number: "1001" })}\n`)
     await expect(requestOf(none)).rejects.toThrow(/states 0 call key/)
 
     const two = cutCapture("capture_twokeys.pcap.gz")
     fs.writeFileSync(
-      path.join(two.cases[0]!.dir, "rows", "1002.json"),
+      path.join(two.cases[0]!.dir, "rows", "1002.row"),
       `${JSON.stringify({ number: "1002", anchor: "SDother" })}\n`
     )
     await expect(requestOf(two)).rejects.toThrow(/states 2 call key/)

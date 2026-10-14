@@ -22,6 +22,8 @@ export interface Interface {
   readonly rowsDir: string
   /** A side row's file name by its number. */
   readonly rowFile: (number: string) => string
+  /** The number a file named `name` in the rows directory is the row of: {@link rowFile}'s inverse; `undefined` for no row. */
+  readonly rowNumberOf: (name: string) => string | undefined
   /** The call key one row states; `undefined` where it states none. A case's rows state exactly one. */
   readonly callKeyOf: (row: Model.LedgerRow) => string | undefined
   /** The variable naming a batch's merged rows directory to the interpreter; `undefined` where none is passed. */
@@ -36,6 +38,7 @@ export const layer = Layer.succeed(
   Service.of({
     rowsDir: "rows",
     rowFile: (number) => `${number}.json`,
+    rowNumberOf: (name) => /^(.+)\.json$/.exec(name)?.[1],
     callKeyOf: () => undefined,
     interpreterVariable: undefined
   })

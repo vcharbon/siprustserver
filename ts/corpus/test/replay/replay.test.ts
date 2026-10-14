@@ -46,6 +46,7 @@ const TWO = "capture_two.pcap.gz"
 const layout = CaseLayout.layerWith({
   rowsDir: "rows",
   rowFile: (number) => `${number}.json`,
+  rowNumberOf: (name) => /^(.+)\.json$/.exec(name)?.[1],
   callKeyOf: () => undefined,
   interpreterVariable: "ROWS_DIR"
 })

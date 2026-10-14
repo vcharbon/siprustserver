@@ -103,8 +103,9 @@ const caseOf = (entry: CutCase, names: ReadonlyMap<string, NameLine>) =>
     }
     const ledger: Array<Model.LedgerRow> = []
     for (const file of yield* filesUnder(fs, caseDir, path.join(caseDir, layout.rowsDir))) {
-      if (!file.endsWith(".json")) continue
-      ledger.push({ number: path.basename(file, ".json"), document: yield* readJson(fs, path.join(caseDir, file)) })
+      const number = layout.rowNumberOf(path.basename(file))
+      if (number === undefined) continue
+      ledger.push({ number, document: yield* readJson(fs, path.join(caseDir, file)) })
     }
     return {
       caseId: entry.id,
