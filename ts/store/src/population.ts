@@ -52,12 +52,6 @@ export interface Interface {
   /** Every member's name alone, which is what a work list is built from. */
   readonly captures: Effect.Effect<ReadonlyArray<string>, SqlError>
   readonly size: Effect.Effect<number, SqlError>
-  /**
-   * The captures a corpus directory names, adopted as the population — ONCE. A
-   * table that already holds a row is left exactly as it is and the answer is
-   * 0, so the seed is a migration an operator can re-run without wondering.
-   */
-  readonly seed: (captures: ReadonlyArray<string>) => Effect.Effect<number, SqlError>
   /** Records that the artifact store extracted this capture just now. */
   readonly ingested: (capture: string) => Effect.Effect<void, SqlError>
 }
@@ -132,27 +126,10 @@ export const layer = Layer.effect(
       return rows[0]?.size ?? 0
     })
 
-    // The table is held for the read AND the inserts: two commands racing to
-    // seed an empty table would otherwise both read it empty and both fill it.
-    const seed = Effect.fn("Population.seed")(function*(named: ReadonlyArray<string>) {
-      return yield* sql.withTransaction(Effect.gen(function*() {
-        yield* sql`LOCK TABLE population IN SHARE ROW EXCLUSIVE MODE`
-        const held = yield* size
-        if (held > 0 || named.length === 0) return 0
-        for (const capture of named) {
-          yield* sql`
-            INSERT INTO population (capture, source_path) VALUES (${capture}, NULL)
-            ON CONFLICT (capture) DO NOTHING
-          `
-        }
-        return named.length
-      }))
-    })
-
     const ingested = Effect.fn("Population.ingested")(function*(capture: string) {
       yield* sql`UPDATE population SET ingested_at = now() WHERE capture = ${capture}`
     })
 
-    return Service.of({ add, list, captures, size, seed, ingested })
+    return Service.of({ add, list, captures, size, ingested })
   })
 )

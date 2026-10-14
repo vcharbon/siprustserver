@@ -119,7 +119,6 @@ const population = Layer.succeed(
     list: refuse,
     captures: refuse,
     size: refuse,
-    seed: () => refuse,
     ingested: () => refuse
   })
 )

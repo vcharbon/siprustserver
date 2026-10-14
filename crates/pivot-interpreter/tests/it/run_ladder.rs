@@ -12,7 +12,6 @@ mod bodies;
 mod budgets;
 mod cancel;
 mod close;
-mod corpus;
 mod deviations;
 mod drafts;
 mod finals_and_acks;
@@ -465,30 +464,6 @@ fn case_dir(name: &str) -> Option<Case> {
         .map(|root| PathBuf::from(root).join(name))
         .find(|dir| dir.join("scenario.json").is_file())?;
     Some(read_case(&found.join("scenario.json"), found))
-}
-
-/// A case from the regenerated v3 CORPUS. Two layouts exist and both are
-/// served: the corpus tree's `<capture>/cases/<case-id>/<case-id>.v3.json`,
-/// and the staged viewer tree's flat `<case-id>/scenario.json`.
-/// `PIVOT_CORPUS_DIRS` points the corpus rungs at either; they SKIP LOUDLY
-/// when it is unset, because an absent corpus must never read as a pass.
-fn corpus_case(case_id: &str) -> Option<Case> {
-    let roots = std::env::var("PIVOT_CORPUS_DIRS").ok()?;
-    for root in roots.split(':').filter(|r| !r.is_empty()) {
-        let capture = case_id.rsplit_once("-case").map(|(c, _)| c).unwrap_or(case_id);
-        let capture = capture.strip_suffix("-auto").unwrap_or(capture);
-        let dir = PathBuf::from(root).join(capture).join("cases").join(case_id);
-        let document = dir.join(format!("{case_id}.v3.json"));
-        if document.is_file() {
-            return Some(read_case(&document, dir));
-        }
-        let flat = PathBuf::from(root).join(case_id);
-        let document = flat.join("scenario.json");
-        if document.is_file() {
-            return Some(read_case(&document, flat));
-        }
-    }
-    None
 }
 
 fn read_case(path: &std::path::Path, base_dir: PathBuf) -> Case {

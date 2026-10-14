@@ -2,9 +2,8 @@
  * The population record and the cut fingerprint, against a real postgres.
  *
  * The load-bearing claims are the ones a fake cannot make: a second add of a
- * held capture counting as nothing new, a seed refusing a table that already
- * holds rows, and the newest cut of a capture answering with the code that took
- * it. The suite builds and drops its OWN database, so the server's other
+ * held capture counting as nothing new, and the newest cut of a capture
+ * answering with the code that took it. The suite builds and drops its OWN database, so the server's other
  * databases are never touched (`./server.js`).
  */
 import * as Effect from "effect/Effect"
@@ -117,20 +116,10 @@ describe.skipIf(!served)("Population", () => {
       // A store rebuilt over kept artifacts: the row is new, the record is not.
       yield* population.add([{ capture: kept, sourcePath: "/p/kept", ingestedAt: at, extractorHash: "e1", ingestFailed: null }])
       expect((yield* population.list)[0]).toMatchObject({ ingestedAt: at, extractorHash: "e1" })
-      // A seeded row with no instant takes the record's on its first restatement.
-      yield* population.add([{ capture: "capture_seeded.pcap.gz", sourcePath: null }])
-      yield* population.add([{ capture: "capture_seeded.pcap.gz", sourcePath: "/p/seeded", ingestedAt: at, extractorHash: "e1" }])
-      expect((yield* population.list)[1]).toMatchObject({ capture: "capture_seeded.pcap.gz", ingestedAt: at })
-    })))
-
-  it("seeds an empty table once and never a filled one", () =>
-    withStore(Effect.gen(function*() {
-      yield* empty
-      const population = yield* Population.Service
-      expect(yield* population.seed(["capture_a.pcap.gz", "capture_b.pcap.gz"])).toBe(2)
-      expect(yield* population.seed(["capture_c.pcap.gz"])).toBe(0)
-      expect(yield* population.captures).toEqual(["capture_a.pcap.gz", "capture_b.pcap.gz"])
-      expect(yield* population.size).toBe(2)
+      // A row added with no instant takes the record's on its first restatement.
+      yield* population.add([{ capture: "capture_named.pcap.gz", sourcePath: null }])
+      yield* population.add([{ capture: "capture_named.pcap.gz", sourcePath: "/p/named", ingestedAt: at, extractorHash: "e1" }])
+      expect((yield* population.list)[1]).toMatchObject({ capture: "capture_named.pcap.gz", ingestedAt: at })
     })))
 
   it("answers what each capture stands cut as, with the code that cut it", () =>
