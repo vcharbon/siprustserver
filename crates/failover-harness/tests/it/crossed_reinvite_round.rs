@@ -201,3 +201,42 @@ async fn a_round_acked_at_the_copy_draws_no_second_ack_through_the_primary() {
     assert_eq!(further, 0, "the callee draws no second ACK for its 2xx");
     caller_hangs_up(&mut est).await;
 }
+
+/// The copy relays the round's 2xx and the primary reads it, so the primary
+/// awaits the caller's ACK. Then the replication is cut: the primary relays a
+/// whole INFO while the copy relays the caller's ACK and her next re-INVITE.
+/// Once healed the first round is over at the primary — no second ACK for its
+/// 2xx — and the next one open: the callee's 2xx to it draws one ACK.
+#[tokio::test(start_paused = true)]
+async fn an_answered_round_followed_by_the_next_round_ends_at_the_primary() {
+    let mut est = establish("crossed-round-answered-then-next").await;
+    let (p_ord, b_ord) = (est.primary_ord.clone(), est.bak_ord.clone());
+    est.proxy.set_health(&p_ord, WorkerHealth::Dead);
+    est.fh.advance(Duration::from_millis(200)).await;
+    let mut round = est.dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    let mut at_bob = est.bob.receive("INVITE").await;
+    round.expect(100).await;
+    at_bob.respond(200, "OK").with_sdp(ANSWER).await;
+    let answer = round.expect(200).await;
+    est.fh.advance(Duration::from_millis(150)).await;
+    est.fh.partition(&p_ord, &b_ord);
+    est.proxy.set_health(&p_ord, WorkerHealth::Alive);
+    info_through_the_primary(&est.alice, &mut est.bob_dialog).await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Dead);
+    est.dialog.ack_for(answer.cseq().seq(), None).await;
+    est.bob.receive("ACK").await;
+    let mut next = est.dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    let mut next_at_bob = est.bob.receive("INVITE").await;
+    next.expect(100).await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Alive);
+    est.fh.heal(&p_ord, &b_ord);
+    est.fh.advance(Duration::from_millis(200)).await;
+    info_through_the_primary(&est.alice, &mut est.bob_dialog).await;
+    est.fh.advance(Duration::from_millis(200)).await;
+
+    next_at_bob.respond(200, "OK").with_sdp(ANSWER).await;
+    next.expect(200).await;
+    let acks = ack_the_answer(&est.fh, &est.alice, &mut est.dialog, &est.bob).await;
+    assert_eq!(acks, 1, "the callee draws exactly one ACK for each 2xx");
+    caller_hangs_up(&mut est).await;
+}
