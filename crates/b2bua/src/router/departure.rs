@@ -84,11 +84,24 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
     let Ok((call, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
     if call.state == CallModelState::Terminated {
         // A takeover copy ended the call and deferred it to the peer, which
-        // left without reconciling it: no one else discharges it now.
-        let _guard = ctx.state.lock(call_ref).await;
+        // left without reconciling it: no one else discharges it now. The body
+        // is read again under the lock, which the call's own turns take: one
+        // of them may have deleted it since the read above.
+        let guard = ctx.state.lock(call_ref).await;
+        let ended = match ctx.state.peek_replica(call_ref).await {
+            Ok((ended, _skew)) if ended.state == CallModelState::Terminated => ended,
+            _ if ctx.state.peek(call_ref).is_some() => return Swept::Left,
+            _ => {
+                drop(guard);
+                ctx.state.discard_orphan(call_ref);
+                return Swept::Left;
+            }
+        };
         let now_ms = ctx.clock.now_ms();
-        discharge_materialized_terminal(ctx, call_ref, call, now_ms, false).await;
-        return Swept::Discharged;
+        if discharge_materialized_terminal(ctx, call_ref, ended, now_ms, false).await {
+            return Swept::Discharged;
+        }
+        return Swept::Left;
     }
     if !has_invite_to_serve(&call) {
         return Swept::Left;

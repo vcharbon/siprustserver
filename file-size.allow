@@ -59,7 +59,7 @@ crates/e2e-web/src/lib.rs 1289
 crates/failover-harness/src/harness.rs 2321
 crates/failover-harness/src/runner.rs 636
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 1017
-crates/failover-harness/tests/it/failover.rs 1571
+crates/failover-harness/tests/it/failover.rs 1570
 crates/failover-harness/tests/it/fault_primitives.rs 887
 crates/failover-harness/tests/it/inflight_resend.rs 812
 crates/failover-harness/tests/it/limiter_ha.rs 881

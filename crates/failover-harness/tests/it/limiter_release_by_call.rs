@@ -2,10 +2,10 @@
 //! copy of the call the releasing node holds.
 //!
 //! Two nodes can each release one call: the crashed primary before it died
-//! and the backup after the takeover (a fold's flush lost with the crash), or
-//! a rebooted primary's reclaim and the backup's reap of the same deferred
-//! terminal. The release is keyed by the call, so the second one frees
-//! nothing: a neighbour's hold on the same id is never taken.
+//! and the backup after the takeover (a fold's flush lost with the crash).
+//! The release is keyed by the call, so the second one frees nothing: a
+//! neighbour's hold on the same id is never taken. A deferred terminal of a
+//! primary that departs is released once, by the backup's departure sweep.
 //!
 //! A counted call whose set lapsed while its primary was down (the lease is
 //! shorter than a silent takeover window) is counted again by the first

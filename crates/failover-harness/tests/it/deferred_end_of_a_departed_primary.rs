@@ -59,3 +59,42 @@ async fn an_end_deferred_to_a_primary_that_departs_is_discharged_by_the_sweep() 
     assert_call_fully_released(&[backup], &call_ref).await;
     drop(proxy);
 }
+
+/// The residual of the sweep's discharge (ADR-0047): a primary that
+/// reconciled a deferred end — its CDR written, its delete sent — and left the
+/// set before the backup applied that delete. The departure parks the
+/// backup's flows, so the delete never lands, and the sweep discharges the
+/// ended Element again: two CDRs. The window runs from the copy's flush to the
+/// park; here the primary's writes to the backup are held throughout.
+#[tokio::test(start_paused = true)]
+async fn an_end_reconciled_by_a_primary_that_departs_before_its_delete_lands_is_discharged_twice() {
+    let Established { mut fh, alice, bob, proxy, w_b1, w_b2, pri_ord, call_ref, mut dialog } =
+        establish("deferred-end-reconciled-then-departed").await;
+    let bak_ord = if pri_ord == "b1" { "b2" } else { "b1" };
+    let (primary, backup) = if pri_ord == "b1" { (&w_b1, &w_b2) } else { (&w_b2, &w_b1) };
+    fh.stall(&pri_ord, bak_ord);
+    // The proxy reads the running primary dead: the BYE reaches the backup.
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    let reconciled = fh
+        .pump_until(Duration::from_millis(100), Duration::from_secs(10), async || {
+            total_cdrs_for(&[primary], &call_ref) == 1
+        })
+        .await;
+    assert!(reconciled, "the primary reconciled the backup's deferred end");
+    assert!(backup.holds_any_trace(&call_ref).await, "its delete never reached the backup");
+
+    fh.depart(&pri_ord);
+    let released = fh
+        .settle_terminal(async || {
+            primary.memory_clean()
+                && backup.memory_clean()
+                && !primary.holds_any_trace(&call_ref).await
+                && !backup.holds_any_trace(&call_ref).await
+        })
+        .await;
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert!(released, "nothing of the call is left");
+    assert_eq!(total_cdrs_for(&[primary, backup], &call_ref), 2, "the residual: two CDRs");
+    drop(proxy);
+}

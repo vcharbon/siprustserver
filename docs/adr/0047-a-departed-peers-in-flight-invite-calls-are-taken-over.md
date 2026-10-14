@@ -291,7 +291,13 @@ the call has one CDR.
   deferred to it.** A copy that ends a call while its primary is a member defers
   (ADR-0020 X3); with no departure the sweep never runs, and the ended Element is
   reaped past its TTL, CDR lost (`call_terminate_on_backup.rs`, C4 and C5).
-- **A primary that discharged a deferred end and departed before its delete reached
-  the backup.** The backup's sweep discharges the Element again: two CDRs. The window
-  is one replication poll between the primary's reconcile and its departure; no cell
-  measures it.
+- **A primary that reconciled a deferred end and departed before its delete landed.**
+  The primary wrote the CDR and sent its delete; the departure parks both of the
+  backup's flows at once, so the delete never lands, and the sweep discharges the
+  Element again: two CDRs. The window runs from the copy's flush to the park, about two
+  replication polls. A departed primary still running keeps pulling the backup, so it
+  can reconcile a deferral after the sweep ran, with the same outcome. The Element
+  keeps no trace of the primary's discharge once the delete is cut, so the backup
+  cannot tell the two apart; reading the peer's last applied position instead trades
+  the duplicate for a lost CDR
+  (`deferred_end_of_a_departed_primary.rs`, the reconciled-then-departed cell).

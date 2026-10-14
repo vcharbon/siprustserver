@@ -19,10 +19,10 @@ use super::super::RouterCtx;
 /// limiter freed, memory freed, **CDR lost**. An expired body is returned by one
 /// pass only, and no read evicts it before this pass sees it.
 ///
-/// A primary that reboots *inside* `reboot_budget` reclaims and discharges first;
-/// when its propagated delete never reaches this backup, this pass releases the
-/// same call a second time, which the limiter applies as a no-op (the release is
-/// keyed by the call). Spawned as a paced task by `b2bua_core`.
+/// A primary that departs before reconciling a deferred terminal has it
+/// discharged by this node's departure sweep (ADR-0047 D8), not here. A release
+/// this pass sends for a call another node already released frees nothing: the
+/// release is keyed by the call. Spawned as a paced task by `b2bua_core`.
 pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
     for terminal in ctx.state.reap_replica(now_ms).await {
         // No per-call lock: the body is already evicted and this node does not

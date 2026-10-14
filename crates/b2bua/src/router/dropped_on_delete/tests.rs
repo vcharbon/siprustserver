@@ -67,3 +67,14 @@ async fn a_takeover_copy_is_not_dropped_on_the_notice() {
     backup_deleted(&n, &r, call.incarnation()).await;
     assert!(ctx.state.is_takeover(&r), "a takeover copy is ended by its own rules");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_notice_for_a_call_not_live_here_leaves_nothing_behind() {
+    let n = node("w0").await;
+    let ctx = n.core.router_ctx();
+    let call = ringing("w0", "w1", "absent");
+    backup_deleted(&n, &call.call_ref, call.incarnation()).await;
+    assert!(ctx.state.peek(&call.call_ref).is_none());
+    assert_eq!(ctx.state.lock_count(), 0, "the notice's queue and lock entry are released");
+    assert!(n.cdr.snapshot().is_empty());
+}

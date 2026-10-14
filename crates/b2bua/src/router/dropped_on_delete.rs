@@ -23,12 +23,12 @@ use b2bua_sdk::event::CallEvent;
 pub(super) const TOPIC: &str = "discharged-by-backup";
 
 /// Queue the drop notice of `call_ref`, whose backup's delete naming
-/// `incarnation` this node applied, for a call this node holds live as its
-/// own; nothing for any other call.
+/// `incarnation` this node applied, whatever is live here now: the turn
+/// decides under the per-call lock. A reclaim of the call materialises it
+/// under that lock too, reading the body there, so either it ran first and the
+/// turn finds the call live and drops it, or the turn ran first and the
+/// reclaim finds the body deleted and materialises nothing.
 pub(super) async fn offer(ctx: &Arc<RouterCtx>, call_ref: String, incarnation: Option<String>) {
-    if ctx.state.peek(&call_ref).is_none() || ctx.state.is_takeover(&call_ref) {
-        return;
-    }
     let event = CallEvent::InternalEvent {
         call_ref,
         topic: TOPIC.to_string(),

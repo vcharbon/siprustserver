@@ -147,15 +147,16 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
 /// Materialise-first so `backup_of` resolves and the propagated delete reaches the
 /// peer. The caller MUST hold the per-call lock. No-op if already resident
 /// (idempotent reclaim/reap re-pass — `materialize_if_absent` returns false).
+/// Returns whether it discharged the body.
 pub(super) async fn discharge_materialized_terminal(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     terminal: Call,
     now_ms: i64,
     force_terminal: bool,
-) {
+) -> bool {
     if !ctx.state.materialize_if_absent(terminal.clone(), MaterialiseOrigin::Reclaim) {
-        return;
+        return false;
     }
     let mut before = terminal.clone();
     before.state = CallModelState::Active; // synth non-terminal → became_terminated fires
@@ -183,6 +184,7 @@ pub(super) async fn discharge_materialized_terminal(
         None,
     )
     .await;
+    true
 }
 
 /// The call's `(p,b)` version vector rendered for a lifecycle line
