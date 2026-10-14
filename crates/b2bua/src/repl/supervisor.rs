@@ -362,7 +362,7 @@ impl ReplicationSupervisor {
         // Backup-deferral gate: open the Backup streams once the Reclaim flows
         // are all current-or-unreachable (ADR-0014 boot order).
         let this = self.clone();
-        let gate = tokio::spawn(async move {
+        let gate = observe::spawn_keeping_node(async move {
             this.run_backup_gate(membership).await;
         });
         *self.inner.gate.lock().unwrap() = Some(gate);
@@ -581,7 +581,7 @@ impl ReplicationSupervisor {
         flow.status_rx = Some(status_rx);
         flow.cancel_tx = Some(cancel_tx);
 
-        tokio::spawn(async move {
+        observe::spawn_keeping_node(async move {
             puller.run(cancel_rx).await;
         });
     }
@@ -830,7 +830,7 @@ async fn await_any_change_or_poll(
         .into_iter()
         .map(|mut r| {
             let tx = tx.clone();
-            tokio::spawn(async move {
+            observe::spawn_keeping_node(async move {
                 if r.changed().await.is_ok() {
                     let _ = tx.try_send(());
                 }

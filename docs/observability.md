@@ -58,7 +58,7 @@ call is sampled nothing revokes it.
 There is **no wire propagation** — proxy and worker sample independently and a
 takeover backup opens its own root span linked to the nominal's. Correlate on
 the `sip.call_id` attribute, which every span carries; `trace_id` correlates the
-nominal and its takeover backup. Every event carries `at_ms` (when the fact
+nominal and its takeover backup, and `node` names the node that served each span. Every event carries `at_ms` (when the fact
 happened) — on the backfill path that is NOT the emission timestamp, so read
 `at_ms` for the call's timeline.
 
@@ -82,6 +82,14 @@ per-call `info!` line: a 5000-call failover prints ~5 lines, not 5000. A
 per-call `info!` is a review must-fix. Per-call diagnostics belong in the
 per-call trace, or at `debug!`. Every line carries node identity, plus peer /
 epoch / `(p,b)` where relevant.
+
+**Node identity.** `node=` is `observe::node()`: the pod's identity, unless the
+code runs under an `observe::NodeScope` — several nodes sharing one process, as
+the in-process harnesses run them. A task a node spawns goes through
+`observe::spawn_keeping_node` (or `keep_node` for a `JoinSet`), so it keeps that
+node; a plain `tokio::spawn` names the process instead. A handle read from
+outside its node's tasks (readiness, a harness proxy's registry) holds the
+`NodeScope` it was built under and enters it to log.
 
 **Traces.** Most implementation work adds NO trace emission: the choke points —
 SIP messages in/out, rule and context transitions, limiter admit/refresh/release

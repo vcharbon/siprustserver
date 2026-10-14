@@ -117,6 +117,9 @@ struct ReadinessInner {
     not_ready_logged: AtomicBool,
     /// The backends whose open breaker gates the OPTIONS self-health.
     backends: BackendGate,
+    /// The node this readiness belongs to: a transition is lined as that node
+    /// whoever reads the state (a probe, or an observer serving no node).
+    node: observe::NodeScope,
 }
 
 /// Clone-cheap readiness handle (shared `Arc` inside). Wired into
@@ -127,7 +130,8 @@ pub struct Readiness {
 }
 
 impl Readiness {
-    /// Build readiness over a cluster [`ReadinessSource`] (the supervisor).
+    /// Build readiness over a cluster [`ReadinessSource`] (the supervisor),
+    /// belonging to the node the caller serves.
     pub fn new(source: Arc<dyn ReadinessSource>) -> Self {
         Self {
             inner: Arc::new(ReadinessInner {
@@ -136,6 +140,7 @@ impl Readiness {
                 ready_latched: AtomicBool::new(false),
                 not_ready_logged: AtomicBool::new(false),
                 backends: BackendGate::default(),
+                node: observe::NodeScope::current(),
             }),
         }
     }
@@ -159,12 +164,14 @@ impl Readiness {
 
     fn latch_draining(&self, reason: &'static str) {
         if !self.inner.draining.swap(true, Ordering::SeqCst) {
-            tracing::info!(
-                node = observe::node(),
-                state = "Draining",
-                reason,
-                "readiness transition"
-            );
+            self.inner.node.enter(|| {
+                tracing::info!(
+                    node = observe::node(),
+                    state = "Draining",
+                    reason,
+                    "readiness transition"
+                );
+            });
         }
     }
 
@@ -215,24 +222,28 @@ impl Readiness {
             // `swap`, not `store`: two probes racing the opening gate must
             // produce ONE transition line.
             if !self.inner.ready_latched.swap(true, Ordering::SeqCst) {
-                tracing::info!(
-                    node = observe::node(),
-                    state = "Ready",
-                    reason = "membership settled, every peer bootstrapped and current",
-                    "readiness transition"
-                );
+                self.inner.node.enter(|| {
+                    tracing::info!(
+                        node = observe::node(),
+                        state = "Ready",
+                        reason = "membership settled, every peer bootstrapped and current",
+                        "readiness transition"
+                    );
+                });
             }
             return ReadinessState::Ready;
         }
         if !self.inner.not_ready_logged.swap(true, Ordering::SeqCst) {
-            tracing::info!(
-                node = observe::node(),
-                state = "NotReady",
-                membership_settled = settled,
-                all_bootstrapped = bootstrapped,
-                all_current = current,
-                "readiness transition"
-            );
+            self.inner.node.enter(|| {
+                tracing::info!(
+                    node = observe::node(),
+                    state = "NotReady",
+                    membership_settled = settled,
+                    all_bootstrapped = bootstrapped,
+                    all_current = current,
+                    "readiness transition"
+                );
+            });
         }
         ReadinessState::NotReady
     }

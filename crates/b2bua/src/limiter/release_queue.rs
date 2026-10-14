@@ -375,7 +375,7 @@ impl ReleaseQueue {
     /// leaves with the next send, one backoff later.
     pub async fn run(self: Arc<Self>) {
         loop {
-            let mut drainer = AbortOnDrop(tokio::spawn(self.clone().drain()));
+            let mut drainer = AbortOnDrop(observe::spawn_keeping_node(self.clone().drain()));
             match (&mut drainer.0).await {
                 Err(e) if e.is_panic() => {
                     {

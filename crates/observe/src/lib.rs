@@ -52,7 +52,7 @@ pub use attr::{
 };
 pub use call_span::{CallIdentity, CallSpan, ChildSpan, TraceEvent, BODY_CAP_BYTES};
 pub use init::{init_production, ObserveGuard};
-pub use node::{node, set_node_identity};
+pub use node::{keep_node, node, set_node_identity, spawn_keeping_node, with_node, NodeScope};
 pub use plane::{is_trace_plane, TRACE_TARGET};
 pub use rate_draw::RateDraw;
 pub use test_buffer::{

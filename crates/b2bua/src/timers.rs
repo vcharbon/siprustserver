@@ -108,7 +108,7 @@ impl TimerService {
         // its task with the cmd channel, so blocking on a full fire channel would
         // deadlock against the router draining via cmd.
         let (fire_tx, fire_rx) = mpsc::unbounded_channel();
-        tokio::spawn(driver(clock, cmd_rx, fire_tx, metrics));
+        observe::spawn_keeping_node(driver(clock, cmd_rx, fire_tx, metrics));
         (Self { cmd_tx }, fire_rx)
     }
 

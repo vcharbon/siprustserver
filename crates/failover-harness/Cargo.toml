@@ -36,6 +36,9 @@ seq-report = { path = "../seq-report" }
 call-limiter = { path = "../call-limiter" }
 http-net = { path = "../http-net" }
 tokio = { workspace = true }
+# The node each SUT serves (`NodeScope`); the trace-plane tests also install
+# their own sampling gate and read the captured subscriber buffer (ADR-0026).
+observe = { path = "../observe" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -43,7 +46,4 @@ tokio = { workspace = true, features = ["test-util"] }
 b2bua-sdk = { path = "../b2bua-sdk" }
 # A test wraps the limiter client (the `CallLimiter` trait is async-trait).
 async-trait = { workspace = true }
-# The trace-plane tests install their own sampling gate and read the captured
-# subscriber buffer (ADR-0026).
-observe = { path = "../observe" }
 serde_json = { workspace = true }

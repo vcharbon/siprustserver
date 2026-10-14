@@ -325,7 +325,7 @@ impl Inner {
         }
         let inner = self.clone();
         let target = target.clone();
-        tokio::spawn(async move {
+        observe::spawn_keeping_node(async move {
             tokio::time::sleep(Duration::from_millis(inner.cache.cfg.refresh_after_ms())).await;
             inner.refresh_armed.lock().unwrap().remove(&key);
             let pinned = inner.pinned.lock().unwrap().contains(&key);
@@ -428,7 +428,7 @@ impl NamedForwarder {
         for target in targets {
             self.0.pinned.lock().unwrap().insert(target.to_string());
             let inner = self.0.clone();
-            tokio::spawn(async move {
+            observe::spawn_keeping_node(async move {
                 inner
                     .resolve_off_path(
                         &target,
@@ -469,7 +469,7 @@ impl NamedForwarder {
                 Join::Claimed => {
                     let inner = self.0.clone();
                     let target = target.clone();
-                    tokio::spawn(async move {
+                    observe::spawn_keeping_node(async move {
                         let deadline = inner.lookup_deadline();
                         let mut lookup =
                             inner.resolver.resolve(&target.host, target.port, deadline);

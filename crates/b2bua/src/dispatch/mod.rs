@@ -144,7 +144,11 @@ impl<T: Runnable> PerCallDispatcher<T> {
                 slots.insert(call_ref.to_string(), slot.clone());
                 drop(slots);
                 self.metrics.bump_creation();
-                tokio::spawn(worker::run(call_ref.to_string(), slot.clone(), self.worker_ctx()));
+                observe::spawn_keeping_node(worker::run(
+                    call_ref.to_string(),
+                    slot.clone(),
+                    self.worker_ctx(),
+                ));
                 (slot, offer)
             }
         };

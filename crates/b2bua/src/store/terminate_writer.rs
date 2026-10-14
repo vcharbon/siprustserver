@@ -42,7 +42,7 @@ impl BufferedTerminateWriter {
     /// drop.
     pub fn spawn(store: Arc<dyn CallStore>, capacity: usize) -> Self {
         let (tx, rx) = mpsc::channel(capacity.max(1));
-        tokio::spawn(drain(store, rx));
+        observe::spawn_keeping_node(drain(store, rx));
         Self { tx }
     }
 

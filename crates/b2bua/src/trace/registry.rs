@@ -1,8 +1,12 @@
 //! The process's live root spans and the gate that opens them (ADR-0026).
 //!
-//! ONE root span per call per process, so the registry is process-scoped by
-//! definition: `traces()` hands out the singleton, and a runner installs a
-//! configured one at startup before any call arrives.
+//! ONE root span per call per node, and one admission gate per process, so the
+//! registry is process-scoped by definition: `traces()` hands out the
+//! singleton, and a runner installs a configured one at startup before any call
+//! arrives. Spans are keyed by the node the caller serves
+//! ([`observe::with_node`]): a process serving several nodes keeps each node's
+//! root apart, so a takeover copy served beside its nominal records onto its
+//! own span.
 //!
 //! The registry holds the spans OUT of the serialized `Call` — a span is a
 //! runtime object, not replicated state. What the `Call` carries is the
@@ -29,7 +33,38 @@ pub struct TraceIds {
 pub struct CallTraces {
     admission: Arc<SampleAdmission>,
     honors_header: bool,
-    spans: Mutex<HashMap<String, CallSpan>>,
+    spans: Mutex<LiveSpans>,
+}
+
+/// Live root spans per serving node, then per call. Every access reads the
+/// node the caller serves.
+#[derive(Default)]
+struct LiveSpans(HashMap<String, HashMap<String, CallSpan>>);
+
+impl LiveSpans {
+    fn get(&self, call_ref: &str) -> Option<&CallSpan> {
+        observe::with_node(|node| self.0.get(node)?.get(call_ref))
+    }
+
+    fn insert(&mut self, call_ref: &str, span: CallSpan) {
+        self.0.entry(observe::node()).or_default().insert(call_ref.to_string(), span);
+    }
+
+    /// Drop the call's span; a node left with none is forgotten.
+    fn remove(&mut self, call_ref: &str) {
+        observe::with_node(|node| {
+            if let Some(calls) = self.0.get_mut(node) {
+                calls.remove(call_ref);
+                if calls.is_empty() {
+                    self.0.remove(node);
+                }
+            }
+        });
+    }
+
+    fn len(&self) -> usize {
+        self.0.values().map(HashMap::len).sum()
+    }
 }
 
 impl CallTraces {
@@ -42,7 +77,7 @@ impl CallTraces {
 
     /// A fully-specified gate (tests, and any runner that configures its own).
     pub fn new(admission: Arc<SampleAdmission>, honors_header: bool) -> Self {
-        Self { admission, honors_header, spans: Mutex::new(HashMap::new()) }
+        Self { admission, honors_header, spans: Mutex::new(LiveSpans::default()) }
     }
 
     /// Whether this process reads `X-Trace-Sample` at all. When false the header
@@ -57,7 +92,7 @@ impl CallTraces {
         self.admission.exporter_configured()
     }
 
-    /// Root spans currently open.
+    /// Root spans currently open, across every node.
     pub fn active(&self) -> usize {
         self.spans.lock().expect("trace registry mutex").len()
     }
@@ -151,7 +186,7 @@ impl CallTraces {
             trace_id: span.trace_id().to_string(),
             root_span_id: span.span_id().to_string(),
         };
-        self.spans.lock().expect("trace registry mutex").insert(call_ref.to_string(), span);
+        self.spans.lock().expect("trace registry mutex").insert(call_ref, span);
         ids
     }
 }
@@ -234,7 +269,7 @@ pub fn traces() -> Arc<CallTraces> {
 
 /// Replace the process's trace registry. A runner calls this once at startup,
 /// before any call arrives; a test that drives the machinery installs its own
-/// gate. Process-wide by construction — there is one root span per call per
+/// gate. Process-wide by construction — there is one admission gate per
 /// process, so there is one registry.
 pub fn install_process_traces(registry: Arc<CallTraces>) {
     *cell().write().expect("process trace registry lock") = registry;
@@ -335,6 +370,34 @@ mod tests {
             .expect("a takeover is admitted");
         assert_eq!(backup_ids.trace_id, nominal_ids.trace_id);
         assert_ne!(backup_ids.root_span_id, nominal_ids.root_span_id);
+    }
+
+    #[test]
+    fn two_nodes_in_one_process_each_serve_a_call_under_their_own_root() {
+        let (_guard, log) = observe::test_buffer();
+        let traces = gate(true, 1.0, 100);
+        let (n1, n2) = ("n1#g1", "n2#g1");
+        let on = |node: &str, f: &dyn Fn()| observe::NodeScope::named(node).enter(f);
+        let nominal = observe::NodeScope::named(n1)
+            .enter(|| traces.activate("r", id(), None, 0))
+            .expect("admitted");
+        let copy = observe::NodeScope::named(n2)
+            .enter(|| {
+                traces.activate_linked("r", id(), &nominal.trace_id, Some(&nominal.root_span_id), 0)
+            })
+            .expect("admitted");
+        assert_ne!(copy.root_span_id, nominal.root_span_id, "the copy opens its own root");
+        assert_eq!(traces.active(), 2);
+
+        on(n2, &|| traces.record("r", TraceEvent::new("sip.in", 1, "bob")));
+        let facts = log.matching("kind=sip.in");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].node.as_deref(), Some(n2), "the fact lands on its node's root");
+
+        on(n2, &|| traces.close("r"));
+        assert_eq!(traces.active(), 1, "closing one node's root leaves the other's open");
+        on(n1, &|| traces.close("r"));
+        assert_eq!(traces.active(), 0);
     }
 
     /// A minimal replicated call carrying the correlation triple a takeover

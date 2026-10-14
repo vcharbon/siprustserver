@@ -23,6 +23,7 @@ mod drain_flushes_releases_before_a_verified_exit;
 mod drain_waits_for_a_backup_behind;
 mod dual_face;
 mod failover;
+mod failure_dump_names_the_node;
 mod fault_primitives;
 mod forward_flush_never_regresses_backup_progress;
 mod held_cancel_takeover;

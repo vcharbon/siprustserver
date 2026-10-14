@@ -191,7 +191,7 @@ impl CancelBranchLru {
             return;
         }
         let lru = self.clone();
-        tokio::spawn(async move {
+        observe::spawn_keeping_node(async move {
             let mut tick =
                 tokio::time::interval(std::time::Duration::from_millis(DEFAULT_SWEEP_INTERVAL_MS));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -11,7 +11,7 @@ ext .rs
 # No generated or fixture .rs file is tracked; one would go here as
 # `exclude <path glob>`.
 
-crates/b2bua-harness/src/lib.rs 1189
+crates/b2bua-harness/src/lib.rs 1067
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
 crates/b2bua-harness/tests/it/message_ring.rs 955
@@ -24,7 +24,7 @@ crates/b2bua-harness/tests/it/suppress_18x.rs 818
 crates/b2bua-runner-kit/src/lib.rs 1013
 crates/b2bua-sdk/src/config.rs 892
 crates/b2bua-sdk/src/model.rs 1285
-crates/b2bua/src/b2bua_core.rs 857
+crates/b2bua/src/b2bua_core.rs 774
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 518
 crates/b2bua/src/limiter/release_queue.rs 513
@@ -56,7 +56,7 @@ crates/call/tests/it/model_helpers.rs 1009
 crates/e2e-core/src/infra.rs 626
 crates/e2e-model/src/registry.rs 576
 crates/e2e-web/src/lib.rs 1289
-crates/failover-harness/src/harness.rs 2558
+crates/failover-harness/src/harness.rs 2469
 crates/failover-harness/src/runner.rs 651
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 1020
 crates/failover-harness/tests/it/failover.rs 1571

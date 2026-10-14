@@ -30,7 +30,7 @@ const YIELD_EVERY: usize = 32;
 pub(super) fn take_over_departed(ctx: &Arc<RouterCtx>, ordinal: &str) {
     let refs = ctx.state.partition_refs(PartitionRole::Backup, ordinal);
     let (task_ctx, ordinal) = (ctx.clone(), ordinal.to_string());
-    let task = tokio::spawn(async move { sweep(&task_ctx, &ordinal, refs).await });
+    let task = observe::spawn_keeping_node(async move { sweep(&task_ctx, &ordinal, refs).await });
     ctx.dispatcher.track(task.abort_handle());
 }
 

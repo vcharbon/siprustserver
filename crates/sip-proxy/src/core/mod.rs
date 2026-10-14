@@ -369,7 +369,7 @@ impl ProxyCore {
             let endpoint = self.endpoint.clone();
             let ext_endpoint = self.external.as_ref().map(|e| e.endpoint.clone());
             let shard = self.shard;
-            tokio::spawn(async move {
+            observe::spawn_keeping_node(async move {
                 let mut tick = tokio::time::interval(Duration::from_millis(
                     crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS,
                 ));

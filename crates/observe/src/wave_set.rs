@@ -270,7 +270,8 @@ impl<P: Clone + Send + 'static> WaveSet<P> {
         };
         let set = self.clone();
         let period = self.summary_every;
-        handle.spawn(async move {
+        // The episode's later lines name the node its rising edge did.
+        handle.spawn(crate::node::keep_node(async move {
             loop {
                 tokio::time::sleep(period).await;
                 let (report, payload) = match set.drive(&key, &slot) {
@@ -285,7 +286,7 @@ impl<P: Clone + Send + 'static> WaveSet<P> {
                     return;
                 }
             }
-        });
+        }));
     }
 }
 

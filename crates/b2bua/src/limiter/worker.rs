@@ -61,7 +61,7 @@ impl LimiterWorker {
             ReleaseQueueConfig::from_config(config, lease.clone()),
             metrics.clone(),
         );
-        let mut tasks = vec![tokio::spawn(releases.clone().run())];
+        let mut tasks = vec![observe::spawn_keeping_node(releases.clone().run())];
         let refreshes = RefreshBatch::new(
             limiter.clone(),
             RefreshBatchConfig::from_config(config, lease.clone()),
@@ -73,7 +73,7 @@ impl LimiterWorker {
         let forget = refreshes.clone();
         let hooked = releases.on_push(move |key| forget.forget(key));
         debug_assert!(hooked, "one refresh batch per release queue");
-        tasks.push(tokio::spawn(refreshes.clone().run()));
+        tasks.push(observe::spawn_keeping_node(refreshes.clone().run()));
         let (admits, breaker) = BreakerLimiter::guard(
             BoundedLimiter::wrap(limiter, metrics.clone()),
             releases.clone(),
@@ -81,7 +81,7 @@ impl LimiterWorker {
             metrics.clone(),
         );
         if let Some(breaker) = breaker {
-            tasks.push(tokio::spawn(breaker.run()));
+            tasks.push(observe::spawn_keeping_node(breaker.run()));
         }
         let worker = Self(Arc::new(Parts { admits, releases, refreshes, lease, metrics }));
         (worker, tasks)

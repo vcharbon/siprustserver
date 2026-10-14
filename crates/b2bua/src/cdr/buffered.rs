@@ -34,7 +34,7 @@ impl BufferedCdrWriter {
         }
         let (tx, mut rx) = mpsc::channel::<(Call, i64)>(queue_max);
         let drain_inner = inner.clone();
-        tokio::spawn(async move {
+        observe::spawn_keeping_node(async move {
             while let Some((call, ts)) = rx.recv().await {
                 drain_inner.write(&call, ts).await;
             }

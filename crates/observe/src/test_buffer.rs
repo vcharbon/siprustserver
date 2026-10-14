@@ -57,6 +57,9 @@ pub struct CapturedEvent {
     /// The `sip.call_id` of the per-call span the event was recorded under
     /// (its own span or an ancestor), `None` outside one.
     pub call: Option<String>,
+    /// The `node` that per-call span names, `None` outside one or when it
+    /// names none.
+    pub node: Option<String>,
 }
 
 impl CapturedEvent {
@@ -219,8 +222,15 @@ struct CaptureLayer;
 /// The span field naming the call a per-call span belongs to.
 const CALL_FIELD: &str = "sip.call_id";
 
-/// The call a captured span belongs to, kept on the span for its events.
-struct CallKey(String);
+/// The span field naming the node a per-call span was opened on.
+const NODE_FIELD: &str = "node";
+
+/// The call a captured span belongs to and the node it names, kept on the
+/// span for its events.
+struct CallKey {
+    call: String,
+    node: Option<String>,
+}
 
 impl<S> Layer<S> for CaptureLayer
 where
@@ -251,9 +261,10 @@ where
         let Some(handle) = current_test_buffer() else { return };
         let mut visitor = FieldVisitor::default();
         attrs.record(&mut visitor);
-        let call = visitor.fields.iter().find(|(k, _)| k == CALL_FIELD).map(|(_, v)| v.clone());
-        if let (Some(call), Some(span)) = (call, ctx.span(id)) {
-            span.extensions_mut().insert(CallKey(call));
+        let field =
+            |name: &str| visitor.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        if let (Some(call), Some(span)) = (field(CALL_FIELD), ctx.span(id)) {
+            span.extensions_mut().insert(CallKey { call, node: field(NODE_FIELD) });
         }
         let meta = attrs.metadata();
         let captured = CapturedSpan {
@@ -269,17 +280,19 @@ where
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
         let meta = event.metadata();
-        let call = ctx.event_scope(event).and_then(|scope| {
-            scope
-                .into_iter()
-                .find_map(|span| span.extensions().get::<CallKey>().map(|k| k.0.clone()))
+        let key = ctx.event_scope(event).and_then(|scope| {
+            scope.into_iter().find_map(|span| {
+                span.extensions().get::<CallKey>().map(|k| (k.call.clone(), k.node.clone()))
+            })
         });
+        let (call, node) = key.map_or((None, None), |(call, node)| (Some(call), node));
         let captured = CapturedEvent {
             level: level_str(meta.level()).to_string(),
             target: meta.target().to_string(),
             message: visitor.message,
             fields: visitor.fields,
             call,
+            node,
         };
         handle.events.lock().expect("capture buffer mutex").push(captured);
     }
@@ -377,6 +390,22 @@ mod tests {
         let events = log.snapshot();
         assert_eq!(events[0].call.as_deref(), Some("c@h"), "an ancestor's call is the event's");
         assert_eq!(events[1].call, None, "an event outside a per-call span names none");
+    }
+
+    #[test]
+    fn an_event_under_a_per_call_span_names_the_spans_node() {
+        let (_guard, log) = test_buffer();
+        let root = tracing::info_span!("sip.call", sip.call_id = "c@h", node = "n1#g2");
+        let child = tracing::info_span!(parent: &root, "sip.call.http", http.route = "/new");
+        tracing::info!(parent: &child, kind = "http.request", "trace");
+        let bare = tracing::info_span!("sip.call", sip.call_id = "d@h");
+        tracing::info!(parent: &bare, kind = "sip.in", "trace");
+        tracing::info!("lifecycle");
+
+        let events = log.snapshot();
+        assert_eq!(events[0].node.as_deref(), Some("n1#g2"), "an ancestor's node is the event's");
+        assert_eq!(events[1].node, None, "a per-call span naming no node gives none");
+        assert_eq!(events[2].node, None, "an event outside a per-call span names none");
     }
 
     #[test]

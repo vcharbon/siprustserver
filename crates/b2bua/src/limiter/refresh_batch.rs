@@ -315,7 +315,7 @@ impl RefreshBatch {
     /// sending is put back, and leaves one tick later.
     pub async fn run(self: Arc<Self>) {
         loop {
-            let mut sender = AbortOnDrop(tokio::spawn(self.clone().send()));
+            let mut sender = AbortOnDrop(observe::spawn_keeping_node(self.clone().send()));
             match (&mut sender.0).await {
                 Err(e) if e.is_panic() => {
                     self.put_back();

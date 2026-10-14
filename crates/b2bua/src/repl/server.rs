@@ -178,9 +178,9 @@ impl ReplServer {
                             );
                         }
                         let server = self.clone();
-                        serves.spawn(async move {
+                        serves.spawn(observe::keep_node(async move {
                             server.serve_connection(conn).await;
-                        });
+                        }));
                     }
                     Err(AcceptError::Closed) => break,
                     Err(AcceptError::Io(error)) => {
@@ -234,7 +234,7 @@ impl ReplServer {
         let _guard = self.changelog.serving(caller, partition);
         // The peer's back-channel: positions in, and a close that ends us.
         let (closed_tx, mut closed) = tokio::sync::watch::channel(false);
-        let _recv = AbortOnDrop(tokio::spawn({
+        let _recv = AbortOnDrop(observe::spawn_keeping_node({
             let conn = conn.clone();
             let changelog = self.changelog.clone();
             let peer = caller.to_string();

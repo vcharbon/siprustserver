@@ -60,7 +60,7 @@ pub(crate) async fn run(interval: Duration, steps: Vec<SweepStep>) {
         tick.tick().await;
         for step in &steps {
             let pass = step.pass.clone();
-            let mut running = AbortOnDrop(tokio::spawn(async move { pass().await }));
+            let mut running = AbortOnDrop(observe::spawn_keeping_node(async move { pass().await }));
             if let Err(e) = (&mut running.0).await {
                 if e.is_panic() {
                     (step.on_panic)();

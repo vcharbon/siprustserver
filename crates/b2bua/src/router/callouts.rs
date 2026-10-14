@@ -176,7 +176,7 @@ pub(super) fn spawn_refer_callout(
     let snapshot = CallSnapshot::of(call);
     let trace = crate::trace::emit::TraceHandle::of(call);
     let to = Caller::of(call_ref, call);
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         let sent_at_ms = ctx2.clock.now_ms();
         let mut req = super::callout_requests::parse_call_refer_request(&request);
         req.snapshot = snapshot;
@@ -255,7 +255,7 @@ pub(super) fn spawn_failure_callout(
     let trace = crate::trace::emit::TraceHandle::of(call);
     let limiter = call.limiter.clone();
     let to = Caller::of(call_ref, call);
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         let sent_at_ms = ctx2.clock.now_ms();
         let (outcome, mut payload) =
             failure_outcome(&ctx2, &limiter, limiter_change, snapshot, &request).await;
@@ -456,7 +456,7 @@ pub(super) fn spawn_release_callout(
     let trace = crate::trace::emit::TraceHandle::of(call);
     let limiter = call.limiter.clone();
     let to = Caller::of(call_ref, call);
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         let sent_at_ms = ctx2.clock.now_ms();
         let req = super::callout_requests::parse_call_release_request(&request, snapshot);
         // Every `release` fold names the event that raised the consult, so
@@ -566,7 +566,7 @@ pub(super) fn spawn_service_http_callout(ctx: &Arc<RouterCtx>, c: ServiceHttpCal
     let ctx2 = ctx.clone();
     // The transport request future IS `Send`, so the whole spawned task is
     // `Send` (unlike the `on_event` cycle).
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         // Per-request budget is INDEPENDENT of `call_control_timeout_ms` (the
         // `DeadlineDecisionEngine` wraps only new_call/call_failure). Fail-safe
         // on teardown: a re-entry landing on a dead `call_ref` is dropped.
@@ -631,7 +631,7 @@ pub(super) struct LimiterAdmitCallout {
 /// key when the request left.
 pub(super) fn spawn_limiter_admit_callout(ctx: &Arc<RouterCtx>, c: LimiterAdmitCallout) {
     let ctx2 = ctx.clone();
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         // Answered just past the limiter's admit budget, whatever the
         // limiter does: the answer's deadline (ADR-0039) lies past it.
         let report = ctx2

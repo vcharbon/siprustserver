@@ -233,7 +233,7 @@ pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: 
             Some(Popped::Item(_, _)) if ctx.in_flight.halted() => return,
             Some(Popped::Item(item, class)) => {
                 let held = ctx.permits.acquire(class.row().pool, &ctx.metrics).await;
-                let task = tokio::spawn(item.into_body());
+                let task = observe::spawn_keeping_node(item.into_body());
                 ctx.in_flight.insert(&call_ref, task.abort_handle());
                 let outcome = task.await;
                 ctx.in_flight.remove(&call_ref);

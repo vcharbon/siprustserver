@@ -18,8 +18,9 @@ fn field<'e>(e: &'e CapturedEvent, name: &str) -> Option<&'e str> {
     e.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
-/// One fact as a line: when, what kind, its detail, and for a SIP message the
-/// first line of its bytes.
+/// One fact as a line: when, the node that recorded it (`?` when its span
+/// names none), what kind, its detail, and for a SIP message the first line of
+/// its bytes.
 fn fact_line(e: &CapturedEvent, kind: &str) -> String {
     let at = field(e, "at_ms").and_then(|v| v.parse::<i64>().ok()).map(format_relative);
     let detail = field(e, "detail").unwrap_or_default();
@@ -31,7 +32,9 @@ fn fact_line(e: &CapturedEvent, kind: &str) -> String {
             .unwrap_or_default(),
         _ => String::new(),
     };
-    format!("[{}] {kind:<16} {detail}{first_line}", at.unwrap_or_else(|| "?".to_string()))
+    let at = at.unwrap_or_else(|| "?".to_string());
+    let node = e.node.as_deref().unwrap_or("?");
+    format!("[{at}] {node} {kind:<16} {detail}{first_line}")
 }
 
 /// The trace-plane facts among `events`, one block per call in the order the
@@ -82,7 +85,22 @@ mod tests {
                 ("body".to_string(), body.to_string()),
             ],
             call: Some(call.to_string()),
+            node: Some("n1".to_string()),
         }
+    }
+
+    #[test]
+    fn each_fact_names_the_node_that_recorded_it() {
+        let mut taken_over = fact("c1", "sip.in", 9, "from 127.0.0.1:5060", "BYE sip:h SIP/2.0");
+        taken_over.node = Some("n2#g1".to_string());
+        let mut unnamed = fact("c1", "rule.fired", 10, "bye", "");
+        unnamed.node = None;
+        let events =
+            vec![fact("c1", "rule.fired", 1, "route-initial-invite", ""), taken_over, unnamed];
+        let lines = render_call_traces(&events);
+        assert!(lines[1].starts_with("  [T+0.001s] n1 rule.fired "), "{lines:?}");
+        assert!(lines[2].starts_with("  [T+0.009s] n2#g1 sip.in "), "{lines:?}");
+        assert!(lines[3].starts_with("  [T+0.010s] ? rule.fired "), "{lines:?}");
     }
 
     #[test]

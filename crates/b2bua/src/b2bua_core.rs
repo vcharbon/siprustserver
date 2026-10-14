@@ -5,30 +5,28 @@
 
 use std::sync::Arc;
 
-use repl_net::transport::{ReplicationListener, ReplicationNetwork};
-use sip_clock::Clock;
+use observe::{spawn_keeping_node, NodeScope};
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
 use sip_txn::{DeferredBound, IdGen, TransactionConfig, TransactionLayer};
 
 use crate::admission::Refusals;
-use topology::Membership;
 
 use crate::capacity::{CapacityGate, Occupancy};
 use crate::cdr::CdrWriter;
 use crate::config::B2buaConfig;
-use crate::decision::CallDecisionEngine;
 use crate::dispatch::PerCallDispatcher;
-use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::overload::OverloadSignal;
 use crate::repl::{Readiness, ReplServer, ReplicatingCallStore, ReplicationSupervisor, RouterSink};
 use crate::router::{self, RouterCtx};
 use crate::rules::{compose_rules, default_rules_with, ServiceDef};
-use crate::store::{BufferedTerminateWriter, CallState, CallStore, StoreFaults};
+use crate::store::{BufferedTerminateWriter, CallState, CallStore};
 use crate::timers::TimerService;
-use crate::wire_faults::WireFaults;
+
+mod deps;
+pub use deps::{B2buaDeps, ReplicationSetup};
 
 mod drain;
 #[cfg(test)]
@@ -73,98 +71,8 @@ pub struct B2buaCore {
     /// on an unwired node: the receiver is created in the same arm as this
     /// sender, so the router then has none to poll.
     _repl_tx: Option<tokio::sync::mpsc::UnboundedSender<router::ReplCommand>>,
-}
-
-/// Optional replication wiring for [`B2buaDeps`]. Supplying `Some(..)` turns a
-/// `B2buaCore` into a replicating worker; `None` is a non-replicating worker
-/// (in-memory store, `always_ready()` OPTIONS, `PutOpts::default()` flush).
-///
-/// ## Host-supplied seams
-/// - **`incarnation_gen`** — the per-boot incarnation seed for the
-///   [`ReplicatingCallStore`]'s changelog (mirrors `IdGen::seeded`), an explicit
-///   input the host derives (the runner uses the boot wall clock).
-/// - **`addr_resolver`** — maps a cluster `Peer` to its replication socket
-///   address, **resolved per connect** (ADR-0012 D3). The sim harness passes
-///   an explicit `ordinal → addr` map (`FnPeerResolver`); the runner derives
-///   it from `ordinal + host + config`. The core defines no addressing
-///   grammar — the resolver IS the seam.
-pub struct ReplicationSetup {
-    /// The replication transport (sim or real). The server `listen`s on it and
-    /// the supervisor's pullers `connect` through it.
-    pub network: Arc<dyn ReplicationNetwork>,
-    /// Cluster membership (who to replicate to/from).
-    pub membership: Arc<dyn Membership>,
-    /// The replicating call store (built with `incarnation_gen`). Used as the
-    /// `CallState` store AND served to pulling peers.
-    pub store: Arc<ReplicatingCallStore>,
-    /// The listener this node serves its changelog on, bound by the host before
-    /// the core spawns so that a bind failure refuses the boot.
-    pub listener: Box<dyn ReplicationListener>,
-    /// Resolves a peer to its replication address (the host's addressing seam).
-    pub addr_resolver: crate::repl::AddrResolver,
-    /// Per-boot incarnation seed for the changelog (host-derived).
-    pub incarnation_gen: u64,
-    /// The pullers' backoff, bootstrap and link bounds (ADR-0045).
-    pub puller: crate::repl::PullerConfig,
-    /// The serve loop's link bounds (ADR-0045).
-    pub serve: crate::repl::ServeConfig,
-}
-
-/// Wiring inputs for [`B2buaCore::spawn`].
-pub struct B2buaDeps {
-    pub config: B2buaConfig,
-    pub decision: Arc<dyn CallDecisionEngine>,
-    pub limiter: Arc<dyn CallLimiter>,
-    pub cdr: Arc<dyn CdrWriter>,
-    pub store: Arc<dyn CallStore>,
-    /// Live-path store-fault probe (ADR-0023). Default = **no faults**: the
-    /// router's live lookup sites (initial-INVITE dialog-existence check,
-    /// in-dialog request fetch, keepalive/audit read) consult it before their
-    /// sync map reads, and read the map unchanged while it is disarmed. A test
-    /// retains a clone of the handle and flips per-path switches mid-call.
-    /// Sits ONLY on the live-serving sites — the HA reclaim/reconcile/
-    /// terminate-writer paths are deliberately un-probed.
-    pub store_faults: StoreFaults,
-    /// Wire-fault seam: one named RFC deviation the core emits on purpose so
-    /// the post-run audit gate can be proven live. Default = never armed.
-    pub wire_faults: WireFaults,
-    pub clock: Clock,
-    pub id_gen: Arc<IdGen>,
-    /// The worker's refusals of new INVITEs ([`crate::admission::Refusals`]),
-    /// shared with the transaction layer. A host that installs the ingress
-    /// brake passes the same instance it gave the brake, so every copy of one
-    /// INVITE draws one answer. `None` builds them from `config`'s
-    /// `Retry-After`, keyed by an entropy-drawn secret.
-    pub refusals: Option<Refusals>,
-    /// The deferred backlog's ceilings. `None` — production — sets one and two
-    /// event queues' worth ([`crate::admission::deferred_bound`]); a test sets
-    /// its own ([`crate::admission::ceilings`]) to
-    /// reach the backlog refusal without stalling the router.
-    pub deferred_ceilings: Option<DeferredBound>,
-    /// Opt-in replication. `None` → a non-replicating worker.
-    pub replication: Option<ReplicationSetup>,
-    /// Shared metrics handle. The host builds this so components it constructs
-    /// *before* spawn (notably the CDR writers) record into the SAME registry the
-    /// core exports at `/metrics`. Pass `B2buaMetrics::new()` if you don't scrape it.
-    pub metrics: B2buaMetrics,
-    /// Host-injected generic async-HTTP capability for
-    /// [`RuleAction::ServiceHttpRequest`](crate::rules::RuleAction) (the
-    /// service-authorable adaptation callback). `None` = no capability (a
-    /// service firing the effect gets an `outcome:"error"` re-entry, never a
-    /// stranded machine); `Some` maps the logical endpoint onto its base URL.
-    pub adaptation_http: Option<crate::router::AdaptationHttpPort>,
-    /// Compose-time selection of which built-in CORE machines participate in the
-    /// default rule set (ADR-0016 opt-out seam). `Default` =
-    /// every built-in included. A downstream that ships
-    /// its own subscription-gated transfer machine sets
-    /// [`ComposeOptions::without_core_refer_transfer`](crate::rules::ComposeOptions::without_core_refer_transfer)
-    /// so an in-dialog REFER relays transparently instead of being intercepted.
-    pub compose: crate::rules::ComposeOptions,
-    /// Memory admission gate (ADR-0037), configured here from
-    /// `config.capacity`. `None` builds [`CapacityGate::live`]. A host that
-    /// installs the gate on its ingress brake passes the same gate; a test
-    /// passes one over a simulated [`SystemProbe`](crate::capacity::SystemProbe).
-    pub capacity: Option<CapacityGate>,
+    /// The node this core serves: the scope it was spawned under.
+    node: NodeScope,
 }
 
 impl B2buaCore {
@@ -202,6 +110,9 @@ impl B2buaCore {
     /// injected value THROUGH the running sampler task into the EWMA and the
     /// header (the live sampler alone cannot exercise this: its busy ratio
     /// stays ~0 under a paused runtime).
+    ///
+    /// The core serves the [`NodeScope`] it is spawned under: every task it
+    /// spawns keeps that node.
     pub fn spawn_with_overload(
         endpoint: Box<dyn UdpEndpoint>,
         deps: B2buaDeps,
@@ -226,6 +137,7 @@ impl B2buaCore {
             compose,
             capacity,
         } = deps;
+        let node = NodeScope::current();
 
         let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
         let refusals = refusals.unwrap_or_else(|| {
@@ -304,7 +216,7 @@ impl B2buaCore {
                 )
                 .with_metrics(metrics.clone())
                 .with_config(setup.serve);
-                tasks.push(tokio::spawn(server.run(setup.listener)));
+                tasks.push(spawn_keeping_node(server.run(setup.listener)));
 
                 // Context rebuild is **puller-driven and continuous** (ADR-0014):
                 // each bootstrap pass signals `ReclaimAll` itself (puller.rs
@@ -321,7 +233,7 @@ impl B2buaCore {
                 // supervisor, and a cycle would outlive `abort`.
                 let mut self_endpoint = supervisor.self_endpoint();
                 let latch = readiness.clone();
-                tasks.push(tokio::spawn(async move {
+                tasks.push(spawn_keeping_node(async move {
                     loop {
                         if self_endpoint.borrow_and_update().is_withdrawn() {
                             latch.set_withdrawn();
@@ -439,7 +351,8 @@ impl B2buaCore {
             adaptation_http: adaptation_http.map(Arc::new),
         });
 
-        let router = tokio::spawn(router::run(ctx.clone(), txn_rx, timer_rx, reentry_rx, repl_rx));
+        let run = router::run(ctx.clone(), txn_rx, timer_rx, reentry_rx, repl_rx);
+        let router = spawn_keeping_node(run);
         let owner = (ctx.txn.owner_pulse().clone(), ctx.txn.owner_task());
         let routing = (ctx.router_pulse.clone(), router.abort_handle());
         let loops = crate::loops::WorkerLoops::new(owner, routing);
@@ -486,7 +399,8 @@ impl B2buaCore {
                 },
                 move || m2.bump_replica_reap_panic(),
             );
-            tasks.push(tokio::spawn(crate::sweep::run(interval, vec![reaper_step, replica_step])));
+            let sweep = crate::sweep::run(interval, vec![reaper_step, replica_step]);
+            tasks.push(spawn_keeping_node(sweep));
         }
 
         // The worker-side load sampler. Rides `tokio::time::interval` so a
@@ -500,7 +414,7 @@ impl B2buaCore {
         {
             let overload = overload.clone();
             let ctx2 = ctx.clone();
-            tasks.push(tokio::spawn(async move {
+            tasks.push(spawn_keeping_node(async move {
                 let mut tick = tokio::time::interval(OverloadSignal::SAMPLE_PERIOD);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 tick.tick().await; // skip the immediate first tick (TS first fire is +100 ms)
@@ -528,7 +442,7 @@ impl B2buaCore {
         {
             let clock = ctx.clock.clone();
             let metrics = metrics.clone();
-            tasks.push(tokio::spawn(async move {
+            tasks.push(spawn_keeping_node(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 tick.tick().await; // skip the immediate first tick
@@ -569,6 +483,7 @@ impl B2buaCore {
             tasks,
             loops,
             _repl_tx: repl_tx,
+            node,
         }
     }
 
@@ -679,9 +594,11 @@ impl B2buaCore {
         // (ADR-0026). A survivor taking one of these calls over therefore opens
         // its OWN linked root, exactly as it does across a process boundary.
         let traces = crate::trace::traces();
-        for call_ref in self.ctx.state.live_call_refs() {
-            traces.close(&call_ref);
-        }
+        self.node.enter(|| {
+            for call_ref in self.ctx.state.live_call_refs() {
+                traces.close(&call_ref);
+            }
+        });
     }
 
     /// This worker's handle on its call limiter: an exit that waits for no
