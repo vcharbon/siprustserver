@@ -127,7 +127,7 @@ crates/sip-proxy-runner/src/main.rs 762
 crates/sip-proxy/src/observability/metrics.rs 650
 crates/sip-txn/src/layer/client.rs 747
 crates/sip-txn/src/layer/owner.rs 517
-crates/sip-txn/src/layer/server.rs 691
+crates/sip-txn/src/layer/server.rs 553
 crates/sip-txn/src/metrics.rs 629
 crates/sip-txn/tests/it/bounded_queue.rs 806
-crates/sip-txn/tests/it/fsm.rs 1598
+crates/sip-txn/tests/it/fsm.rs 1582

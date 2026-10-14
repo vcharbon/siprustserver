@@ -814,7 +814,7 @@ async fn invite_then_final(stack: &mut Stack, branch: &str, call_id: &str, statu
     stack.txn.send_response(resp, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     let _ = stack.drain_peer();
-    assert_eq!(active(stack), 1, "completed txn pinned for Timer H");
+    assert_eq!(active(stack), 1, "an answered txn is held (Timer H, or Timer L after a 2xx)");
 }
 
 /// RFC 3261 §17.2.1: the ACK for a non-2xx final moves the server txn to
@@ -847,22 +847,6 @@ async fn ack_for_non_2xx_is_absorbed() {
 
     elapse_ms(TIMER_I).await;
     assert_eq!(active(&stack), 0, "Timer I terminates the txn");
-}
-
-#[tokio::test(start_paused = true)]
-async fn ack_for_2xx_passes_through() {
-    let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    let branch = "z9hG4bK-ack2";
-    invite_then_final(&mut stack, branch, "ack2-call", 200).await;
-
-    stack.inject(&inbound_request("ACK", branch, "ack2-call", Some("peer-tag"))).await;
-    elapse_ms(60).await;
-
-    assert_eq!(active(&stack), 0, "ACK for 2xx terminates the server txn");
-    assert!(
-        has_message_request(&stack.drain_events(), "ACK"),
-        "ACK for 2xx is delivered to the app"
-    );
 }
 
 /// A second final on an already-Completed server txn (a 200 racing the
@@ -1007,7 +991,7 @@ async fn server_invite_2xx_final_is_not_timer_g_retransmitted() {
     elapse_ms(8_000).await;
     assert_eq!(count_responses(&stack.drain_peer(), 200), 0, "no Timer-G resend for a 2xx");
     assert_eq!(stack.txn.metrics().server_final_retransmits(), 0, "counter untouched by 2xx");
-    assert_eq!(active(&stack), 1, "still held in Completed for Timer H / the 2xx ACK");
+    assert_eq!(active(&stack), 1, "still held in Accepted for Timer L");
 }
 
 // ── Auto-ACK for non-2xx (client INVITE) ────────────────────────────────────

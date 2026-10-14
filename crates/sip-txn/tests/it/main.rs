@@ -9,6 +9,7 @@
 mod common;
 
 mod absorb_100;
+mod accepted;
 mod bounded_queue;
 mod branch_collision;
 mod cancel_after_final;

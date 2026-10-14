@@ -78,14 +78,17 @@ fn to_tags(msgs: &[SipMessage], status: u16) -> Vec<String> {
         .collect()
 }
 
-/// INVITE in, 200 under `tag` out, the caller's ACK in: the transaction is
-/// gone and the dialog's tag is only remembered.
+/// INVITE in, 200 under `tag` out, the caller's ACK in, then Timer L run out
+/// (RFC 6026 §7.1): the transaction is gone and the dialog's tag is only
+/// remembered.
 async fn answered_and_acked(stack: &mut Stack, branch: &str, call_id: &str, tag: &str) {
     stack.inject(&inbound_request("INVITE", branch, call_id, None)).await;
     elapse_ms(20).await;
     send(stack, tu_response(200, "INVITE", branch, call_id, Some(tag))).await;
     stack.inject(&inbound_request("ACK", branch, call_id, Some(tag))).await;
     elapse_ms(20).await;
+    elapse_ms(sip_txn::timers::TIMER_L).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 0, "Timer L ended the transaction");
     let _ = stack.drain_events();
     let _ = stack.drain_peer();
 }

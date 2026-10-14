@@ -97,7 +97,7 @@ impl Owner {
         // An INVITE still open: each provisional may open an early dialog and
         // the final binds the tag (§12.1.1) — the TU chooses. A second final
         // never reaches here (a transaction that sent its final drops it,
-        // through Completed and Confirmed).
+        // through Completed, Confirmed and Accepted).
         if txn.kind == TxnKind::Invite {
             return Bound::Free;
         }

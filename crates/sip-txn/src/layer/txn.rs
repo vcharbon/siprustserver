@@ -22,9 +22,10 @@ pub(super) enum TxnRole {
 }
 
 /// Transaction lifecycle. There is no `Terminated` state: the hold that
-/// follows a final (Timer D/H/J, or Timer I after the ACK) ends by deleting
-/// the transaction from the map ([`Lifetime`]). A resident txn that has sent or received
-/// its final is `Completed` or `Confirmed`; either refuses a second final.
+/// follows a final (Timer D/H/J/L/M, or Timer I after the ACK) ends by
+/// deleting the transaction from the map ([`Lifetime`]). A resident txn that
+/// has sent or received its final is `Completed`, `Confirmed` or `Accepted`;
+/// each refuses a second final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TxnState {
     Trying,
@@ -35,9 +36,12 @@ pub(super) enum TxnState {
     /// held for Timer I, absorbing ACK retransmissions and any further final
     /// the TU offers on the branch. Nothing retransmits or times out here.
     Confirmed,
-    /// Orphaned INVITE client txn whose 2xx the layer ACKed itself (RFC 6026
-    /// §7.2): held for Timer M, re-passing that ACK to every repeat of the 2xx
-    /// (RFC 3261 §13.2.2.4). Nothing retransmits or times out here.
+    /// RFC 6026 Accepted, after a 2xx; nothing retransmits or times out here.
+    /// An INVITE server txn that sent a 2xx (§7.1, §8.7): held for Timer L,
+    /// answering each copy of its INVITE with that 2xx and passing every ACK
+    /// up. An orphaned INVITE client txn whose 2xx the layer ACKed itself
+    /// (§7.2): held for Timer M, re-passing that ACK to every repeat of the
+    /// 2xx (RFC 3261 §13.2.2.4).
     Accepted,
 }
 

@@ -10,7 +10,8 @@ use tokio::time::Instant;
 
 use crate::event::TxnKind;
 use crate::timers::{
-    ms, TIMER_B, TIMER_D, TIMER_H, TIMER_I, TIMER_J, TIMER_M, TXN_MAX_AGE, TXN_SWEEP_INTERVAL,
+    ms, TIMER_B, TIMER_D, TIMER_H, TIMER_I, TIMER_J, TIMER_L, TIMER_M, TXN_MAX_AGE,
+    TXN_SWEEP_INTERVAL,
 };
 
 use super::events::SweptServer;
@@ -29,9 +30,10 @@ const SWEEP_SLACK: Duration = ms(TXN_SWEEP_INTERVAL);
 pub(super) enum Hold {
     /// Client INVITE after a non-2xx final (RFC 3261 §17.1.1.2).
     TimerD,
-    /// Server INVITE after its final: Timer H after a non-2xx (§17.2.1),
-    /// RFC 6026 §7.1 Timer L after a 2xx — both 64·T1.
+    /// Server INVITE after a non-2xx final (§17.2.1).
     TimerH,
+    /// Server INVITE Accepted after a 2xx (RFC 6026 §7.1).
+    TimerL,
     /// Server non-INVITE after its final (§17.2.2).
     TimerJ,
     /// Server INVITE whose non-2xx final is ACKed (§17.2.1).
@@ -48,6 +50,7 @@ impl Hold {
         ms(match self {
             Hold::TimerD => TIMER_D,
             Hold::TimerH => TIMER_H,
+            Hold::TimerL => TIMER_L,
             Hold::TimerJ => TIMER_J,
             Hold::TimerI => TIMER_I,
             Hold::TimerM => TIMER_M,

@@ -311,10 +311,10 @@ impl Owner {
                 // its acting-backup takeover copy — but only AFTER this turn's
                 // protocol event (the ACK/Timeout that drove the delete), so defer
                 // it to `flush_pending_quiesce`. (For a 2xx INVITE the server txn
-                // lingers in `Completed` until Timer H — the ACK reuses a different
-                // branch — so this naturally fires at Timer H, after the ACK relay.
-                // A non-2xx INVITE server txn detached on its ACK, `call_ref`
-                // already `None`, was accounted then.)
+                // lingers in `Accepted` until Timer L — the ACK of a 2xx takes a
+                // new branch and matches no transaction — so this fires at Timer
+                // L, after the ACK relay. An INVITE server txn detached on an ACK
+                // it matched, `call_ref` already `None`, was accounted then.)
                 if let Some(cr) = t.call_ref {
                     if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
                         self.pending_quiesce.push(cr);

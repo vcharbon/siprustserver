@@ -144,9 +144,10 @@ pub(super) enum Command {
     /// or an INVITE's give-up plus its 64·T1 hold),
     /// so the acting-backup may shed its live takeover copy. Attribution — not
     /// `is_active()` — is deliberate: an INVITE server txn lingers in
-    /// `Completed` until its ACK, and shedding before the ACK would strand the
-    /// ACK relay. A txn that lives on past its obligation (a non-2xx INVITE
-    /// server txn in Confirmed for Timer I) is detached and no longer counted.
+    /// `Completed` or `Accepted` until its ACK, and shedding before the ACK
+    /// would strand the ACK relay. A txn that lives on past its obligation (an
+    /// INVITE server txn whose ACK it saw, in Confirmed for Timer I or
+    /// Accepted for Timer L) is detached and no longer counted.
     ActiveTxnCount {
         call_ref: String,
         reply: oneshot::Sender<usize>,
