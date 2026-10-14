@@ -5,8 +5,8 @@
 use crate::common;
 use call::helpers::merge_rounds;
 use call::model::{
-    Call, Dialog, Direction, Obligation, PendingRequest, Repeated, RetainedEmission, TimerEntry,
-    TimerKey, TimerType, Unacked2xx,
+    Call, Dialog, Direction, Obligation, OwedAnswer, PendingRequest, RSeq, Repeated,
+    RetainedEmission, TimerEntry, TimerKey, TimerType, Unacked2xx,
 };
 use call::testkit::{stage_reinvite_round, RoundStage, STAGED_ROUND_CSEQ};
 
@@ -130,4 +130,78 @@ fn a_round_the_other_copy_never_saw_end_changes_nothing() {
     let before = common::representative_call();
     assert_eq!(merge_rounds(held.clone(), &before), held);
     assert_eq!(merge_rounds(held.clone(), &round(RoundStage::Open)), held);
+}
+
+/// A session state that says which description went last, and after how
+/// many exchanges the leg's peer opened.
+fn session_on(call: &mut Call, leg: usize, origin: &str, opened: u32) {
+    let leg = if leg == 0 { &mut call.a_leg } else { &mut call.b_legs[leg - 1] };
+    leg.sdp_session.sent_origin = Some(origin.into());
+    leg.sdp_session.exchanges_opened = opened;
+}
+
+fn sent_origin(call: &Call, leg: usize) -> Option<&str> {
+    let leg = if leg == 0 { &call.a_leg } else { &call.b_legs[leg - 1] };
+    leg.sdp_session.sent_origin.as_deref()
+}
+
+#[test]
+fn the_rounds_session_comes_in() {
+    let mut held = round(RoundStage::Open);
+    session_on(&mut held, 0, "b2bua 1 1 IN IP4 192.0.2.1", 1);
+    let mut incoming = round(RoundStage::Answered);
+    session_on(&mut incoming, 0, "b2bua 1 2 IN IP4 192.0.2.1", 1);
+    let merged = merge_rounds(held, &incoming);
+    assert_eq!(
+        sent_origin(&merged, 0),
+        Some("b2bua 1 2 IN IP4 192.0.2.1"),
+        "the 2xx's description"
+    );
+}
+
+#[test]
+fn a_session_the_record_moved_on_its_own_stays() {
+    let mut held = round(RoundStage::Answered);
+    session_on(&mut held, 0, "b2bua 1 3 IN IP4 192.0.2.1", 1);
+    session_on(&mut held, 1, "b2bua 2 3 IN IP4 192.0.2.1", 2);
+    let mut incoming = round(RoundStage::Acked);
+    session_on(&mut incoming, 0, "b2bua 1 2 IN IP4 192.0.2.1", 1);
+    session_on(&mut incoming, 1, "b2bua 2 2 IN IP4 192.0.2.1", 1);
+    let merged = merge_rounds(held, &incoming);
+    assert!(callee(&merged).ack_branch.is_some(), "the round's end came in");
+    assert_eq!(sent_origin(&merged, 0), Some("b2bua 1 3 IN IP4 192.0.2.1"));
+    assert_eq!(sent_origin(&merged, 1), Some("b2bua 2 3 IN IP4 192.0.2.1"), "never an earlier one");
+    assert_eq!(merged.b_legs[0].sdp_session.exchanges_opened, 2, "never lowered");
+}
+
+#[test]
+fn the_next_rounds_request_raises_the_callers_remote_sequence() {
+    let held = round(RoundStage::Open);
+    let mut incoming = round(RoundStage::Acked);
+    stage_reinvite_round(&mut incoming.b_legs[0], "z9hG4bK-round-2", RoundStage::Open);
+    let next = incoming.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    next.peer_cseq = Some(next.peer_cseq.unwrap_or(0) + 1);
+    let merged = merge_rounds(held, &incoming);
+    assert!(callee(&merged).inbound_pending_requests.iter().any(|p| p.method == "INVITE"));
+    assert_eq!(caller(&merged).peer_cseq, caller(&incoming).peer_cseq, "the next INVITE's CSeq");
+}
+
+#[test]
+fn an_answer_the_round_owed_goes_with_its_end() {
+    let mut held = round(RoundStage::Open);
+    held.b_legs[0].dialogs.confirmed_mut().expect("the callee's dialog").owed_answer =
+        Some(OwedAnswer::InPrack { rseq: RSeq(1), offer: b"v=0".to_vec() });
+    let merged = merge_rounds(held, &round(RoundStage::Answered));
+    assert_eq!(callee(&merged).owed_answer, None, "the PRACK's answer left with the round");
+}
+
+#[test]
+fn an_answered_round_followed_by_the_next_round_ends() {
+    let held = awaiting_the_callers_ack(round(RoundStage::Answered));
+    let mut incoming = round(RoundStage::Acked);
+    stage_reinvite_round(&mut incoming.b_legs[0], "z9hG4bK-round-2", RoundStage::Open);
+    let merged = merge_rounds(held, &incoming);
+    assert!(callee(&merged).awaited_ack_cseq.is_none(), "the first round's ACK left");
+    assert!(caller(&merged).pending_reinvite_2xx.is_none() && ladders(&merged) == 0);
+    assert!(callee(&merged).inbound_pending_requests.iter().any(|p| p.method == "INVITE"));
 }

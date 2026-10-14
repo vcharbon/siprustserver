@@ -578,3 +578,31 @@ async fn a_round_fold_keeps_what_the_live_copy_wrote_since_the_branch() {
     assert_eq!(after.message_count, Some(42), "the live copy's own write stays");
     assert_eq!(live_pb(&n, &call_ref), (6, 2), "the backup's `b`, our `p`, no bump");
 }
+
+/// **Only the timers a fold takes are moved into this node's clock.** The
+/// other owner's clock runs 5 s ahead of ours; a round's end folds alone, and
+/// the live copy's own timer keeps the deadline this node armed it at.
+#[tokio::test(start_paused = true)]
+async fn a_round_fold_leaves_the_live_copys_own_timers_where_it_armed_them() {
+    let n = node("w0").await;
+    let ctx = n.core.router_ctx();
+    let now = ctx.clock.now_ms();
+    let mut live = in_round(6, 1, RoundStage::Open);
+    let own = call::TimerEntry {
+        key: call::TimerKey::call(call::TimerType::GlobalDuration),
+        generation: 3,
+        fire_at: now + 600_000,
+    };
+    live.timers.push(own.clone());
+    let call_ref = live.call_ref.clone();
+    assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+
+    let replica = in_round(4, 2, RoundStage::Answered);
+    let body = MsgpackCodec::new().encode(&replica);
+    fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, now + 5_000).await;
+    sip_clock::testkit::settle().await;
+
+    let after = ctx.state.peek(&call_ref).expect("the call plays on");
+    let kept = after.timers.iter().find(|t| t.key == own.key).expect("the own timer stays");
+    assert_eq!(kept.fire_at, own.fire_at, "not re-anchored by the other owner's skew");
+}

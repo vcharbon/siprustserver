@@ -6,8 +6,10 @@
 //! named by the leg, the dialog's two tags and the transaction's branch. It
 //! goes open (its relay awaits a final) → answered (a 2xx taken, the
 //! originator's ACK awaited) → ACKed, or ends on a non-2xx, and never goes
-//! back. Only the node holding the client transaction sees its final, so a
-//! round's end is progress a record holding the round open cannot make itself.
+//! back. Its final reaches the node holding the client transaction, so a
+//! round's end another copy saw is progress a record holding the round
+//! unfinished cannot make itself. The rules read the rounds that record holds;
+//! a round only the other copy holds is no progress under them.
 
 use crate::model::{Call, Dialog, DialogId, Leg, Obligation, PendingRequest, TimerEntry};
 
@@ -19,7 +21,9 @@ use super::peering::relay_peer_dialog;
 /// any dialog? Further along an open round: `incoming`'s same dialog no longer
 /// holds the relay at the round's CSeq and its own sequence is at or past it
 /// — it saw the round end, answered or refused, and possibly a next round
-/// begin. Further along an answered round: the same transaction's ACK left.
+/// begin. Further along an answered round: `incoming` no longer awaits that
+/// 2xx's ACK, and either the same transaction's ACK left or a next round's
+/// transaction stands on the dialog at or past `held`'s sequence.
 pub fn round_further(incoming: &Call, held: &Call) -> bool {
     !rounds_ended(incoming, held).is_empty()
 }
@@ -29,8 +33,10 @@ pub fn round_further(incoming: &Call, held: &Call) -> bool {
 /// INVITE client transaction and the ACK state of that transaction's 2xx, the
 /// offer it owes an answer to, its own sequence at the higher of the two; on
 /// the originator's dialog the 2xx it awaits an ACK for and the higher remote
-/// sequence; that 2xx's ladder timers; and the session state of both legs.
-/// Every other fact is `held`'s, its own requests on either dialog included.
+/// sequence; that 2xx's ladder timers; and the session state of both legs
+/// when `incoming` opened at least as many offer/answer exchanges on each of
+/// them, so no exchange count is lowered (RFC 3264 §8). Every other fact is
+/// `held`'s, its own requests on either dialog included.
 pub fn merge_rounds(mut held: Call, incoming: &Call) -> Call {
     for ended in rounds_ended(incoming, &held) {
         held = merge_round(held, incoming, &ended);
@@ -49,7 +55,7 @@ struct RoundEnd {
 /// What `held` holds of a dialog's round, while unfinished.
 enum Unfinished<'a> {
     Open { outbound_cseq: i64, inbound_cseq: i64 },
-    Answered { branch: &'a str, inbound_cseq: i64 },
+    Answered { branch: &'a str, inbound_cseq: i64, our_cseq: i64 },
 }
 
 fn unfinished(dialog: &Dialog) -> Option<Unfinished<'_>> {
@@ -59,9 +65,11 @@ fn unfinished(dialog: &Dialog) -> Option<Unfinished<'_>> {
             outbound_cseq: relay.outbound_cseq,
             inbound_cseq: relay.inbound_cseq,
         }),
-        None => dialog
-            .awaited_ack_cseq
-            .map(|inbound_cseq| Unfinished::Answered { branch: txn.branch.as_str(), inbound_cseq }),
+        None => dialog.awaited_ack_cseq.map(|inbound_cseq| Unfinished::Answered {
+            branch: txn.branch.as_str(),
+            inbound_cseq,
+            our_cseq: dialog.our_cseq,
+        }),
     }
 }
 
@@ -79,10 +87,14 @@ fn ended(incoming: &Dialog, round: &Unfinished<'_>) -> bool {
                     .iter()
                     .any(|p| p.outbound_cseq == *outbound_cseq)
         }
-        Unfinished::Answered { branch, .. } => {
-            incoming.pending_invite_txn.as_ref().is_some_and(|t| t.branch == *branch)
-                && incoming.awaited_ack_cseq.is_none()
-                && incoming.ack_branch.is_some()
+        Unfinished::Answered { branch, inbound_cseq, our_cseq } => {
+            let txn = incoming.pending_invite_txn.as_ref();
+            let same = txn.is_some_and(|t| t.branch == *branch);
+            let awaited = same && incoming.awaited_ack_cseq == Some(*inbound_cseq);
+            let acked = same && incoming.ack_branch.is_some();
+            let next_round =
+                txn.is_some_and(|t| t.branch != *branch) && incoming.our_cseq >= *our_cseq;
+            !awaited && (acked || next_round)
         }
     }
 }
@@ -131,8 +143,9 @@ fn merge_round(held: Call, incoming: &Call, round: &RoundEnd) -> Call {
             take_round(d, &theirs);
         }
     });
-    held = take_session(held, incoming, &round.leg_id);
-    let Some((o_leg, o_id)) = originator else { return held };
+    let Some((o_leg, o_id)) = originator else {
+        return take_sessions(held, incoming, &[&round.leg_id]);
+    };
     let theirs_o = dialog_of(incoming, &o_leg, &o_id).cloned();
     held = update_leg(held, &o_leg, |leg| {
         let (Some(d), Some(t)) = (leg.dialogs.by_tags_mut(&o_id.our_tag, &o_id.peer_tag), theirs_o)
@@ -142,7 +155,7 @@ fn merge_round(held: Call, incoming: &Call, round: &RoundEnd) -> Call {
         d.pending_reinvite_2xx = t.pending_reinvite_2xx;
         d.peer_cseq = d.peer_cseq.max(t.peer_cseq);
     });
-    held = take_session(held, incoming, &o_leg);
+    held = take_sessions(held, incoming, &[&round.leg_id, &o_leg]);
     take_ladders(held, incoming, &o_leg, round.inbound_cseq)
 }
 
@@ -159,12 +172,26 @@ fn take_round(d: &mut Dialog, theirs: &Dialog) {
     d.our_cseq = d.our_cseq.max(theirs.our_cseq);
 }
 
-/// The session state of `leg_id`, from `incoming`.
-fn take_session(held: Call, incoming: &Call, leg_id: &str) -> Call {
-    let Some(session) = find_leg(incoming, leg_id).map(|l| l.sdp_session.clone()) else {
+/// The session state of the round's `legs`, from `incoming`, when it opened
+/// at least as many offer/answer exchanges as `held` on each of them: it then
+/// saw every exchange `held` saw on them, the round's included, and the
+/// descriptions this stack last sent there. Otherwise `held` served an
+/// exchange of its own the other copy never saw, and keeps its sessions: an
+/// exchange count is never lowered, nor a description sent replaced by an
+/// earlier one (RFC 3264 §8).
+fn take_sessions(held: Call, incoming: &Call, legs: &[&str]) -> Call {
+    let opened =
+        |call: &Call, leg: &str| find_leg(call, leg).map(|l| l.sdp_session.exchanges_opened);
+    let saw_every_exchange = legs.iter().all(|leg| opened(incoming, leg) >= opened(&held, leg));
+    if !saw_every_exchange {
         return held;
-    };
-    update_leg(held, leg_id, |leg| leg.sdp_session = session)
+    }
+    legs.iter().fold(held, |held, leg| {
+        let Some(session) = find_leg(incoming, leg).map(|l| l.sdp_session.clone()) else {
+            return held;
+        };
+        update_leg(held, leg, |l| l.sdp_session = session)
+    })
 }
 
 /// The ladders of the re-INVITE 2xx the originator's leg awaits ACKs for, from

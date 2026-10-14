@@ -502,7 +502,8 @@ in, at that same vector. On every path the other owner's next write orders
 against what it published: a fold that bumped would read that write as made on
 a version this node has moved past and refuse it. Timers a fold takes are
 re-anchored into this node's clock and a stale keepalive guard is dropped,
-which no peer reads.
+which no peer reads; the live copy's own timers stay where it armed them
+(`a_round_fold_leaves_the_live_copys_own_timers_where_it_armed_them`).
 
 **Accepted degradation.** A node restoring the call — the reclaiming primary,
 since a survivor's takeover copy is reactive and sheds when its last
