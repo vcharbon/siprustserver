@@ -95,7 +95,6 @@ crates/rfc-rules/src/rules/cseq/tests.rs 874
 crates/rfc-rules/src/rules/dialog.rs 921
 crates/rfc-rules/src/rules/dialog/tests.rs 1159
 crates/rfc-rules/src/rules/proxy.rs 634
-crates/rfc-rules/src/rules/reinvite.rs 670
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1722
 crates/scenario-harness/src/actor/goals.rs 510
