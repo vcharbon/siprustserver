@@ -15,10 +15,12 @@
  * checkout into an unreadable hash error. A command reads each fingerprint
  * once per process for the inputs its deployment states — a campaign's
  * thousands of captures share one tree — while a long-lived reader (the
- * viewer) reads it now, so an edit shows.
+ * viewer) reads it now, so an edit shows. Either way a file is read again
+ * only where its size or mtime moved, so a reading now costs a stat per file.
  */
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
+import * as Option from "effect/Option"
 import * as crypto from "node:crypto"
 import * as path from "node:path"
 import * as Census from "./cut/census.js"
@@ -73,9 +75,24 @@ export const contentHash = Effect.fn("Fingerprint.contentHash")(function*(
   const hash = crypto.createHash("sha256")
   for (const input of inputs) {
     hash.update(`${input.name}\n`)
-    hash.update(crypto.createHash("sha256").update(yield* fs.readFile(input.file)).digest())
+    hash.update(yield* digestOf(fs, input.file))
   }
   return hash.digest("hex")
+})
+
+/** Each file's digest this process took, by path, with the size and mtime it was taken at. */
+const digests = new Map<string, { readonly size: bigint; readonly mtime: number; readonly digest: Buffer }>()
+
+/** `file`'s sha-256, read again only where its size or mtime moved since this process last read it. */
+const digestOf = Effect.fn("Fingerprint.digestOf")(function*(fs: FileSystem.FileSystem, file: string) {
+  const info = yield* fs.stat(file)
+  const size = BigInt(info.size)
+  const mtime = Option.match(info.mtime, { onNone: () => -1, onSome: (at) => at.getTime() })
+  const held = digests.get(file)
+  if (held !== undefined && held.size === size && held.mtime === mtime && mtime !== -1) return held.digest
+  const digest = crypto.createHash("sha256").update(yield* fs.readFile(file)).digest()
+  digests.set(file, { size, mtime, digest })
+  return digest
 })
 
 /**
