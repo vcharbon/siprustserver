@@ -4,7 +4,9 @@
  * A capture becomes cases in four moves: correlate the calls (`./engine.ts`),
  * cut which legs are one call of the system under test (`./cut.ts`), infer the
  * layout and synthesize the flow (`./topology.ts`, `./flowsteps.ts`), and
- * assemble the documents (`./assemble.ts`, `./caseset.ts`).
+ * assemble the documents (`./assemble.ts`, `./caseset.ts`). Two runs of one
+ * call's replay ladders compare once what each run minted is normalised
+ * (`./ladder-delta.ts`).
  *
  * Nothing here knows whose platform produced the capture. Every reading that
  * would need to — a derived Call-ID, a handover cause, a family label, a lane
@@ -55,6 +57,7 @@ export * as FlowsSegments from "./flows-segments.js"
 export * as FlowSteps from "./flowsteps.js"
 export * as Fold from "./fold.js"
 export * as Forms from "./forms.js"
+export * as LadderDelta from "./ladder-delta.js"
 export * as LegRole from "./leg-role.js"
 export { LogicExtractor } from "./logic-extractor.js"
 export * as MsgSpec from "./msgspec.js"

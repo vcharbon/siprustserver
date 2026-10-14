@@ -1123,6 +1123,69 @@
                 "type": "null"
               }
             ]
+          },
+          "delta": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "firstDifference": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "line": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "before": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "after": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "line",
+                          "before",
+                          "after"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "differingLines": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "firstDifference",
+                  "differingLines"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -1135,7 +1198,8 @@
           "lane",
           "before",
           "after",
-          "ref"
+          "ref",
+          "delta"
         ],
         "additionalProperties": false
       }

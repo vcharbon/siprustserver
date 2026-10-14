@@ -16,7 +16,9 @@
  *                                 skipped, failedStep,
  *                                 mainError, bless, accepted, knownBugs[] | null,
  *                                 ladder[] | null, links { study, text } },
- *                ref: ladder[] | null } }
+ *                ref: ladder[] | null,
+ *                delta: { firstDifference: { line, before, after } | null,
+ *                         differingLines } | null } }
  *
  * Only the calls BOTH sides ran are compared; `onlyBefore`/`onlyAfter` count
  * the captures the other side never ran and, within the captures both ran, the
@@ -24,7 +26,11 @@
  * {@link MOVE_CLASSES}; `calls` holds the calls that moved, or every compared
  * call where the producer was asked for all. A ladder is the text renderer's
  * own lines; null where the bundle was reaped, the store holds no document, or
- * the call is past the producer's ladder budget. `knownBugs` is null where the
+ * the call is past the producer's ladder budget. `delta` compares the two
+ * replay ladders once what each run minted is normalised (`@sip/pipeline`
+ * `ladder-delta.ts`): the first event they part at (`m<line>`) and how many
+ * lines differ; it is information on the call, never a class, and null where
+ * either ladder is. `knownBugs` is null where the
  * bundle is gone. `code`, `document` and `lane` say whether the two cells ran
  * the same code (tree fingerprints, component by component), the same case
  * document and the same lane behaviour; a verdict flip with all three the same
@@ -151,6 +157,22 @@ export const Cell = Schema.Struct({
 })
 export interface Cell extends Schema.Schema.Type<typeof Cell> {}
 
+/** The first event two replay ladders part at, `m<line>` on both, each side's line as normalised; null on a side that ran out. */
+export const LadderDifference = Schema.Struct({
+  line: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  before: Schema.NullOr(Schema.String),
+  after: Schema.NullOr(Schema.String)
+})
+export interface LadderDifference extends Schema.Schema.Type<typeof LadderDifference> {}
+
+/** How the two replay ladders of a call differ once what each run minted is normalised. */
+export const LadderDelta = Schema.Struct({
+  firstDifference: Schema.NullOr(LadderDifference),
+  /** The longer ladder's event lines outside the two ladders' longest common subsequence. */
+  differingLines: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+})
+export interface LadderDelta extends Schema.Schema.Type<typeof LadderDelta> {}
+
 export const Call = Schema.Struct({
   /** The id the call is cited by. */
   alias: Schema.String,
@@ -162,7 +184,9 @@ export const Call = Schema.Struct({
   lane: LaneReading,
   before: Cell,
   after: Cell,
-  ref: Schema.NullOr(Schema.Array(Schema.String))
+  ref: Schema.NullOr(Schema.Array(Schema.String)),
+  /** The ladder delta of the two cells; null where either ladder was not read. */
+  delta: Schema.NullOr(LadderDelta)
 })
 export interface Call extends Schema.Schema.Type<typeof Call> {}
 

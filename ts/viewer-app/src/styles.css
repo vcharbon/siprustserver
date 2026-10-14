@@ -1933,6 +1933,13 @@ tr.rule-unrostered td {
   line-height: 1.35;
 }
 
+.ladder-first-difference {
+  display: inline-block;
+  min-width: 100%;
+  color: inherit;
+  background: color-mix(in srgb, var(--extra) 22%, transparent);
+}
+
 .report-summary-note {
   padding: 8px 12px;
   border: 1px solid var(--extra);

@@ -39,6 +39,8 @@ describe("the compare and report routes", () => {
 
   it("writes the canonical forms, keeping every other existing form", () => {
     expect(href.compareRuns({ a: "@develop", b: "@env:x", all: "1" })).toBe("/compare?a=%40develop&b=%40env%3Ax&all=1")
+    expect(href.compareRuns({ a: "@run:1", b: "@run:2", ladderChanged: "1" }))
+      .toBe("/compare?a=%40run%3A1&b=%40run%3A2&ladderChanged=1")
     expect(href.report({ run: "@run:7", lane: "fake" })).toBe("/report?run=%40run%3A7&lane=fake")
     expect(href.triage({ lane: "fake", scope: "red", rule: "r", expected: "e", q: "x" }))
       .toBe("/triage?lane=fake&scope=red&rule=r&expected=e&q=x")

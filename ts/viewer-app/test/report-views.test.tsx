@@ -49,6 +49,15 @@ const side = (selector: string): CompareReport.Side => ({
 
 const zero = { sameDocument: 0, documentChanged: 0 }
 
+/** A two-event replay ladder whose answer is `status`. */
+const ladderOf = (status: string): ReadonlyArray<string> => [
+  "run c-case3",
+  "",
+  "ladder (2 events; m<idx> +t from -> to | message | detail | dialog | step):",
+  "  m0 +0.000000 uac1 -> SUT | INVITE | CSeq 1 | fromA1 | s1",
+  `  m1 +0.010000 SUT -> uac1 | ${status} | INVITE · CSeq 1 | fromA1 · toA1 | s2`
+]
+
 const compare: CompareReport.CompareReport = {
   schema_version: "sip.compare/1",
   headline: "the two sides ran DIFFERENT code",
@@ -80,7 +89,8 @@ const compare: CompareReport.CompareReport = {
     lane: "same",
     before: cell(1, false, ["run1 c-case1", "A -- INVITE --> B"]),
     after: cell(2, true, null),
-    ref: ["c.pcap c-case1", "A -- INVITE --> SUT"]
+    ref: ["c.pcap c-case1", "A -- INVITE --> SUT"],
+    delta: null
   }, {
     alias: "c-case3",
     capture: "c.pcap",
@@ -89,9 +99,17 @@ const compare: CompareReport.CompareReport = {
     document: "same",
     code: "different",
     lane: "same",
-    before: cell(1, true, null),
-    after: { ...cell(2, false, null), repeats: { runs: 3, passed: 2 } },
-    ref: null
+    before: cell(1, true, ladderOf("200 OK")),
+    after: { ...cell(2, false, ladderOf("486 Busy Here")), repeats: { runs: 3, passed: 2 } },
+    ref: null,
+    delta: {
+      firstDifference: {
+        line: 1,
+        before: "SUT -> uac1 | 200 OK | INVITE · CSeq +0 | fromA1 · toA1 | s2",
+        after: "SUT -> uac1 | 486 Busy Here | INVITE · CSeq +0 | fromA1 · toA1 | s2"
+      },
+      differingLines: 1
+    }
   }]
 }
 
@@ -123,6 +141,19 @@ describe("the compare view", () => {
     expect(markup).toContain("repeats 2/3 passed")
     // A cell run once states no repeats.
     expect(markup.match(/repeats \d+\/\d+ passed/g)).toHaveLength(1)
+  })
+
+  it("marks the first line where the two ladders differ, on both sides, and says how many lines differ", () => {
+    expect(markup).toContain(
+      `<mark class="ladder-first-difference">  m1 +0.010000 SUT -&gt; uac1 | 200 OK | INVITE · CSeq 1 | fromA1 · toA1 | s2</mark>`
+    )
+    expect(markup).toContain(
+      `<mark class="ladder-first-difference">  m1 +0.010000 SUT -&gt; uac1 | 486 Busy Here | INVITE · CSeq 1 | fromA1 · toA1 | s2</mark>`
+    )
+    expect(markup.match(/<mark class="ladder-first-difference">/g)).toHaveLength(2)
+    expect(markup).toContain("ladder: 1 line(s) differ, first at m1")
+    // A call whose ladders were not both read states no delta.
+    expect(markup.match(/ladder: \d+ line\(s\) differ/g)).toHaveLength(1)
   })
 
   it("links each cell into this viewer, and each side to its report", () => {

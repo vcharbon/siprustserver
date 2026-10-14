@@ -2,7 +2,8 @@
  * Two run sets compared call by call: the `sip.compare/1` document the server
  * serves for the URL's selectors (`/compare?a=@develop&b=@env:X`), drawn.
  * Selectors stated in the path (`/compare/@develop/@env:X`) are read as the
- * query form, which the page then shows in the address bar.
+ * query form, which the page then shows in the address bar. `ladderChanged=1`
+ * lists only the calls whose two replay ladders differ, whatever their class.
  */
 import type { JSX } from "react"
 import { useEffect, useState } from "react"
@@ -11,18 +12,25 @@ import { CompareReportView } from "../components/CompareReportView.tsx"
 import { href, navigate, redirect, useQuery } from "../router.ts"
 
 const SelectorForm = (
-  { a, b, lane, all }: { a: string; b: string; lane: string; all: boolean }
+  { a, b, lane, all, ladderChanged }: { a: string; b: string; lane: string; all: boolean; ladderChanged: boolean }
 ): JSX.Element => {
   const [before, setBefore] = useState(a)
   const [after, setAfter] = useState(b)
   const [onLane, setOnLane] = useState(lane)
   const [every, setEvery] = useState(all)
+  const [moved, setMoved] = useState(ladderChanged)
   return (
     <form
       className="selector-form"
       onSubmit={(event) => {
         event.preventDefault()
-        navigate(href.compareRuns({ a: before, b: after, lane: onLane, all: every ? "1" : undefined }))
+        navigate(href.compareRuns({
+          a: before,
+          b: after,
+          lane: onLane,
+          all: every ? "1" : undefined,
+          ladderChanged: moved ? "1" : undefined
+        }))
       }}
     >
       <label>
@@ -36,6 +44,9 @@ const SelectorForm = (
       </label>
       <label>
         <input type="checkbox" checked={every} onChange={() => setEvery(!every)} /> unchanged calls too
+      </label>
+      <label>
+        <input type="checkbox" checked={moved} onChange={() => setMoved(!moved)} /> only calls whose ladders differ
       </label>
       <button type="submit">compare</button>
       <span className="muted">
@@ -54,17 +65,22 @@ export const RunComparePage = ({ path }: { path?: { readonly a: string; readonly
       a: path.a,
       b: path.b,
       lane: query.get("lane") ?? undefined,
-      all: query.get("all") ?? undefined
+      all: query.get("all") ?? undefined,
+      ladderChanged: query.get("ladderChanged") ?? undefined
     }))
   }, [path?.a, path?.b])
   const a = path?.a ?? query.get("a") ?? ""
   const b = path?.b ?? query.get("b") ?? ""
   const lane = query.get("lane") ?? ""
   const all = query.get("all") === "1"
+  const ladderChanged = query.get("ladderChanged") === "1"
   const asked = a !== "" && b !== ""
   const doc = useAsync(
-    () => (asked ? api.compare({ a, b, lane: lane === "" ? undefined : lane, all }) : Promise.resolve(undefined)),
-    `${a}|${b}|${lane}|${all}`
+    () =>
+      asked
+        ? api.compare({ a, b, lane: lane === "" ? undefined : lane, all, ladderChanged })
+        : Promise.resolve(undefined),
+    `${a}|${b}|${lane}|${all}|${ladderChanged}`
   )
   return (
     <div className="page compare-runs-page">
@@ -79,7 +95,14 @@ export const RunComparePage = ({ path }: { path?: { readonly a: string; readonly
           </div>
         )}
       </header>
-      <SelectorForm key={`${a}|${b}|${lane}|${all}`} a={a} b={b} lane={lane} all={all} />
+      <SelectorForm
+        key={`${a}|${b}|${lane}|${all}|${ladderChanged}`}
+        a={a}
+        b={b}
+        lane={lane}
+        all={all}
+        ladderChanged={ladderChanged}
+      />
       {!asked
         ? <p className="muted">name both sides to compare them.</p>
         : doc.state === "loading"

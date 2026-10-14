@@ -79,7 +79,11 @@ const report: CompareReport.CompareReport = {
       mainError: { kind: "died", rule: null, rfc: null, step: "s6", expected: "200 to INVITE", detail: "" }
     },
     after: cell,
-    ref: ["A  B", "|--INVITE-->|"]
+    ref: ["A  B", "|--INVITE-->|"],
+    delta: {
+      firstDifference: { line: 4, before: "uas1 -> SUT | 200 OK | INVITE · CSeq +0", after: null },
+      differingLines: 1
+    }
   }]
 }
 
@@ -100,6 +104,14 @@ describe("the compare report format", () => {
     expect(() => decode({ ...report, schema_version: "sip.compare/2" })).toThrow()
     expect(() => decode({ ...report, calls: [{ ...report.calls[0], class: "moved" }] })).toThrow()
     expect(() => decode({ ...report, compared: 1.5 })).toThrow()
+  })
+
+  it("carries each call's ladder delta, null where either ladder was not read", () => {
+    const call = report.calls[0]!
+    expect(decode({ ...report, calls: [{ ...call, delta: null }] }).calls[0]?.delta).toBeNull()
+    expect(() => decode({ ...report, calls: [{ ...call, delta: { firstDifference: null } }] })).toThrow()
+    expect(() => decode({ ...report, calls: [{ ...call, delta: { firstDifference: null, differingLines: -1 } }] }))
+      .toThrow()
   })
 
   it("states its version in the published schema", () => {

@@ -136,6 +136,8 @@ export interface CompareParams {
   readonly lane?: string | undefined
   /** `1` lists every compared call, the unchanged ones too. */
   readonly all?: string | undefined
+  /** `1` lists only the calls whose two ladders differ, whatever their class. */
+  readonly ladderChanged?: string | undefined
 }
 
 /** Which run set a report reads. */

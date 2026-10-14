@@ -2,8 +2,10 @@
  * A `sip.compare/1` document, drawn: the headline, both sides, the class
  * counts, what one side alone holds, then one row per listed call — both
  * cells' outcomes and repeats, the links to each cell, and the before, after
- * and reference ladders side by side as the text export renders them. A call
- * whose repeats within one side disagree is classed `unstable`.
+ * and reference ladders side by side as the text export renders them, the
+ * event where the two replay ladders part first marked on both (the call's
+ * ladder delta). A call whose repeats within one side disagree is classed
+ * `unstable`.
  *
  * It draws the document and derives nothing: what the page says is what
  * `compare A B --json` printed.
@@ -134,14 +136,41 @@ const ClassCounts = ({ doc }: { doc: CompareReport.CompareReport }): JSX.Element
   )
 }
 
-const LadderText = ({ title, lines }: { title: string; lines: ReadonlyArray<string> | null }): JSX.Element => (
+/** Whether a ladder line draws event `m<index>`. */
+const drawsEvent = (line: string, index: number): boolean => new RegExp(`^\\s*m${index} `).test(line)
+
+/** A ladder's lines, the line drawing event `m<marked>` marked as where the two ladders part first. */
+const LadderLines = ({ lines, marked }: { lines: ReadonlyArray<string>; marked: number | null }): JSX.Element => {
+  const at = marked === null ? -1 : lines.findIndex((line) => drawsEvent(line, marked))
+  if (at < 0) return <pre className="ladder-text">{lines.join("\n")}</pre>
+  return (
+    <pre className="ladder-text">
+      {lines.slice(0, at).map((line) => `${line}\n`).join("")}
+      <mark className="ladder-first-difference">{lines[at]}</mark>
+      {lines.slice(at + 1).map((line) => `\n${line}`).join("")}
+    </pre>
+  )
+}
+
+const LadderText = (
+  { title, lines, marked = null }: { title: string; lines: ReadonlyArray<string> | null; marked?: number | null }
+): JSX.Element => (
   <div className="compare-ladder">
     <h4>{title}</h4>
     {lines === null
       ? <p className="muted">not read: the bundle is gone, the store holds no document, or the call is past the ladder budget</p>
-      : <pre className="ladder-text">{lines.join("\n")}</pre>}
+      : <LadderLines lines={lines} marked={marked} />}
   </div>
 )
+
+/** A call's ladder delta in a few words; empty where either ladder was not read. */
+export const deltaOf = (delta: CompareReport.LadderDelta | null): string => {
+  if (delta === null) return ""
+  const first = delta.firstDifference
+  return first === null
+    ? "ladder: no difference"
+    : `ladder: ${delta.differingLines} line(s) differ, first at m${first.line}`
+}
 
 const CellLine = ({ label, cell }: { label: string; cell: CompareReport.Cell }): JSX.Element => (
   <p className="compare-cell">
@@ -171,12 +200,25 @@ const CallRow = ({ call }: { call: CompareReport.Call }): JSX.Element => (
       <span className="muted">
         document {call.document} · code {call.code} · lane {call.lane}
       </span>
+      {deltaOf(call.delta) !== "" && (
+        <>
+          {" "}<span className={`tag ${call.delta?.firstDifference === null ? "muted" : "extra"}`}>{deltaOf(call.delta)}</span>
+        </>
+      )}
     </summary>
     <CellLine label="before" cell={call.before} />
     <CellLine label="after" cell={call.after} />
     <div className="compare-ladders">
-      <LadderText title={`before · run${call.before.run}`} lines={call.before.ladder} />
-      <LadderText title={`after · run${call.after.run}`} lines={call.after.ladder} />
+      <LadderText
+        title={`before · run${call.before.run}`}
+        lines={call.before.ladder}
+        marked={call.delta?.firstDifference?.line ?? null}
+      />
+      <LadderText
+        title={`after · run${call.after.run}`}
+        lines={call.after.ladder}
+        marked={call.delta?.firstDifference?.line ?? null}
+      />
       <LadderText title="reference" lines={call.ref} />
     </div>
   </details>

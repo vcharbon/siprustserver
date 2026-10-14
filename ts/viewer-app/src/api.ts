@@ -991,6 +991,8 @@ export interface CompareQuery {
   readonly lane?: string | undefined
   /** Every compared call, the unchanged ones too. */
   readonly all?: boolean | undefined
+  /** Only the calls whose two ladders differ, whatever their class. */
+  readonly ladderChanged?: boolean | undefined
 }
 
 export const api = {
@@ -998,7 +1000,15 @@ export const api = {
   /** The `sip.compare/1` document of two run sets. */
   compare: (query: CompareQuery) =>
     ask<CompareReport.CompareReport>(
-      `/api/compare${search({ a: query.a, b: query.b, lane: query.lane, all: query.all === true ? "1" : undefined })}`
+      `/api/compare${
+        search({
+          a: query.a,
+          b: query.b,
+          lane: query.lane,
+          all: query.all === true ? "1" : undefined,
+          ladderChanged: query.ladderChanged === true ? "1" : undefined
+        })
+      }`
     ),
   /** The `sip.run-report/1` document of one run set. */
   report: (run: string, lane?: string) => ask<RunReport.RunReport>(`/api/report${search({ run, lane })}`),
