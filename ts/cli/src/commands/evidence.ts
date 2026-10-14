@@ -73,6 +73,11 @@ const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input)
     yield* Console.error(`[evidence] refused: ${refused}`)
     return 2
   }
+  const unstated = yield* Refusals.lane(options.lane)
+  if (unstated !== null) {
+    yield* Console.error(`[evidence] refused: ${unstated}`)
+    return 2
+  }
   const census = yield* Refusals.census(facts, options.paths)
   if (census !== null) {
     yield* Console.error(`[evidence] refused: ${census}`)

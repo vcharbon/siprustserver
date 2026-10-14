@@ -2,7 +2,8 @@
  * A hook is told the job's captures in a way the kernel accepts: the list in
  * `HOOK_CAPTURE` while it fits one environment string, its count there and
  * the file `HOOK_CAPTURES_FILE` otherwise (the file always). A hook the
- * kernel refuses to spawn is a log with exit -1, never a failed job.
+ * kernel refuses to spawn, or one a signal kills, is a log with exit -1 that
+ * says which, never a failed job.
  */
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
@@ -74,5 +75,15 @@ describe("Hooks.run", () => {
     const text = fs.readFileSync(path.join(dir, "huge.log"), "utf8")
     expect(text.startsWith("exit -1\n")).toBe(true)
     expect(text).toContain("spawn failed: spawn E2BIG")
+  })
+
+  it("records a hook a signal killed by its signal, never as a spawn that failed", async () => {
+    const killed: Hooks.Hook = { name: "killed", when: "after", command: "echo started; kill -KILL $$" }
+    const logs = await run(Hooks.run([killed], "after", env(["a.pcap"]), dir, dir))
+    expect(logs[0].exit).toBe(-1)
+    const text = fs.readFileSync(path.join(dir, "killed.log"), "utf8")
+    expect(text).toContain("started")
+    expect(text).toContain("hook killed by SIGKILL")
+    expect(text).not.toContain("spawn failed")
   })
 })

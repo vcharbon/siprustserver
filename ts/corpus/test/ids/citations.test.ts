@@ -35,13 +35,13 @@ describe("citationsOf", () => {
   it("reads every case id form, the run-scoped one included, and a bare suffix", () => {
     const found = scan(ticket([{
       text: "`traceX.anon-case17` refused; capture_ab12cd34-0001.pcap.gz-auto, " +
-        "Q100.pcap-cut2, run200300/case1, A1.02_x_sip.pcapng.gz-legs3+4, " +
+        "Q100.pcap-cut2, run200300/case1, capture-a.pcapng.gz-legs3+4, " +
         "and case437 on its own",
       on: "2026-10-01T00:00:00.000Z"
     }]))
     expect([...refsOf(found, "case")].sort()).toEqual([
-      "A1.02_x_sip.pcapng.gz-legs3+4",
       "Q100.pcap-cut2",
+      "capture-a.pcapng.gz-legs3+4",
       "capture_ab12cd34-0001.pcap.gz-auto",
       "case437",
       "run200300/case1",
@@ -54,6 +54,13 @@ describe("citationsOf", () => {
     const grammar = { isCapture: () => false, suffixes: String.raw`case\d+|x[0-9a-f]{4}` }
     expect(refsOf(citationsOf(ticket([text]), grammar), "case")).toEqual(["a.anon2-x0123"])
     expect(refsOf(scan(ticket([text])), "case")).toEqual([])
+  })
+
+  it("reads a bare suffix the grammar says a text cites alone, and never a word like `auto`", () => {
+    const text = { text: "see x0123 alone, then auto and case5", on: "2026-10-01T00:00:00.000Z" }
+    const grammar = { isCapture: () => false, suffixes: String.raw`case\d+|auto|x[0-9a-f]{4}`, bareSuffixes: String.raw`case\d+|x[0-9a-f]{4}` }
+    expect([...refsOf(citationsOf(ticket([text]), grammar), "case")].sort()).toEqual(["case5", "x0123"])
+    expect(refsOf(scan(ticket([text])), "case")).toEqual(["case5"])
   })
 
   it("dates each citation by the text that holds it, the earliest when several do", () => {

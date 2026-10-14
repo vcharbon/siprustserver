@@ -43,9 +43,9 @@ const answer = (
 ): Resolver.Resolution => ({ input, form: Resolver.formOf(input), status, calls, total: calls.length, note })
 
 const ANSWERS: ReadonlyMap<string, Resolver.Resolution> = new Map([
-  [`${C}-case110`, answer(`${C}-case110`, "resolved", [call(C, `${C}-case110`)], "prep7")],
-  ["trace-case110", answer("trace-case110", "resolved", [call(C, `${C}-case110`)], "prep7")],
-  ["run322903/case110", answer("run322903/case110", "resolved", [call(C, `${C}-case110`)], "run 322903 (…): prep7")],
+  [`${C}-case2`, answer(`${C}-case2`, "resolved", [call(C, `${C}-case2`)], "prep7")],
+  ["trace-case2", answer("trace-case2", "resolved", [call(C, `${C}-case2`)], "prep7")],
+  ["run7/case2", answer("run7/case2", "resolved", [call(C, `${C}-case2`)], "run 7 (…): prep7")],
   [`${D}-case1`, answer(`${D}-case1`, "resolved", [call(D, `${D}-case1`)], "prep7")],
   [
     "case1",
@@ -90,18 +90,18 @@ describe("CaseSelection.resolve", () => {
   })
 
   it("reads a bare suffix as the named capture's case, with no lookup", async () => {
-    const got = await read([C], ["case110", "-case111"])
-    expect(got).toEqual({ _tag: "read", selection: selection([C], [`${C}-case110`, `${C}-case111`]) })
+    const got = await read([C], ["case2", "-case3"])
+    expect(got).toEqual({ _tag: "read", selection: selection([C], [`${C}-case2`, `${C}-case3`]) })
   })
 
   it("names the capture a full case id names where the line named none", async () => {
-    expect(await read([], [`${C}-case110`])).toEqual({ _tag: "read", selection: selection([C], [`${C}-case110`]) })
+    expect(await read([], [`${C}-case2`])).toEqual({ _tag: "read", selection: selection([C], [`${C}-case2`]) })
   })
 
   it("reads a case id cited by its capture's stem, and runN/caseN, back to the capture's own id", async () => {
-    expect(await read([], ["trace-case110", "run322903/case110"])).toEqual({
+    expect(await read([], ["trace-case2", "run7/case2"])).toEqual({
       _tag: "read",
-      selection: selection([C], [`${C}-case110`])
+      selection: selection([C], [`${C}-case2`])
     })
   })
 
@@ -126,7 +126,7 @@ describe("CaseSelection.resolve", () => {
   })
 
   it("refuses ids of two captures, naming both", async () => {
-    const got = await read([], [`${C}-case110`, `${D}-case1`])
+    const got = await read([], [`${C}-case2`, `${D}-case1`])
     const why = got._tag === "refused" ? got.why : ""
     expect(why).toContain(C)
     expect(why).toContain(D)

@@ -4,7 +4,7 @@
  * the host's box refusal is the answer.
  */
 import { NodeServices } from "@effect/platform-node"
-import { Boxing } from "@sip/corpus"
+import { Boxing, LaneHosting } from "@sip/corpus"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as fs from "node:fs"
@@ -35,6 +35,24 @@ const boxing = Boxing.layerWith({
 
 const run = <A>(effect: Effect.Effect<A, unknown, Boxing.Service | NodeServices.NodeServices>) =>
   Effect.runPromise(effect.pipe(Effect.provide(Layer.merge(boxing, NodeServices.layer))) as Effect.Effect<A>)
+
+describe("the lane refusal", () => {
+  it("names a lane the deployment does not state, and answers null for one it does", async () => {
+    const hosting = LaneHosting.layerWith({
+      lanes: ["paused"],
+      lane: (lane) =>
+        lane === "paused"
+          ? Effect.succeed(LaneHosting.NEUTRAL_LANE)
+          : Effect.fail(new LaneHosting.LaneUnstated({ lane, known: ["paused"] })),
+      standBatch: () => Effect.succeed(undefined),
+      standSut: () => Effect.succeed(undefined),
+      preflight: () => Effect.succeed(null)
+    })
+    const ask = (lane: string) => Effect.runPromise(Refusals.lane(lane).pipe(Effect.provide(hosting)))
+    expect(await ask("paused")).toBeNull()
+    expect(await ask("pased")).toBe("there is no lane 'pased': the lanes are paused")
+  })
+})
 
 describe("the cut's refusals", () => {
   it("name where the census root is stated when no census run is there", async () => {

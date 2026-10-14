@@ -103,23 +103,49 @@ export interface Grammar {
   readonly isCapture: (input: string) => boolean
   /** The case-id suffixes, as the alternatives of a regular expression; {@link DEFAULT_SUFFIXES} where absent. */
   readonly suffixes?: string
+  /**
+   * The suffixes a prose text cites a case by ALONE — none a word of prose
+   * reads as (`auto` does) — as alternatives; {@link DEFAULT_BARE_SUFFIXES}
+   * where absent.
+   */
+  readonly bareSuffixes?: string
 }
 
 /** The suffixes a grammar that states none reads: `caseN`, `cutN`, `auto`, `legsA+B`. */
 export const DEFAULT_SUFFIXES = String.raw`case\d+|cut\d+|auto|legs[\d+]+`
 
+/** The suffixes a text cites a case by alone, where a grammar states none: `caseN`. */
+export const DEFAULT_BARE_SUFFIXES = String.raw`case\d+`
+
 /** A capture is a packet-capture file: its name carries `.pcap` (`.pcapng` included). */
 export const DEFAULT_GRAMMAR: Grammar = { isCapture: (input) => input.includes(".pcap") }
 
-/** The case-id shapes a grammar reads. */
-const shapesOf = (grammar: Grammar) => {
+/**
+ * The case-id shapes a grammar reads — the one source every reader of a case
+ * id builds on (the resolver, the id forms, the citation scan, the bundle
+ * import): its suffixes and the anchored shapes of a suffix, a full case id
+ * (`<capture>-<suffix>`, the capture captured) and a bare suffix (`-` optional).
+ */
+export interface CaseShapes {
+  readonly suffixes: string
+  readonly bareSuffixes: string
+  readonly suffix: RegExp
+  readonly caseId: RegExp
+  readonly bare: RegExp
+}
+
+export const caseShapes = (grammar: Grammar): CaseShapes => {
   const suffixes = grammar.suffixes ?? DEFAULT_SUFFIXES
   return {
+    suffixes,
+    bareSuffixes: grammar.bareSuffixes ?? DEFAULT_BARE_SUFFIXES,
     suffix: new RegExp(`^(${suffixes})$`),
     caseId: new RegExp(`^(.+)-(${suffixes})$`),
     bare: new RegExp(`^-?(${suffixes})$`)
   }
 }
+
+const shapesOf = caseShapes
 
 /** How an input reads, before any lookup. */
 export const formOf = (input: string, grammar: Grammar = DEFAULT_GRAMMAR): Form => {

@@ -30,7 +30,11 @@ const MANAGED = "managed"
 const hosting = LaneHosting.layerWith({
   lanes: [PAUSED, MANAGED],
   lane: (lane) =>
-    Effect.succeed(lane === MANAGED ? { clock: "real", exclusive: true, sut: "managed" } : LaneHosting.NEUTRAL_LANE),
+    lane === MANAGED
+      ? Effect.succeed({ clock: "real", exclusive: true, sut: "managed" })
+      : lane === PAUSED
+      ? Effect.succeed(LaneHosting.NEUTRAL_LANE)
+      : Effect.fail(new LaneHosting.LaneUnstated({ lane, known: [PAUSED, MANAGED] })),
   standBatch: () => Effect.succeed(undefined),
   standSut: () => Effect.succeed(undefined),
   preflight: () => Effect.succeed(null)
@@ -84,6 +88,14 @@ const run = (lane: string, buildMs: number): Promise<ReadonlyArray<string>> => {
 describe("ReplayBuild.session", () => {
   it("builds before the box is taken, and a real-clock lane settles after a build that compiled", async () => {
     expect(await run(MANAGED, 60_000)).toEqual(["built before the locks", `settled ${ReplayBuild.SETTLE_MS}`])
+  })
+
+  it("refuses a lane the deployment does not state before it builds or takes a lock", async () => {
+    const refused = await run("pased", 60_000).then(
+      () => "ran",
+      (cause: unknown) => String(cause)
+    )
+    expect(refused).toContain("there is no lane 'pased': the lanes are paused, managed")
   })
 
   it("does not settle after a build that found the tree current, nor on a paused-clock lane", async () => {

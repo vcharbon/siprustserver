@@ -340,6 +340,11 @@ const startCommand = (facts: CliFacts, root: Root) =>
           yield* Console.error(`[job] refused: there is no request ${input.request.value}`)
           return yield* exit(2)
         }
+        const unstated = yield* Refusals.lane(shown.request.lane)
+        if (unstated !== null) {
+          yield* Console.error(`[job] refused: ${unstated}`)
+          return yield* exit(2)
+        }
         yield* launchReplay(facts, sessions, shown.request, knobsOf(input), undefined)
       })
   ).pipe(Command.withDescription("Create a job and launch it detached"))

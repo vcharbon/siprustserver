@@ -96,6 +96,7 @@ import type { CliFacts } from "../facts.js"
 import { triageFlags } from "../flags.js"
 import * as IdFlags from "../id-flags.js"
 import { optionsOf, USAGE_TAIL } from "../options.js"
+import * as Refusals from "../refusals.js"
 import { exit } from "../runner.js"
 import * as CaseSelection from "./case-selection.js"
 import { createdBy } from "./compare.js"
@@ -267,6 +268,11 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     return 2
   }
   const options = yield* requestOptions(input, shown.request)
+  const unstated = yield* Refusals.lane(options.lane)
+  if (unstated !== null) {
+    yield* Console.error(`[replay] refused: ${unstated}`)
+    return 2
+  }
   if (Option.isSome(input.after)) {
     const ahead = yield* restore(awaitJob(input.after.value, Option.getOrUndefined(input.job)))
     if (ahead !== null) yield* Console.log(`[replay] job ${input.after.value} ${ahead}; resolving now`)
@@ -428,6 +434,11 @@ const workOf = Effect.fn("Replay.workOf")(function*(facts: CliFacts, input: Inpu
 
 /** A work list replayed: planned off the cut store, then the phase under the lane's locks. */
 const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Input) {
+  const unstated = yield* Refusals.lane(input.lane)
+  if (unstated !== null) {
+    yield* Console.error(`[replay] refused: ${unstated}`)
+    return 2
+  }
   const asked = yield* workOf(facts, input, yield* optionsOf(input))
   if (typeof asked === "string") {
     yield* Console.error(asked)

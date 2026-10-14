@@ -38,9 +38,7 @@ export interface CaseForms {
 
 /** The case forms `grammar`'s suffixes read. */
 export const caseForms = (grammar: Resolver.Grammar): CaseForms => {
-  const suffixes = grammar.suffixes ?? Resolver.DEFAULT_SUFFIXES
-  const bare = new RegExp(`^-?(${suffixes})$`)
-  const caseId = new RegExp(`^(.+)-(${suffixes})$`)
+  const { bare, caseId } = Resolver.caseShapes(grammar)
   return {
     caseIdIn: (capture, text) => {
       const read = bare.exec(text.trim())

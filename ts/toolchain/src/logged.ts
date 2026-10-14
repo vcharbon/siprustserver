@@ -36,17 +36,34 @@ const commandOf = (binary: string, args: ReadonlyArray<string>, options: LoggedO
     ...(options.forceKillAfter === undefined ? {} : { forceKillAfter: options.forceKillAfter })
   })
 
-/** `binary args` with its output in `file`; answers the exit code. */
+/** How a run ended: its exit code, or the signal that killed it (an OOM kill is `SIGKILL`). */
+export interface Ended {
+  /** The exit code; `null` where a signal ended it. */
+  readonly exit: number | null
+  readonly signal: string | null
+}
+
+/**
+ * `binary args` with its output in `file`; answers how it ended. A command a
+ * signal killed is an answer, never a failure: only one that could not be
+ * spawned or read fails.
+ */
 export const run = Effect.fn("Logged.run")(
   function*(binary: string, args: ReadonlyArray<string>, file: string, options: LoggedOptions = {}) {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const fs = yield* FileSystem.FileSystem
     const handle = yield* spawner.spawn(commandOf(binary, args, options))
-    const [, exitCode] = yield* Effect.all(
-      [handle.all.pipe(Stream.run(fs.sink(file, { flag: options.append === true ? "a" : "w" }))), handle.exitCode],
+    const [, exit] = yield* Effect.all(
+      [
+        handle.all.pipe(Stream.run(fs.sink(file, { flag: options.append === true ? "a" : "w" }))),
+        Effect.result(handle.exitCode)
+      ],
       { concurrency: "unbounded" }
     )
-    return exitCode as number
+    if (exit._tag === "Success") return { exit: exit.success as number, signal: null } satisfies Ended
+    const signal = signalOf(exit.failure)
+    if (signal === undefined) return yield* Effect.fail(exit.failure)
+    return { exit: null, signal } satisfies Ended
   },
   (effect, binary, args) =>
     effect.pipe(

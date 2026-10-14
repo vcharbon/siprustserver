@@ -54,11 +54,14 @@ export interface Seams {
 }
 
 /**
- * The tools built, then {@link Session.forReplay} held for the caller's
- * scope, then the settle a real-clock lane owes a build that compiled.
+ * The lane read first — a lane the deployment does not state is refused before
+ * any build or lock — then the tools built, then {@link Session.forReplay}
+ * held for the caller's scope, then the settle a real-clock lane owes a build
+ * that compiled.
  */
 export const session = (options: Options, what: string, watch: Locks.Watch = () => Effect.void, seams: Seams = {}) =>
   Effect.gen(function*() {
+    yield* Effect.flatMap(LaneHosting.Service, (hosting) => hosting.lane(options.lane))
     const built = seams.build === undefined
       ? yield* forLane(options.lane, watch)
       : yield* seams.build(options.lane, watch)

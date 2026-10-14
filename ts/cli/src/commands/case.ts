@@ -3,7 +3,7 @@
  * (`@sip/store` `Resolver`): one block per input, the form it was read as,
  * what it came to, and the call or the candidates.
  *
- *   case trace.pcap.gz-case12 case1 run1051725/case1
+ *   case trace.pcap.gz-case12 case1 run7/case1
  *   case trace.pcap.gz-case12 --cited 2026-09-18
  *   case <Call-ID> --json
  *

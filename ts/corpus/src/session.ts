@@ -32,14 +32,22 @@ export class Held extends Schema.TaggedError<Held>()("Session.Held", { held: Sch
   }
 }
 
-/** One lock into the scope: waited for on the fiber, or `Held`; released with the scope. */
+/**
+ * One lock into the scope: waited for on the fiber, or `Held`; released with
+ * the scope. The WAIT is interruptible — a stop that lands while a lock is
+ * queued for ends the wait at once — and a lock once taken is handed to the
+ * scope before anything can interrupt again.
+ */
 const acquire = <E, R>(
   take: Effect.Effect<Locks.Taken | Locks.Held, E, R>
 ): Effect.Effect<Locks.Taken, Held | E, R | Scope.Scope> =>
-  Effect.acquireRelease(
-    Effect.flatMap(take, (taken) =>
-      Locks.isTaken(taken) ? Effect.succeed(taken) : Effect.fail(new Held({ held: taken.held }))),
-    (taken) => taken.release
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function*() {
+      const taken = yield* restore(take)
+      if (!Locks.isTaken(taken)) return yield* Effect.fail(new Held({ held: taken.held }))
+      yield* Effect.addFinalizer(() => taken.release)
+      return taken
+    })
   )
 
 /**

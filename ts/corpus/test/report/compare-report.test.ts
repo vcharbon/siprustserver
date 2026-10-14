@@ -147,7 +147,7 @@ describe("the compare document", () => {
     expect(call.before.mainError?.expected).toBe("200 to INVITE")
     expect(call.after.ladder?.[0]).toBe(`run2 ${CASE}`)
     expect(call.after.ladder?.some((line) => line.includes("INVITE"))).toBe(true)
-    expect(call.after.knownBugs).toEqual([{ rule: "via-received-param-ignored", ticket: "tracker/1", records: 2 }])
+    expect(call.after.knownBugs).toEqual([{ rule: "via-received-param-ignored", ticket: "tracker/1", records: 2}])
     expect(call.after.bless).toBe("known-bug")
     expect(call.ref).toBeNull()
     // Only one of the two ladders was read: the call states no delta.

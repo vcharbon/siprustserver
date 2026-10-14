@@ -84,7 +84,7 @@ const cutCapture = (
     fs.writeFileSync(path.join(caseDir, "resources", "uac1_0_0.sdp"), `v=0\r\no=${id}\r\n`)
     fs.writeFileSync(
       path.join(caseDir, "rows", `100${at}.json`),
-      `${JSON.stringify({ number: `100${at}`, dialled: "route", anchor: `SDcall${at}-${capture}` })}\n`
+      `${JSON.stringify({ number: `100${at}`, dialled: "route", anchor: `call${at}-${capture}` })}\n`
     )
     cases.push({ id, dir: caseDir, egressEndpoint: "ep2" })
   }
@@ -192,10 +192,10 @@ describe("the rows a cut becomes", () => {
     expect(entry.ledger[0]!.document).toEqual({
       number: "1001",
       dialled: "route",
-      anchor: "SDcall1-capture_rows.pcap.gz"
+      anchor: "call1-capture_rows.pcap.gz"
     })
     // The call key is the side row's anchor: the capture's own name for the call.
-    expect(entry.callKey).toEqual("SDcall1-capture_rows.pcap.gz")
+    expect(entry.callKey).toEqual("call1-capture_rows.pcap.gz")
     // `scenario.json` is not content: the materialiser makes its own symlink.
     expect(entry.assets.some((asset) => asset.path.includes("scenario.json"))).toBe(false)
   })
@@ -203,8 +203,8 @@ describe("the rows a cut becomes", () => {
   it("gives two cases of one capture the keys their side rows state, distinct", async () => {
     const request = await requestOf(cutCapture("capture_two.pcap.gz", { cases: 2 }))
     expect(request.cases.map((entry) => entry.callKey)).toEqual([
-      "SDcall1-capture_two.pcap.gz",
-      "SDcall2-capture_two.pcap.gz"
+      "call1-capture_two.pcap.gz",
+      "call2-capture_two.pcap.gz"
     ])
   })
 
@@ -261,13 +261,13 @@ describe("the rows a cut becomes", () => {
     const capture = "capture_named.pcap.gz"
     const prepared = cutCapture(capture, { cases: 1, refused: ["source-call-incomplete"] })
     const names = path.join(path.dirname(prepared.excluded), "names.json")
-    const start = { at_us: 1_789_646_119_005_979, src: "10.0.0.9:5060", dst: "10.0.0.1:5060" }
+    const start = { at_us: 1_789_646_119_005_979, src: "192.0.2.9:5060", dst: "192.0.2.1:5060" }
     fs.writeFileSync(names, JSON.stringify({
-      [`${capture}-case1`]: { start, replaces: "SDcall1#ingress0" },
+      [`${capture}-case1`]: { start, replaces: "call1#ingress0" },
       [`${capture}-cut1`]: { replaces: "call-1@x#ingress1" }
     }))
     const request = await requestOf({ ...prepared, names })
-    expect(request.cases[0]).toMatchObject({ start, replaces: "SDcall1#ingress0" })
+    expect(request.cases[0]).toMatchObject({ start, replaces: "call1#ingress0" })
     expect(request.refusals[0]).toMatchObject({ caseId: `${capture}-cut1`, replaces: "call-1@x#ingress1" })
     // A reading with no names file names nothing more.
     expect((await requestOf(prepared)).cases[0]!.start).toBeUndefined()

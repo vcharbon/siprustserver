@@ -78,3 +78,23 @@ describe("Logged.section", () => {
     expect(section).toMatchObject({ exit: null, signal: "SIGKILL" })
   })
 })
+
+describe("Logged.run", () => {
+  it("answers a run's exit code, its output in the file", async () => {
+    const file = path.join(dir, "run.log")
+    const ended = await Effect.runPromise(
+      Logged.run("sh", ["-c", "echo said; exit 3"], file).pipe(Effect.provide(NodeServices.layer))
+    )
+    expect(ended).toEqual({ exit: 3, signal: null })
+    expect(fs.readFileSync(file, "utf8")).toBe("said\n")
+  })
+
+  it("names the signal a run died of rather than failing as a spawn", async () => {
+    const ended = await Effect.runPromise(
+      Logged.run("sh", ["-c", "kill -KILL $$"], path.join(dir, "run-killed.log")).pipe(
+        Effect.provide(NodeServices.layer)
+      )
+    )
+    expect(ended).toEqual({ exit: null, signal: "SIGKILL" })
+  })
+})

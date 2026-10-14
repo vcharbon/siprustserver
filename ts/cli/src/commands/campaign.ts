@@ -1,7 +1,7 @@
 /**
  * `campaign` — the operator's one command: pcaps in, runs on a lane out.
  *
- *   campaign --pcaps <dir-or-file>... [--set <file>...] [--lane L]
+ *   campaign --pcaps P [--pcaps P …] [--set F [--set F …]] [--lane L]
  *       [--add-only | --add-and-replay]
  *       [--max-span S] [--sample N] [--limit N] [--concurrency N] [--batch N]
  *       [--memory-max SIZE] [--prep N] [--no-cleanup] [--force-recut] [--dry-run]
@@ -42,6 +42,9 @@ const main = Effect.fn("Campaign.main")(function*(facts: CliFacts, input: Input)
   if (input.addAndReplay && lane === undefined) return yield* refuse("--add-and-replay needs the --lane to replay on")
   // A dry run reads the shared store and writes nothing, so any checkout may
   // ask it what the deployment's own checkout would do.
+  // A lane is refused before anything is ingested, cut or queued for it.
+  const unstated = lane === undefined || input.addOnly ? null : yield* Refusals.lane(lane)
+  if (unstated !== null) return yield* refuse(unstated)
   const environment = input.dryRun ? null : facts.environmentRefusal("the campaign")
   if (environment !== null) return yield* refuse(environment)
   const pcaps = pcapsOf(facts, input)

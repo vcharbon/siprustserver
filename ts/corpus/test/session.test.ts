@@ -9,8 +9,10 @@
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
+import * as Fiber from "effect/Fiber"
 import * as Layer from "effect/Layer"
 import * as Scope from "effect/Scope"
+import * as TestClock from "effect/testing/TestClock"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -158,6 +160,28 @@ describe("a session that waits", () => {
     expect(heard).toHaveLength(2)
     expect(heard[0]).toContain("replay A")
     expect(heard[1]).toBeUndefined()
+    await (await taken(SINGLE, "replay after")).release()
+  })
+
+  it("stops waiting the moment it is interrupted, holding nothing, on a clock that never moves", async () => {
+    const first = await taken(SINGLE, "replay A")
+    const heard: Array<string | undefined> = []
+    await Effect.runPromise(
+      Effect.gen(function*() {
+        const waiting = yield* Effect.forkChild(
+          Effect.scoped(
+            Session.forReplay(options(SINGLE, 900_000), "replay B", (holder) =>
+              Effect.sync(() => void heard.push(holder)))
+          )
+        )
+        // The waiter has asked once and sleeps on the paused clock until it is told otherwise.
+        while (heard.length === 0) yield* Effect.yieldNow
+        yield* Fiber.interrupt(waiting)
+      }).pipe(Effect.provide(Layer.merge(services(), TestClock.layer())))
+    )
+    expect(heard[0]).toContain("replay A")
+    await first.release()
+    // The interrupted waiter took nothing: the lane is free once its holder gives it back.
     await (await taken(SINGLE, "replay after")).release()
   })
 })

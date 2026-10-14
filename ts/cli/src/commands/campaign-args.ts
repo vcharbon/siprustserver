@@ -13,7 +13,7 @@ import { patienceOf, triageFlags } from "../flags.js"
 import { pathsOf } from "../options.js"
 
 export const usage = (facts: CliFacts): string =>
-  `usage: ${facts.invocation("campaign")} --pcaps <dir-or-file>... [--set <file>...] [--lane L] ` +
+  `usage: ${facts.invocation("campaign")} --pcaps P [--pcaps P …] [--set F [--set F …]] [--lane L] ` +
   "[--add-only | --add-and-replay] [--max-span SECONDS] [--sample N] [--limit N] " +
   "[--concurrency N] [--batch N] [--memory-max SIZE] [--prep N] [--no-cleanup] [--force-recut] [--strict-census] " +
   "[--dry-run] [--repo DIR] [--wait SECONDS]"

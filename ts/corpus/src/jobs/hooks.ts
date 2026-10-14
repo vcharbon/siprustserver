@@ -103,7 +103,11 @@ const runOne = (hook: Hook, env: HookEnv, capturesFile: string, dir: string, cwd
       env: childEnv(env, capturesFile),
       forceKillAfter: "1 second"
     }).pipe(
-      Effect.map((exit) => ({ exit, note: undefined as string | undefined })),
+      Effect.map((ended) =>
+        ended.signal === null
+          ? { exit: ended.exit ?? -1, note: undefined as string | undefined }
+          : { exit: -1, note: `hook killed by ${ended.signal}` }
+      ),
       Effect.timeoutOrElse({
         duration: HOOK_TIMEOUT_MS,
         orElse: () => Effect.succeed({ exit: -1, note: `hook killed after ${HOOK_TIMEOUT_MS / 1000}s` })

@@ -53,6 +53,7 @@ import type { CliFacts } from "../facts.js"
 import { laneFlag, pathFlags } from "../flags.js"
 import * as IdFlags from "../id-flags.js"
 import { overridesOf, pathsOf } from "../options.js"
+import * as Refusals from "../refusals.js"
 import { exit } from "../runner.js"
 import { createdBy } from "./compare.js"
 
@@ -212,6 +213,11 @@ const rootOf = (facts: CliFacts) =>
 const createOf = (facts: CliFacts, root: ReturnType<typeof rootOf>) =>
   Command.make("create", createFlags(facts), (input) =>
     Effect.gen(function*() {
+      const unstated = yield* Refusals.lane(input.lane)
+      if (unstated !== null) {
+        yield* Console.error(`[request] refused: ${unstated}`)
+        return yield* exit(2)
+      }
       const selection = selectionOf(input)
       if (selection instanceof Refused) {
         yield* Console.error(`[request] refused: ${selection.message}`)

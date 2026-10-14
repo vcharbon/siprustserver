@@ -39,14 +39,14 @@ const failed = (caseId: string, runId: number, step: string): Compare.Cell =>
 
 describe("ReplaySummary.lines", () => {
   it("prints each cell's first failing step and main error beside the current run, failures first", () => {
-    const own = [cell(`${C}-case1`, 9), failed(`${C}-case3143`, 9, "s24"), cell(`${C}-case7`, 9)]
+    const own = [cell(`${C}-case1`, 9), failed(`${C}-case3`, 9, "s24"), cell(`${C}-case7`, 9)]
     const current = new Map([
       [`${C}/${C}-case1`, failed(`${C}-case1`, 5, "s6")],
-      [`${C}/${C}-case3143`, failed(`${C}-case3143`, 5, "s24")]
+      [`${C}/${C}-case3`, failed(`${C}-case3`, 5, "s24")]
     ])
     const lines = ReplaySummary.lines(own, current, "@current")
     expect(lines[0]).toBe("[summary] 3 cell(s): 1 failed, 2 passed; against @current: 1 moved, 1 unchanged, 1 never ran there")
-    expect(lines[1]).toContain(`${C}-case3143`)
+    expect(lines[1]).toContain(`${C}-case3`)
     expect(lines[1]).toContain("failed at s24 · died expect-timed-out at s24 waiting 200 to INVITE")
     expect(lines[1]).toContain("@current run5 failed at s24")
     expect(lines[2]).toContain(`${C}-case1`)

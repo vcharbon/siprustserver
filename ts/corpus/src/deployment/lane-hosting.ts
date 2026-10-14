@@ -56,10 +56,14 @@ export const NEUTRAL_LANE: Lane = { clock: "paused", exclusive: false }
 
 /** No lane hosting is composed; the message names the lane asked for and how to state it. */
 export class LaneUnstated extends Schema.TaggedError<LaneUnstated>()("Corpus.LaneUnstated", {
-  lane: Schema.String
+  lane: Schema.String,
+  /** The lanes the deployment does state, where one is composed. */
+  known: Schema.optional(Schema.Array(Schema.String))
 }) {
   override get message(): string {
-    return `no lane hosting is composed — substitute LaneHosting.layerWith to say what lane '${this.lane}' is`
+    return this.known === undefined
+      ? `no lane hosting is composed — substitute LaneHosting.layerWith to say what lane '${this.lane}' is`
+      : `there is no lane '${this.lane}': the lanes are ${this.known.join(", ")}`
   }
 }
 

@@ -23,7 +23,7 @@ describe("Timing.format and Timing.parse", () => {
       "=== generator exit 0 ===",
       "[v3] census: 92 rule(s) covered",
       Timing.format({ phase: "generator.load", ms: 50 }),
-      "[v3] capture_a.pcap.gz: SUT 10.0.0.1",
+      "[v3] capture_a.pcap.gz: SUT 192.0.2.1",
       "[timing] {not json",
       "[timing] {\"phase\":\"no-ms\"}",
       `  ${Timing.format({ phase: "cut.mirror", ms: 7, prep: 9 })}`

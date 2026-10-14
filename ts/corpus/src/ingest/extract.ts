@@ -125,8 +125,12 @@ export const extract = Effect.fn("Extract.extract")(function*(
   return done
 })
 
-/** A fresh scratch directory for one extraction, beside the store it extracts into. */
-const scratchFor = (fs: FileSystem.FileSystem, artifacts: string) =>
+/**
+ * A fresh scratch directory for one extraction, beside the store it extracts
+ * into: a raw flows document is the capture before anonymisation, so it never
+ * lands under the shared temp dir.
+ */
+export const scratchFor = (fs: FileSystem.FileSystem, artifacts: string) =>
   Effect.gen(function*() {
     const root = path.join(artifacts, SCRATCH)
     yield* fs.makeDirectory(root, { recursive: true })

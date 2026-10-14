@@ -62,6 +62,7 @@ import {
   Pins,
   Queue,
   Refusals,
+  Resolver,
   RuleHits,
   Runs,
   RunSets,
@@ -102,8 +103,9 @@ const captureOf = Effect.fn("Store.captureOf")(function*(
   stem: string,
   caseIds: ReadonlyArray<string>
 ) {
+  const { caseId } = Resolver.caseShapes((yield* StoreBinding.Service).grammar)
   for (const id of caseIds) {
-    const cut = /^(.*)-case\d+$/.exec(id)
+    const cut = caseId.exec(id)
     if (cut !== null) return cut[1]!
   }
   const fs = yield* FileSystem.FileSystem

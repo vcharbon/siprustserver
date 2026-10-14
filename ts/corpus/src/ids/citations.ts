@@ -1,7 +1,8 @@
 /**
  * What a ticket's text CITES of the store: the runs, jobs, sweeps and preps it
  * names by number, and the case ids it names in any form the resolver reads —
- * `<capture>-<suffix>`, `runN/<case>`, a bare `caseN`. Each citation is dated
+ * `<capture>-<suffix>`, `runN/<case>`, a bare suffix no prose word reads as
+ * (`caseN`, `Grammar.bareSuffixes`). Each citation is dated
  * by the earliest text holding it, which is what tells an id of this store
  * from one of a store rebuilt since.
  *
@@ -18,8 +19,11 @@ export interface TicketText {
 
 /** The case-id shapes a text is scanned for, under one grammar's suffixes. */
 const shapesOf = (grammar: Resolver.Grammar) => {
-  const suffix = `(?:${grammar.suffixes ?? Resolver.DEFAULT_SUFFIXES})`
+  const shapes = Resolver.caseShapes(grammar)
+  const suffix = `(?:${shapes.suffixes})`
   return {
+    /** A bare suffix, which names a call only with its capture. */
+    bare: new RegExp(String.raw`(?<![\w.+…/-])-?(?:${shapes.bareSuffixes})(?![\w+])`, "g"),
     /** `runN/<case>`: a case of the capture run N replayed. */
     runCase: new RegExp(
       String.raw`(?<![\w-])(?:@run:|run)(\d{1,9})/((?:[\w.+…-]*-)?${suffix}|[\w.+…-]+-${suffix})(?![\w+])`,
@@ -29,9 +33,6 @@ const shapesOf = (grammar: Resolver.Grammar) => {
     caseId: new RegExp(String.raw`(?<![\w.+…/-])[A-Za-z0-9_][\w.+…-]*-${suffix}(?![\w+])`, "g")
   }
 }
-
-/** A bare `caseN` or `-caseN`, which names a call only with its capture. */
-const BARE = /(?<![\w.+…/-])-?case\d+(?![\w+])/g
 
 /** One number of a list, with an optional `#` and markdown emphasis or code quotes around it. */
 const NUMBER = String.raw`[*\x60]{0,2}#?\d{1,9}[*\x60]{0,2}`
@@ -108,7 +109,7 @@ export const citationsOf = (
       rest = rest.replace(match[0], " ".repeat(match[0].length))
     }
     for (const match of rest.matchAll(shapes.caseId)) note("case", match[0], on)
-    for (const match of rest.matchAll(BARE)) note("case", match[0], on)
+    for (const match of rest.matchAll(shapes.bare)) note("case", match[0], on)
   }
   return [...found.values()]
 }
