@@ -64,20 +64,30 @@ export const scratchDatabase = Effect.fn("Client.scratchDatabase")(function*(bas
   return `${head}_${hash}`
 })
 
-/**
- * Whether a statement failed as not permitted: the client reads SQLSTATE 42501
- * as an `AuthorizationError` reason, the only code it maps there.
- */
-export const notPermitted = (error: SqlError): boolean => error.reason._tag === "AuthorizationError"
+/** The SQLSTATE a statement failed with, as the `pg` driver states it; `undefined` where it states none. */
+export const sqlState = (error: SqlError): string | undefined => {
+  const cause = (error.reason as { readonly cause?: unknown }).cause
+  const code = typeof cause === "object" && cause !== null ? (cause as { readonly code?: unknown }).code : undefined
+  return typeof code === "string" ? code : undefined
+}
+
+/** Whether a drop was refused because a session still holds the database (SQLSTATE 55006). */
+export const inUse = (error: SqlError): boolean => sqlState(error) === "55006"
 
 /**
- * `database` gone, its sessions ended. A backend this role may not terminate
- * (an autovacuum worker on a freshly written database) refuses the forced drop
- * until it ends, so a refusal as not permitted is retried for up to five
- * seconds.
+ * `database` gone. This role's own sessions on it are ended first, then the
+ * database is dropped WITHOUT `FORCE`: a forced drop ends every backend
+ * itself and is refused (42501) by any it may not end — an autovacuum worker
+ * runs as the bootstrap superuser — while a plain drop signals autovacuum
+ * workers to exit on its own. A drop refused as in use is retried for up to
+ * five seconds, while an ended session goes away.
  */
 export const dropDatabase = (database: string): Effect.Effect<void, SqlError, SqlClient> =>
-  Effect.flatMap(SqlClient, (sql) => sql.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`)).pipe(
-    Effect.asVoid,
-    Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 20, while: notPermitted })
-  )
+  Effect.flatMap(SqlClient, (sql) =>
+    Effect.gen(function*() {
+      yield* sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+        WHERE datname = ${database} AND pid <> pg_backend_pid() AND usename = current_user`
+      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${database}`)
+    })).pipe(
+      Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 20, while: inUse })
+    )
