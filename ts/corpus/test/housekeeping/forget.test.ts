@@ -5,13 +5,17 @@
  * touches, and removes nothing; a confirmed forget drops the rows, then the
  * files, leaving the captures that stay and a session directory they share
  * untouched, and the cache pass collects what only the forgotten named; a
- * forget whose rows cannot go removes no file. The suite builds and drops its
+ * forget whose rows cannot go removes no file; an upload a capture that stays
+ * names stays; a crash among the removals leaves only what a second forget
+ * finds. The suite builds and drops its
  * OWN database (`@sip/store/test-server`) and never touches the corpus.
  */
 import { Citations, Client, Cuts, Forget, Jobs, Model, Population, Resolver, Runs, Sessions } from "@sip/store"
 import { CURRENT } from "@sip/store/test-identity"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
+import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import * as fs from "node:fs"
@@ -219,9 +223,16 @@ const seeded = Effect.gen(function*() {
   yield* cuts.finish(recut)
   writeFile(path.join(prepDir(paths.sessions, recut), "manifest.json"), "{}")
   writeFile(path.join(prepDir(paths.sessions, prep), "manifest.json"), "{}")
-  const jobs = yield* Jobs.Service
-  const goneJob = yield* jobs.create({ kind: "cut", args: { captures: [GONE] }, createdBy: "test" })
-  const mixedJob = yield* jobs.create({ kind: "cut", args: { captures: [GONE, KEPT] }, createdBy: "test" })
+  const doneJob = (captures: ReadonlyArray<string>) =>
+    Effect.map(
+      sql<{ id: string }>`
+        INSERT INTO jobs (kind, args, status, created_by)
+        VALUES ('cut', ${JSON.stringify({ captures })}::jsonb, 'done', 'test') RETURNING id
+      `,
+      (rows) => Number(rows[0]!.id)
+    )
+  const goneJob = yield* doneJob([GONE])
+  const mixedJob = yield* doneJob([GONE, KEPT])
   for (const id of [goneJob, mixedJob]) writeFile(path.join(jobDir(paths.sessions, id), "log"), "done")
   yield* sql`INSERT INTO case_ids (capture, case_id, call_key, origin) VALUES (${RAW}, 'raw-case1', 'raw@x', 'seed')`
   const hashes = Object.fromEntries(gone.cases.map((entry) => [entry.caseId, entry.caseHash]))
@@ -346,6 +357,47 @@ describe.skipIf(!served)("Forget", () => {
       for (const one of listed) expect([one, fs.existsSync(one)]).toEqual([one, true])
       expect(yield* rowsOf(GONE)).toBeGreaterThan(0)
     })))
+
+  it("keeps an upload a capture that stays names too", () =>
+    withStore(Effect.gen(function*() {
+      const s = yield* seeded
+      const record = path.join(paths.corpus, KEPT, "ingest.json")
+      const kept = JSON.parse(fs.readFileSync(record, "utf8")) as { pcaps: Array<unknown> }
+      kept.pcaps.push({ path: s.upload, size: 4, mtime: "2026-01-01T00:00:00.000Z", sha256: "x" })
+      fs.writeFileSync(record, JSON.stringify(kept))
+      const applied = yield* Forgetting.apply({ ...request(), graceHours: 1 })
+      expect(applied.plan.files.uploads.paths).toEqual([])
+      expect(fs.existsSync(s.upload)).toBe(true)
+      expect(fs.existsSync(path.join(paths.corpus, GONE))).toBe(false)
+    })))
+
+  it("a crash among the removals leaves only what a second forget finds, and that one removes it", () => {
+    const sessionDir = () => path.join(paths.sessions, GONE)
+    const crashing = Layer.effect(
+      FileSystem.FileSystem,
+      Effect.map(FileSystem.FileSystem, (real) =>
+        FileSystem.FileSystem.of({
+          ...real,
+          remove: (at, options) => (at === sessionDir() ? Effect.die("the disk went away") : real.remove(at, options))
+        }))
+    ).pipe(Layer.provide(NodeServices.layer))
+    return withStore(Effect.gen(function*() {
+      const s = yield* seeded
+      const exit = yield* Forgetting.apply({ ...request(), graceHours: 1 }).pipe(Effect.provide(crashing), Effect.exit)
+      expect(exit._tag).toBe("Failure")
+      // What only a row or the artifact directory pointed at went before the crash.
+      expect(fs.existsSync(jobDir(paths.sessions, s.goneJob))).toBe(false)
+      expect(fs.existsSync(prepDir(paths.sessions, s.recut))).toBe(false)
+      expect(fs.existsSync(s.upload)).toBe(false)
+      expect(fs.existsSync(seedFile(GONE))).toBe(false)
+      expect(fs.existsSync(path.join(paths.corpus, GONE))).toBe(true)
+      expect(fs.existsSync(sessionDir())).toBe(true)
+      const again = yield* Forgetting.apply({ ...request(), graceHours: 1 })
+      expect(again.plan.store.captures).toContain(GONE)
+      expect(fs.existsSync(path.join(paths.corpus, GONE))).toBe(false)
+      expect(fs.existsSync(sessionDir())).toBe(false)
+    }))
+  })
 
   it("removes no file where the transaction dropping the rows fails", () => {
     const failing = Layer.effect(

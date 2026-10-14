@@ -2,13 +2,16 @@
  * Forgetting captures against a real postgres: every capture name a table
  * keys a row by, a read-only plan whose counts are exactly what the forget
  * then drops, the jobs, requests, sweeps and preps that name only forgotten
- * captures dropped and the mixed ones kept, the refusals that remove nothing,
+ * captures dropped and the mixed ones kept, content a kept job cell names
+ * kept, the refusals and the writer lock-out that remove nothing,
  * and a forget that leaves a kept capture's rows, and the content it shares,
  * untouched. The suite builds
  * and drops its own database.
  */
+import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
+import * as Fiber from "effect/Fiber"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import * as CaseIds from "../src/case-ids.js"
@@ -429,7 +432,86 @@ describe.skipIf(!served)("Forget", () => {
       return id
     }))
     const held = await withStore(counts)
-    expect(await refused({ captures: [GONE] })).toContain(`job(s) ${job} running`)
+    expect(await refused({ captures: [GONE] })).toContain(`job(s) ${job} queued or running`)
     expect(await withStore(counts)).toEqual(held)
   })
+
+  it("keeps a case a kept capture's job cell names, though only forgotten cuts cut it", async () => {
+    const s = await withStore(seed)
+    const hash = await withStore(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const [row] = yield* sql<{ case_hash: string }>`SELECT case_hash FROM cut_cases WHERE case_id = ${`${GONE}-case2`}`
+      yield* sql`
+        INSERT INTO job_cells (job_id, request_id, capture, call_key, case_hash, outcome)
+        SELECT id, request_id, ${KEPT}, 'call-9', ${row!.case_hash}, 'ran' FROM jobs WHERE id = ${s.job}
+      `
+      return row!.case_hash
+    }))
+    const plan = await forget((service) => service.plan({ captures: [GONE, RAW] }))
+    expect(plan.rows.cases).toBe(0)
+    await forget((service) => service.execute({ captures: [GONE, RAW] }))
+    const left = await withStore(Effect.flatMap(SqlClient, (sql) =>
+      sql<{ n: number }>`SELECT count(*)::int AS n FROM cases WHERE hash = ${hash}`))
+    expect(left[0]!.n).toBe(1)
+  })
+
+  it("refuses, removing nothing, while anything may still write: a queued job, a prep, a sweep, a run of its own", async () => {
+    const holders: ReadonlyArray<readonly [string, Effect.Effect<string, unknown, Services>]> = [
+      ["a queued job", Effect.map(
+        Effect.flatMap(Jobs.Service, (jobs) => jobs.create({ kind: "cut", args: {}, createdBy: "test" })),
+        (id) => `job(s) ${id} queued or running`
+      )],
+      ["an unfinished prep", Effect.map(
+        Effect.flatMap(Cuts.Service, (cuts) => cuts.open()),
+        (id) => `prep(s) ${id} not finished`
+      )],
+      ["an open sweep", Effect.map(
+        Effect.flatMap(SqlClient, (sql) =>
+          sql<{ id: string }>`
+            INSERT INTO sweeps (lane, universe, captures, concurrency, batch_size, memory_max)
+            VALUES ('fake-lane', 'named', 1, 1, 1, '1G') RETURNING id
+          `),
+        (rows) => `sweep(s) ${rows[0]!.id} not ended`
+      )],
+      ["an open run of a capture it drops", Effect.map(
+        Effect.flatMap(Runs.Service, (runs) =>
+          runs.open({ capture: GONE, lane: "fake-lane", mode: "record", sessionDir: `/w/${GONE}`, identity: CURRENT })),
+        (opened) => `run(s) ${opened.id} of a capture it drops still open`
+      )]
+    ]
+    for (const [what, hold] of holders) {
+      await withStore(seed)
+      const reason = await withStore(hold)
+      const before = await withStore(counts)
+      const exit = await forget((service) => Effect.exit(service.execute({ captures: [GONE] })))
+      expect([what, Exit.isFailure(exit)]).toEqual([what, true])
+      expect([what, String(Exit.isFailure(exit) ? exit.cause : "")]).toEqual([what, expect.stringContaining(reason)])
+      expect([what, await withStore(counts)]).toEqual([what, before])
+    }
+  })
+
+  it("holds off a job written meanwhile: it waits on the writer, then fails, removing nothing", async () => {
+    await withStore(seed)
+    const before = await withStore(counts)
+    const exit = await withStore(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const written = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      // A writer's transaction, open across the forget: a job row inserted, not yet committed.
+      const writer = yield* Effect.forkChild(sql.withTransaction(Effect.gen(function*() {
+        yield* sql`INSERT INTO jobs (kind, args, status, created_by) VALUES ('cut', '{}'::jsonb, 'done', 'test')`
+        yield* Deferred.succeed(written, undefined)
+        yield* Deferred.await(release)
+        return yield* Effect.fail("rolled back")
+      })))
+      yield* Deferred.await(written)
+      const forgot = yield* Effect.exit(Effect.flatMap(Forget.Service, (service) => service.execute({ captures: [GONE] })))
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.await(writer)
+      return forgot
+    }))
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(String(Exit.isFailure(exit) ? exit.cause : "")).toContain("lock timeout")
+    expect(await withStore(counts)).toEqual(before)
+  }, 30_000)
 })

@@ -725,6 +725,18 @@ const sourceFault = Effect.gen(function*() {
 export const SOURCE_FAULT = "8_source_fault"
 
 /**
+ * `cut_cases` by case hash: what a delete of a `cases` row checks its foreign
+ * key against, and what tells the content only some captures name.
+ */
+const cutCaseHashes = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`CREATE INDEX cut_cases_case_hash_idx ON cut_cases (case_hash)`
+})
+
+/** The key of the migration that indexes the cut cases by case hash. */
+export const CUT_CASE_HASHES = "9_cut_case_hashes"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -736,7 +748,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [SEED_FROZEN_IDS]: seedFrozenIds,
   [ID_GAPS]: idGaps,
   [FROZEN_CUT_GUARD]: frozenCutGuard,
-  [SOURCE_FAULT]: sourceFault
+  [SOURCE_FAULT]: sourceFault,
+  [CUT_CASE_HASHES]: cutCaseHashes
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

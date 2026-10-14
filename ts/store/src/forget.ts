@@ -19,9 +19,10 @@
  * row. One that also names a capture that stays is kept whole, counted as
  * mixed.
  *
- * {@link Interface.plan} is read-only. {@link Interface.execute} plans again
- * inside its one transaction and refuses, removing nothing, where
- * {@link refusals} names a reason.
+ * {@link Interface.plan} is read-only. {@link Interface.execute} locks out
+ * every writer of jobs, preps, sweeps and runs, plans again inside its one
+ * transaction and refuses, removing nothing, where {@link refusals} names a
+ * reason; a writer it waits on past the lock timeout fails it the same way.
  */
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
@@ -123,7 +124,10 @@ export interface Plan {
   readonly runs: ReadonlyArray<Run>
   readonly pins: ReadonlyArray<Pin>
   readonly cited: ReadonlyArray<Cited>
-  /** Why a forget may not run now: a running job, an unfinished prep, an open run of a capture it drops. */
+  /**
+   * Why a forget may not run now: a queued or running job, an unfinished
+   * prep, an open sweep, an open run of a capture it drops.
+   */
   readonly holders: ReadonlyArray<string>
 }
 
@@ -391,16 +395,19 @@ export const layer = Layer.effect(
            OR (i.kind = 'prep' AND i.id IN (SELECT id FROM fpreps WHERE id IS NOT NULL))
         ORDER BY i.kind, i.id, i.cited_by
       `
-      const held = yield* sql<{ jobs: string | null; preps: string | null; runs: string | null }>`
-        SELECT (SELECT string_agg(id::text, ', ' ORDER BY id) FROM jobs WHERE status = 'running') AS jobs,
+      const held = yield* sql<{ jobs: string | null; preps: string | null; sweeps: string | null; runs: string | null }>`
+        SELECT (SELECT string_agg(id::text, ', ' ORDER BY id) FROM jobs
+                WHERE status IN ('queued', 'running')) AS jobs,
                (SELECT string_agg(id::text, ', ' ORDER BY id) FROM preps WHERE finished_at IS NULL) AS preps,
+               (SELECT string_agg(id::text, ', ' ORDER BY id) FROM sweeps WHERE finished_at IS NULL) AS sweeps,
                (SELECT string_agg(id::text, ', ' ORDER BY id) FROM runs
                 WHERE finished_at IS NULL AND capture IN (${named(captures)})) AS runs
       `
       const h = held[0]!
       const holders: Array<string> = []
-      if (h.jobs !== null) holders.push(`job(s) ${h.jobs} running`)
+      if (h.jobs !== null) holders.push(`job(s) ${h.jobs} queued or running`)
       if (h.preps !== null) holders.push(`prep(s) ${h.preps} not finished: close them first`)
+      if (h.sweeps !== null) holders.push(`sweep(s) ${h.sweeps} not ended: close them first`)
       if (h.runs !== null) holders.push(`run(s) ${h.runs} of a capture it drops still open: reap them first`)
       return {
         captures,
@@ -429,6 +436,8 @@ export const layer = Layer.effect(
     const execute = Effect.fn("Forget.execute")(function*(request: Request) {
       return yield* sql.withTransaction(Effect.gen(function*() {
         yield* sql`SET LOCAL lock_timeout = '5s'`
+        // No job, prep, sweep or run is written while the plan is read and the rows go.
+        yield* sql`LOCK TABLE jobs, preps, sweeps, runs IN SHARE ROW EXCLUSIVE MODE`
         const planned = yield* planIn(request)
         const reasons = refusals(planned, request.population === true)
         if (reasons.length > 0) return yield* new Refused({ reasons })

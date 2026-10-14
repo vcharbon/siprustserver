@@ -2,7 +2,8 @@
  * Retiring a source and deleting runs, against a real postgres and a fixture
  * tree of their own: a capture run on two lanes
  * leaves no row in any table and no directory on disk, the upload it came
- * from goes while a pcap elsewhere stays, the cache pass collects the case
+ * from goes while a pcap elsewhere, or an upload a kept capture names too,
+ * stays, the cache pass collects the case
  * content it alone cited and keeps what another capture cites; a delete of
  * the standing run leaves the previous full run standing and protected;
  * both are refused, removing nothing, while a running job holds them. The
@@ -307,6 +308,19 @@ describe.skipIf(!served)("Retire", () => {
       // Retired means unknown: a second retire plans nothing and applies to nothing.
       const [again] = yield* Retire.plan({ paths, captures: [GONE], measure: false })
       expect(again!.known).toBe(false)
+    })))
+
+  it("keeps an upload a capture that stays names too", () =>
+    withStore(Effect.gen(function*() {
+      const s = yield* seeded
+      const record = path.join(paths.corpus, KEPT, "ingest.json")
+      const kept = JSON.parse(fs.readFileSync(record, "utf8")) as { pcaps: Array<unknown> }
+      kept.pcaps.push({ path: s.upload, size: 4, mtime: "2026-01-01T00:00:00.000Z", sha256: "x" })
+      fs.writeFileSync(record, JSON.stringify(kept))
+      const applied = yield* Retire.apply({ paths, captures: [GONE], measure: false, graceHours: 1 })
+      expect(applied.plans[0]!.uploads).toEqual([])
+      expect(fs.existsSync(s.upload)).toBe(true)
+      expect(fs.existsSync(path.join(paths.corpus, GONE))).toBe(false)
     })))
 
   it("is refused while a running job names the capture, removing nothing", () =>

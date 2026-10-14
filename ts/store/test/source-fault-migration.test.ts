@@ -17,10 +17,14 @@ const SCRATCH = await Server.scratch("store_source_fault_test")
 
 const served = Server.served
 
+const order = (key: string): number => Number.parseInt(key, 10)
+
 /** Every migration before the source fault's, alone. */
 const before = Migrator.make({})({
   loader: Migrator.fromRecord(
-    Object.fromEntries(Object.entries(Migrations.record).filter(([key]) => key !== Migrations.SOURCE_FAULT))
+    Object.fromEntries(
+      Object.entries(Migrations.record).filter(([key]) => order(key) < order(Migrations.SOURCE_FAULT))
+    )
   ),
   table: Migrations.TABLE
 })

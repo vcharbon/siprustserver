@@ -6,10 +6,11 @@
  * (`Removal.retirePlan`), the run bundles, the session directory
  * `<sessions>/<stem>`, the artifact directory `<artifacts>/<capture>`, and
  * the pcap under `<artifacts>/_uploads` its ingest record names — that one
- * alone: a pcap anywhere else is the host's, never the store's. A capture the
- * store holds nothing of but the disk still does — a retire that crashed
- * between its commit and its removals — plans its directories and nothing
- * else, so running it again finishes the job.
+ * alone, and only where no capture that stays names it too: a pcap anywhere
+ * else is the host's, never the store's. A capture the store holds nothing of
+ * but the disk still does — a retire that crashed between its commit and its
+ * removals — plans its directories and nothing else, so running it again
+ * finishes the job.
  *
  * Apply takes the rows in ONE transaction, refused where a running job holds
  * the capture; the files go after the commit. A crash between the two leaves
@@ -70,6 +71,46 @@ export const uploadsOf = Effect.fn("Retire.uploadsOf")(function*(artifacts: stri
   return found as ReadonlyArray<string>
 })
 
+/**
+ * Every pcap path, as written and resolved, the ingest record of a capture
+ * outside `leaving` names: an upload one of them names stays on disk.
+ */
+export const uploadsHeld = Effect.fn("Retire.uploadsHeld")(function*(
+  artifacts: string,
+  leaving: ReadonlySet<string>
+) {
+  const fs = yield* FileSystem.FileSystem
+  const entries = yield* fs.readDirectory(artifacts).pipe(
+    Effect.catch((error) =>
+      error.reason._tag === "NotFound" ? Effect.succeed<ReadonlyArray<string>>([]) : Effect.fail(error)
+    )
+  )
+  const held = new Set<string>()
+  for (const capture of entries) {
+    if (leaving.has(capture) || capture.startsWith("_") || capture.startsWith(".")) continue
+    const record = yield* Record.read(artifacts, capture)
+    for (const one of record?.pcaps ?? []) {
+      held.add(one.path)
+      held.add(yield* fs.realPath(one.path).pipe(Effect.orElseSucceed(() => one.path)))
+    }
+  }
+  return held as ReadonlySet<string>
+})
+
+/** `uploads` less those a capture that stays names, compared as written and resolved. */
+export const unshared = Effect.fn("Retire.unshared")(function*(
+  uploads: ReadonlyArray<string>,
+  held: ReadonlySet<string>
+) {
+  const fs = yield* FileSystem.FileSystem
+  const out: Array<string> = []
+  for (const one of uploads) {
+    const real = yield* fs.realPath(one).pipe(Effect.orElseSucceed(() => one))
+    if (!held.has(one) && !held.has(real)) out.push(one)
+  }
+  return out as ReadonlyArray<string>
+})
+
 const bytesOf = Effect.fn("Retire.bytesOf")(function*(plan: Omit<Plan, "bytes" | "known">) {
   const fs = yield* FileSystem.FileSystem
   let total = 0
@@ -88,18 +129,24 @@ export const plan = Effect.fn("Retire.plan")(function*(request: PlanRequest) {
   const existing = (dir: string) =>
     fs.exists(dir).pipe(Effect.map((there) => (there ? dir : null)), Effect.orElseSucceed(() => null))
   const rows = yield* removal.retirePlan(request.captures)
+  let held: ReadonlySet<string> | undefined
   return yield* Effect.forEach(rows, (one) =>
     Effect.gen(function*() {
       const sessionDir = yield* existing(path.join(request.paths.sessions, stemOf(one.capture)))
       const bundles: Array<string> = []
       for (const run of one.runs) if ((yield* existing(run.bundlePath)) !== null) bundles.push(run.bundlePath)
       const artifactDir = yield* existing(Record.captureDir(request.paths.corpus, one.capture))
+      let uploads = yield* uploadsOf(request.paths.corpus, one.capture)
+      if (uploads.length > 0) {
+        held ??= yield* uploadsHeld(request.paths.corpus, new Set(request.captures))
+        uploads = yield* unshared(uploads, held)
+      }
       const partial = {
         ...one,
         bundles,
         sessionDir,
         artifactDir,
-        uploads: yield* uploadsOf(request.paths.corpus, one.capture)
+        uploads
       }
       const known = Object.values(one.rows).some((count) => count > 0) || sessionDir !== null || artifactDir !== null
       return { ...partial, known, bytes: request.measure ? yield* bytesOf(partial) : null } satisfies Plan as Plan

@@ -14,8 +14,13 @@
  * path separator, or starting with `_` or `.`, owns no file: those entries
  * are the stores' own.
  *
- * A crash between the commit and the removals leaves files whose rows are
- * gone; naming the capture again finds them on disk and removes them.
+ * The removals run in the order that keeps a crash between them recoverable:
+ * first what only a dropped row or the artifact directory points at — the
+ * job records, the cut logs, the bundles outside a session directory, the
+ * uploads, the seeds — then the session directories, the artifact
+ * directories last. What a crash leaves
+ * is then a capture's own directories, which a second forget naming the
+ * capture, or a pattern matching it, finds on disk and removes.
  */
 import { Citations, Forget, Resolver } from "@sip/store"
 import * as Effect from "effect/Effect"
@@ -23,7 +28,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
 import type * as ContentGc from "../content/content-gc.js"
 import * as Extraction from "../deployment/extraction.js"
-import { uploadsOf } from "../ingest/retire.js"
+import { unshared, uploadsHeld, uploadsOf } from "../ingest/retire.js"
 import { jobDir } from "../jobs/job.js"
 import { type Paths, prepDir, stemOf } from "../paths.js"
 import * as Cleanup from "./cleanup.js"
@@ -213,6 +218,7 @@ export const plan = Effect.fn("Forget.plan")(function*(request: Request) {
     else unknown.push(capture)
   }
   const gone = new Set(known)
+  const owned = uploads.length === 0 ? [] : yield* unshared(uploads, yield* uploadsHeld(corpus, gone))
   const forgotten = yield* store.plan({ captures: known, citations: request.citations })
   const jobLogs: Array<string> = []
   for (const id of forgotten.invocations.jobs) {
@@ -238,7 +244,7 @@ export const plan = Effect.fn("Forget.plan")(function*(request: Request) {
       sessionDirs: yield* setOf(sessionDirs),
       bundles: yield* setOf(bundles),
       artifactDirs: yield* setOf(artifactDirs),
-      uploads: yield* setOf(uploads),
+      uploads: yield* setOf(owned),
       seeds: yield* setOf(seeds),
       jobLogs: yield* setOf(jobLogs),
       prepLogs: yield* setOf(prepLogs)
@@ -275,17 +281,15 @@ export const apply = Effect.fn("Forget.apply")(function*(request: ApplyRequest) 
     population: request.population
   })
   const { files } = planned
-  const dirs = [
-    ...files.sessionDirs.paths,
-    ...files.bundles.paths,
-    ...files.artifactDirs.paths,
-    ...files.jobLogs.paths,
-    ...files.prepLogs.paths
-  ]
-  for (const one of dirs) {
+  // What only a dropped row or the artifact directory points at goes first,
+  // the artifact directory last: a crash leaves what a second forget finds.
+  for (const one of [...files.jobLogs.paths, ...files.prepLogs.paths, ...files.bundles.paths]) {
     yield* fs.remove(one, { recursive: true, force: true })
   }
   for (const one of [...files.uploads.paths, ...files.seeds.paths]) yield* fs.remove(one, { force: true })
+  for (const one of [...files.sessionDirs.paths, ...files.artifactDirs.paths]) {
+    yield* fs.remove(one, { recursive: true, force: true })
+  }
   const cache = yield* Cleanup.collectContent({
     sessions: request.paths.sessions,
     graceHours: request.graceHours,
