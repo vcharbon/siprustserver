@@ -46,12 +46,12 @@ crates/b2bua/src/rules/defaults/core_rules.rs 2080
 crates/b2bua/src/rules/relay_first_18x.rs 526
 crates/b2bua/src/rules/relay/originate_tests.rs 849
 crates/b2bua/src/rules/relay/sdp_session_tests.rs 968
-crates/b2bua/src/store/mod.rs 1046
-crates/b2bua/tests/it/rules.rs 5878
+crates/b2bua/src/store/mod.rs 1044
+crates/b2bua/tests/it/rules.rs 5875
 crates/call-limiter/src/store.rs 599
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1186
-crates/call/tests/it/common/mod.rs 1016
+crates/call/tests/it/common/mod.rs 1012
 crates/call/tests/it/model_helpers.rs 1009
 crates/e2e-core/src/infra.rs 626
 crates/e2e-model/src/registry.rs 576
