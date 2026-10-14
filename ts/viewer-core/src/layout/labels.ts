@@ -1,5 +1,5 @@
 /** Human-facing one-liners for the things a ladder draws. */
-import type { Body, MsgSpec, Ref, Step } from "../generated/pivot-v3.ts"
+import type { Body, MsgSpec, Step } from "../generated/pivot-v3.ts"
 
 /** The label a message draws on its arrow. */
 export const msgLabel = (msg: MsgSpec): string => {
@@ -21,12 +21,6 @@ export const msgSublabel = (msg: MsgSpec): string | undefined => {
 export const stepLabel = (step: Step): string => msgLabel(step.msg)
 export const stepSublabel = (step: Step): string | undefined => msgSublabel(step.msg)
 
-/** The discriminator two messages are compared on: leg plus what identifies them. */
-export const msgDiscriminator = (msg: MsgSpec): string =>
-  typeof msg.status === "number"
-    ? `${msg.status}/${msg["cseq-method"] ?? "*"}`
-    : `${msg.method ?? "?"}`
-
 /** A short description of a body, for a decoration badge. */
 export const bodySummary = (body: Body): string => {
   if ("multipart" in body) {
@@ -39,7 +33,3 @@ export const bodySummary = (body: Body): string => {
   }
   return body.mode
 }
-
-/** A tier-2 reference, rendered as the token an author reads. */
-export const refLabel = (ref: Ref): string =>
-  "pos" in ref ? `${ref.pos}${ref.form ? `/${ref.form}` : ""}` : ref.frozen

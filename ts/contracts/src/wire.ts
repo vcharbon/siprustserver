@@ -25,10 +25,6 @@ export const headBodyArm = { head: Schema.String, body_b64: Schema.String } as c
 /** Even the head is not UTF-8 — opaque, standard base64. */
 export const opaqueArm = { raw_b64: Schema.String } as const
 
-export const TextArm = Schema.Struct(textArm)
-export const HeadBodyArm = Schema.Struct(headBodyArm)
-export const OpaqueArm = Schema.Struct(opaqueArm)
-
 /** Any value carrying a datagram in one of the three arms. */
 export type Msg =
   | { readonly raw: string }
@@ -45,18 +41,6 @@ export const payloadOf = (msg: Msg): Payload => {
   if ("raw" in msg) return { _tag: "text", raw: msg.raw }
   if ("head" in msg) return { _tag: "head-body", head: msg.head, body_b64: msg.body_b64 }
   return { _tag: "opaque", raw_b64: msg.raw_b64 }
-}
-
-/** The arm's fields alone, as a document writes them beside its other keys. */
-export const armOf = (payload: Payload): Msg => {
-  switch (payload._tag) {
-    case "text":
-      return { raw: payload.raw }
-    case "head-body":
-      return { head: payload.head, body_b64: payload.body_b64 }
-    case "opaque":
-      return { raw_b64: payload.raw_b64 }
-  }
 }
 
 const utf8Encoder = new TextEncoder()

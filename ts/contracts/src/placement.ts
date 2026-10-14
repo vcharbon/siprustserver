@@ -53,14 +53,6 @@ export const CountBound = Schema.Struct({
 })
 export interface CountBound extends Schema.Schema.Type<typeof CountBound> {}
 
-/** Whether the bound says anything, and says it without contradicting itself. */
-export const countBoundIsSatisfiable = (bound: CountBound): boolean => {
-  const { at_least: low, at_most: high, exactly } = bound
-  if (exactly !== undefined && (low !== undefined || high !== undefined)) return false
-  if (low !== undefined && high !== undefined) return low <= high
-  return exactly !== undefined || low !== undefined || high !== undefined
-}
-
 /**
  * What a background policy matches. Method-only: a keepalive is identified by
  * its method, and a policy that had to inspect a header would be a flow step

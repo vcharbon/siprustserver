@@ -29,8 +29,6 @@ export const jobsDir = (sessions: string): string => path.join(sessions, JOBS)
 
 export const jobDir = (sessions: string, id: number): string => path.join(jobsDir(sessions), String(id))
 
-export const logPath = (sessions: string, id: number): string => path.join(jobDir(sessions, id), "log")
-
 export const hooksPath = (sessions: string, id: number): string => path.join(jobDir(sessions, id), "hooks")
 
 /** What the launcher knows once the process exists. */

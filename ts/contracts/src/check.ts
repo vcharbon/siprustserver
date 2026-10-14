@@ -31,9 +31,6 @@ export type KnownBug = typeof KnownBug.Type
 export const CheckOp = Schema.Literals(["eq", "regex", "exists", "absent"])
 export type CheckOp = typeof CheckOp.Type
 
-/** Whether the operator compares against a stated value. */
-export const checkOpTakesValue = (op: CheckOp): boolean => op === "eq" || op === "regex"
-
 /** One field assertion. */
 export const Check = Schema.Struct({
   field: Schema.String,
@@ -42,7 +39,3 @@ export const Check = Schema.Struct({
   class: Schema.optionalKey(CheckClass)
 })
 export interface Check extends Schema.Schema.Type<typeof Check> {}
-
-/** Whether `value` is stated exactly where the operator takes one. */
-export const checkValueIsDeclarable = (check: Check): boolean =>
-  checkOpTakesValue(check.op) === (check.value !== undefined)

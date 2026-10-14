@@ -756,21 +756,3 @@ const lastMatching = (
   }
   return -1
 }
-
-/** Whether this step's message is the first INVITE the named UAS receives. */
-export const isClaimStep = (
-  steps: ReadonlyArray<StepDraft>,
-  index: number,
-  uasLegs: ReadonlySet<string>
-): boolean => {
-  const s = steps[index]!
-  if (s.op !== "expect" || !uasLegs.has(s.leg)) return false
-  if ((s.msg.method ?? "").toUpperCase() !== "INVITE") return false
-  for (let i = 0; i < index; i++) {
-    const p = steps[i]!
-    if (p.op === "expect" && p.leg === s.leg && (p.msg.method ?? "").toUpperCase() === "INVITE") {
-      return false
-    }
-  }
-  return true
-}

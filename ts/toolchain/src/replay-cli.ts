@@ -17,7 +17,6 @@
  * {@link INTERRUPT_GRACE} is over, SIGKILL: an interpreter that will not stop
  * never keeps its driver from stopping.
  */
-import type * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -109,8 +108,5 @@ export const layer = Layer.effect(
     return Service.of({ run: runSpec, schema })
   })
 )
-
-/** The binary this service will run. Configured, never guessed. */
-export const binary: Config.Config<string> = REPLAY
 
 export * as ReplayCli from "./replay-cli.js"

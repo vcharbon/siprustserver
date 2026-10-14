@@ -59,22 +59,6 @@ export interface Rows {
   readonly flowsLegs: number
 }
 
-export const ROW_TABLES: ReadonlyArray<keyof Rows> = [
-  "runs",
-  "caseResults",
-  "runRuleHits",
-  "preps",
-  "captureCuts",
-  "cutCases",
-  "cutRefusals",
-  "cutRefusalCalls",
-  "cases",
-  "caseAssets",
-  "ledgerRows",
-  "flowsDocuments",
-  "flowsLegs"
-]
-
 export interface Plan {
   /** The runs kept, by the first reason that keeps each: its lane, its pin, still open. */
   readonly kept: { readonly lane: number; readonly pinned: number; readonly open: number }

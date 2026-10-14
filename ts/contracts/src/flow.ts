@@ -135,12 +135,6 @@ export const isInjectNode = (node: FlowNode): node is Inject => node.op === "inj
 export const isAltNode = (node: FlowNode): node is Alt => node.op === "alt"
 export const isUnorderedNode = (node: FlowNode): node is Unordered => node.op === "unordered"
 
-/** The node's own id. */
-export const flowNodeId = (node: FlowNode): string => node.id
-
-/** The steps this node orders after. */
-export const flowNodeAfter = (node: FlowNode): ReadonlyArray<string> => node.after ?? []
-
 /**
  * Every message step the node contains, in document order. The one traversal
  * lint, formatters and interpreters share, so a construct added to the union
