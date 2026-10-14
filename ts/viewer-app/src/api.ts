@@ -400,10 +400,14 @@ export interface TriageStudySession {
   readonly held?: readonly unknown[]
 }
 
-/** One hook log kept beside a run: `hooks/<name>.log`, verbatim. */
+/** One hook log kept beside a run: `hooks/<name>.log`, its two ends where it is long. */
 export interface TriageStudyHook {
   readonly name: string
   readonly text: string
+  /** The whole log's size, where the server states it. */
+  readonly bytes?: number
+  /** Where the whole log is read, where the server serves it. */
+  readonly href?: string
 }
 
 export interface TriageStudyCase {

@@ -778,7 +778,11 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
               the box's own account of that replay, kept beside it. */}
           {(activeSession ?? value.sessions[value.sessions.length - 1])?.hooks.map((hook) => (
             <details key={hook.name} className="rerun-log study-hook">
-              <summary className="muted">hook: {hook.name}</summary>
+              <summary className="muted">
+                hook: {hook.name}
+                {hook.bytes !== undefined && <> · {hook.bytes} byte(s)</>}
+              </summary>
+              {hook.href !== undefined && <p className="muted"><a href={hook.href}>the whole log</a></p>}
               <pre className="raw">{hook.text}</pre>
             </details>
           ))}
