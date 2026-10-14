@@ -456,3 +456,41 @@ fn an_ended_fork_does_not_compete_with_one_still_ringing() {
         .expect("the one fork still ringing needs no name");
     assert_eq!(update.to().tag(), Some("B-early-f2"));
 }
+
+/// RFC 3261 §12.3, §14: an INVITE offered again after its predecessor's
+/// non-2xx final is no re-INVITE. The early dialog that final ended is no
+/// dialog an INVITE may ride, so the request is refused by name rather than
+/// sent under the ended fork's To-tag.
+#[test]
+fn an_invite_never_rides_an_ended_early_dialog() {
+    let mut uac = calling();
+    let (mut uas, _) = ringing("B");
+    uac.learn_response(&answer_invite(&mut uas, 180, "Ringing", "B-early-f1"));
+    uac.learn_response(&answer_invite(&mut uas, 487, "Request Terminated", "B-early-f1"));
+    assert_eq!(
+        uac.in_dialog(Method::Invite, &[], Vec::new(), None, None),
+        Err(StackError::NoDialog { leg: "A".into(), method: "INVITE".into() })
+    );
+}
+
+/// RFC 3261 §12.3 ends the early dialogs of ONE INVITE transaction, which
+/// its Call-ID and CSeq name together: a callee answering 487 to another
+/// call's INVITE of the same CSeq number leaves its own fork ringing.
+#[test]
+fn a_final_to_another_call_s_invite_ends_none_of_this_call_s_forks() {
+    let (mut uas, _) = ringing("B");
+    answer_invite(&mut uas, 180, "Ringing", "B-early-f1");
+    let mut other_caller = stack("C", "r9z8y7");
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:other@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let other = other_caller
+        .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+        .expect("another call's INVITE");
+    assert_eq!(other.cseq().seq(), 1);
+    uas.learn_request(&other);
+    answer_invite(&mut uas, 487, "Request Terminated", "B-early-f9");
+    assert!(uas.rings_early(), "the 487 to the other call ended this call's fork");
+}

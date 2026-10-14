@@ -1,13 +1,16 @@
 //! The dialog facts a leg learns from what it receives.
 
-use super::{creates_dialog, reliably, rseq_of, LegStack, ReliableProvisional};
+use super::{
+    creates_dialog, invite_key, refreshes_target, reliably, rseq_of, LegStack, ReliableProvisional,
+};
 use sip_message::generators::StackDialog;
 use sip_message::{Method, SipRequest, SipResponse};
 
 impl LegStack {
     /// Learn the dialog facts a response carries: the remote tag and the route
     /// set from a 1xx/2xx to a dialog-creating request alone (RFC 3261
-    /// §12.1.2), the remote target from any non-final or 2xx (§12.2.1.2). Only
+    /// §12.1.2), the remote target from a provisional that creates an early
+    /// dialog or a 2xx to a target refresh request (§12.2.1.2). Only
     /// a 2xx to a dialog-creating request opens the leg's dialog (§12.1). A
     /// final to a CANCEL or a BYE states no dialog fact and leaves the dialog
     /// as it is; a non-2xx final to an INVITE ends the early dialogs its
@@ -29,7 +32,14 @@ impl LegStack {
                 self.dialog.route_set = routes.into_iter().rev().collect();
             }
         }
-        if status < 300 && !other_dialog {
+        // The remote target is the Contact of a provisional that creates an
+        // early dialog, or of a 2xx to a target refresh request (RFC 3261
+        // §12.1.2, §12.2.1.2): no other response moves it.
+        let method = response.cseq().method();
+        let sets_target =
+            ((101..200).contains(&status) && creates_dialog(method) && !self.confirmed)
+                || ((200..300).contains(&status) && refreshes_target(method));
+        if sets_target && !other_dialog {
             if let Some(contact) = response.contacts().as_slice().first() {
                 self.dialog.remote_target = contact.uri().to_string();
             }
@@ -61,12 +71,12 @@ impl LegStack {
                 local_cseq: seeded.unwrap_or(self.dialog.local_cseq),
                 ..self.dialog.clone()
             };
-            self.ring_early(&tag, response.cseq().seq(), fork, rseq);
+            self.ring_early(&tag, invite_key(response), fork, rseq);
         }
         // A non-2xx final to an INVITE creates no dialog and ends the early
         // dialogs its provisionals opened (RFC 3261 §12.3).
         if status >= 300 && *response.cseq().method() == Method::Invite {
-            self.end_early(response.cseq().seq());
+            self.end_early(&invite_key(response));
         }
         // A 2xx to a PRACK or UPDATE an early dialog carried confirms nothing
         // (RFC 3261 §12.1, RFC 3262 §4, RFC 3311 §5.1): the fork keeps its own
@@ -120,15 +130,21 @@ impl LegStack {
         if self.dialog.remote_uri.is_empty() {
             self.dialog.remote_uri = request.from().clone().without_tag().to_string();
         }
-        if let Some(contact) = request.contacts().as_slice().first() {
-            self.dialog.remote_target = contact.uri().to_string();
+        // Only a dialog-creating or target refresh request names the remote
+        // target (RFC 3261 §12.1.1, §12.2.2).
+        if refreshes_target(request.method()) {
+            if let Some(contact) = request.contacts().as_slice().first() {
+                self.dialog.remote_target = contact.uri().to_string();
+            }
         }
         let routes: Vec<String> =
             request.raw_text(sip_message::HeaderName::RecordRoute).map(|s| s.to_string()).collect();
         if !routes.is_empty() {
             self.dialog.route_set = routes;
         }
-        if request.method() == Method::Invite {
+        // The dialog a creating request opens carries its Call-ID, and its To
+        // names this side (RFC 3261 §12.1.1, RFC 6665 §4.4.1).
+        if creates_dialog(request.method()) {
             self.dialog.call_id = request.call_id().to_string();
             if self.dialog.local_uri.is_empty() {
                 self.dialog.local_uri = request.to().clone().without_tag().to_string();
@@ -140,7 +156,7 @@ impl LegStack {
 
 /// Whether a response creates or confirms a dialog on the side that sent the
 /// request: a 1xx (other than 100) or 2xx to an INVITE or SUBSCRIBE (RFC 3261
-/// §12.1, RFC 6665 §4.1.2). Every other response states no dialog fact.
+/// §12.1, RFC 6665 §4.4.1). Every other response states no dialog fact.
 fn establishes_dialog(response: &SipResponse) -> bool {
     creates_dialog(response.cseq().method()) && (101..300).contains(&response.status())
 }

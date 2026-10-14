@@ -107,10 +107,11 @@ impl LegStack {
         // (RFC 3261 §12.1.1): the fork answers under that tag, on the dialog
         // the INVITE established, in its own CSeq space.
         let invite = request.cseq().method() == Method::Invite;
+        let key = (request.call_id().to_string(), request.cseq().seq());
         if (101..200).contains(&status) && invite {
             let fork =
                 StackDialog { local_tag: to_tag.clone(), local_cseq: 0, ..self.dialog.clone() };
-            self.ring_early(&to_tag, request.cseq().seq(), fork, rseq);
+            self.ring_early(&to_tag, key.clone(), fork, rseq);
         }
         if status >= 200 {
             self.finalled.insert(request.cseq().seq());
@@ -118,7 +119,7 @@ impl LegStack {
         // A non-2xx final to an INVITE creates no dialog and ends the early
         // dialogs its provisionals opened (RFC 3261 §12.3).
         if status >= 300 && invite {
-            self.end_early(request.cseq().seq());
+            self.end_early(&key);
         }
         // Only a 2xx to a dialog-creating request opens the leg's dialog (RFC
         // 3261 §12.1.1).

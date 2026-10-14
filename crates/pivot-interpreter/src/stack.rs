@@ -72,6 +72,10 @@ impl ReliableProvisional {
     }
 }
 
+/// An INVITE as its responses name it: its Call-ID and CSeq number. A CSeq
+/// number alone names no transaction across two calls on one leg.
+type InviteKey = (String, u32);
+
 /// ONE early dialog of a leg (RFC 3261 §12.1.2), keyed everywhere by the To-tag
 /// the UAS side minted for it.
 ///
@@ -84,8 +88,8 @@ struct EarlyDialog {
     dialog: StackDialog,
     /// The RSeq of the last reliable provisional that rode it, where one has.
     rseq: Option<u32>,
-    /// The CSeq of the INVITE whose provisional opened it.
-    invite: u32,
+    /// The INVITE whose provisional opened it.
+    invite: InviteKey,
     /// Whether a non-2xx final to that INVITE ended it (RFC 3261 §12.3). An
     /// ended dialog rings no more, and keeps what it held for a request a
     /// peer still sends into it.
@@ -101,7 +105,7 @@ pub struct LegStack {
     pub route_target: SocketAddr,
     dialog: StackDialog,
     /// Whether a 2xx to a dialog-creating request, sent or received, opened
-    /// the leg's dialog (RFC 3261 §12.1, RFC 6665 §4.1.2). No other final
+    /// the leg's dialog (RFC 3261 §12.1, RFC 6665 §4.4.1). No other final
     /// opens one.
     has_dialog: bool,
     /// Whether an INVITE 2xx has CONFIRMED the leg's dialog (RFC 3261 §13).
@@ -361,9 +365,21 @@ pub(crate) fn reliably(response: &SipResponse) -> bool {
 }
 
 /// Whether a request creates a dialog when a 2xx answers it: an INVITE or a
-/// SUBSCRIBE (RFC 3261 §12.1, RFC 6665 §4.1.2).
+/// SUBSCRIBE (RFC 3261 §12.1, RFC 6665 §4.4.1).
 pub(crate) fn creates_dialog(method: &Method) -> bool {
     matches!(method, Method::Invite | Method::Subscribe)
+}
+
+/// Whether a request is a target refresh request, whose Contact and whose
+/// 2xx's Contact replace the remote target: an INVITE, an UPDATE, a SUBSCRIBE
+/// or a NOTIFY (RFC 3261 §12.2.1.2, RFC 3311 §5.1, RFC 6665 §4.4.1).
+pub(crate) fn refreshes_target(method: &Method) -> bool {
+    matches!(method, Method::Invite | Method::Update | Method::Subscribe | Method::Notify)
+}
+
+/// The INVITE a response answers, as [`InviteKey`] names it.
+pub(crate) fn invite_key(response: &SipResponse) -> InviteKey {
+    (response.call_id().to_string(), response.cseq().seq())
 }
 
 /// The `RSeq` a response carries, where it carries a readable one.

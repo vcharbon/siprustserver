@@ -1,6 +1,6 @@
 //! The early dialogs a leg rings (RFC 3261 §12.1), keyed by the To-tag each answers under.
 
-use super::{EarlyDialog, LegStack, StackError};
+use super::{EarlyDialog, InviteKey, LegStack, StackError};
 use sip_message::generators::StackDialog;
 use sip_message::Method;
 
@@ -17,9 +17,10 @@ impl LegStack {
     /// leg's only one still ringing, else, where none rings, the leg's only
     /// ended one: a peer that sends into a dialog a final already ended is
     /// answered 481 by the far side (RFC 3261 §12.2.2), and the request is
-    /// composed on what that dialog held. None and several are refusals:
-    /// which dialog a request rides decides which endpoint it reaches, and §14
-    /// has the tool infer nothing.
+    /// composed on what that dialog held. An INVITE never rides an ended one:
+    /// after a non-2xx final it offers a new call, not a re-INVITE (§12.3,
+    /// §14). None and several are refusals: which dialog a request rides
+    /// decides which endpoint it reaches, and §14 has the tool infer nothing.
     pub(super) fn early_tag_for(
         &self,
         early: Option<&str>,
@@ -32,7 +33,10 @@ impl LegStack {
             self.early.iter().filter(|(_, e)| e.ended == ended).map(|(tag, _)| tag).collect()
         };
         let ringing = tags(false);
-        let candidates = if ringing.is_empty() { tags(true) } else { ringing };
+        let candidates = match ringing.is_empty() && *method != Method::Invite {
+            true => tags(true),
+            false => ringing,
+        };
         match candidates.as_slice() {
             [] => Err(StackError::NoDialog { leg: self.leg.clone(), method: method.to_string() }),
             [only] => Ok((*only).clone()),
@@ -45,14 +49,14 @@ impl LegStack {
     }
 
     /// Open or refresh the early dialog `tag` names, as a provisional to the
-    /// INVITE of CSeq `invite` rang it. A later provisional on the same fork
+    /// INVITE `invite` names rang it. A later provisional on the same fork
     /// refreshes the target and route set it carried; the dialog's own sequence
     /// number stands. A provisional under the tag of an ENDED dialog opens a
     /// new one.
     pub(super) fn ring_early(
         &mut self,
         tag: &str,
-        invite: u32,
+        invite: InviteKey,
         dialog: StackDialog,
         rseq: Option<u32>,
     ) {
@@ -69,10 +73,10 @@ impl LegStack {
         }
     }
 
-    /// End the early dialogs the provisionals to the INVITE of CSeq `invite`
+    /// End the early dialogs the provisionals to the INVITE `invite` names
     /// opened: a non-2xx final to that INVITE terminates them (RFC 3261 §12.3).
-    pub(super) fn end_early(&mut self, invite: u32) {
-        for (_, early) in self.early.iter_mut().filter(|(_, early)| early.invite == invite) {
+    pub(super) fn end_early(&mut self, invite: &InviteKey) {
+        for (_, early) in self.early.iter_mut().filter(|(_, early)| early.invite == *invite) {
             early.ended = true;
         }
     }

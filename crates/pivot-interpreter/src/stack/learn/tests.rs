@@ -332,3 +332,134 @@ fn a_2xx_to_a_request_outside_a_dialog_opens_none() {
     uac.learn_response(&ok);
     assert!(!uac.has_dialog(), "the OPTIONS' 200 opened a dialog");
 }
+
+/// RFC 3261 §9.1, §13.2.2.4: a CANCEL that loses the race to the 2xx draws
+/// its own 200 and leaves the INVITE answered. The 2xx arriving after the
+/// CANCEL's 200 opens and confirms the dialog, and the ACK and the BYE ride
+/// it.
+#[test]
+fn a_2xx_after_the_cancel_s_200_confirms_the_dialog() {
+    let mut uac = calling();
+    let (mut uas, _) = ringing("B");
+    let answer = |status, reason, method| Answer {
+        status,
+        reason,
+        cseq_method: Some(method),
+        early_tag: None,
+    };
+    let rings =
+        uas.respond(&answer(180, "Ringing", "INVITE"), &[], Vec::new(), None).expect("rings");
+    uac.learn_response(&rings);
+    let cancel = uac.cancel(&[]).expect("the caller CANCELs");
+    uas.learn_request(&cancel);
+    let cancelled =
+        uas.respond(&answer(200, "OK", "CANCEL"), &[], Vec::new(), None).expect("CANCEL's 200");
+    uac.learn_response(&cancelled);
+    let ok = uas.respond(&answer(200, "OK", "INVITE"), &[], Vec::new(), None).expect("the 2xx");
+    uac.learn_response(&ok);
+    assert!(uac.has_dialog() && uac.confirmed(), "the 2xx opens and confirms the dialog");
+    let target = ok.contacts().as_slice().first().expect("a 2xx states a Contact").uri();
+    let tag = ok.to().tag();
+    let ack = uac.ack_for(&ok, &[], Vec::new(), None, None).expect("the 2xx is ACKed");
+    assert_eq!(ack.to().tag(), tag);
+    assert_eq!(ack.request_uri().to_string(), target.to_string());
+    let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("the BYE");
+    assert_eq!(bye.to().tag(), tag);
+    assert_eq!(bye.request_uri().to_string(), target.to_string());
+    assert_eq!(bye.cseq().seq(), 2);
+}
+
+/// RFC 6665 §4.4.1: a SUBSCRIBE's 2xx creates a dialog on the notifier's
+/// side too, and its NOTIFY rides it: the SUBSCRIBE's Call-ID, the
+/// notifier's own URI on the From under the 2xx's tag, the subscriber's
+/// tag on the To and its Contact as the Request-URI.
+#[test]
+fn a_notifier_notifies_on_the_dialog_its_subscribe_created() {
+    let mut subscriber = stack("A", "r1a2b3");
+    let addresses = Addresses {
+        ruri: "sip:presentity@pivot.invalid",
+        from: "<sip:watcher@pivot.invalid>",
+        to: "<sip:presentity@pivot.invalid>",
+    };
+    let subscribe = subscriber
+        .out_of_dialog(Method::Subscribe, &addresses, &[], Vec::new(), None, None)
+        .expect("the watcher subscribes");
+    let mut notifier = stack("B", "r1a2b3");
+    notifier.learn_request(&subscribe);
+    let accepted = notifier
+        .respond(
+            &Answer {
+                status: 202,
+                reason: "Accepted",
+                cseq_method: Some("SUBSCRIBE"),
+                early_tag: None,
+            },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the notifier accepts");
+    subscriber.learn_response(&accepted);
+    let notify = notifier
+        .in_dialog(Method::Notify, &[], Vec::new(), None, None)
+        .expect("the notifier notifies");
+    assert_eq!(notify.call_id().to_string(), subscribe.call_id().to_string());
+    assert!(notify.from().uri().to_string().contains("presentity"), "{}", notify.from());
+    assert_eq!(notify.from().tag(), accepted.to().tag());
+    assert_eq!(notify.to().tag(), subscribe.from().tag());
+    let watcher = subscribe.contacts().as_slice().first().expect("a Contact").uri().to_string();
+    assert_eq!(notify.request_uri().to_string(), watcher);
+}
+
+/// `request` as the peer would have sent it, rewritten by `edit`.
+fn edited_request(request: &SipRequest, edit: impl Fn(String) -> String) -> SipRequest {
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    let rewritten = edit(String::from_utf8(request.image().to_vec()).expect("text"));
+    match CustomParser::new().parse(rewritten.as_bytes()).expect("parses") {
+        SipMessage::Request(r) => r,
+        _ => panic!("a request"),
+    }
+}
+
+/// RFC 3261 §12.2.1.2: only a target refresh request (INVITE, UPDATE,
+/// SUBSCRIBE, NOTIFY) and its 2xx move the remote target, besides the
+/// responses that create the dialog. An INFO's 200 and an inbound OPTIONS
+/// naming another Contact leave it; an inbound UPDATE and a re-INVITE's 2xx
+/// move it.
+#[test]
+fn only_a_target_refresh_moves_the_remote_target() {
+    let (mut uac, mut uas, _) = answered_on_an_unrung_fork();
+    let target = uac.remote_target().to_string();
+    let answer = |status, method| Answer {
+        status,
+        reason: "OK",
+        cseq_method: Some(method),
+        early_tag: None,
+    };
+    let info = uac.in_dialog(Method::Info, &[], Vec::new(), None, None).expect("INFO");
+    uas.learn_request(&info);
+    let info_ok = uas.respond(&answer(200, "INFO"), &[], Vec::new(), None).expect("200 INFO");
+    let info_ok = edited(info_ok.image(), |t| {
+        t.replacen("CSeq:", "Contact: <sip:elsewhere@192.0.2.10>\r\nCSeq:", 1)
+    });
+    uac.learn_response(&info_ok);
+    assert_eq!(uac.remote_target(), target, "an INFO's 200 refreshes nothing");
+
+    let elsewhere = |prefix: &'static str| {
+        move |t: String| t.replacen("Contact: <sip:", &format!("Contact: <sip:{prefix}-"), 1)
+    };
+    let options = uas.in_dialog(Method::Options, &[], Vec::new(), None, None).expect("OPTIONS");
+    uac.learn_request(&edited_request(&options, elsewhere("options")));
+    assert_eq!(uac.remote_target(), target, "an OPTIONS refreshes nothing");
+
+    let update = uas.in_dialog(Method::Update, &[], Vec::new(), None, None).expect("UPDATE");
+    uac.learn_request(&edited_request(&update, elsewhere("update")));
+    assert!(uac.remote_target().contains("update-"), "{}", uac.remote_target());
+
+    let re_invite = uac.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("INVITE");
+    uas.learn_request(&re_invite);
+    let re_ok = uas.respond(&answer(200, "INVITE"), &[], Vec::new(), None).expect("2xx");
+    uac.learn_response(&edited(re_ok.image(), elsewhere("reinvite")));
+    assert!(uac.remote_target().contains("reinvite-"), "{}", uac.remote_target());
+}

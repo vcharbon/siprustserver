@@ -73,8 +73,9 @@ now reads.
 **2026-10-14 — a scripted leg's dialog opens on a 2xx to a dialog-creating
 request alone, and a tolerated absence binds no transaction's turn.** The 200
 to a CANCEL and a non-2xx final open no dialog; a non-2xx final ends the early
-dialogs of its INVITE; a request with no dialog to ride or no remote target
-fails its step by name (§8). A pending `optional` answer standing in front of an
+dialogs of its INVITE, which no INVITE rides again; only a target refresh moves
+the remote target; a request with no dialog to ride or no remote target fails
+its step by name (§6.1, §8). A pending `optional` answer standing in front of an
 answer to an open transaction no longer keeps it from arming (§6.7c). No
 document field changes.
 
@@ -1122,16 +1123,19 @@ speaks to an ACK that never came. `pivot-schema lint` enforces the placement
 `in-dialog/confirm-duplicate`). The interpreter reads nothing from the marker at
 run time, exactly as it reads nothing from `in_dialog`: lint is the enforcement.
 
-**An `early` id names one fork, and two kinds of message may carry it.** A
-response `send` ANSWERS under it, minting the To-tag that fork rings on
-(RFC 3261 §12.1.1). A PRACK (RFC 3262 §7.2) or an UPDATE (RFC 3311 §5.1) RIDES
-it: both run inside a dialog that has not confirmed yet, and the id says which
-fork. Every other request waits for a confirmed dialog, so `early` on one says
-nothing and is refused. An UPDATE naming no fork on a leg whose dialog is
-unconfirmed rides that leg's ONE early dialog; a leg ringing several and an
-UPDATE naming none is a refusal, because which fork an UPDATE rides decides
-which endpoint receives it and §14 has the tool infer nothing.
-`${early:<id>.tag}` and `${early:<id>.rseq}` (§8.1) read the fork back.
+**An `early` id names one fork.** A response `send` ANSWERS under it, minting
+the To-tag that fork rings on (RFC 3261 §12.1.1). A request a leg sends before
+any 2xx opened its dialog RIDES an early dialog: a PRACK (RFC 3262 §7.2), an
+UPDATE (RFC 3311 §5.1), and a BYE (§15) or any other in-dialog request alike.
+It rides the fork `early` names, else the leg's ONE early dialog still ringing,
+else, where none rings, its ONE early dialog a non-2xx final ended (§12.3): a
+peer sending into a dialog already ended, which the far side answers 481
+(§12.2.2), composed on what that dialog held. An INVITE never rides an ended
+early dialog: after a non-2xx final it offers a new call, not a re-INVITE, and
+the step fails by name. A leg ringing several forks and a request naming none
+is a refusal, because which fork a request rides decides which endpoint
+receives it and §14 has the tool infer nothing. `${early:<id>.tag}` and
+`${early:<id>.rseq}` (§8.1) read the fork back.
 
 On an EXPECT, `early` GATES: the message satisfies the step only if its To-tag
 is the one the named fork rings on. A leg ringing two forks takes provisionals
@@ -2028,10 +2032,13 @@ The tier model is UNCHANGED:
 on a 2xx to a dialog-creating request, sent or received (INVITE, SUBSCRIBE;
 RFC 3261 §12.1); no other final opens one. A provisional under a To-tag opens
 an early dialog, and a non-2xx final to its INVITE ends it (§12.3): it rings no
-more, and a request the document still sends on it, a peer sending into a
-dialog already ended that the far side answers 481 (§12.2.2), is composed on
-what it held. A request with no dialog to ride, or riding one no Contact gave a
-remote target, fails its step by name.
+more, and a request other than an INVITE the document still sends on it, a
+peer sending into a dialog already ended that the far side answers 481
+(§12.2.2), is composed on what it held (§6.1). The remote target is the Contact
+of a provisional that creates an early dialog, of a dialog-creating or target
+refresh request (INVITE, UPDATE, SUBSCRIBE, NOTIFY), or of a 2xx to one
+(§12.2.1.2); no other message moves it. A request with no dialog to ride, or
+riding one no Contact gave a remote target, fails its step by name.
 
 `RSeq` splits by direction: a **send** freezes the captured value (the scripted
 endpoint must put a concrete number on the wire for RAck translation), an

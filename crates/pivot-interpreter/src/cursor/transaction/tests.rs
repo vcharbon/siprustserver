@@ -157,9 +157,9 @@ fn the_opening_send_is_the_last_send_of_the_method_before_the_expect() {
     assert_eq!(Cursor::new(&relay).opening_send("s2"), None, "this leg sent no INVITE");
 }
 
-/// An armed answer of the same METHOD refuses the candidate even where it
-/// waits on an older transaction: two steps with one discriminator armed
-/// together would take each other's datagram.
+/// An armed `optional` answer with the candidate's own status refuses it,
+/// even where it waits on an older transaction: two steps with one
+/// discriminator armed together would take each other's datagram.
 #[test]
 fn an_answer_does_not_arm_beside_an_armed_answer_of_the_same_method() {
     let p = plan(&format!(
@@ -176,6 +176,26 @@ fn an_answer_does_not_arm_beside_an_armed_answer_of_the_same_method() {
     cursor.complete("s2");
     cursor.complete("s4");
     assert_eq!(cursor.frontier(), ["s3", "s5"], "s6 waits: s3 would take its 200");
+}
+
+/// An armed REQUIRED answer of the same method refuses the candidate
+/// whatever its status: it is that method's earlier turn on the leg.
+#[test]
+fn an_answer_does_not_arm_beside_a_required_answer_of_the_same_method() {
+    let p = plan(&format!(
+        "[{},{},{},{},{},{}]",
+        send("s1", "A", "INVITE"),
+        send("s2", "A", "PRACK"),
+        answer("s3", "A", 200, "PRACK"),
+        send("s4", "A", "PRACK"),
+        request_expect("s5", "A", "INFO"),
+        answer("s6", "A", 481, "PRACK")
+    ));
+    let mut cursor = Cursor::new(&p);
+    cursor.complete("s1");
+    cursor.complete("s2");
+    cursor.complete("s4");
+    assert_eq!(cursor.frontier(), ["s3"], "s6 waits behind the required 200");
 }
 
 /// RFC 3261 §9.2: the CANCEL's 200 and the INVITE's 487 come in either

@@ -65,8 +65,9 @@ impl LegStack {
 
     /// Compose an in-dialog request. `cseq` is a `cseq-override` (§11) and
     /// becomes the dialog's sequence number, as it does on a dialog-opening
-    /// request. Before any final it rides the leg's only early dialog
-    /// ([`in_dialog_on`](Self::in_dialog_on)).
+    /// request. With no dialog a 2xx opened, it rides the leg's only early
+    /// dialog, still ringing or, for any method but INVITE, ended by a non-2xx
+    /// final ([`in_dialog_on`](Self::in_dialog_on)).
     pub fn in_dialog(
         &mut self,
         method: Method,
