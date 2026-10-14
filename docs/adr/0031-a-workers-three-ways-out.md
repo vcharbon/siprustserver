@@ -388,7 +388,10 @@ offer/answer exchanges on each of them, so an exchange count is never lowered no
 description sent replaced by an earlier one (RFC 3264 §8). On this path what the live copy
 relayed on its own since the other owner branched, and the sequence it advanced, stay
 (RFC 3261 §12.2.1.1; `crossed_reinvite_round.rs`, the two answered cells;
-`call/tests/it/round.rs`).
+`call/tests/it/round.rs`). An answered round folded into the record has its Accepted
+server INVITE seeded there; an open one keeps its transactions at the node that relayed
+it (ADR-0014, "a fold into the call's record seeds the answered INVITEs it brings";
+`retained_2xx_folded_into_the_record.rs`).
 
 **A fold adopts both counters, and so does a refusal.** A fold takes `max(p)` and `max(b)`
 of the two views and is not a write of this node: neither axis moves and nothing flushes,

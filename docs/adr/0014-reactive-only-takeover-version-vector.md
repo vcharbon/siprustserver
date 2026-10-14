@@ -384,8 +384,17 @@ INVITE transactions the replicated record names**, in one router module
   the INVITE bound armed and no re-send;
 - a `Proceeding` server INVITE for the a-leg's initial INVITE while the a-leg
   is unanswered (request rebuilt from the replicated snapshot, To-tag pinned),
-  and for each pending relayed INVITE (no request retained: it absorbs the
-  retransmission and replays a 100, and a CANCEL naming it is handed up).
+  and for each pending relayed INVITE, holding the originator's request rebuilt
+  from its relay snapshot (Via stack, From, To, Call-ID, CSeq): it absorbs the
+  retransmission and replays a 100, answers a CANCEL 200 + 487, and is answered
+  at the call's release;
+- a server INVITE in RFC 6026 Accepted for each 2xx a dialog retains awaiting
+  its ACK, holding that 2xx: a copy of the INVITE draws the 2xx in the layer and
+  never reaches the rules, whose glare check would answer it 491. A transaction
+  the copy itself opened before the record was read, with no final, takes the
+  seed's 2xx and sends it once. An answered round awaiting its ACK is an INVITE
+  transaction a live copy serves: the departure sweep takes it over and resumes
+  its 2xx ladder (RFC 3261 §13.3.1.4).
 
 The datagram that caused the materialisation is re-offered to the transaction
 layer after the seed, so the layer owns every hop ACK, Timer D re-ACK and
@@ -410,8 +419,30 @@ The front proxy's CANCEL memo (Decision 5's ACK/CANCEL exemption) re-resolves a
 dead pinned worker through the stickiness cookie's own health ladder, so the
 caller's give-up reaches the survivor that holds the seeded INVITE.
 
-Pinned by `failover-harness/tests/it/{prack_takeover,inflight_resend,released_copy}.rs`,
-`sip-txn/tests/it/seed.rs` and `b2bua/src/router/materialise/tests.rs`.
+**A fold into the call's record seeds the answered INVITEs it brings.** A body
+folded into the primary's live copy (ADR-0031 D3) may hold a round the other copy
+answered and whose 2xx awaits its ACK; its Accepted server INVITE is seeded as at a
+materialisation, so the originator's copy of the INVITE, routed to the primary once
+the proxy reads it alive, draws the retained 2xx. A round still open is not seeded
+there: its target's responses follow the Via of the node that relayed it, so only
+that node can CANCEL it or take its final, and a client seed elsewhere would run
+out its bound on a round another node finishes.
+
+**A non-INVITE relay no node can finish is superseded.** A non-INVITE request that
+reaches the rules found no server transaction on this node, so the relay the record
+holds for it, if any, was made by another node, or this one's former incarnation:
+the relay's final follows its Via there and a non-INVITE response is never failed
+over (`sip-proxy/src/core/response.rs`), and the target does not repeat it (RFC
+3261 §17.2.2). The record drops that relay — same method, originator CSeq,
+Call-ID, top-Via branch and sent-by — before the rules read the call, and the
+request is relayed afresh, under this node's `relayed_by`. Absorbing the
+retransmission instead would leave its originator to run out Timer F. Residual: the
+target sees the request twice (`superseded_relay.rs`).
+
+Pinned by `failover-harness/tests/it/{prack_takeover,inflight_resend,released_copy,
+reinvite_server_side_at_the_takeover,retained_2xx_folded_into_the_record,superseded_relay}.rs`,
+`sip-txn/tests/it/{seed,accepted}.rs`, `b2bua/src/router/materialise/tests.rs` and
+`b2bua/src/router/superseded_relay/tests.rs`.
 
 ## Amendment — lifecycle progress folds over a refused reverse flush
 

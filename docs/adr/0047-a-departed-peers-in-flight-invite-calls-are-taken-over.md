@@ -64,7 +64,10 @@ over ends at its replicated no-answer deadline, as the dead node would have ende
 whatever the callee sent, unless the node returns first (D7)
 (`failover-harness/tests/it/ringing_call_taken_over_on_departure.rs`);
 a replicated re-INVITE round gives up at its INVITE bound
-(`reinvite_round_gives_up_after_takeover.rs`, the departure cell), and a message that
+(`reinvite_round_gives_up_after_takeover.rs`, the departure cell), a round answered
+2xx and awaiting its ACK is a transaction too — the copy resumes the 2xx's ladder,
+which nobody else repeats once the caller heard a 100 (RFC 3261 §13.3.1.4;
+`reinvite_server_side_at_the_takeover.rs`, the departure cell) — and a message that
 arrives afterwards finds the copy live (`reinvite_answer_failover.rs`, the departure
 cell). A takeover copy's self-release is a turn of its own call's queue, so the turns
 of the messages that cleared its last transactions run first (ADR-0010 X2) and none of

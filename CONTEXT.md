@@ -469,13 +469,16 @@ storage-only step).
 
 **Seed**: a transaction the materialisation rebuilds from the record: a
 Proceeding client INVITE from an INVITE handle, a Proceeding server INVITE
-from the a-leg snapshot or a pending relayed re-INVITE. Never a 2xx, PRACK or
-re-ACK: those are ADR-0032 obligations replicated with the call.
+holding the request rebuilt from the a-leg snapshot or a pending relayed
+re-INVITE's snapshot, an Accepted server INVITE (RFC 6026) holding a 2xx a
+dialog retains awaiting its ACK. A fold into the call's record seeds the last
+kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
+are ADR-0032 obligations replicated with the call.
 
 **Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
 A backup holds a **takeover copy** only *while actively serving* the rerouted
 request(s). When the **last transaction** for that call reaches a terminal state
-(2xx INVITE → Timer H after the ACK; non-INVITE → Timer J; failed leg → Timer B/F)
+(2xx INVITE → its ACK on the branch, else Timer L; non-INVITE → Timer J; failed leg → Timer B/F)
 the txn layer emits `CallQuiesced` and the backup **self-releases**: it
 `drop_local`s the live copy and stops its timers, reverting to a pure **Element**.
 **Local-only** — no delete propagates; the `bak:` replica + reverse-flushed deltas
