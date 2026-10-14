@@ -6,7 +6,7 @@ use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::helpers::{PrackDisposition, RAckTokens};
 use call::{
     ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, Dialog, ExtMap, Leg, MachineId,
-    Obligation, PromotePemState, RSeq, StateLabel, TransferState,
+    Obligation, PromotePemState, StateLabel, TransferState,
 };
 
 /// The **refined view** of a [`Call`] a rule reads (ADR-0020 X8) — the entire
@@ -59,25 +59,13 @@ impl<'a> RuleCall<'a> {
     pub fn own_prack_branch(&self, branch: &str) -> bool {
         call::helpers::own_prack_branch(self.0, branch)
     }
-    /// The relayed INVITE still pending toward its target — `(leg_id,
-    /// outbound_cseq)` there — that the provisional shown as `rseq` in this
-    /// stack's `tag` dialog answers; `None` for the initial INVITE or a
-    /// transaction already resolved.
-    pub fn pending_invite_answered_by(&self, tag: &str, rseq: RSeq) -> Option<(String, i64)> {
-        call::helpers::pending_invite_answered_by(self.0, tag, rseq)
-    }
-    /// The leg whose dialog carries `shown_tag` as this stack's own — the face
-    /// a reliable provisional so tagged was shown on.
-    pub fn leg_shown(&self, shown_tag: &str) -> Option<&'a str> {
-        call::helpers::leg_shown(self.0, shown_tag)
-    }
     /// Whether `obligation` is the caller's ACK of the a-leg's INITIAL answer
     /// rather than of a re-INVITE's 2xx — what tells the `RepeatGiveUp` of the
     /// call's own setup from an in-dialog one (RFC 3261 §13.3.1.4). A rule
     /// answering either give-up may re-author the teardown — its cause, its
     /// CDR, the order the legs go — but not decline it: a call left Active
     /// after an `AckOf2xx` give-up is torn down by the framework with the CORE
-    /// verdict (ADR-0032 X5). An `AwaitPrack` give-up carries no such floor.
+    /// verdict (ADR-0032 X5).
     pub fn answers_initial_invite(&self, obligation: &Obligation) -> bool {
         call::helpers::answers_initial_invite(self.0, obligation)
     }

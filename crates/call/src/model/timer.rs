@@ -45,17 +45,15 @@ pub enum TimerType {
     /// discharging ACK or PRACK, by the give-up, or with the leg, transaction
     /// or call the emission belonged to.
     Rung,
-    /// The give-up deadline of its obligation scope's ladder — the one ladder event a
-    /// rule sees: 64·T1 for a reliable provisional, the deployment's ACK
-    /// deadline for a 2xx (Timer L where it states none). Armed once with the
-    /// first rung, so a re-emission cannot push the deadline out, and in the
-    /// ledger for as long as the retained emission is; the framework scrubs
-    /// the ladder when it fires and a CORE rule (which a service may
-    /// re-author) says what the silence means. For a 2xx the session ends
-    /// whatever the rule decides (RFC 3261 §13.3.1.4) — a service authors the
-    /// teardown's shape, never whether it happens; a reliable provisional's is
-    /// the rule's alone — a teardown, an in-dialog reject, or nothing (RFC
-    /// 3262 §3).
+    /// The give-up deadline of a 2xx's ladder — the one ladder event a rule
+    /// sees: the deployment's ACK deadline (Timer L where it states none).
+    /// Armed once with the first rung, so a re-emission cannot push the
+    /// deadline out, and in the ledger for as long as the retained emission
+    /// is; the framework scrubs the ladder when it fires and a CORE rule
+    /// (which a service may re-author) says what the silence means. The
+    /// session ends whatever the rule decides (RFC 3261 §13.3.1.4) — a service
+    /// authors the teardown's shape, never whether it happens. A reliable
+    /// provisional's ladder arms none: its §3 reject is its responder's.
     RepeatGiveUp,
     /// Safety-net timer scheduled when entering "terminating" state.
     TerminatingTimeout,

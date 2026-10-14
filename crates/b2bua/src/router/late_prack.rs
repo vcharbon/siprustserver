@@ -24,7 +24,7 @@ use super::responses::build_200;
 use super::RouterCtx;
 
 /// How long a released call's shown provisionals stay answerable: RFC 3262
-/// §3's 64·T1 give-up bound.
+/// §3's 64·T1 bound.
 const WINDOW_MS: i64 = 64 * sip_retransmit::timers::T1 as i64;
 
 type DialogKey = (String, String);

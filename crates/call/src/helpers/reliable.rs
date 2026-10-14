@@ -242,27 +242,6 @@ pub fn responder_of<'a>(call: &'a Call, tag: &str, rseq: RSeq) -> Option<&'a Pro
     shown_as(call, tag, rseq).map(|p| &p.id)
 }
 
-/// The relayed INVITE transaction, still pending toward its target, that the
-/// provisional shown as `rseq` in the `tag` dialog answers: the target leg
-/// and the CSeq the request carries there. `None` for the initial INVITE (no
-/// pending relay: the setup is the call), for a transaction already resolved
-/// or CANCELled, and for a number this stack never showed. RFC 3262 §3's
-/// give-up rejects the ORIGINAL REQUEST, so this tells an in-dialog reject —
-/// one transaction, the dialog untouched (RFC 3261 §14.1) — from a setup
-/// teardown.
-pub fn pending_invite_answered_by(call: &Call, tag: &str, rseq: RSeq) -> Option<(String, i64)> {
-    let id = responder_of(call, tag, rseq)?;
-    let leg = crate::helpers::find_leg(call, &id.leg)?;
-    let cseq = id.invite_cseq.as_i64();
-    leg.dialogs
-        .iter()
-        .flat_map(|d| d.inbound_pending_requests.iter())
-        .find(|p| {
-            p.outbound_cseq == cseq && p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled
-        })
-        .map(|p| (id.leg.clone(), p.outbound_cseq))
-}
-
 /// Whether the provisional answering the relayed request `pending` may leave
 /// toward its originator reliably (RFC 3262 §3): the request is an INVITE —
 /// the one method the mechanism serves; §4 bars `Require: 100rel` from every

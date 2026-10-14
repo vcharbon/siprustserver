@@ -90,7 +90,7 @@ pub enum Ceased {
     /// §17.2.1).
     Final,
     /// The ladder reached its 64·T1 bound (RFC 3262 §3).
-    GiveUp,
+    Bound,
 }
 
 /// The RFC 3262 §3 ladder of a shown provisional: this stack's

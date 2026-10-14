@@ -473,44 +473,6 @@ fn the_shown_leg_is_the_one_whose_dialog_carries_the_shown_tag() {
     assert_eq!(leg_shown(&call, "fork-2-a-tag"), None);
 }
 
-/// A relayed re-INVITE snapshot on the b-leg dialog: the request left toward
-/// bob under `outbound_cseq`, offering `100rel` or not.
-fn relayed_reinvite(mut call: Call, outbound_cseq: i64, cancelled: bool) -> Call {
-    let d = call.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).expect("the b-leg dialog");
-    d.inbound_pending_requests.push(PendingRequest {
-        cancelled,
-        offered_100rel: true,
-        ..PendingRequest::new("INVITE", outbound_cseq, 7, Direction::FromA)
-    });
-    call
-}
-
-/// RFC 3262 §3's give-up rejects the ORIGINAL REQUEST: the provisional of a
-/// relayed re-INVITE still pending toward its target names that transaction,
-/// while the initial INVITE's — no pending relay, the setup is the call — and
-/// a transaction already CANCELled or resolved name none.
-#[test]
-fn the_give_up_finds_the_pending_reinvite_a_provisional_answers() {
-    // Bob's 183 to the re-INVITE this stack sent him as CSeq 2.
-    let (call, s) = shown(settled_call(), &pid("b-1", "bf1", 2, 4711), "a1", 7, 900);
-    assert_eq!(pending_invite_answered_by(&call, "a1", s), None, "no relay pending");
-    assert_eq!(
-        pending_invite_answered_by(&relayed_reinvite(call.clone(), 2, false), "a1", s),
-        Some(("b-1".to_string(), 2)),
-    );
-    assert_eq!(
-        pending_invite_answered_by(&relayed_reinvite(call.clone(), 2, true), "a1", s),
-        None,
-        "a CANCELled transaction has its final already",
-    );
-    assert_eq!(
-        pending_invite_answered_by(&relayed_reinvite(call.clone(), 3, false), "a1", s),
-        None,
-        "another transaction's snapshot is not this provisional's",
-    );
-    assert_eq!(pending_invite_answered_by(&call, "a1", s.next()), None, "a number never shown");
-}
-
 /// Forks mirrored as DISTINCT shown dialogs each carry their own sequence
 /// (RFC 3262 §4, errata 4603/4604), so interleaving them never shows either
 /// dialog a gap.
@@ -556,7 +518,7 @@ fn a_shown_ladder_runs_until_acknowledged_or_ceased() {
     cease_shown_ladder(&mut call, "a1", s, Ceased::Final);
     assert!(shown_emission(&call, "a1", s).is_none());
     assert!(acknowledge_shown(&mut call, "a1", s), "a late PRACK still acknowledges it");
-    cease_shown_ladder(&mut call, "a1", s, Ceased::GiveUp);
+    cease_shown_ladder(&mut call, "a1", s, Ceased::Bound);
     assert!(shown_as(&call, "a1", s).unwrap().acknowledged_by_shown(), "acknowledged stands");
     assert!(!acknowledge_shown(&mut call, "a1", s), "acknowledged once");
 }

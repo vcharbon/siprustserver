@@ -1833,11 +1833,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             },
         ),
         // ── ladder give-ups (ADR-0032 X4/X5) ─────────────────────────────────
-        // The one ladder event a rule sees is `RepeatGiveUp { obligation }`,
-        // its timers already scrubbed; these CORE rules say what the silence
-        // means, per obligation, and a service may re-author them. For a 2xx
-        // the re-authoring is of the teardown's shape only: the router ends a
-        // session the rules left Active (`settle_give_up`).
+        // The one ladder event a rule sees is a 2xx's `RepeatGiveUp
+        // { obligation }`, its timers already scrubbed; these CORE rules say
+        // what the silence means and a service may re-author them, of the
+        // teardown's shape only: the router ends a session the rules left
+        // Active (`settle_give_up`). A reliable provisional's ladder arms no
+        // give-up (`arm_reliable_provisional_ladder`).
         //
         // RFC 3261 §13.3.1.4 — no ACK for the a-leg's INITIAL 2xx by the
         // deadline: the caller is gone.
@@ -1875,84 +1876,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     return ok(vec![]);
                 };
                 ok(unacked_2xx_give_up_actions(&ctx.call, obligation))
-            },
-        ),
-        // RFC 3262 §3 — the give-up deadline (64·T1) elapsed with no PRACK for
-        // the reliable provisional this stack showed: the PRACKing party is
-        // gone, or does not honour the `100rel` it advertised. §3 has the UAS
-        // reject the ORIGINAL REQUEST with a 5xx. On the initial INVITE that
-        // request is the call, so on a B2BUA the reject is a teardown:
-        // `BeginTermination` CANCELs the pending b-legs and the → terminated
-        // invariant settles the obligations and the CDR. On a relayed
-        // re-INVITE it is one in-dialog transaction: the 5xx answers it and
-        // the relay toward its target is CANCELled with it, while the
-        // established dialogs stay as they were (RFC 3261 §14.1). Ranked CORE
-        // so a service may re-author the status, as a downstream re-authors the
-        // setup-timeout final. Every retirement of the ladder (PRACK, the
-        // answered transaction's final, fork or call teardown) takes this
-        // deadline with the rungs, so a fire here means the silence really
-        // lasted 64·T1.
-        rule(
-            "unacked-reliable-1xx-give-up",
-            &[],
-            Match::timer()
-                .call_state(CallModelState::Active)
-                .filter(|ctx| matches!(fired_give_up(ctx), Some(Obligation::AwaitPrack { .. }))),
-            |ctx| {
-                let Some(Obligation::AwaitPrack { tag, rseq }) = fired_give_up(ctx) else {
-                    return ok(vec![]);
-                };
-                // A re-INVITE's provisional: §3's reject answers that transaction
-                // alone, on both faces.
-                if let Some((leg_id, outbound_cseq)) =
-                    ctx.call.pending_invite_answered_by(tag, *rseq)
-                {
-                    let silent = ctx
-                        .call
-                        .leg_shown(tag)
-                        .unwrap_or(ctx.call.a_leg().leg_id.as_str())
-                        .to_string();
-                    return ok(vec![
-                        RuleAction::AddCdrEvent {
-                            event_type: CdrEventType::Timeout,
-                            leg_id: silent,
-                            status_code: Some(504),
-                            reason: Some("prack_timeout".into()),
-                        },
-                        RuleAction::RejectPendingReinvite {
-                            leg_id,
-                            outbound_cseq,
-                            status: 504,
-                            reason: "Server Time-out".into(),
-                        },
-                    ]);
-                }
-                // Answered: the setup this provisional belonged to is over, and
-                // with it the number's life — absorb.
-                let answered = ctx.call.a_leg().state() == LegState::Confirmed
-                    || ctx.call.b_legs().iter().any(|b| b.state() == LegState::Confirmed);
-                if answered {
-                    return ok(vec![]);
-                }
-                ok(vec![
-                    RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Timeout,
-                        leg_id: ctx.call.a_leg().leg_id.clone(),
-                        status_code: Some(504),
-                        reason: Some("prack_timeout".into()),
-                    },
-                    RuleAction::RespondToALeg {
-                        status: 504,
-                        reason: "Server Time-out".into(),
-                        header_updates: vec![],
-                        contacts: vec![],
-                    },
-                    RuleAction::BeginTermination {
-                        reason: Some("prack-timeout".into()),
-                        cause: TerminationCause::Timeout(TimeoutKind::Prack),
-                        by_leg: Some(ctx.call.a_leg().leg_id.clone()),
-                    },
-                ])
             },
         ),
         // ── call reaper verdicts (ADR-0020 X1/X6) ───────────────────────────

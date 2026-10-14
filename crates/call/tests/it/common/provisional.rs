@@ -41,7 +41,7 @@ pub(super) fn arb_provisional() -> impl Strategy<Value = Provisional> {
         arb_retained_emission().prop_map(Ladder::Repeating),
         Just(Ladder::Acknowledged),
         Just(Ladder::Ceased(Ceased::Final)),
-        Just(Ladder::Ceased(Ceased::GiveUp)),
+        Just(Ladder::Ceased(Ceased::Bound)),
     ];
     let shown = proptest::option::of(
         (arb_tag(), any::<u32>(), any::<u32>(), any::<bool>(), ladder).prop_map(

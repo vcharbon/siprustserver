@@ -43,9 +43,9 @@ pub enum Scope<'a> {
     Machine(&'a crate::model::MachineId),
 }
 
-/// Every obligation the books name inside `scope`, ladder live or not: a
-/// reliable provisional whose ladder ceased still names the give-up it may
-/// have left armed, so it is retired by name rather than by emission.
+/// Every obligation the books name inside `scope`, ladder live or not: a 2xx
+/// whose ladder ceased at its last rung still names the give-up it left
+/// armed, so it is retired by name rather than by emission.
 pub fn obligations_in(call: &Call, scope: &Scope<'_>) -> Vec<Obligation> {
     match scope {
         Scope::Obligation(o) => vec![o.clone()],

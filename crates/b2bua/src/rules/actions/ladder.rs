@@ -4,7 +4,8 @@
 //! under the [`Obligation`] that discharges it, paced by `sip_retransmit`'s
 //! class, and keyed into the timer ledger by that obligation — so the same key
 //! arms it, repeats it, retires it when the discharging ACK or PRACK arrives,
-//! and names the one give-up a rule sees. No rule cancels a ladder timer.
+//! and names the 2xx's give-up, the one ladder event a rule sees. No rule
+//! cancels a ladder timer.
 //! The provisionals' books live in `call::helpers`; the relays that emit the
 //! originals live in [`super::relay_response`] and [`super::respond`].
 
@@ -109,12 +110,13 @@ impl ActionExecutor<'_> {
 
     /// Retain the reliable provisional as its `image()` — the datagram the
     /// transaction layer sends verbatim — and arm its first §3 rung under
-    /// `AwaitPrack`. The obligation is this stack's: the `RSeq` the peer must
-    /// PRACK is our own number, so the ladder under its copies is ours — per
-    /// shown `(tag, rseq)`, one sequence per shown dialog (§4, errata 4603).
-    /// Idempotent: a recalled number keeps the ladder it already anchors, and
-    /// the give-up is armed once with the first rung so a re-emission cannot
-    /// push it out.
+    /// `AwaitPrack`. The `RSeq` the peer must PRACK is our own number, so the
+    /// ladder under its copies is ours — per shown `(tag, rseq)`, one sequence
+    /// per shown dialog (§4, errata 4603) — and stops at its 64·T1 bound. No
+    /// give-up is armed: the provisional relays a responder's own, whose PRACK
+    /// is relayed end to end, so the §3 reject of the INVITE is that
+    /// responder's, and reaches the PRACKing party as the INVITE's final.
+    /// Idempotent: a recalled number keeps the ladder it already anchors.
     pub(super) fn arm_reliable_provisional_ladder(
         &self,
         call: &mut Call,
@@ -139,14 +141,8 @@ impl ActionExecutor<'_> {
         self.schedule(
             call,
             fx,
-            TimerKey::obligation(TimerType::Rung, obligation.clone()),
+            TimerKey::obligation(TimerType::Rung, obligation),
             first.as_millis() as i64,
-        );
-        self.schedule(
-            call,
-            fx,
-            TimerKey::obligation(TimerType::RepeatGiveUp, obligation),
-            Schedule::rfc(Class::ReliableProvisional).give_up_after().as_millis() as i64,
         );
     }
 
@@ -155,7 +151,7 @@ impl ActionExecutor<'_> {
     /// A rung fired: re-send the retained emission `obligation` is owed for,
     /// as the bytes it left as — a rung is THE response, never a recomposed
     /// equivalent — then arm the next rung, or cease at the last one inside
-    /// the bound while the give-up stands. A spent fire — the ladder is
+    /// the bound. A spent fire — the ladder is
     /// discharged, the call is no longer active, or the reliable provisional's
     /// raising fork is torn down (a reclaim can restore a ladder whose cancel
     /// died with the crashed node) — sends nothing and retires the obligation
@@ -184,28 +180,25 @@ impl ActionExecutor<'_> {
             Some(next) => self.schedule(call, fx, rung, next.as_millis() as i64),
             None => {
                 // The last rung inside the bound has been sent: re-asking stops
-                // here, but the give-up stands — the peer's silence is answered
-                // at the deadline instead of merely falling quiet. A 2xx stays
-                // retained until then: it is also the RFC 6026 *Accepted*
-                // marker `reinvite-glare` reads.
+                // here. A 2xx's give-up stands — its silence is answered at the
+                // deadline — and the 2xx stays retained until then: it is also
+                // the RFC 6026 *Accepted* marker `reinvite-glare` reads. A
+                // reliable provisional's silence is its responder's to answer.
                 self.disarm(call, fx, &rung);
                 if let Obligation::AwaitPrack { tag, rseq } = obligation {
-                    call::helpers::cease_shown_ladder(call, tag, *rseq, Ceased::GiveUp);
+                    call::helpers::cease_shown_ladder(call, tag, *rseq, Ceased::Bound);
                 }
             }
         }
     }
 
-    /// The give-up fired: both ladder timers leave the ledger before the CORE
-    /// give-up rule decides what the silence means. A reliable provisional's
-    /// emission is spent with it; a 2xx's stays until the rules have read it
+    /// A 2xx's give-up fired: both ladder timers leave the ledger before the
+    /// CORE give-up rule decides what the silence means. The 2xx stays
+    /// retained until the rules have read it
     /// ([`settle_give_up`](Self::settle_give_up)) — it is also what tells the
     /// call's own answer from a re-INVITE's.
     pub fn give_up(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
         self.scrub_timers(call, fx, obligation);
-        if let Obligation::AwaitPrack { tag, rseq } = obligation {
-            call::helpers::cease_shown_ladder(call, tag, *rseq, Ceased::GiveUp);
-        }
     }
 
     /// After the rules have answered the give-up. An un-ACKed 2xx's silence
@@ -213,9 +206,7 @@ impl ActionExecutor<'_> {
     /// re-authors the teardown — its cause, its CDR, the order the legs go —
     /// never whether it happens, so a call the rules left Active is torn down
     /// here with the CORE verdict, and the retained 2xx leaves the body either
-    /// way (its RFC 6026 *Accepted* interval ended with the ladder). A reliable
-    /// provisional's give-up keeps the rules' own verdict: RFC 3262 §3 rejects
-    /// a transaction, and only the initial INVITE's is the call.
+    /// way (its RFC 6026 *Accepted* interval ended with the ladder).
     pub fn settle_give_up(
         &self,
         result: HandlerResult,

@@ -137,7 +137,6 @@ fn arb_termination_cause() -> impl Strategy<Value = TerminationCause> {
     let timeout = prop_oneof![
         Just(TimeoutKind::Setup),
         Just(TimeoutKind::NoAnswer),
-        Just(TimeoutKind::Prack),
         Just(TimeoutKind::Ack),
         Just(TimeoutKind::Keepalive),
         Just(TimeoutKind::Transaction),

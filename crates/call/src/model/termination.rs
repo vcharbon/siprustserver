@@ -15,8 +15,6 @@ pub enum TimeoutKind {
     /// A leg rang past its answer deadline (RFC 3261 §13.3.1.1: a UAS may
     /// be given a bounded time to answer), a re-INVITE included.
     NoAnswer,
-    /// A reliable provisional was never PRACKed (RFC 3262 §3).
-    Prack,
     /// A 2xx was never ACKed (RFC 3261 §13.3.1.4).
     Ack,
     /// A leg answered no liveness probe (RFC 3261 §11).

@@ -1,8 +1,8 @@
 //! What discharges a dialog-level retransmission ladder (ADR-0032 X4): the
 //! key the framework matches an inbound ACK or PRACK against. A ladder is
-//! armed under one of these, its rung and give-up timers carry it, and the
-//! engine retires all three when the discharging request arrives — a rule
-//! sees only the give-up.
+//! armed under one of these, its timers carry it — the rung, and a 2xx's
+//! give-up — and the engine retires them when the discharging request
+//! arrives; a rule sees only the 2xx's give-up.
 
 use serde::{Deserialize, Serialize};
 

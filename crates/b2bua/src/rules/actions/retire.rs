@@ -1,5 +1,5 @@
 //! Leaving a scope retires it ([`Scope`]): every ladder the scope owes ends —
-//! its rung and give-up leave the ledger and the live driver, and what it
+//! its timers leave the ledger and the live driver, and what it
 //! repeated stops riding the replicated body — and every timer guarding the
 //! scope is disarmed: a leg's timers with the leg, an attempt's as it ends, a
 //! service machine's as it deactivates, the call's as its termination
@@ -13,7 +13,7 @@ use crate::effects::HandlerEffects;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    /// Retire `scope`. Ladders are keyed by the books, so a ladder that
+    /// Retire `scope`. Ladders are keyed by the books, so a 2xx's ladder that
     /// already ceased still loses the give-up it left armed; at
     /// [`Scope::Call`] a ladder timer the books no longer name goes too.
     pub(super) fn retire(&self, call: &mut Call, fx: &mut HandlerEffects, scope: Scope<'_>) {

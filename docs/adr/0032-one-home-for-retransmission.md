@@ -153,7 +153,8 @@ is done; it never pushes `CancelTimer` for a ladder, and `ClearAnsweredInvite2xx
 
 The one thing that reaches a rule is the give-up, as
 `TimerType::RepeatGiveUp { obligation }` — a single event kind a service rule
-may override per obligation. Existing CDR marker strings are unchanged.
+may override per obligation. Only `AckOf2xx` arms one (X5). Existing CDR marker
+strings are unchanged.
 
 ## Decision X5 — the 2xx ladder is not configurable away, and neither is its give-up
 
@@ -179,9 +180,14 @@ releases the legs — but not whether the session ends. The framework settles th
 `AckOf2xx` give-up after the rules have run (`settle_give_up`): the retained 2xx
 leaves the replicated body whatever they decided (its RFC 6026 *Accepted*
 interval is over, so `reinvite-glare` stops answering 491), and a call still
-Active is torn down with the CORE verdict. The `AwaitPrack` give-up keeps its own
-RFC 3262 §3 policy — reject the pending re-INVITE, absorb, or tear down — and
-is left to the rules.
+Active is torn down with the CORE verdict.
+
+`AwaitPrack` arms no give-up. The provisional it repeats relays a responder's
+own, whose PRACK is relayed end to end, so RFC 3262 §3's "reject the original
+request with a 5xx" belongs to that responder: this stack's ladder stops at its
+64·T1 bound, and the responder's reject reaches the PRACKing party as the
+INVITE's final through the ordinary failure path. A second timer here would race
+the responder's for the same bound and answer the INVITE in its place.
 
 The one consumer of the old behaviour is `failover-harness`
 (`src/harness.rs:605-612`), whose token-for-token differential oracle could not
@@ -263,8 +269,7 @@ unacked_2xx_reap,unacked_reinvite_2xx_reap,prack_reliable_ladder}.rs`
 non-positive `ack_timeout_sec` still ends the session at Timer L, and a service
 rule that answers the give-up without terminating does not keep it up.
 `b2bua/tests/it/rules.rs` (answering the caller leaves a b-leg's pending re-INVITE
-2xx ladder alone; `settle_give_up` ends a session a service parked and leaves an
-`AwaitPrack` give-up to the rules), `b2bua-sdk/src/config.rs` (a non-positive
+2xx ladder alone; `settle_give_up` ends a session a service parked), `b2bua-sdk/src/config.rs` (a non-positive
 deadline is refused and falls back to 32 s), `call/tests/it/model_helpers.rs` (the 2xx ladder never runs
 past Timer L; `Scope::Provisionals` names no 2xx),
 `failover-harness/tests/it/{prack_takeover,prack_repeat_takeover}.rs`, and the new

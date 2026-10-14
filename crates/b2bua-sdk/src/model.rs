@@ -561,8 +561,7 @@ pub enum RuleAction {
     /// `outbound_cseq` on BOTH faces, transaction-scoped: answer its
     /// originator with the locally authored `status` final, and CANCEL the
     /// relayed request toward its target as [`Self::CancelPendingReinvite`]
-    /// does. Neither dialog moves (RFC 3261 §14.1) — RFC 3262 §3's give-up
-    /// "reject the original request with a 5xx" on an in-dialog INVITE.
+    /// does. Neither dialog moves (RFC 3261 §14.1).
     RejectPendingReinvite {
         leg_id: String,
         outbound_cseq: i64,

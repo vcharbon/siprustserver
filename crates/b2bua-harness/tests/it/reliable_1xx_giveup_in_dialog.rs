@@ -1,20 +1,16 @@
-//! An unacknowledged reliable provisional to a **re-INVITE** ends the
+//! An unacknowledged reliable provisional to a **re-INVITE** is rejected by
+//! the party that answered the re-INVITE, and the reject ends the
 //! renegotiation, not the call.
 //!
-//! RFC 3262 §3 bounds the ladder at 64·T1 and then answers the silence:
-//! "the UAS SHOULD reject the original request with a 5xx". On an initial
-//! INVITE the original request IS the call, and the reject is a teardown
-//! (`prack_reliable_ladder.rs::the_ladder_gives_up_at_64_t1`). On a re-INVITE
-//! it is one in-dialog transaction: RFC 3261 §14.1 leaves a failed re-INVITE's
-//! dialog in the state it held before, so the 5xx answers that transaction and
-//! the established call carries on. The relayed re-INVITE still pending toward
-//! the callee ends with it, transaction-scoped (§9.1) — the renegotiation is
-//! over on both faces, the dialogs are not.
+//! RFC 3262 §3 bounds the ladder at 64·T1, then "the UAS SHOULD reject the
+//! original request with a 5xx". The provisional this stack shows is a relay of
+//! the answering party's own, whose PRACK is owed end to end, so that party is
+//! the UAS whose reject answers the silence: this stack's ladder stops at its
+//! bound, and the 5xx it relays back is the re-INVITE's final. RFC 3261 §14.1
+//! leaves a failed re-INVITE's dialog in the state it held before, so the
+//! established call carries on.
 //!
-//! Both directions are pinned: the caller's renegotiation and the callee's. The
-//! rule resolves the provisional to whichever leg it was SHOWN on,
-//! so the face that owes the PRACK is the face the 5xx answers, and the CANCEL
-//! goes to the other one.
+//! Both directions are pinned: the caller's renegotiation and the callee's.
 
 use std::net::SocketAddr;
 
@@ -47,9 +43,9 @@ fn write_flow_report(report: &RunReport) {
 /// Bob's own sequence — far from anything this stack mints first.
 const BOB_RSEQ: u32 = 4711;
 
-/// RFC 3261 T1, and §3's 64·T1 give-up bound.
+/// RFC 3261 T1, and §3's 64·T1 bound.
 const T1_MS: u64 = 500;
-const GIVE_UP_MS: u64 = 64 * T1_MS;
+const BOUND_MS: u64 = 64 * T1_MS;
 
 /// The margin an advance takes past a deadline it must cross.
 const MARGIN_MS: u64 = 50;
@@ -72,22 +68,22 @@ fn requests_to(
 }
 
 /// Alice re-INVITEs offering `100rel`, bob answers reliably, and alice never
-/// PRACKs. At 64·T1 the RE-INVITE is rejected and the pending relay toward bob
-/// is CANCELled; the established call stands, and alice's own BYE is what ends
-/// it.
+/// PRACKs. Past 64·T1 bob rejects his re-INVITE transaction and the reject
+/// reaches alice; the established call stands, and alice's own BYE is what
+/// ends it.
 ///
 /// ```text
 ///   INVITE(100rel) → 180 → 200 → ACK
 ///   re-INVITE(100rel) → 183(100rel,RSeq 4711) ← 183(100rel,RSeq n)
 ///                       [alice never PRACKs — the ladder runs to 64·T1]
-///   64·T1: ← 504(re-INVITE) ; CANCEL → 487                [the renegotiation]
-///          BYE → 200(BYE)                                 [the call, alice's]
+///   bob's bound: ← 500(re-INVITE) ← 500 ; ACK               [the renegotiation]
+///                BYE → 200(BYE)                             [the call, alice's]
 /// ```
 #[tokio::test(start_paused = true)]
-async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_only() {
+async fn the_answering_party_rejects_the_callers_reinvite() {
     let h = Harness::with_transit_delay("b2bua-prack-giveup-in-dialog", 0);
     // Alice deliberately never PRACKs — that withholding IS the fixture, and it
-    // is the only way to reach the give-up bound. Every other bind stays gated.
+    // is the only way to reach the bound. Every other bind stays gated.
     h.waive(
         WaiverScope::rule(
             "unacked-reliable-provisional",
@@ -101,7 +97,7 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
     let bob = h.agent("bob", "127.0.0.1:5182").await;
     // The keepalive is not this test's subject, and the harness baseline probes
     // at 30 s — inside §3's 32 s bound. Push it past the window so the ladder
-    // and its give-up are the only clocks in play.
+    // is the only clock in play.
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5182)
         .tune(|c| c.keepalive_interval_sec = 600)
         .start(&h, "b2bua", "127.0.0.1:5183")
@@ -136,20 +132,16 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
     re_uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(REANSWER).await;
     reinv.expect(183).await;
 
-    // ── alice withholds her PRACK to the bound; drain the rungs so what she
-    // reads next is the give-up's own answer ──
-    h.advance(Duration::from_millis(GIVE_UP_MS - T1_MS + 2 * MARGIN_MS)).await;
+    // ── alice withholds her PRACK past the bound: nothing from this stack ──
+    h.advance(Duration::from_millis(BOUND_MS + 2 * MARGIN_MS)).await;
     alice.drain().await;
 
-    // §3's reject answers the RE-INVITE, and the pending relay toward bob ends
-    // with it — transaction-scoped (RFC 3261 §9.1), leg state untouched.
-    h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
-    reinv.expect(504).await;
-    // The provisional no one PRACKed end to end is acknowledged by this stack as
-    // it CANCELs the transaction (RFC 3262 §4).
+    // bob's §3 reject answers his re-INVITE transaction, relayed to alice; the
+    // PRACK this stack owes bob leaves at that final on the confirmed dialog
+    // (RFC 3262 §4).
+    re_uas.respond(500, "Server Internal Error").await;
     bob.receive("PRACK").await.respond(200, "OK").await;
-    bob.receive("CANCEL").await.respond(200, "OK").await;
-    re_uas.respond(487, "Request Terminated").await;
+    reinv.expect(500).await;
 
     // ── the call is untouched: it ends on alice's own BYE, not the timer's ──
     h.advance(Duration::from_millis(2 * MARGIN_MS)).await;
@@ -163,11 +155,14 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
     let entries = report.entries();
     assert!(
         requests_to(&entries, b2bua.addr, alice_addr, "BYE").is_empty(),
-        "RFC 3261 §14.1: a failed re-INVITE leaves the dialog as it was — the give-up rejects \
+        "RFC 3261 §14.1: a failed re-INVITE leaves the dialog as it was — the reject ends \
          the transaction, it does not BYE the caller",
     );
-    // Toward the callee, alice's own BYE relayed and nothing else: a give-up
-    // teardown would have put a second one on his wire at 64·T1.
+    assert!(
+        requests_to(&entries, b2bua.addr, bob_addr, "CANCEL").is_empty(),
+        "bob ends his own re-INVITE transaction: nothing CANCELs it",
+    );
+    // Toward the callee, alice's own BYE relayed and nothing else.
     let alice_bye = requests_to(&entries, alice_addr, b2bua.addr, "BYE");
     let relayed = requests_to(&entries, b2bua.addr, bob_addr, "BYE");
     assert_eq!(alice_bye.len(), 1, "alice ends the call once: {alice_bye:?}");
@@ -177,22 +172,22 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
 }
 
 /// The mirror of the cell above, with the callee originating: bob re-INVITEs
-/// offering `100rel`, alice answers reliably, and BOB never PRACKs. §3's reject
-/// answers HIS re-INVITE and the relay toward alice is CANCELled; the
-/// established call is again untouched.
+/// offering `100rel`, alice answers reliably, and BOB never PRACKs. Alice's §3
+/// reject answers HIS re-INVITE, relayed to him; the established call is again
+/// untouched.
 ///
 /// ```text
 ///   INVITE → 180 → 200 → ACK
 ///   re-INVITE(100rel) bob→ 183(100rel,RSeq n) →bob ; 183(100rel,RSeq 4711) ←alice
 ///                       [bob never PRACKs — the ladder runs to 64·T1]
-///   64·T1: 504(re-INVITE) →bob ; CANCEL →alice → 487        [the renegotiation]
-///          BYE bob→ → 200(BYE)                              [the call, bob's]
+///   alice's bound: 500(re-INVITE) →bob ; 500 ←alice ; ACK     [the renegotiation]
+///                  BYE bob→ → 200(BYE)                        [the call, bob's]
 /// ```
 #[tokio::test(start_paused = true)]
-async fn the_give_up_answers_the_face_that_owed_the_prack() {
+async fn the_answering_party_rejects_the_callees_reinvite() {
     let h = Harness::with_transit_delay("b2bua-prack-giveup-callee-reinvite", 0);
     // Bob deliberately never PRACKs — that withholding IS the fixture, and it is
-    // the only way to reach the give-up bound. Every other bind stays gated.
+    // the only way to reach the bound. Every other bind stays gated.
     h.waive(
         WaiverScope::rule(
             "unacked-reliable-provisional",
@@ -234,19 +229,15 @@ async fn the_give_up_answers_the_face_that_owed_the_prack() {
     re_uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(REANSWER).await;
     reinv.expect(183).await;
 
-    // ── bob withholds his PRACK to the bound; drain the rungs shown toward him ──
-    h.advance(Duration::from_millis(GIVE_UP_MS - T1_MS + 2 * MARGIN_MS)).await;
+    // ── bob withholds his PRACK past the bound: nothing from this stack ──
+    h.advance(Duration::from_millis(BOUND_MS + 2 * MARGIN_MS)).await;
     bob.drain().await;
 
-    // §3's reject answers the face that owed the PRACK — bob's — and the relay
-    // toward alice ends with it.
-    h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
-    reinv.expect(504).await;
-    // The provisional no one PRACKed end to end is acknowledged by this stack as
-    // it CANCELs the transaction (RFC 3262 §4).
+    // alice's §3 reject answers bob's re-INVITE transaction, relayed to him;
+    // the PRACK this stack owes alice leaves at that final (RFC 3262 §4).
+    re_uas.respond(500, "Server Internal Error").await;
     alice.receive("PRACK").await.respond(200, "OK").await;
-    alice.receive("CANCEL").await.respond(200, "OK").await;
-    re_uas.respond(487, "Request Terminated").await;
+    reinv.expect(500).await;
 
     // ── the call is untouched: it ends on bob's own BYE ──
     h.advance(Duration::from_millis(2 * MARGIN_MS)).await;
@@ -260,7 +251,11 @@ async fn the_give_up_answers_the_face_that_owed_the_prack() {
     let entries = report.entries();
     assert!(
         requests_to(&entries, b2bua.addr, bob_addr, "BYE").is_empty(),
-        "RFC 3261 §14.1: the give-up rejects the callee's transaction, it does not BYE him",
+        "RFC 3261 §14.1: the reject ends the callee's transaction, it does not BYE him",
+    );
+    assert!(
+        requests_to(&entries, b2bua.addr, alice_addr, "CANCEL").is_empty(),
+        "alice ends her own answer to the re-INVITE: nothing CANCELs it",
     );
     let bob_bye = requests_to(&entries, bob_addr, b2bua.addr, "BYE");
     let relayed = requests_to(&entries, b2bua.addr, alice_addr, "BYE");

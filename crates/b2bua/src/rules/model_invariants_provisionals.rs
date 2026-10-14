@@ -3,7 +3,7 @@
 //! shown provisional's ladder holds its timers exactly while it repeats.
 
 use call::helpers::find_leg;
-use call::{Ceased, Ladder, LegDisposition, LegState, Obligation, ResponderAck, TimerType};
+use call::{Ladder, LegDisposition, LegState, Obligation, ResponderAck, TimerType};
 
 use super::Turn;
 
@@ -59,10 +59,8 @@ pub(super) fn no_unshown_owed_prack(turn: &Turn<'_>) -> Result<(), String> {
     }
 }
 
-/// A shown provisional's ladder holds its timers exactly while it repeats
-/// (RFC 3262 §3): repeating, its rung and its give-up are armed; ceased at its
-/// last rung, its give-up alone stands; unsent, acknowledged or ceased with
-/// its final, no timer of its ladder is armed.
+/// A shown provisional's ladder holds its rung exactly while it repeats (RFC
+/// 3262 §3), and never a give-up: the §3 reject is its responder's.
 pub(super) fn shown_ladder_armed_while_repeating(turn: &Turn<'_>) -> Result<(), String> {
     let call = turn.after;
     let armed = |o: &Obligation, ty: TimerType| {
@@ -71,13 +69,7 @@ pub(super) fn shown_ladder_armed_while_repeating(turn: &Turn<'_>) -> Result<(), 
     for s in call.provisionals.iter().filter_map(|p| p.shown.as_ref()) {
         let o = Obligation::AwaitPrack { tag: s.tag.clone(), rseq: s.rseq };
         let (rung, give_up) = (armed(&o, TimerType::Rung), armed(&o, TimerType::RepeatGiveUp));
-        let held = match s.ladder {
-            Ladder::Repeating(_) => rung && give_up,
-            Ladder::Ceased(Ceased::GiveUp) => !rung,
-            Ladder::Unsent | Ladder::Acknowledged | Ladder::Ceased(Ceased::Final) => {
-                !rung && !give_up
-            }
-        };
+        let held = !give_up && rung == matches!(s.ladder, Ladder::Repeating(_));
         if !held {
             let state = match &s.ladder {
                 Ladder::Repeating(_) => "repeating".to_string(),

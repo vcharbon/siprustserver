@@ -2892,7 +2892,6 @@ mod answer_a_leg_new_dialog {
             (TimerKey::obligation(TimerType::Rung, reinvite_2xx.clone()), 500),
             (TimerKey::obligation(TimerType::RepeatGiveUp, reinvite_2xx.clone()), 32_000),
             (TimerKey::obligation(TimerType::Rung, provisional.clone()), 500),
-            (TimerKey::obligation(TimerType::RepeatGiveUp, provisional.clone()), 32_000),
         ] {
             call::helpers::arm_timer(&mut call, key, fire_at);
         }
@@ -2950,7 +2949,7 @@ mod answer_a_leg_new_dialog {
             .collect();
         assert_eq!(
             cancelled,
-            vec!["Rung on AwaitPrack:A1early:1", "RepeatGiveUp on AwaitPrack:A1early:1"],
+            vec!["Rung on AwaitPrack:A1early:1"],
             "only the provisional's timers leave the driver",
         );
         assert!(
@@ -4816,8 +4815,7 @@ fn relay_ack_pushes_no_ladder_plumbing() {
 
 // ADR-0032 X5 — a ladder give-up's settlement after the rules (`settle_give_up`,
 // the router's step after the rule chain on every `RepeatGiveUp`): an un-ACKed
-// 2xx ends the session whatever a service rule made of the give-up, and a
-// reliable provisional's give-up is left to the rules' own RFC 3262 §3 policy.
+// 2xx ends the session whatever a service rule made of the give-up.
 mod ladder_give_up {
     use super::*;
     use b2bua::effects::OutboundBody;
@@ -4870,14 +4868,6 @@ mod ladder_give_up {
             && matches!(
                 ctx.timer_key().and_then(TimerKey::obligation_of),
                 Some(Obligation::AckOf2xx { .. })
-            )
-    }
-
-    fn is_prack_give_up(ctx: &RuleContext) -> bool {
-        ctx.timer_type() == Some(&TimerType::RepeatGiveUp)
-            && matches!(
-                ctx.timer_key().and_then(TimerKey::obligation_of),
-                Some(Obligation::AwaitPrack { .. })
             )
     }
 
@@ -5022,52 +5012,6 @@ mod ladder_give_up {
             marker.as_deref(),
             Some("reinvite_ack_timeout"),
             "the CDR names the leg that owed the ACK"
-        );
-    }
-
-    #[test]
-    fn a_prack_give_up_keeps_the_rules_own_verdict() {
-        // An answered call whose caller-facing reliable provisional was never
-        // PRACKed: RFC 3262 §3's reject has nothing left to answer, and CORE
-        // absorbs. The settlement forces nothing — the §13.3.1.4 floor is the
-        // 2xx's alone.
-        let mut call = answered_call();
-        call.a_leg.dialogs.confirmed_mut().unwrap().answered_2xx = None;
-        call.provisionals.push(call::testkit::shown_provisional(
-            "b-1",
-            "bobtag",
-            1,
-            9,
-            A_TAG,
-            1,
-            call::Ladder::Repeating(
-                RetainedEmission::paced(
-                    b"SIP/2.0 183 Session Progress\r\n\r\n".to_vec(),
-                    ("127.0.0.1".into(), 5060),
-                    Class::ReliableProvisional,
-                    call::Repeated::response("INVITE", 183),
-                )
-                .0,
-            ),
-            call::ResponderAck::RelayedPrack,
-        ));
-        let obligation = Obligation::AwaitPrack { tag: A_TAG.into(), rseq: call::RSeq(1) };
-        let mut rules = vec![parking_rule(is_prack_give_up)];
-        rules.extend(default_rules());
-
-        let (ruled, settled) = give_up_turn(&call, &obligation, &rules);
-
-        assert_eq!(ruled.call.state, CallModelState::Active);
-        assert_eq!(
-            settled.call.state,
-            CallModelState::Active,
-            "a PRACK give-up is the rules' to answer"
-        );
-        assert!(byes_in(&settled).is_empty(), "no forced teardown");
-        assert_eq!(
-            settled.call.provisionals[0].shown.as_ref().map(|s| &s.ladder),
-            Some(&call::Ladder::Ceased(call::Ceased::GiveUp)),
-            "the provisional's emission is spent with its ladder"
         );
     }
 }
