@@ -42,10 +42,10 @@ async fn settle(est: &Established) {
 }
 
 /// The primary's writes are held from the copy while it relays the caller's
-/// re-INVITE; the callee holds its answer. The proxy reads the primary dead:
-/// the callee hangs up through the copy, which ends the call; the callee then
-/// refuses the round 487. Once the primary's writes are released, the copy's
-/// ending is the call's.
+/// re-INVITE; the callee answers it 100 and holds its final. The proxy reads
+/// the primary dead: the callee hangs up through the copy, which ends the
+/// call. The primary takes the copy's ending: it answers the caller's
+/// re-INVITE 487 and CANCELs it toward the callee, who refuses it 487.
 #[tokio::test(start_paused = true)]
 async fn the_copys_ending_ends_the_call_the_primary_holds_a_round_in() {
     let mut est = establish("ending-crossing-the-primarys-round").await;
@@ -53,6 +53,7 @@ async fn the_copys_ending_ends_the_call_the_primary_holds_a_round_in() {
     est.fh.stall(&p_ord, &b_ord);
     let mut round = est.dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
     let mut at_bob = est.bob.receive("INVITE").await;
+    at_bob.respond(100, "Trying").await;
     round.expect(100).await;
     est.fh.advance(Duration::from_millis(300)).await;
     est.proxy.set_health(&p_ord, WorkerHealth::Dead);
@@ -60,12 +61,38 @@ async fn the_copys_ending_ends_the_call_the_primary_holds_a_round_in() {
     let mut bye = est.bob_dialog.bye().await;
     est.alice.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    est.fh.advance(SETTLE).await;
-    est.proxy.set_health(&p_ord, WorkerHealth::Alive);
-    est.fh.advance(Duration::from_millis(100)).await;
-    at_bob.respond(487, "Request Terminated").await;
     round.expect(487).await;
+    est.bob.receive("CANCEL").await.respond(200, "OK").await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Alive);
+    at_bob.respond(487, "Request Terminated").await;
+    est.fh.advance(SETTLE).await;
     est.fh.resume(&p_ord, &b_ord);
+    est.fh.advance(SETTLE).await;
+    settle(&est).await;
+}
+
+/// The primary relays the caller's re-INVITE and the copy reads it; the
+/// callee holds its final. The proxy reads the primary dead: the callee hangs
+/// up through the copy, whose teardown answers the caller's re-INVITE 487 and
+/// CANCELs it. The primary takes that ending: the round already has its
+/// final, so the primary sends the caller none of its own.
+#[tokio::test(start_paused = true)]
+async fn the_copys_ending_of_a_round_it_read_draws_one_final() {
+    let mut est = establish("ending-of-a-round-the-copy-read").await;
+    let p_ord = est.primary_ord.clone();
+    let mut round = est.dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    let mut at_bob = est.bob.receive("INVITE").await;
+    round.expect(100).await;
+    est.fh.advance(SETTLE).await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Dead);
+    est.fh.advance(Duration::from_millis(200)).await;
+    let mut bye = est.bob_dialog.bye().await;
+    round.expect(487).await;
+    est.alice.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    est.fh.advance(SETTLE).await;
+    at_bob.respond(487, "Request Terminated").await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Alive);
     est.fh.advance(SETTLE).await;
     settle(&est).await;
 }
