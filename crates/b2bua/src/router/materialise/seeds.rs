@@ -28,7 +28,7 @@ use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{self, HeaderValue, SentBy, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipHeader, SipMessage, SipParser, SipRequest, SipStr};
-use sip_txn::TxnSeed;
+use sip_txn::{ServerTxnKey, TxnSeed};
 
 use crate::rules::relay::rebuild_a_leg_invite;
 
@@ -135,6 +135,14 @@ fn round_open(dialog: &Dialog, handle: &InviteTxnHandle) -> bool {
         .iter()
         .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq)
         .all(|p| !p.cancelled)
+}
+
+/// The INVITE server transaction the originator's request of the pending
+/// relayed re-INVITE `p` opened here: its top-Via branch and sent-by.
+pub(in crate::router) fn relayed_server_key(p: &PendingRequest) -> Option<ServerTxnKey> {
+    let via = pending_via(p)?;
+    let branch = via.branch().filter(|b| !b.is_empty())?.to_string();
+    Some(ServerTxnKey::invite(branch, SentBy::of(&via)))
 }
 
 /// The originator's top Via a pending relayed request was received with.

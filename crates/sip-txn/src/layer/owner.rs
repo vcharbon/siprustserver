@@ -447,8 +447,7 @@ impl Owner {
                 let _ = reply.send(());
             }
             Command::Seed { call_ref, seeds, reply } => {
-                let seeded = self.do_seed(&call_ref, seeds);
-                let _ = reply.send(seeded);
+                let _ = reply.send(self.do_seed(&call_ref, seeds));
             }
             Command::Reoffer { message, src, reply } => {
                 let disposition = self.do_reoffer(endpoint, *message, src).await;
@@ -459,6 +458,7 @@ impl Owner {
                 let _ = reply.send(());
             }
             Command::RelinquishCall { call_ref, reply } => self.relinquish_call(&call_ref, reply),
+            Command::RelinquishServer { key, reply } => self.relinquish_server(&key, reply),
             Command::ForgetUnanswered { key, call_id, from_tag } => {
                 self.forget_unanswered(&key, &call_id, &from_tag)
             }

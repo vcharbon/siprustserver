@@ -69,3 +69,23 @@ async fn a_relinquished_call_sends_nothing_and_its_callees_answer_arrives_unmatc
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 0, "and no orphan ACKs it");
     assert_eq!(stack.txn.relinquish_call(CALL_REF).await.unwrap(), 0, "idempotent");
 }
+
+/// `TransactionLayer::relinquish_server`: one INVITE server transaction goes
+/// with nothing sent — the release's answer of the call's unanswered INVITEs
+/// no longer reaches it — while the call's other transactions stay.
+#[tokio::test(start_paused = true)]
+async fn a_relinquished_server_invite_draws_no_final_and_the_rest_stays() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (client, server) = ("z9hG4bK-rs-c", "z9hG4bK-rs-s");
+    assert_eq!(stack.txn.seed(CALL_REF, seeds(client, server)).await.unwrap(), 2);
+
+    let key = sip_txn::ServerTxnKey::invite(server.to_string(), peer_sent_by());
+    assert!(stack.txn.relinquish_server(key.clone()).await.unwrap(), "it was there");
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1, "the client stays");
+    let answered = stack.txn.answer_unanswered_invites_of_call(CALL_REF, 481, "Gone").await;
+    assert_eq!(answered.unwrap(), 0, "no INVITE left to answer");
+    elapse_ms(100).await;
+    let finals = stack.drain_peer().iter().filter(|m| matches!(m, SipMessage::Response(_))).count();
+    assert_eq!(finals, 0, "no final");
+    assert!(!stack.txn.relinquish_server(key).await.unwrap(), "idempotent");
+}

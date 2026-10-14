@@ -57,9 +57,12 @@ pub struct PendingRequest {
     /// back to it echoes (RFC 3261 §8.2.6.1); `None` where it stated none.
     #[serde(default)]
     pub source_timestamp: Option<String>,
-    /// The node that relayed the request: its client transaction carries the
-    /// relay, and the final returns there (RFC 3261 §18.2.2). Empty where no
-    /// node is named.
+    /// The node that relayed the request, by its ordinal: its client
+    /// transaction carries the relay, and the final returns there (RFC 3261
+    /// §18.2.2). Empty where no node is named. A node restarted under the same
+    /// ordinal reads a relay its former incarnation made as its own; such a
+    /// relay holds no transaction here, so a takeover copy it keeps from
+    /// standing down still self-releases once its own transactions clear.
     #[serde(default)]
     pub relayed_by: String,
 }

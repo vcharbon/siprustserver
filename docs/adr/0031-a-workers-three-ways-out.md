@@ -359,10 +359,11 @@ whatever the live copy holds on another dialog, and the fold takes that dialog's
 the live copy's rounds on other dialogs staying. A step on the answer or ending axis folds
 whole whatever round the live copy holds: a call not yet answered holds no re-INVITE round,
 and only the node holding a round's client transaction sees its final, so an ending folded
-into the primary's record answers every
-re-INVITE the record relayed that the ending body does not hold, as this stack's own teardown
-does — a 487 to its originator, a CANCEL to its target (RFC 3261 §15.1.2) — and the call is
-discharged (`ending_crossing_a_round.rs`, the copy's ending). The fold and the
+into the primary's record gives every re-INVITE this node relayed and holds open one final for
+its originator: one the ending body holds CANCELled was answered by the other copy's
+teardown, and this node relinquishes its server transaction with nothing sent; any other
+it answers as its own teardown does — a 487 to its originator, a CANCEL to its target (RFC
+3261 §15.1.2) — and the call is discharged (`ending_crossing_a_round.rs`). The fold and the
 order the gates read (`lifecycle_behind`, the round ranked after the answer and the ending)
 read the same rule (`call/tests/it/lifecycle.rs`:
 `an_ending_is_progress_whatever_round_the_record_holds`,

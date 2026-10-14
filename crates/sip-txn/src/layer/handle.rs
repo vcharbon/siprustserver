@@ -130,6 +130,12 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
+    /// Delete the server transaction `key` with nothing sent; replies whether
+    /// it was there.
+    RelinquishServer {
+        key: ServerTxnKey,
+        reply: oneshot::Sender<bool>,
+    },
     /// Count the transactions (any role/state) still attributed to `call_ref`.
     /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
     /// serving a takeover event: when it reaches **0** the backup's served
@@ -335,6 +341,18 @@ impl TransactionLayer {
     pub async fn relinquish_call(&self, call_ref: &str) -> Result<usize, TransactionLayerClosed> {
         self.roundtrip(|reply| Command::RelinquishCall { call_ref: call_ref.to_string(), reply })
             .await
+    }
+
+    /// Relinquish the one server transaction `key` to the node that answered
+    /// its request: it is deleted with its timers, nothing sent and nothing
+    /// owed. A retransmission of its request arriving afterwards matches
+    /// nothing here and is handed up as a new arrival. Returns whether it was
+    /// there. Idempotent.
+    pub async fn relinquish_server(
+        &self,
+        key: ServerTxnKey,
+    ) -> Result<bool, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::RelinquishServer { key, reply }).await
     }
 
     /// How many transactions for `call_ref` are still resident in the map (any

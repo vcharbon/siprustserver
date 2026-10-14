@@ -51,6 +51,7 @@
 //! the peer's `bak:{self}`) is a genuine miss here.
 
 mod seeds;
+pub(in crate::router) use seeds::relayed_server_key;
 #[cfg(test)]
 mod tests;
 

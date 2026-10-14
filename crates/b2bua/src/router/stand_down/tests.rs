@@ -149,6 +149,8 @@ fn a_deleted_record_releases_only_a_copy_that_finishes_nothing_alone() {
     let d = round.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.inbound_pending_requests.iter_mut().for_each(|p| p.relayed_by = COPY.into());
     assert!(!finishes_nothing_alone(None, &round, COPY), "the round's final is the copy's");
+    let answered = in_round(2, Some(RoundStage::Answered));
+    assert!(finishes_nothing_alone(None, &answered, COPY), "its final is taken, its ACK routed");
 }
 
 /// A primary that refused the copy's round raised its sequence past the

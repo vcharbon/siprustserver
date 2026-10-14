@@ -1,16 +1,17 @@
 //! The other owner's ending of the call, folded into the record that ends it
 //! here (ADR-0014 §2, ADR-0020 X3): its terminal body is discharged through
-//! the one enforcement funnel, and every re-INVITE the record relayed that
-//! the ending body never read is answered first.
+//! the one enforcement funnel, and every re-INVITE this node relayed draws
+//! one final for its originator.
 
 use std::sync::Arc;
 
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleAction;
 use call::helpers::raise_sequences;
-use call::{Call, Direction};
+use call::{Call, Direction, PendingRequest};
 
 use super::super::interpret::process_result;
+use super::super::materialise::relayed_server_key;
 use super::super::RouterCtx;
 use crate::effects::HandlerResult;
 use crate::rules::{ActionExecutor, RuleCall, RuleContext};
@@ -25,11 +26,17 @@ use crate::rules::{ActionExecutor, RuleCall, RuleContext};
 /// delete all ride `process_result`, exactly as a primary-served BYE would. The
 /// discharged body keeps the higher of both views' dialog sequences.
 ///
-/// The record may hold a round the ending body never read: a re-INVITE it
-/// relayed whose client transaction it alone holds. The call's end answers it
-/// as this stack's own teardown does (RFC 3261 §15.1.2: a 487 to its
-/// originator, a CANCEL to its target), so no originator is left without a
-/// final.
+/// Every re-INVITE this node relayed and the record holds open draws one
+/// final for its originator (RFC 3261 §15.1.2), from the server transaction
+/// this node holds:
+/// - the ending body holds it CANCELled — the other copy's teardown answered
+///   it — so this node relinquishes its server transaction with nothing sent;
+///   its client transaction stays to absorb the target's final;
+/// - otherwise this node answers it as its own teardown does: a 487 to its
+///   originator, a CANCEL to its target.
+///
+/// A round the other copy relayed has its server transaction there, and its
+/// ending answers it.
 pub(super) async fn discharge_folded_terminal(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -37,8 +44,13 @@ pub(super) async fn discharge_folded_terminal(
     terminal: Call,
     now_ms: i64,
 ) {
+    let by = ctx.config.self_ordinal.as_str();
+    let (answered_there, ours) = own_open_rounds(before, &terminal, by);
+    for key in answered_there.iter().filter_map(relayed_server_key) {
+        let _ = ctx.txn.relinquish_server(key).await;
+    }
     let mut result = HandlerResult::new(raise_sequences(terminal, before));
-    answer_the_records_rounds(ctx, call_ref, before, &mut result, now_ms);
+    answer_the_records_rounds(ctx, call_ref, before, ours, &mut result, now_ms);
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
         before,
@@ -52,16 +64,17 @@ pub(super) async fn discharge_folded_terminal(
         .await;
 }
 
-/// The effects answering every re-INVITE relay `record` holds open that the
-/// ending body `result` carries does not: the record's own rounds.
+/// The effects answering the record's re-INVITE relays `rounds` — `(leg,
+/// outbound CSeq)` — 487 to the originator and CANCEL to the target.
 fn answer_the_records_rounds(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     record: &Call,
+    rounds: Vec<(String, i64)>,
     result: &mut HandlerResult,
     now_ms: i64,
 ) {
-    let actions: Vec<RuleAction> = open_rounds_alone(record, &result.call)
+    let actions: Vec<RuleAction> = rounds
         .into_iter()
         .map(|(leg_id, outbound_cseq)| RuleAction::RejectPendingReinvite {
             leg_id,
@@ -106,25 +119,36 @@ fn answer_the_records_rounds(
     result.effects.fire_and_forget.extend(answered.fire_and_forget);
 }
 
-/// `(leg, outbound CSeq)` of every re-INVITE relay `record` holds open, not
-/// CANCELled, that `ending`'s same dialog does not hold.
-fn open_rounds_alone(record: &Call, ending: &Call) -> Vec<(String, i64)> {
+/// The re-INVITE relays node `by` made that `record` holds open, not
+/// CANCELled: those `ending` holds CANCELled, and the `(leg, outbound CSeq)`
+/// of the others.
+fn own_open_rounds(
+    record: &Call,
+    ending: &Call,
+    by: &str,
+) -> (Vec<PendingRequest>, Vec<(String, i64)>) {
     let legs = || std::iter::once(&record.a_leg).chain(record.b_legs.iter());
-    let mut out = Vec::new();
+    let (mut answered_there, mut ours) = (Vec::new(), Vec::new());
     for leg in legs() {
         let theirs = call::helpers::find_leg(ending, &leg.leg_id);
         for d in leg.dialogs.iter() {
             let held = theirs.and_then(|l| l.dialogs.by_tags(&d.our_tag, &d.peer_tag));
-            for p in d.inbound_pending_requests.iter() {
-                let invite = p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled;
-                let read = held.is_some_and(|h| {
-                    h.inbound_pending_requests.iter().any(|t| t.outbound_cseq == p.outbound_cseq)
+            let open = d.inbound_pending_requests.iter().filter(|p| {
+                p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled && p.relayed_by == by
+            });
+            for p in open {
+                let cancelled_there = held.is_some_and(|h| {
+                    h.inbound_pending_requests
+                        .iter()
+                        .any(|t| t.outbound_cseq == p.outbound_cseq && t.cancelled)
                 });
-                if invite && !read {
-                    out.push((leg.leg_id.clone(), p.outbound_cseq));
+                if cancelled_there {
+                    answered_there.push(p.clone());
+                } else {
+                    ours.push((leg.leg_id.clone(), p.outbound_cseq));
                 }
             }
         }
     }
-    out
+    (answered_there, ours)
 }

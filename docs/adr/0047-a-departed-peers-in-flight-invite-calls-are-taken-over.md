@@ -139,7 +139,8 @@ stands down when:
 - the primary's body is the same call and **covers every write the copy made**: its
   `b` is at or past the copy's live `b`, the copy stands ahead of it on no re-INVITE
   round (`call::helpers::round_ahead`), and it holds every request whose final only the
-  copy sees: each round the copy holds unfinished on a transaction of its own, as the
+  copy sees: each round the copy relayed itself and holds open (an answered round's final
+  is taken and its ACK follows the route set), as the
   same transaction or behind a later one (`call::helpers::holds_rounds_of`, read from
   the transactions, never from a sequence a refusal raised), and each other request the
   copy relayed itself, as the same relay (`call::helpers::holds_relays_of`;

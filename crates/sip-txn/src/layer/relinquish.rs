@@ -26,3 +26,11 @@ impl Owner {
         let _ = reply.send(clients + servers);
     }
 }
+
+impl Owner {
+    /// Delete the one server transaction `key`, its timers with it, sending
+    /// nothing and owing nothing. Replies whether it was there.
+    pub(super) fn relinquish_server(&mut self, key: &ServerTxnKey, reply: oneshot::Sender<bool>) {
+        let _ = reply.send(self.delete_txn(TxnRef::Server(key.id())));
+    }
+}
