@@ -32,7 +32,7 @@ const host = CellHost.layerWith({
   tests: Effect.die("unused"),
   services: () => Layer.empty as never,
   auditLines: () => Effect.succeed([]),
-  charges: (_dir, findings) => findings,
+  charges: (_dir, findings) => Effect.succeed(findings),
   hitsOf: (outcome: Reclassifier.RunOutcome, records) => {
     asked.set(outcome.caseId, outcome.passed)
     return records.map((one) => ({

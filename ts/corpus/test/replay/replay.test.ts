@@ -90,7 +90,7 @@ const cellHost = CellHost.layerWith({
   tests: Effect.succeed({ program: "cargo", args: [] } as never),
   services: () => cellServices,
   auditLines: () => Effect.succeed([]),
-  charges: (_dir, findings) => findings.filter((finding) => finding.gating),
+  charges: (_dir, findings) => Effect.succeed(findings.filter((finding) => finding.gating)),
   hitsOf: () => []
 })
 

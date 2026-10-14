@@ -19,7 +19,7 @@
 import type { CellHits, Confrontation } from "@sip/contracts"
 import { LanePresets, RoutingCompiler, type TestInvocation } from "@sip/driver"
 import { Classifier, Reclassifier } from "@sip/pipeline"
-import type { Bundle } from "@sip/store"
+import { Bundle } from "@sip/store"
 import { ReplayCli } from "@sip/toolchain"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -103,7 +103,7 @@ export const layer = Layer.succeed(
     tests: Effect.fail(new CellHostUnready({ detail: UNSTATED })),
     services: () => refusing(UNSTATED),
     auditLines: () => Effect.succeed([]),
-    charges: (_cellDir, findings) => findings.filter((finding) => finding.gating),
+    charges: Bundle.everyCharge,
     hitsOf: () => []
   })
 )

@@ -48,14 +48,15 @@ export interface BundleReading {
 export type Charges = (
   cellDir: string,
   findings: ReadonlyArray<Bundle.RfcFinding>
-) => ReadonlyArray<Bundle.RfcFinding>
+) => Effect.Effect<ReadonlyArray<Bundle.RfcFinding>, never, FileSystem.FileSystem>
 
 export interface Options {
   readonly charges?: Charges
 }
 
 /** Every gating finding stands. */
-const everyCharge: Charges = (_cellDir, findings) => findings.filter((finding) => finding.gating)
+export const everyCharge: Charges = (_cellDir, findings) =>
+  Effect.succeed(findings.filter((finding) => finding.gating))
 
 interface Rollup {
   readonly cells?: ReadonlyArray<{
@@ -237,7 +238,7 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
     // audited cell that holds a charge to rule on.
     const charged = passed || skipped !== null || dir === undefined || !findings.some((f) => f.gating)
       ? []
-      : charges(dir, findings)
+      : yield* charges(dir, findings)
     // Only a failing cell can carry one: the body gate fails every other.
     const body = passed || skipped !== null || dir === undefined ? [] : yield* failingBodyOf(dir, document)
     cases.push({

@@ -162,10 +162,11 @@ describe("Bundle.read", () => {
   it("honours the caller's ruling on the charges, and hands it the cell and the whole audit", async () => {
     const asked: Array<[string, ReadonlyArray<string>]> = []
     const reading = await readOf(RUN, {
-      charges: (cellDir, findings) => {
-        asked.push([path.basename(cellDir), findings.map((finding) => finding.rule)])
-        return []
-      }
+      charges: (cellDir, findings) =>
+        Effect.sync(() => {
+          asked.push([path.basename(cellDir), findings.map((finding) => finding.rule)])
+          return []
+        })
     })
     const cells = byCase(reading)
     // Every charge inherited: the cell leads with where it died instead.

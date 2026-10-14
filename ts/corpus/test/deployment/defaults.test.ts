@@ -111,7 +111,9 @@ describe("the seams that state nothing by default", () => {
   it("read a cell as its gating charges standing and no rule hit of its own", async () => {
     const host = await seam(CellHost.Service)
     const findings = [{ gating: true }, { gating: false }] as unknown as Parameters<CellHost.Interface["charges"]>[1]
-    expect(host.charges("/cell", findings)).toEqual([findings[0]])
+    expect(await Effect.runPromise(host.charges("/cell", findings).pipe(Effect.provide(NodeServices.layer)))).toEqual([
+      findings[0]
+    ])
   })
 })
 
