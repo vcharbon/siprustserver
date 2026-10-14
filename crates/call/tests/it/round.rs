@@ -132,6 +132,37 @@ fn a_round_the_other_copy_never_saw_end_changes_nothing() {
     assert_eq!(merge_rounds(held.clone(), &round(RoundStage::Open)), held);
 }
 
+#[test]
+fn a_round_the_record_never_reached_comes_in_and_the_records_own_request_stays() {
+    let mut held = common::representative_call();
+    info_toward_the_caller(&mut held);
+    let mut incoming = round(RoundStage::Open);
+    let theirs = incoming.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    theirs.peer_cseq = caller(&held).peer_cseq.map(|c| c + 1);
+
+    let merged = merge_rounds(held.clone(), &incoming);
+
+    assert_eq!(callee(&merged).pending_invite_txn, callee(&incoming).pending_invite_txn);
+    assert!(callee(&merged).inbound_pending_requests.iter().any(|p| p.method == "INVITE"));
+    assert_eq!(callee(&merged).our_cseq, callee(&incoming).our_cseq, "the round's CSeq");
+    assert_eq!(caller(&merged).peer_cseq, caller(&incoming).peer_cseq, "the caller's re-INVITE");
+    assert_eq!(caller(&merged).our_cseq, caller(&held).our_cseq, "the record's own sequence");
+    assert!(
+        caller(&merged).inbound_pending_requests.iter().any(|p| p.method == "INFO"),
+        "the record's own INFO stays pending"
+    );
+}
+
+#[test]
+fn an_acked_round_the_record_never_reached_comes_in_with_its_ack() {
+    let held = common::representative_call();
+    let incoming = round(RoundStage::Acked);
+    let merged = merge_rounds(held, &incoming);
+    assert!(callee(&merged).ack_branch.is_some(), "a repeated 2xx is re-ACKed");
+    assert_eq!(callee(&merged).pending_invite_txn.as_ref().map(|t| t.branch.as_str()), Some(ROUND));
+    assert_eq!(callee(&merged).our_cseq, callee(&incoming).our_cseq, "the round's CSeq");
+}
+
 /// A session state that says which description went last, and after how
 /// many exchanges the leg's peer opened.
 fn session_on(call: &mut Call, leg: usize, origin: &str, opened: u32) {

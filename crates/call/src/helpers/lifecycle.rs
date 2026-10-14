@@ -6,7 +6,7 @@
 
 use crate::model::{Call, CallModelState};
 
-use super::round::round_further;
+use super::round::round_ahead;
 
 /// The call's position as `(an answer was recorded for the caller, active <
 /// terminating < terminated)`. Both components are monotone over one owner's
@@ -26,13 +26,14 @@ pub fn lifecycle_position(call: &Call) -> (u8, u8) {
 }
 
 /// Does `incoming` sit BEHIND `held` on either axis, or on a re-INVITE round
-/// ([`round_further`])? Then it is a branch off a view its owner left behind —
+/// ([`round_ahead`])? Then it is a branch off a view its owner left behind —
 /// a pre-answer teardown of a call the other owner answered, a live body for a
 /// call the other owner is ending, a round still unfinished that the other
-/// owner saw end — never a newer version of the same call.
+/// owner saw end, a round the other owner opened that it never reached —
+/// never a newer version of the same call.
 pub fn lifecycle_regresses(incoming: &Call, held: &Call) -> bool {
     let (i, h) = (lifecycle_position(incoming), lifecycle_position(held));
-    i.0 < h.0 || i.1 < h.1 || round_further(held, incoming)
+    i.0 < h.0 || i.1 < h.1 || round_ahead(held, incoming)
 }
 
 /// Does `incoming` stand behind `held` as a version of the call one owner
@@ -41,14 +42,14 @@ pub fn lifecycle_regresses(incoming: &Call, held: &Call) -> bool {
 /// behind an unanswered one, however far toward its end the unanswered one
 /// went, and an unanswered body is always behind an answered one. Between two
 /// bodies alike on the answer, the one less far toward its end is behind;
-/// between two alike on both, the one holding unfinished a re-INVITE round the
-/// other saw end ([`round_further`]). The replication gates read it both ways:
-/// a reverse flush behind the primary's live copy never folds as the call's
-/// newer version, and a forward flush behind the backup's Element is a branch
-/// the Element refuses (ADR-0031 D3).
+/// between two alike on both, the one lacking a re-INVITE round's progress the
+/// other holds — its end or its opening ([`round_ahead`]). The replication
+/// gates read it both ways: a reverse flush behind the primary's live copy
+/// never folds as the call's newer version, and a forward flush behind the
+/// backup's Element is a branch the Element refuses (ADR-0031 D3).
 pub fn lifecycle_behind(incoming: &Call, held: &Call) -> bool {
     let (i, h) = (lifecycle_position(incoming), lifecycle_position(held));
-    i < h || (i == h && round_further(held, incoming))
+    i < h || (i == h && round_ahead(held, incoming))
 }
 
 /// What `incoming` carries that `held` lacks.
@@ -57,13 +58,14 @@ pub enum Progress {
     /// A further step on the answer or the ending axis: the body is the call
     /// further along.
     Lifecycle,
-    /// Only the end of a re-INVITE round `held` holds unfinished
-    /// ([`super::round::merge_rounds`] takes it).
+    /// Only re-INVITE rounds: the end of one `held` holds unfinished, or the
+    /// opening of one it never reached ([`super::round::merge_rounds`] takes
+    /// them).
     Round,
 }
 
 /// The progress `incoming` carries over `held` — every step `held` made on
-/// BOTH axes and on every round they share, and at least one more — or `None`.
+/// BOTH axes and on every round, and at least one more — or `None`.
 /// Progress is a chain, not a rank: a terminal body whose caller was never
 /// answered does not outrank a live answered one.
 pub fn lifecycle_progress(incoming: &Call, held: &Call) -> Option<Progress> {
@@ -73,7 +75,7 @@ pub fn lifecycle_progress(incoming: &Call, held: &Call) -> Option<Progress> {
     } else if i != h {
         Some(Progress::Lifecycle)
     } else {
-        round_further(incoming, held).then_some(Progress::Round)
+        round_ahead(incoming, held).then_some(Progress::Round)
     }
 }
 

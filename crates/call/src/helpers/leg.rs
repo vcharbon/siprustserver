@@ -147,6 +147,11 @@ pub fn find_leg<'a>(call: &'a Call, leg_id: &str) -> Option<&'a Leg> {
     }
 }
 
+/// Every leg of the call, the a-leg first.
+pub(crate) fn every_leg(call: &Call) -> impl Iterator<Item = &Leg> {
+    std::iter::once(&call.a_leg).chain(call.b_legs.iter())
+}
+
 /// Find a b-leg by callId.
 pub fn find_b_leg_by_call_id<'a>(call: &'a Call, call_id: &str) -> Option<&'a Leg> {
     call.b_legs.iter().find(|l| l.call_id == call_id)

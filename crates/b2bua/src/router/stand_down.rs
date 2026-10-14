@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use call::helpers::{holds_relays_of, round_ahead};
 use call::Call;
 
 use super::release::{release_call, ReleaseKind};
@@ -81,19 +82,24 @@ pub(super) async fn stand_down_turn(
 }
 
 /// Whether the primary's body `primary` covers every write the takeover
-/// `copy` made: the same call (one incarnation), and the primary's `b` at or
-/// past the copy's. One `b` increment is one write the copy made as the
-/// call's acting backup (`CallState::update` on this node); a fold of the
-/// primary's body is not one.
-/// A primary reaches a `b` only by reading the copy's write that carries it:
-/// applied or folded into its record, or refused — a body behind its record
-/// (`call::helpers::lifecycle_behind`: an unanswered ending of a call the
-/// primary answered), or one with no lifecycle progress its record lacks —
-/// and its counter adopted (ADR-0031 D3). Either way the primary's record
-/// decides everything the copy did.
+/// `copy` made: the same call (one incarnation), the primary's `b` at or past
+/// the copy's, every request the copy relays and awaits a final for in the
+/// primary's record — no re-INVITE round on which the copy stands ahead
+/// (`call::helpers::round_ahead`: one it opened that the primary never
+/// reached, or one further along than the primary holds it), and every other
+/// relay held there too (`call::helpers::holds_relays_of`). One `b` increment
+/// is one write the copy made as the call's acting backup (`CallState::update`
+/// on this node); a fold of the primary's body is not one. A primary reaches
+/// a `b` by reading the copy's write that carries it, applied or folded into
+/// its record, or refused and its counter adopted (ADR-0031 D3). A request
+/// refused there is in no record but the copy's, and its final follows the
+/// copy's Via, so the copy plays on with it.
 pub(super) fn covers(primary: &Call, copy: &Call) -> bool {
     let bak_gen = |c: &Call| c.topology.as_ref().map_or(0, |t| t.bak_gen);
-    primary.incarnation() == copy.incarnation() && bak_gen(primary) >= bak_gen(copy)
+    primary.incarnation() == copy.incarnation()
+        && bak_gen(primary) >= bak_gen(copy)
+        && !round_ahead(copy, primary)
+        && holds_relays_of(primary, copy)
 }
 
 #[cfg(test)]

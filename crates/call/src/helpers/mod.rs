@@ -14,7 +14,9 @@
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
 //!     of one call compare on them (replication reconciliation)
 //!   - [`round`] — the re-INVITE rounds two copies share, and how one copy's
-//!     view of a round's end lands in the other
+//!     view of a round's end or opening lands in the other
+//!   - [`sequence`] — the in-dialog requests two copies of one call carry:
+//!     the sequences they reached, the relays they hold
 //!   - [`dialog`] — CSeq, ACK branch, pending and retired relays, SDP cache
 //!   - [`peering`] — caller-facing fronts, active peer pair, relay-peer
 //!     resolution
@@ -47,6 +49,7 @@ pub mod record;
 pub mod reliable;
 pub mod resolved;
 pub mod round;
+pub mod sequence;
 pub mod services;
 pub mod termination;
 pub mod timer;
@@ -101,7 +104,8 @@ pub use reliable::{
     shown_as, shown_emission, start_shown_ladder, starts_shown_sequence, Arrival,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
-pub use round::{merge_rounds, round_further};
+pub use round::{merge_rounds, round_ahead, round_further, round_opened};
+pub use sequence::{holds_relays_of, raise_sequences, raise_settled_sequences, sequence_behind};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,
     refer_processed_locally, relay_first_18x_first_relayed, relay_first_18x_messages,

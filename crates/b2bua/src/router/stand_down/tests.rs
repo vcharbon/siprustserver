@@ -1,11 +1,13 @@
 //! The stand-down rule, as a pure decision over the two bodies and as the
 //! turn a wired core runs on the notice: a takeover copy stands down on a
-//! write of its primary that covers every write the copy made, and on its
-//! primary's delete of the call; every other copy plays on.
+//! write of its primary that covers every write the copy made and holds every
+//! re-INVITE round the copy holds, as far along, and on its primary's delete
+//! of the call; every other copy plays on.
 
 use std::sync::Arc;
 
-use call::{Call, CallBodyCodec, MsgpackCodec};
+use call::testkit::{stage_leg, stage_reinvite_round, RoundStage};
+use call::{Call, CallBodyCodec, Direction, LegState, MsgpackCodec, PendingRequest};
 
 use super::{covers, offer};
 use crate::config::B2buaConfig;
@@ -55,6 +57,66 @@ fn a_write_of_another_call_on_the_ref_never_covers_a_copy() {
     let other = at_b(reborn(&copy), 5);
     assert_ne!(other.incarnation(), copy.incarnation());
     assert!(!covers(&other, &copy));
+}
+
+/// The answered call at backup counter `b`, a re-INVITE round on the caller's
+/// dialog standing at `stage`, or none.
+fn in_round(b: i64, stage: Option<RoundStage>) -> Call {
+    let mut call = at_b(ringing("round"), b);
+    call.a_leg.invite_final_sent = Some(200);
+    stage_leg(&mut call.a_leg, LegState::Confirmed);
+    if let Some(stage) = stage {
+        stage_reinvite_round(&mut call.a_leg, "z9hG4bK-round", stage);
+    }
+    call
+}
+
+#[test]
+fn a_primary_that_never_reached_the_copys_round_does_not_cover_it() {
+    for stage in [RoundStage::Open, RoundStage::Answered, RoundStage::Acked] {
+        let copy = in_round(2, Some(stage));
+        let primary = in_round(2, None);
+        assert!(!covers(&primary, &copy), "{stage:?}: the round is the copy's alone");
+    }
+}
+
+#[test]
+fn a_primary_holding_the_copys_round_at_its_stage_or_past_covers_it() {
+    let copy = in_round(2, Some(RoundStage::Open));
+    assert!(covers(&in_round(2, Some(RoundStage::Open)), &copy), "the primary holds it");
+    assert!(covers(&in_round(2, Some(RoundStage::Answered)), &copy), "the primary saw it on");
+    assert!(covers(&in_round(2, Some(RoundStage::Refused)), &copy), "the primary saw it end");
+}
+
+#[test]
+fn a_primary_lacking_a_request_the_copy_relays_does_not_cover_it() {
+    let primary = in_round(2, None);
+    let mut copy = primary.clone();
+    let d = copy.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    d.our_cseq += 1;
+    d.inbound_pending_requests.push(PendingRequest {
+        method: "INFO".into(),
+        outbound_cseq: d.our_cseq,
+        inbound_cseq: 9,
+        source_vias: Vec::new(),
+        source_call_id: String::new(),
+        source_from: String::new(),
+        source_to: String::new(),
+        direction: Direction::FromB,
+        cancelled: false,
+        offered_100rel: false,
+        offered: false,
+        source_timestamp: None,
+    });
+    assert!(!covers(&primary, &copy), "the INFO's final follows the copy's Via");
+    assert!(covers(&copy, &copy), "a primary holding the relay covers it");
+}
+
+#[test]
+fn a_primary_behind_the_copy_on_its_round_does_not_cover_it() {
+    let copy = in_round(2, Some(RoundStage::Answered));
+    let primary = in_round(2, Some(RoundStage::Open));
+    assert!(!covers(&primary, &copy), "only the copy took the round's 2xx");
 }
 
 /// `call`, stored as `w1`'s Element of `w0`'s call and taken over: the live

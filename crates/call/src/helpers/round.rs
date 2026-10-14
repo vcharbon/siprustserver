@@ -8,12 +8,12 @@
 //! originator's ACK awaited) → ACKed, or ends on a non-2xx, and never goes
 //! back. Its final reaches the node holding the client transaction, so a
 //! round's end another copy saw is progress a record holding the round
-//! unfinished cannot make itself. The rules read the rounds that record holds;
-//! a round only the other copy holds is no progress under them.
+//! unfinished cannot make itself; so is a round's opening the record never
+//! reached, whatever stage the other copy holds it at.
 
-use crate::model::{Call, Dialog, DialogId, Leg, Obligation, PendingRequest, TimerEntry};
+use crate::model::{Call, Dialog, DialogId, Obligation, PendingRequest, TimerEntry};
 
-use super::leg::find_leg;
+use super::leg::{every_leg, find_leg};
 use super::lens::update_leg;
 use super::peering::relay_peer_dialog;
 
@@ -28,8 +28,25 @@ pub fn round_further(incoming: &Call, held: &Call) -> bool {
     !rounds_ended(incoming, held).is_empty()
 }
 
-/// `held` with every round `incoming` stands further along taken from
-/// `incoming`, and nothing else: per such dialog, its INVITE relays, its
+/// Does `incoming` hold a round `held` never reached, on a dialog both hold?
+/// `incoming`'s dialog holds an INVITE client transaction that `held`'s same
+/// dialog does not hold, and `incoming`'s own sequence there stands past
+/// `held`'s: `held` sent nothing at the round's CSeq. The round is open,
+/// answered or ACKed in `incoming`; a round refused leaves no transaction and
+/// only its sequence behind.
+pub fn round_opened(incoming: &Call, held: &Call) -> bool {
+    !rounds_opened(incoming, held).is_empty()
+}
+
+/// Does `incoming` carry a round's progress `held` lacks: the end of a round
+/// `held` holds unfinished ([`round_further`]) or the opening of one it never
+/// reached ([`round_opened`])?
+pub fn round_ahead(incoming: &Call, held: &Call) -> bool {
+    round_further(incoming, held) || round_opened(incoming, held)
+}
+
+/// `held` with every round `incoming` stands ahead on ([`round_ahead`]) taken
+/// from `incoming`, and nothing else: per such dialog, its INVITE relays, its
 /// INVITE client transaction and the ACK state of that transaction's 2xx, the
 /// offer it owes an answer to, its own sequence at the higher of the two; on
 /// the originator's dialog the 2xx it awaits an ACK for and the higher remote
@@ -38,24 +55,38 @@ pub fn round_further(incoming: &Call, held: &Call) -> bool {
 /// them, so no exchange count is lowered (RFC 3264 §8). Every other fact is
 /// `held`'s, its own requests on either dialog included.
 pub fn merge_rounds(mut held: Call, incoming: &Call) -> Call {
-    for ended in rounds_ended(incoming, &held) {
-        held = merge_round(held, incoming, &ended);
+    let mut ahead = rounds_ended(incoming, &held);
+    for opened in rounds_opened(incoming, &held) {
+        if !ahead.iter().any(|r| r.leg_id == opened.leg_id && r.dialog == opened.dialog) {
+            ahead.push(opened);
+        }
+    }
+    for round in ahead {
+        held = merge_round(held, incoming, &round);
     }
     held
 }
 
-/// Where a round `held` holds unfinished ended in `incoming`.
-struct RoundEnd {
+/// A dialog on which `incoming` stands ahead of `held` on a round.
+struct RoundAhead {
     leg_id: String,
     dialog: DialogId,
-    /// The CSeq the round's originator sent its INVITE with.
-    inbound_cseq: i64,
+    /// The CSeq the round's originator sent its INVITE with, while the round
+    /// is unfinished; `None` for a round `incoming` holds ACKed, whose 2xx
+    /// awaits nothing.
+    inbound_cseq: Option<i64>,
 }
 
 /// What `held` holds of a dialog's round, while unfinished.
 enum Unfinished<'a> {
     Open { outbound_cseq: i64, inbound_cseq: i64 },
     Answered { branch: &'a str, inbound_cseq: i64, our_cseq: i64 },
+}
+
+/// Whether `dialog` holds a re-INVITE round unfinished: open, or answered
+/// with its ACK awaited.
+pub(crate) fn holds_round_unfinished(dialog: &Dialog) -> bool {
+    unfinished(dialog).is_some()
 }
 
 fn unfinished(dialog: &Dialog) -> Option<Unfinished<'_>> {
@@ -99,9 +130,19 @@ fn ended(incoming: &Dialog, round: &Unfinished<'_>) -> bool {
     }
 }
 
-fn rounds_ended(incoming: &Call, held: &Call) -> Vec<RoundEnd> {
+impl Unfinished<'_> {
+    fn inbound_cseq(&self) -> i64 {
+        match self {
+            Unfinished::Open { inbound_cseq, .. } | Unfinished::Answered { inbound_cseq, .. } => {
+                *inbound_cseq
+            }
+        }
+    }
+}
+
+fn rounds_ended(incoming: &Call, held: &Call) -> Vec<RoundAhead> {
     let mut out = Vec::new();
-    for held_leg in legs(held) {
+    for held_leg in every_leg(held) {
         let Some(incoming_leg) = find_leg(incoming, &held_leg.leg_id) else { continue };
         for d in held_leg.dialogs.iter() {
             let Some(round) = unfinished(d) else { continue };
@@ -109,14 +150,10 @@ fn rounds_ended(incoming: &Call, held: &Call) -> Vec<RoundEnd> {
                 continue;
             };
             if ended(theirs, &round) {
-                let inbound_cseq = match round {
-                    Unfinished::Open { inbound_cseq, .. }
-                    | Unfinished::Answered { inbound_cseq, .. } => inbound_cseq,
-                };
-                out.push(RoundEnd {
+                out.push(RoundAhead {
                     leg_id: held_leg.leg_id.clone(),
                     dialog: d.id(),
-                    inbound_cseq,
+                    inbound_cseq: Some(round.inbound_cseq()),
                 });
             }
         }
@@ -124,15 +161,33 @@ fn rounds_ended(incoming: &Call, held: &Call) -> Vec<RoundEnd> {
     out
 }
 
-fn legs(call: &Call) -> impl Iterator<Item = &Leg> {
-    std::iter::once(&call.a_leg).chain(call.b_legs.iter())
+fn rounds_opened(incoming: &Call, held: &Call) -> Vec<RoundAhead> {
+    let mut out = Vec::new();
+    for incoming_leg in every_leg(incoming) {
+        let Some(held_leg) = find_leg(held, &incoming_leg.leg_id) else { continue };
+        for d in incoming_leg.dialogs.iter() {
+            let Some(txn) = d.pending_invite_txn.as_ref() else { continue };
+            let Some(ours) = held_leg.dialogs.by_tags(&d.our_tag, &d.peer_tag) else {
+                continue;
+            };
+            let holds_it = ours.pending_invite_txn.as_ref().is_some_and(|t| t.branch == txn.branch);
+            if !holds_it && d.our_cseq > ours.our_cseq {
+                out.push(RoundAhead {
+                    leg_id: incoming_leg.leg_id.clone(),
+                    dialog: d.id(),
+                    inbound_cseq: unfinished(d).map(|r| r.inbound_cseq()),
+                });
+            }
+        }
+    }
+    out
 }
 
 fn dialog_of<'a>(call: &'a Call, leg_id: &str, id: &DialogId) -> Option<&'a Dialog> {
     find_leg(call, leg_id)?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
 }
 
-fn merge_round(held: Call, incoming: &Call, round: &RoundEnd) -> Call {
+fn merge_round(held: Call, incoming: &Call, round: &RoundAhead) -> Call {
     let Some(theirs) = dialog_of(incoming, &round.leg_id, &round.dialog).cloned() else {
         return held;
     };
@@ -156,7 +211,10 @@ fn merge_round(held: Call, incoming: &Call, round: &RoundEnd) -> Call {
         d.peer_cseq = d.peer_cseq.max(t.peer_cseq);
     });
     held = take_sessions(held, incoming, &[&round.leg_id, &o_leg]);
-    take_ladders(held, incoming, &o_leg, round.inbound_cseq)
+    match round.inbound_cseq {
+        Some(from_cseq) => take_ladders(held, incoming, &o_leg, from_cseq),
+        None => held,
+    }
 }
 
 /// The INVITE round facts of the target dialog, from `theirs`; its own

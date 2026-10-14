@@ -137,16 +137,21 @@ queued for the copy is served first (ADR-0010 X2). Under the per-call lock the c
 stands down when:
 
 - the primary's body is the same call and **covers every write the copy made**: its
-  `b` is at or past the copy's live `b`. One increment of a copy's `b` is one write
-  this node made as the call's acting backup; a quiet turn, a fold or an adopted
-  version moves nothing. A primary reaches a `b` only by reading the copy's
-  write that carries it — applied or folded into its record, or refused (a body
-  behind its record, or one with no lifecycle progress its record lacks) and its
-  counter adopted (ADR-0031 D3) — so its record decides everything the copy did, and
-  the copy holds nothing to keep. A copy
-  that wrote nothing is covered by any write of its primary. The returning node's
-  recovery pulls the copy's writes before it reclaims, so its reclaim write covers
-  them; or
+  `b` is at or past the copy's live `b`, and it holds every request the copy relays and
+  awaits a final for: every re-INVITE round at the copy's stage or past it
+  (`call::helpers::round_ahead`), every other relay as it is
+  (`call::helpers::holds_relays_of`). One increment
+  of a copy's `b` is one write this node made as the call's acting backup; a quiet
+  turn, a fold or an adopted version moves nothing. A primary reaches a `b` only by
+  reading the copy's write that carries it — applied or folded into its record, or
+  refused (a body behind its record, or one with no lifecycle progress its record
+  lacks) and its counter adopted (ADR-0031 D3). A refused request is in no record but
+  the copy's, and its final follows the copy's Via (RFC 3261 §18.2.2), so the copy
+  stands down only once the primary's body carries it, or saw a round end
+  (`round_the_primary_never_read.rs`, `relay_the_primary_never_read.rs`;
+  `router/stand_down/tests.rs`). A copy that wrote
+  nothing is covered by any write of its primary. The returning node's recovery pulls
+  the copy's writes before it reclaims, so its reclaim write covers them; or
 - the primary deleted the call (the same incarnation, or one the delete does not name).
 
 The rule is read at the turn, not at the apply: the copy may have written again in
@@ -166,12 +171,14 @@ two bodies of one call the same way (`call::helpers::lifecycle_behind`): the ans
 ranks first, so an answered body is never behind an unanswered one however far toward
 its end the unanswered one went, and between bodies alike on the answer the one less
 far toward its end is behind; between bodies alike on both, the one holding unfinished a
-re-INVITE round the other saw end (ADR-0031, "a re-INVITE round is a third chain").
+re-INVITE round the other saw end, or lacking one the other opened (ADR-0031, "a
+re-INVITE round is a third chain").
 
 - **Reverse.** A backup's `p` may be one it adopted without the body that carried it,
   so the live-map fold of a reverse flush takes the vector's verdict (`p` unchanged,
-  `b` advanced) only for a body not behind the primary's; lifecycle progress folds as
-  before (`router/reclaim/tests.rs`).
+  `b` advanced) only for a body neither behind the primary's nor below it on a dialog
+  sequence (ADR-0031, "the record never lowers a dialog sequence"); lifecycle progress
+  folds as before (`router/reclaim/tests.rs`, `adopted_counter_reverse_fold.rs`).
 - **Forward.** While the vector is split, a forward `Put` behind the Element is a
   branch and is refused (ADR-0031 D3); an answered body is not behind an Element
   holding a copy's ending of a call it never saw answered, so the authority's answer

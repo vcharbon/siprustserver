@@ -479,7 +479,9 @@ axis — has the other owner written since I branched — and strict greater on
 the writer's axis — is this a newer write of yours; that is the Reverse rule
 as it stands (`p_in == p_cur && b_in > b_cur`). It never orders two owners'
 progress; the body does (the lifecycle chain, the answer latch, ADR-0031's
-amendment).
+amendment). An adopted `p` names a version without its body, so the Reverse
+rule folds whole only a body that carries the dialog sequences the primary
+reached (ADR-0031, "the record never lowers a dialog sequence").
 
 **One increment means** one turn on that owner changed the replicated call
 state, and the flush carrying that body is on the wire. **It does not mean** a
@@ -496,9 +498,10 @@ views on each axis, and its store keeps the version it last flushed. What the
 live copy holds depends on the path. The reverse reconcile of a flush the
 vector took holds the other owner's body at the version it published. A
 refused flush folded whole holds the other owner's content at `(max p, max b)`,
-a vector neither owner published. A round's end folded alone (ADR-0031, "a
-round's end folds alone") holds this node's own content with the round merged
-in, at that same vector. On every path the other owner's next write orders
+a vector neither owner published. A round's end or opening folded alone
+(ADR-0031, "a round's end folds alone") holds this node's own content with the
+round merged in, at that same vector. At the primary every path holds the
+higher of both views' dialog sequences. On every path the other owner's next write orders
 against what it published: a fold that bumped would read that write as made on
 a version this node has moved past and refuse it. Timers a fold takes are
 re-anchored into this node's clock and a stale keepalive guard is dropped,

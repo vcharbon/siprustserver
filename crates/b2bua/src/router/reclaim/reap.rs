@@ -1,0 +1,47 @@
+//! The periodic replica-store reap (ADR-0020 X3): expired bodies evicted, the
+//! limiter holds of a deferred terminal no primary came back for released,
+//! and no CDR written.
+
+use std::sync::Arc;
+
+use call::Call;
+
+use super::super::RouterCtx;
+
+/// Periodic replica-store maintenance. **No CDR is ever written here**
+/// (ADR-0020 X3). A deferred terminal whose primary never came back to reclaim
+/// it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be left
+/// to pin its limiter slot or leak its replica body. `reap_replica` evicts every
+/// expired body and hands back the deferred terminals among them, whichever
+/// partition holds the body (a replica its primary flushed, or a takeover copy's
+/// own terminal); each one is released on the limiter by its key — the SAME
+/// `release(key)` the discharge funnel emits — and counted as a lost-CDR cleanup:
+/// limiter freed, memory freed, **CDR lost**. An expired body is returned by one
+/// pass only, and no read evicts it before this pass sees it.
+///
+/// A primary that reboots *inside* `reboot_budget` reclaims and discharges first;
+/// when its propagated delete never reaches this backup, this pass releases the
+/// same call a second time, which the limiter applies as a no-op (the release is
+/// keyed by the call). Spawned as a paced task by `b2bua_core`.
+pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
+    for terminal in ctx.state.reap_replica(now_ms).await {
+        // No per-call lock: the body is already evicted and this node does not
+        // serve the call live (a takeover copy self-released at its terminal), so
+        // there is no writer to serialize against — and taking the lock would leak
+        // a `locks` map entry (only `release_call`/`discard_orphan` clear it). The
+        // decoded snapshot is all the limiter release needs.
+        release_orphaned_limiter_holds(ctx, &terminal);
+        ctx.metrics.bump_repl_terminal_lost();
+    }
+}
+
+/// Release the cluster-wide limiter set a never-reclaimed deferred terminal
+/// still owns (`CallLimiterState::owed_release`: a call that sent no admit
+/// owes nothing), WITHOUT writing a CDR or propagating a delete. No turn
+/// serves the body, so the release goes to the worker directly. The backup is
+/// the only node that can free this slot once its primary is dead for good.
+fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
+    if let Some(key) = call.limiter.owed_release() {
+        ctx.limiter.release(key);
+    }
+}

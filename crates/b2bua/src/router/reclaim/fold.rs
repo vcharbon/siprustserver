@@ -1,15 +1,16 @@
 //! How a fold lands (ADR-0014, ADR-0031 D3): the other owner's body, or only
-//! the ends of the re-INVITE rounds it carries, becomes the live copy at the
-//! `max` of both views' counters, with no write of this node's own, and the
-//! live timer service follows the timers it took.
+//! the re-INVITE rounds it stands ahead on, becomes the live copy at the
+//! `max` of both views' counters and dialog sequences, with no write of this
+//! node's own, and the live timer service follows the timers it took.
 
 use std::sync::Arc;
 
-use call::helpers::{merge_rounds, Progress};
+use call::helpers::{merge_rounds, raise_sequences, Progress};
 use call::Call;
 
 use super::super::restore_hygiene::sanitize_restored_timers;
 use super::super::RouterCtx;
+use super::FlushDirection;
 
 /// How much of the other owner's body a fold takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +18,8 @@ pub(in crate::router) enum Fold {
     /// The whole body: the vector says it is newer, or it is the call further
     /// along on the answer or the ending axis.
     Whole,
-    /// Only the ends of the re-INVITE rounds this node holds unfinished
+    /// Only the re-INVITE rounds the body stands ahead on: the end of one this
+    /// node holds unfinished, the opening of one it never reached
     /// ([`call::helpers::merge_rounds`]); this node's own writes stay.
     Rounds,
 }
@@ -38,10 +40,15 @@ impl Fold {
 /// node's own axis ([`CallState::update_quiet`](crate::store::CallState::update_quiet))
 /// and without a flush; this node's store keeps the version it last flushed.
 /// A whole fold holds the other owner's content; a rounds fold holds this
-/// node's content with the rounds' ends merged in. The live timer service
-/// follows the timers the fold took.
+/// node's content with the rounds merged in. Folded into the call's record
+/// (`direction`), either holds on every dialog the higher of the two views'
+/// sequences ([`call::helpers::raise_sequences`]): the record's next request
+/// continues from every one the other owner sent (RFC 3261 §12.2.1.1). The
+/// live timer service follows the timers the fold took.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::router) async fn fold_quietly(
     ctx: &Arc<RouterCtx>,
+    direction: FlushDirection,
     call_ref: &str,
     live: &Call,
     replica: Call,
@@ -49,10 +56,13 @@ pub(in crate::router) async fn fold_quietly(
     skew_offset_ms: i64,
     now_ms: i64,
 ) {
+    let record = direction.into_the_record();
     let mut folded = match fold {
+        Fold::Whole if record => raise_sequences(replica, live),
         Fold::Whole => replica,
         Fold::Rounds => {
-            let mut merged = merge_rounds(live.clone(), &replica);
+            let merged = merge_rounds(live.clone(), &replica);
+            let mut merged = if record { raise_sequences(merged, &replica) } else { merged };
             adopt_counters(&mut merged, &replica);
             merged
         }

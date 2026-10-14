@@ -2,11 +2,13 @@
 //! the answer axis ranks first, so an unanswered teardown never ends an
 //! answered call, and between bodies alike on the answer the one further
 //! toward its end is ahead; between bodies alike on both, a re-INVITE round
-//! one holds answered is ahead of the same round held open.
+//! one holds answered is ahead of the same round held open, and a round one
+//! opened is ahead of a body that never reached it.
 
 use crate::common;
 use call::helpers::{
-    lifecycle_advances, lifecycle_behind, lifecycle_progress, round_further, Progress,
+    lifecycle_advances, lifecycle_behind, lifecycle_progress, round_ahead, round_further,
+    round_opened, Progress,
 };
 use call::model::{Call, CallModelState};
 use call::testkit::{stage_reinvite_round, RoundStage};
@@ -105,6 +107,46 @@ fn a_body_that_never_saw_the_round_is_not_past_it() {
     let before = at(ANSWERED, CallModelState::Active);
     assert!(!round_further(&before, &open), "its sequence stands before the round's CSeq");
     assert!(!lifecycle_advances(&before, &open) && !lifecycle_behind(&open, &before));
+}
+
+#[test]
+fn a_round_the_other_copy_opened_advances_a_record_that_never_reached_it() {
+    let before = at(ANSWERED, CallModelState::Active);
+    for stage in [RoundStage::Open, RoundStage::Answered, RoundStage::Acked] {
+        let opened = round(CallModelState::Active, ROUND, stage);
+        assert!(round_opened(&opened, &before), "{stage:?}");
+        assert_eq!(lifecycle_progress(&opened, &before), Some(Progress::Round), "{stage:?}");
+        assert!(lifecycle_behind(&before, &opened), "{stage:?}: the record lacking it is behind");
+        assert!(!lifecycle_advances(&before, &opened), "{stage:?}: lacking a round is no progress");
+    }
+}
+
+#[test]
+fn a_round_both_copies_hold_is_no_opening() {
+    let open = round(CallModelState::Active, ROUND, RoundStage::Open);
+    let answered = round(CallModelState::Active, ROUND, RoundStage::Answered);
+    assert!(!round_opened(&answered, &open) && !round_opened(&open, &answered));
+    assert!(round_ahead(&answered, &open), "its answer is the progress");
+    assert!(!round_ahead(&open, &answered));
+}
+
+#[test]
+fn a_round_past_which_the_record_sent_is_no_opening() {
+    let opened = round(CallModelState::Active, ROUND, RoundStage::Open);
+    let mut sent = at(ANSWERED, CallModelState::Active);
+    sent.b_legs[0].dialogs.confirmed_mut().expect("the callee's dialog").our_cseq += 1;
+    assert!(!round_opened(&opened, &sent), "the record sent a request at the round's CSeq");
+}
+
+#[test]
+fn rounds_opened_on_both_dialogs_crossed_are_no_progress_either_way() {
+    let mut callers = at(ANSWERED, CallModelState::Active);
+    stage_reinvite_round(&mut callers.b_legs[0], ROUND, RoundStage::Open);
+    let mut callees = at(ANSWERED, CallModelState::Active);
+    stage_reinvite_round(&mut callees.a_leg, "z9hG4bK-round-2", RoundStage::Open);
+    assert!(round_opened(&callers, &callees) && round_opened(&callees, &callers));
+    assert!(!lifecycle_advances(&callers, &callees), "progress is a chain");
+    assert!(!lifecycle_advances(&callees, &callers), "on every round");
 }
 
 #[test]
