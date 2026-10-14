@@ -1,0 +1,32 @@
+{
+  "name": "@sip/corpus",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The orchestration of a capture corpus: extraction, cut, replay on a lane, jobs and requests, and the compare and run reports, over a deployment's seams.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/contracts": "workspace:*",
+    "@sip/driver": "workspace:*",
+    "@sip/pipeline": "workspace:*",
+    "@sip/store": "workspace:*",
+    "@sip/toolchain": "workspace:*",
+    "@sip/viewer-core": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

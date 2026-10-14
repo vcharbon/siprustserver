@@ -1,0 +1,26 @@
+{
+  "name": "@sip/cli",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The command lines over @sip/corpus: flag sets, command builders taking a deployment's facts, and the runner that turns a handler's answer into the exit code.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/corpus": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -6,6 +6,8 @@ packages:
   - "store"
   - "viewer-core"
   - "viewer-app"
+  - "corpus"
+  - "cli"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false

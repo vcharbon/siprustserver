@@ -8,8 +8,70 @@ importers:
 
   .: {}
 
+  cli:
+    dependencies:
+      '@sip/corpus':
+        specifier: workspace:*
+        version: link:../corpus
+      effect:
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111
+    devDependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111(effect@4.0.0-rc.111)(redis@6.2.1)
+      '@types/node':
+        specifier: 24.10.1
+        version: 24.10.1
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@24.10.1)(vite@8.2.2(@types/node@24.10.1)(tsx@4.20.6))
+
   contracts:
     dependencies:
+      effect:
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111
+    devDependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111(effect@4.0.0-rc.111)(redis@6.2.1)
+      '@types/node':
+        specifier: 24.10.1
+        version: 24.10.1
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@24.10.1)(vite@8.2.2(@types/node@24.10.1)(tsx@4.20.6))
+
+  corpus:
+    dependencies:
+      '@sip/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@sip/driver':
+        specifier: workspace:*
+        version: link:../driver
+      '@sip/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
+      '@sip/store':
+        specifier: workspace:*
+        version: link:../store
+      '@sip/toolchain':
+        specifier: workspace:*
+        version: link:../toolchain
+      '@sip/viewer-core':
+        specifier: workspace:*
+        version: link:../viewer-core
       effect:
         specifier: 4.0.0-rc.111
         version: 4.0.0-rc.111

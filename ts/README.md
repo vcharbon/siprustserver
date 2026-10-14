@@ -1,6 +1,6 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Seven packages, four of them one layer each of the same stack:
+A pnpm workspace. Nine packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
@@ -11,12 +11,16 @@ A pnpm workspace. Seven packages, four of them one layer each of the same stack:
 | `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
 | `viewer-core/` | `@sip/viewer-core` | the callflow viewer's core: pivot types generated from the Rust schema, the pure ladder layouts, their SVG components, the run-bundle and capture-flows readers, and the text export |
 | `viewer-app/` | `@sip/viewer-app` | the viewer's Vite + React SPA over a deployment's server: cases, runs, the triage queue and study, and the compare and run report pages over the report formats |
+| `corpus/` | `@sip/corpus` | the orchestration of a capture corpus over a deployment's seams (`deployment/`): extraction, cut and replay on a lane, jobs and requests, and the compare and run reports a command prints and a viewer serves |
+| `cli/` | `@sip/cli` | the command lines over `@sip/corpus`: flag sets and command builders taking a deployment's facts |
 
 Dependencies point one way only: `driver → pipeline → toolchain → contracts`,
-`store → contracts`, and `viewer-app → viewer-core` (the app reads the report
-formats' types from `contracts`, nothing else). The viewer's server is the
-deployment's: it serves the app's build and the documents the app draws. A policy package never imports the store: what it reads of
-a run reaches it as contract vocabulary.
+`store → contracts`, `viewer-app → viewer-core` (the app reads the report
+formats' types from `contracts`, nothing else), and `cli → corpus → {driver,
+store, viewer-core}`. The viewer's server is the deployment's: it serves the
+app's build and the documents the app draws. A policy package never imports the
+store: what it reads of a run reaches it as contract vocabulary. Only
+`@sip/toolchain` spawns a process; `@sip/corpus` runs every child through it.
 
 The store's tests build and drop their own databases on a postgres server:
 `STORE_TEST_URL` names one (any database of it, `postgresql:///postgres?host=…`),
@@ -56,6 +60,27 @@ const composed = Layer.mergeAll(
 case against whatever process happened to be listening. `RoutingCompiler`'s
 default is the cell's own `overlay`, which is the escape hatch a pilot needs and
 is visible in the campaign document rather than buried in a layer.
+
+The orchestration above the driver reads the same way. What only a deployment
+can state is a `@sip/corpus` seam, substituted with `layerWith`:
+
+| seam | what the deployment states |
+| --- | --- |
+| `Roots` | its artifact store, session tree, census runs, verdict registry, pcap roots, lock root |
+| `Tools` | how its extractor, case generator and interpreter are built, and which paths decide a cut |
+| `Extraction` | its anonymiser: how a raw flows document becomes the one the store keeps |
+| `LaneHosting` | what a lane name means to the orchestrator: clock, exclusivity, ceilings, batch process, SUT, preflight |
+| `CaseLayout` | the numbered side rows a case carries for the interpreter's peers |
+| `CellHost` | what a cell runs under, and how a landed cell's charges and rule hits are read |
+| `Identity` | the environment, branch and repositories a run is recorded under |
+| `Launcher` | the entry point each job kind runs, and the hooks around every job |
+| `Tracker` | its ticket tracker: the state of a registry record's ticket, and every ticket's texts |
+
+Besides them, `@sip/store` `StoreBinding` states its selector spelling,
+capture grammar and migration, and `@sip/cli`'s `CliFacts` what the parser
+needs before any service exists (the default lane, the host env files, the
+help every entry point ends with). Roots, tools, the anonymiser, the cell host
+and a job's entry point refuse by name until stated; the rest state nothing.
 
 ## What a campaign leaves on disk
 

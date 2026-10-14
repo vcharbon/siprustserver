@@ -11,10 +11,11 @@
  * judgment — only what happened. The registry never holds run status — only
  * what a failure means. What a deployment adds is configuration: its database
  * url (`Client`), the env and branch whose runs are current (`Current`), the
- * spelling of its current selector (`Selector.Spelling`), the capture names its
- * resolver recognises (`Resolver.Grammar`), and its reading of a document's
+ * spelling of its current selector, the capture names its resolver recognises
+ * and the migration it runs (`StoreBinding`), and its reading of a document's
  * features (`case_features`, `Migrations`).
  */
+export * as StoreBinding from "./binding.js"
 export * as Bundle from "./bundle.js"
 export * as CallHistory from "./call-history.js"
 export * as Calls from "./calls.js"
