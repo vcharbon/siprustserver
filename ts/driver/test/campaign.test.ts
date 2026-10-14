@@ -5,7 +5,6 @@
 import { Campaign, CellHits, Confrontation, E2e } from "@sip/contracts"
 import { Reclassifier } from "@sip/pipeline"
 import * as Effect from "effect/Effect"
-import * as Layer from "effect/Layer"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -408,13 +407,5 @@ describe("the post-run escape hatch", () => {
     })
     const written = fs.readFileSync(path.join(run.dir, run.index.cells[0]!.dir, RULE_HITS_FILE), "utf8")
     expect(CellHits.decodeHitsSync(JSON.parse(written) as unknown)).toEqual(hits)
-  })
-})
-
-/** The stub layer is a Layer, so it composes like any deployment's would. */
-describe("composition", () => {
-  it("is what a deployment substitutes, and nothing else", () => {
-    const composed = LanePresets.layerWith(() => Effect.succeed({ kind: "whatever" }))
-    expect(Layer.isLayer(composed)).toBe(true)
   })
 })

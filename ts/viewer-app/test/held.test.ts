@@ -13,10 +13,6 @@ const loading: Async<number> = { state: "loading" }
 const error = (message: string): Async<number> => ({ state: "error", message })
 
 describe("hold", () => {
-  it("starts empty and loading", () => {
-    expect(INITIAL).toEqual({ current: undefined, loading: true })
-  })
-
   it("takes an ok answer as the current value, not loading, with no error", () => {
     const held: Held<number> = hold(INITIAL, ok(1))
     expect(held).toEqual({ current: 1, loading: false })

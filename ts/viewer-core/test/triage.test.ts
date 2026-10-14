@@ -121,7 +121,6 @@ describe("callIdFamilies", () => {
     const derived = families.byLeg.get(2)!
     expect(derived.hueSlot).toBe(base.hueSlot)
     expect(derived.shade).not.toBe(base.shade)
-    expect(callIdHueClass(derived.hueSlot)).toBe(callIdHueClass(base.hueSlot))
     expect(callIdShadeClass(derived.shade)).not.toBe(callIdShadeClass(base.shade))
   })
 

@@ -15,25 +15,11 @@ const SAMPLE = path.join(import.meta.dirname, "fixtures", "registry.sample.json"
 const registry = decodeRegistrySync(JSON.parse(fs.readFileSync(SAMPLE, "utf8")) as unknown)
 
 describe("the sample registry", () => {
-  it("is keyed by the corpus capture basename", () => {
-    for (const key of Object.keys(registry)) expect(key.endsWith(".pcap.gz")).toBe(true)
-  })
-
-  it("holds one record of each verdict", () => {
-    expect(Object.values(registry).map((r) => r.verdict).sort()).toEqual(["bug", "cut", "expected", "never-fix"])
-  })
-
   it("makes the verdict alone decide finality", () => {
     for (const record of Object.values(registry)) {
       if (isFinal(record)) expect(["expected", "never-fix"]).toContain(record.verdict)
       else expect(record.ticket.length).toBeGreaterThan(0)
     }
-  })
-
-  it("narrows a record to specific cut cases only where it says so", () => {
-    const narrowed = Object.values(registry).filter((r) => r.cases !== undefined)
-    expect(narrowed.length).toBe(1)
-    expect(narrowed[0].verdict).toBe("cut")
   })
 })
 

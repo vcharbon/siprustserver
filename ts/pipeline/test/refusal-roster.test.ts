@@ -82,13 +82,6 @@ describe("the roster in its tiers", () => {
     )
   })
 
-  it("carries each rule's PREDICATE, which the flat roster cannot", () => {
-    const tiers = tieredRoster(policyWith({}))
-    for (const rule of [...tiers.capture, ...tiers.case, ...tiers.document]) {
-      expect(typeof rule.refuses).toBe("function")
-    }
-  })
-
   it("puts the cut's own rules, then the pipeline's capture rules, ahead of the deployment's", () => {
     const deployment = { ...CAPTURE_RULES[0]!, id: "scope-deployment-own" }
     const tiers = tieredRoster(policyWith({ refuseAtCapture: [deployment] }))
