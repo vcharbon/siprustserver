@@ -64,8 +64,8 @@ Severity = operational risk if the behaviour is wrong.
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | ACK-1 | 17.1.1.3 | B-leg non-2xx → ACK | B2BUA generates ACK, same branch (part of INVITE txn) | high | ✅ | sip-txn `client_auto_acks_non_2xx_final` |
-| ACK-2 | 13.2.2.4 | B-leg 2xx → ACK | New branch, separate txn, dialog target | high | 🟡 | sip-txn `ack_for_2xx_passes_through`, generators ACK-2xx; add B2BUA `bleg_2xx_ack_new_branch_separate_txn` |
-| ACK-3 | 13.3.1.4 | A-leg 2xx ACK arrives | Absorb, stop 2xx resend, not forwarded | high | ✅ | sip-txn `ack_for_2xx_passes_through` + `self_release_fires...` |
+| ACK-2 | 13.2.2.4 | B-leg 2xx → ACK | New branch, separate txn, dialog target | high | 🟡 | sip-txn `an_answered_invite_absorbs_a_late_copy_until_timer_l`, generators ACK-2xx; add B2BUA `bleg_2xx_ack_new_branch_separate_txn` |
+| ACK-3 | 13.3.1.4 | A-leg 2xx ACK arrives | Absorb, stop 2xx resend, not forwarded | high | ✅ | sip-txn `an_answered_invite_absorbs_a_late_copy_until_timer_l` + `self_release_fires...` |
 | ACK-4 | 13.3.1.4 | A-leg 2xx, ACK never arrives | Retransmit 2xx then BYE | high | ❌ | add `aleg_2xx_no_ack_retransmit_then_bye` |
 | ACK-5 | 13.2.2.4 | A-leg ACK carries SDP (delayed-offer answer) | Honour body, map to B-leg | med | ✅ | reinvite `alice_reinvite`, fake_prack `delayed_offer_fallback` |
 | ACK-6 | 17.1.1.2 | Retransmit non-2xx after ACK | Resend same ACK (Timer D) | med | ✅ | sip-txn `non_2xx_invite_final_absorbs_retransmits_for_timer_d` |
