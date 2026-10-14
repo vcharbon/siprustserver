@@ -80,7 +80,14 @@ can state is a `@sip/corpus` seam, substituted with `layerWith`:
 Besides them, `@sip/store` `StoreBinding` states its selector spelling,
 capture grammar and migration, and `@sip/cli`'s `CliFacts` what the parser
 needs before any service exists (the default lane, the host env files, the
-help every entry point ends with). Every default layer builds; roots, tools,
+help every entry point ends with) and the words its lines are printed in
+(how a command is invoked, the viewer's address, the selector spelling, why
+a refusal token was minted). `@sip/cli` holds the commands themselves —
+campaign, source, cut, replay, evidence, request, job, compare, case,
+retire, delete, cleanup and the store verbs — each a builder over the facts;
+a deployment's entry point runs one under its own layer, beneath the store
+the line's roots name (`Store.layer`), and adds verbs of its own to the
+store command where it has any. Every default layer builds; roots, tools,
 the anonymiser, a lane, the cell host, a job's entry point and the tracker's
 texts refuse by name when a command reaches for them, and the rest state nothing.
 The case-id grammar has one source, the binding: the resolver
