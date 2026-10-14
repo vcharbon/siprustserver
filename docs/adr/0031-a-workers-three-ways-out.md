@@ -399,9 +399,9 @@ takes the higher of both views' sequences on each dialog both hold
 the backup sent (RFC 3261 §12.2.1.1); so does every refusal, on each dialog where the
 backup holds no round unfinished (`raise_settled_sequences`): the refused round is not in
 the record, and a sequence raised past it would read as its end, standing the copy down
-with it (`a_refusal_raises_no_sequence_past_a_round_the_record_lacks`). The primary's
-record holds what a fold brings; it serves none of it until a message of the call reaches
-it. A takeover copy's refusal moves its counter alone,
+with it (`a_refusal_raises_no_sequence_past_a_round_the_record_lacks`). A fold
+brings facts into the primary's record and seeds no transaction there. A takeover copy's
+refusal moves its counter alone,
 so the copy's sequences are those of the requests it relayed or took and of the bodies it
 folded, which is what the primary's vector rule reads. **An adopted counter is not the body
 it counts**: a backup's `p` may be one it
@@ -411,6 +411,7 @@ adopted without the body that carried it, so the Reverse vector's verdict (`p` u
 it lacks a request the primary sent or took); otherwise only its progress folds, a round's
 alone (`router/reclaim/tests.rs`:
 `the_vector_clause_never_folds_a_body_below_our_dialog_sequence`,
+`a_round_fold_raises_the_records_sequence_on_every_dialog`,
 `a_refusal_raises_the_records_dialog_sequence_and_only_the_records`;
 `adopted_counter_reverse_fold.rs`, `split_dialog_sequence.rs`,
 `round_the_primary_never_read.rs`, the round served whole at the copy).
