@@ -69,12 +69,14 @@ describe("rfc audit pane", () => {
     expect(html).not.toContain("rfc-audit-gating")
   })
 
-  it("draws a harness fault in a section of its own, apart from the SUT's gating findings", () => {
+  it("draws a source fault in a section of its own, apart from the SUT's gating findings", () => {
     const html = renderToStaticMarkup(
-      <RfcAuditPane rfc={{ status: "audited", findings: [{ ...party, harness_fault: true }] }} />
+      <RfcAuditPane rfc={{ status: "audited", findings: [{ ...party, source_fault: true }] }} />
     )
-    expect(html).toContain("rfc-audit-harness")
-    expect(html).toContain("rfc-badge-harness")
+    expect(html).toContain("rfc-audit-source")
+    expect(html).toContain("rfc-badge-source")
+    expect(html).toContain("source fault")
+    expect(html).not.toContain("harness")
     expect(html).not.toContain("rfc-audit-gating")
   })
 })

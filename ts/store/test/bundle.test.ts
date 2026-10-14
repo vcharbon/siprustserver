@@ -36,7 +36,8 @@ describe("Bundle.read", () => {
       "case9",
       "case10",
       "case11",
-      "case12"
+      "case12",
+      "case13"
     ])
 
     expect(cells.get("case1")!.mainError).toEqual({
@@ -136,14 +137,14 @@ describe("Bundle.read", () => {
     })
     expect(cells.get("case10")!.bodyFailing).toEqual(2)
 
-    // A clean verdict failed by a scripted party's violation the document does
-    // not state reads as the harness's fault, naming the party; the SUT is
+    // A cell failed on a scripted party's violation the document does not
+    // state alone reads as the source's fault, naming the party; the SUT is
     // charged nothing.
     expect(cells.get("case11")!.passed).toBe(false)
     // Counted among the findings that fail it, so the row never reads 0 rfc.
     expect(cells.get("case11")!.rfcGating).toEqual(1)
     expect(cells.get("case11")!.mainError).toEqual({
-      kind: "harness-fault",
+      kind: "source-fault",
       rule: "no-200-after-cancel",
       rfc: "RFC 3261 §9.2",
       step: null,
@@ -157,6 +158,23 @@ describe("Bundle.read", () => {
     expect(cells.get("case12")!.passed).toBe(true)
     expect(cells.get("case12")!.rfcGating).toEqual(0)
     expect(cells.get("case12")!.mainError).toBeNull()
+
+    // A death beside a source fault: the death is the main error, the source
+    // fault stands beside it.
+    expect(cells.get("case13")!.mainError).toEqual({
+      kind: "died",
+      rule: null,
+      rfc: null,
+      step: "s14",
+      expected: "200 to INVITE",
+      detail: "gated on early dialog \"f5\", which must be a dialog of its own",
+      source: {
+        rule: "no-200-after-cancel",
+        rfc: "RFC 3261 §9.2",
+        detail: "uas1: Answered an INVITE it had already taken a CANCEL for with a 200 — " +
+          "RFC 3261 §9.2 has the cancelled UAS answer 487"
+      }
+    })
   })
 
   it("honours the caller's ruling on the charges, and hands it the cell and the whole audit", async () => {

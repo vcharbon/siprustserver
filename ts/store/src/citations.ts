@@ -137,7 +137,9 @@ export const layer = Layer.effect(
                  CASE WHEN cr.error_kind IS NULL THEN NULL ELSE jsonb_build_object(
                    'kind', cr.error_kind, 'rule', cr.error_rule, 'rfc', cr.error_rfc, 'step', cr.error_step,
                    'expected', cr.error_expected, 'detail', cr.error_detail
-                 ) END,
+                 ) || CASE WHEN cr.error_source IS NULL THEN '{}'::jsonb
+                           ELSE jsonb_build_object('source', cr.error_source) END
+                 END,
                  r.components, r.env, r.branch, r.sweep_id, r.job_id, r.prep_id, r.started_at
           FROM cited JOIN runs r ON r.id = cited.id JOIN case_results cr ON cr.run_id = r.id
           ON CONFLICT DO NOTHING

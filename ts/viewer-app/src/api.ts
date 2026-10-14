@@ -107,8 +107,8 @@ export interface TriageTicket {
 
 /** What a call failed on: the one line a queue row is picked on. */
 export interface TriageMainError {
-  /** rfc = a charged RFC finding; harness-fault = a scripted party broke a rule the document does not state; died = the replay stopped waiting; failure = any other verdict failure; bad-body = a body no rule accepts; refused = the cut made no case. */
-  readonly kind: "rfc" | "harness-fault" | "died" | "failure" | "bad-body" | "refused"
+  /** rfc = a charged RFC finding; source-fault = the SUT's side passed and a scripted party broke a rule the source capture's endpoint broke, which the document does not state; died = the replay stopped waiting; failure = any other verdict failure; bad-body = a body no rule accepts; refused = the cut made no case. */
+  readonly kind: "rfc" | "source-fault" | "died" | "failure" | "bad-body" | "refused"
   /** The RFC rule id, the failure tag, or the refusal reason; null for a died call. */
   readonly rule: string | null
   /** The citation the finding carries (`RFC 3581 §4`); null where it cites none. */
@@ -116,6 +116,17 @@ export interface TriageMainError {
   readonly step: string | null
   /** What a died call waited for, as `BYE` / `200 to INVITE` / `200`. */
   readonly expected: string | null
+  readonly detail: string
+  /** The source fault beside the SUT's failure; absent where the call has none, or failed on it alone. */
+  readonly source?: TriageSourceFault
+}
+
+/** A scripted party's violation the document does not state, as a main error carries it beside the SUT's failure. */
+export interface TriageSourceFault {
+  readonly rule: string
+  /** The citation the finding carries; null where it cites none. */
+  readonly rfc: string | null
+  /** The finding, led by the party. */
   readonly detail: string
 }
 

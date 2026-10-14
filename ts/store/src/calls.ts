@@ -28,7 +28,8 @@ import type { Fragment } from "effect/unstable/sql/Statement"
 import { type Summary, summaryOf, EMPTY } from "./call-summary.js"
 import { DEFAULT_SCOPE, type Group, type Outcome, type Query } from "./facets.js"
 import { MainError as MainErrors } from "@sip/contracts"
-import type { MainError, MainErrorKind, SetKind } from "./model.js"
+import { type ErrorColumns, errorOf as columnsError } from "./error-columns.js"
+import type { MainError, SetKind } from "./model.js"
 import * as Sessions from "./sessions.js"
 
 export type RowKind = "case" | "refused"
@@ -97,7 +98,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@sip/store/Calls") {}
 
 /** A served row as the statement builds it, one shape for a case and a refused call. */
-interface ServedRow {
+interface ServedRow extends ErrorColumns {
   readonly kind: RowKind
   readonly capture: string
   readonly case_id: string
@@ -114,12 +115,6 @@ interface ServedRow {
   readonly rfc_gating: number | null
   readonly reasons: ReadonlyArray<string>
   readonly features: ReadonlyArray<string>
-  readonly error_kind: string | null
-  readonly error_rule: string | null
-  readonly error_rfc: string | null
-  readonly error_step: string | null
-  readonly error_expected: string | null
-  readonly error_detail: string | null
   readonly body_failing: number
 }
 
@@ -153,16 +148,7 @@ const errorOf = (row: ServedRow): MainError | null =>
       expected: null,
       detail: row.error_detail ?? ""
     }
-    : row.error_kind === null
-    ? null
-    : {
-      kind: row.error_kind as MainErrorKind,
-      rule: row.error_rule,
-      rfc: row.error_rfc,
-      step: row.error_step,
-      expected: row.error_expected,
-      detail: row.error_detail ?? ""
-    }
+    : columnsError(row)
 
 const blank = (value: string | undefined): value is undefined => value === undefined || value === ""
 
@@ -238,7 +224,7 @@ export const layer = Layer.effect(
           SELECT c.capture, c.case_id, c.run_id, c.set_kind, c.bundle_path, c.finished_at,
                  c.document_hash, c.passed, c.skipped, c.failed_step, c.rfc_gating,
                  c.error_kind, c.error_rule, c.error_rfc, c.error_step, c.error_expected, c.error_detail,
-                 c.body_failing
+                 c.error_source, c.body_failing
           FROM current_cells c
           WHERE c.lane = ${lane} AND ${captures}
             AND NOT EXISTS (SELECT 1 FROM refused x WHERE x.capture = c.capture AND x.case_id = c.case_id)
@@ -254,7 +240,7 @@ export const layer = Layer.effect(
                    '{}'::text[] AS reasons, coalesce(d.features, '{}'::text[]) AS features, NULL::text AS call_key,
                    c.run_id, c.set_kind, NULL::bigint AS prep_id, c.bundle_path, c.finished_at, c.document_hash,
                    c.passed, c.skipped, c.failed_step, c.rfc_gating, c.error_step, c.error_detail,
-                   c.body_failing, c.body_failing > 0 AS bad_body
+                   c.error_source, c.body_failing, c.body_failing > 0 AS bad_body
             FROM cases c
             LEFT JOIN case_documents d ON d.hash = c.document_hash
             UNION ALL
@@ -263,7 +249,7 @@ export const layer = Layer.effect(
                    reasons, '{}'::text[], call_key,
                    NULL, NULL, prep_id, NULL, cut_at, NULL,
                    false, NULL, NULL, NULL, NULL, detail,
-                   0, false
+                   NULL::jsonb, 0, false
             FROM refused
           ) u
           WHERE ${inScope}
@@ -307,7 +293,7 @@ export const layer = Layer.effect(
              'skipped', s.skipped, 'failed_step', s.failed_step, 'rfc_gating', s.rfc_gating,
              'reasons', to_jsonb(s.reasons), 'features', to_jsonb(s.features), 'error_kind', s.error_kind, 'error_rule', s.rule,
              'error_rfc', s.rfc, 'error_step', s.error_step, 'error_expected', s.expected,
-             'error_detail', s.error_detail, 'body_failing', s.body_failing
+             'error_detail', s.error_detail, 'error_source', s.error_source, 'body_failing', s.body_failing
            ) ORDER BY s.kind, s.capture COLLATE "C", s.case_id COLLATE "C"), '[]'::jsonb)
            FROM served s) AS rows
       `

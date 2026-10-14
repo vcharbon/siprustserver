@@ -28,7 +28,7 @@ import {
   resolveBinding,
   rfcAuditPassed,
   rfcGating,
-  rfcHarnessFaults,
+  rfcSourceFaults,
   verdictPassed
 } from "../src/bundle/index.js"
 import { PIVOT_FIXTURES, read } from "./fixtures.js"
@@ -65,9 +65,9 @@ describe("the post-run RFC audit", () => {
     expect(rfcAuditPassed(audit)).toBe(false)
   })
 
-  it("fails on a scripted party's harness fault apart from the SUT's charges, and never on a cancelled or unjudged one", () => {
+  it("fails on a scripted party's source fault apart from the SUT's charges, and never on a cancelled or unjudged one", () => {
     const audit = decodeRunRfcAuditSync(JSON.parse(read(BUNDLE, "rfc.json")) as unknown)
-    expect(rfcHarnessFaults(audit).map((f) => [f.rule, f.actor])).toEqual([
+    expect(rfcSourceFaults(audit).map((f) => [f.rule, f.actor])).toEqual([
       ["unacked-invite-non-2xx-final", "uas1"]
     ])
     const party = {
@@ -85,9 +85,9 @@ describe("the post-run RFC audit", () => {
         { ...party, unjudged: "census-uncovered: the census covers no capture 'c'" }
       ]
     })
-    expect([rfcGating(info), rfcHarnessFaults(info)]).toEqual([[], []])
+    expect([rfcGating(info), rfcSourceFaults(info)]).toEqual([[], []])
     expect(rfcAuditPassed(info)).toBe(true)
-    const fault = decodeRunRfcAuditSync({ status: "audited", findings: [{ ...party, harness_fault: true }] })
+    const fault = decodeRunRfcAuditSync({ status: "audited", findings: [{ ...party, source_fault: true }] })
     expect(rfcGating(fault)).toEqual([])
     expect(rfcAuditPassed(fault)).toBe(false)
   })

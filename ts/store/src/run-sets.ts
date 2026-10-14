@@ -24,7 +24,8 @@ import type { SqlError } from "effect/unstable/sql/SqlError"
 import type { Fragment } from "effect/unstable/sql/Statement"
 import type { Cell, Elsewhere, Side, SideSweep } from "./compare.js"
 import { NoCurrentPopulation } from "./current.js"
-import type { MainErrorKind, Provenance, RunStatus, SetKind } from "./model.js"
+import { type ErrorColumns, errorOf } from "./error-columns.js"
+import type { Provenance, RunStatus, SetKind } from "./model.js"
 import type { Selector, Term } from "./selector.js"
 import * as Sessions from "./sessions.js"
 
@@ -74,7 +75,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@sip/store/RunSets") {}
 
-interface CellRow {
+interface CellRow extends ErrorColumns {
   readonly side: "before" | "after"
   readonly capture: string
   readonly case_id: string
@@ -90,12 +91,6 @@ interface CellRow {
   readonly skipped: string | null
   readonly failed_step: string | null
   readonly document_hash: string | null
-  readonly error_kind: string | null
-  readonly error_rule: string | null
-  readonly error_rfc: string | null
-  readonly error_step: string | null
-  readonly error_expected: string | null
-  readonly error_detail: string | null
   readonly classification: Record<string, unknown> | null
   readonly components: Provenance | null
   readonly repeat_runs: string | null
@@ -135,16 +130,7 @@ const cellOf = (root: Sessions.Root, row: CellRow): Cell => ({
   skipped: row.skipped,
   failedStep: row.failed_step,
   documentHash: row.document_hash,
-  mainError: row.error_kind === null
-    ? null
-    : {
-      kind: row.error_kind as MainErrorKind,
-      rule: row.error_rule,
-      rfc: row.error_rfc,
-      step: row.error_step,
-      expected: row.error_expected,
-      detail: row.error_detail ?? ""
-    },
+  mainError: errorOf(row),
   deltas: row.classification === null
     ? null
     : {
@@ -345,7 +331,7 @@ export const layer = Layer.effect(
         SELECT p.side, p.capture, p.case_id, r.id AS run_id, r.lane, r.env, r.branch, r.lane_hash, r.prep_id,
                r.bundle_path, cr.passed, cr.verdict, cr.skipped, cr.failed_step, cr.document_hash,
                cr.error_kind, cr.error_rule, cr.error_rfc, cr.error_step, cr.error_expected, cr.error_detail,
-               cr.classification,
+               cr.error_source, cr.classification,
                r.components,
                rp.runs AS repeat_runs, rp.passed AS repeat_passed
         FROM picked p

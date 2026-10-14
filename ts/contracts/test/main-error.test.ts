@@ -134,29 +134,66 @@ describe("mainErrorOf", () => {
     })
   })
 
-  describe("a scripted party's harness fault", () => {
+  describe("a scripted party's source fault", () => {
     const fault: Bundle.RfcFinding = {
       ...finding("no-200-after-cancel", "Answered with a 200 after the CANCEL — RFC 3261 §9.2 has it answer 487", 12),
       gating: false,
       actor: "uas1",
-      harness_fault: true
+      source_fault: true
+    }
+    const beside = {
+      rule: "no-200-after-cancel",
+      rfc: "RFC 3261 §9.2",
+      detail: "uas1: Answered with a 200 after the CANCEL — RFC 3261 §9.2 has it answer 487"
     }
 
-    it("is its own kind, naming the party, ahead of the step the run died at", () => {
-      expect(mainErrorOf({ ...failed, verdict: verdict([died]), charged: [], harness: [fault] })).toEqual({
-        kind: "harness-fault",
-        rule: "no-200-after-cancel",
-        rfc: "RFC 3261 §9.2",
-        step: null,
-        expected: null,
-        detail: "uas1: Answered with a 200 after the CANCEL — RFC 3261 §9.2 has it answer 487"
+    it("is its own kind, naming the party, where the SUT's side passed", () => {
+      expect(mainErrorOf({ ...failed, verdict: verdict([died]), charged: [], source: [fault], sourceOnly: true }))
+        .toEqual({
+          kind: "source-fault",
+          rule: "no-200-after-cancel",
+          rfc: "RFC 3261 §9.2",
+          step: null,
+          expected: null,
+          detail: "uas1: Answered with a 200 after the CANCEL — RFC 3261 §9.2 has it answer 487"
+        })
+    })
+
+    it("never hides the step the run died at: the death leads, the source fault beside it", () => {
+      expect(mainErrorOf({ ...failed, verdict: verdict([died]), charged: [], source: [fault] })).toEqual({
+        kind: "died",
+        rule: null,
+        rfc: null,
+        step: "s14",
+        expected: "200 to INVITE",
+        detail: "gated on early dialog \"f5\", which must be a dialog of its own",
+        source: beside
       })
     })
 
-    it("comes after a charge the SUT answers for", () => {
+    it("never hides a charge the SUT answers for, nor any other failure", () => {
       const charge = finding("cseq-in-dialog-order", "CSeq reused — RFC 3261 §12.2.1.1", 20)
-      expect(mainErrorOf({ ...failed, verdict: verdict([]), charged: [charge], harness: [fault] })?.kind)
-        .toBe("rfc")
+      const charged = mainErrorOf({ ...failed, verdict: verdict([]), charged: [charge], source: [fault] })
+      expect([charged?.kind, charged?.source]).toEqual(["rfc", beside])
+      const other = mainErrorOf({ ...failed, verdict: verdict([checkFailed]), charged: [], source: [fault] })
+      expect([other?.kind, other?.rule, other?.source]).toEqual(["failure", "check-failed", beside])
+    })
+
+    it("stands beside a body the gate refused", () => {
+      const error = mainErrorOf({
+        ...failed,
+        verdict: verdict([]),
+        charged: [],
+        source: [fault],
+        body: [bodyRow()],
+        bodyGated: true
+      })
+      expect([error?.kind, error?.source]).toEqual(["bad-body", beside])
+    })
+
+    it("is said once: a cell that failed on it alone carries no source beside its main error", () => {
+      expect(mainErrorOf({ ...failed, verdict: verdict([]), charged: [], source: [fault], sourceOnly: true }))
+        .not.toHaveProperty("source")
     })
   })
 

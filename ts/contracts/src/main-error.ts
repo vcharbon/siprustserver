@@ -5,21 +5,35 @@
  *
  * The precedence is the one {@link MainError} states: the interpreter's
  * refusal, else the charged audit finding on the earliest offending message,
- * else a scripted party's harness fault, else the step the run died waiting
- * at, else the first failure under its own tag, else the earliest body row no
- * rule accepts. Where the body gate is
+ * else the step the run died waiting at, else the first failure under its own
+ * tag, else the earliest body row no rule accepts. Where the body gate is
  * what refused the cell (every verdict failure a named rule accepts), that row
- * leads right after the refusal and the charges. A cell that passed or was
- * skipped has no main error. A failing cell with nothing to read is said to
- * have none rather than left blank, so a row never shows a failure with no
- * name.
+ * leads right after the refusal and the charges. A scripted party's source
+ * fault never hides any of them: it is the main error only of a cell the SUT's
+ * side passed, and stands beside the SUT's failure otherwise. A cell that
+ * passed or was skipped has no main error. A failing cell with nothing to read
+ * is said to have none rather than left blank, so a row never shows a failure
+ * with no name.
  */
 import * as Schema from "effect/Schema"
 import * as Bundle from "./bundle/index.js"
 import * as Records from "./confrontation.js"
 
-export const MainErrorKind = Schema.Literals(["rfc", "harness-fault", "died", "failure", "bad-body", "refused"])
+export const MainErrorKind = Schema.Literals(["rfc", "source-fault", "died", "failure", "bad-body", "refused"])
 export type MainErrorKind = typeof MainErrorKind.Type
+
+/**
+ * A scripted party's violation the document does not state, on the earliest
+ * offending message: the party replays what the source capture's endpoint
+ * did, and that endpoint broke the RFC. `rule` the rule id, `rfc` its
+ * citation, `detail` led by the party.
+ */
+export const SourceFault = Schema.Struct({
+  rule: Schema.String,
+  rfc: Schema.NullOr(Schema.String),
+  detail: Schema.String
+})
+export interface SourceFault extends Schema.Schema.Type<typeof SourceFault> {}
 
 /**
  * The ONE thing a failing cell is said to have failed on, so a row leads with
@@ -27,16 +41,16 @@ export type MainErrorKind = typeof MainErrorKind.Type
  * not skipped: `refused` (the interpreter refused the cell — `rule`
  * `interpreter-refused`, `detail` its first line), else `rfc` (the charged
  * audit finding on the earliest offending message — `rule` the rule id, `rfc`
- * its citation), else `harness-fault` (a scripted party's violation the
- * document does not state, on the earliest offending message — `rule` and
- * `rfc` as for `rfc`, `detail` led by the party), else `died` (the first
- * `unmatched-datagram` /
+ * its citation), else `died` (the first `unmatched-datagram` /
  * `expect-timed-out` — `step` where, `expected` the message it waited for),
  * else `failure` (the first failure, `rule` its tag), else `bad-body` (the first
  * body row no rule accepts, the session description's included — `rule`
  * `bad-body`, `step` the row's, `detail` its signature and the first differing
- * captured → replayed line). A cut's own refusal rides the same shape: `rule`
- * is the first refusal reason.
+ * captured → replayed line). A cell the SUT's side passed and a source fault
+ * failed is `source-fault` ({@link SourceFault}'s fields, `step` and
+ * `expected` null). Every other kind carries the cell's source fault, where it
+ * has one, in `source`. A cut's own refusal rides the same shape: `rule` is
+ * the first refusal reason.
  */
 export const MainError = Schema.Struct({
   kind: MainErrorKind,
@@ -45,7 +59,9 @@ export const MainError = Schema.Struct({
   rfc: Schema.NullOr(Schema.String),
   step: Schema.NullOr(Schema.String),
   expected: Schema.NullOr(Schema.String),
-  detail: Schema.String
+  detail: Schema.String,
+  /** The source fault beside the SUT's failure; absent where the cell has none, or failed on it alone. */
+  source: Schema.optionalKey(SourceFault)
 })
 export interface MainError extends Schema.Schema.Type<typeof MainError> {}
 
@@ -57,8 +73,10 @@ export interface Input {
   readonly verdict?: Bundle.RunVerdict | null | undefined
   /** The gating findings that STAND against the SUT after the inheritance ruling. */
   readonly charged: ReadonlyArray<Bundle.RfcFinding>
-  /** The audit's harness faults: scripted parties' violations the document does not state. */
-  readonly harness?: ReadonlyArray<Bundle.RfcFinding> | undefined
+  /** The audit's source faults: scripted parties' violations the document does not state. */
+  readonly source?: ReadonlyArray<Bundle.RfcFinding> | undefined
+  /** The cell failed on its source fault alone: the SUT's side passed (`CellSummary.sourceFaultOnly`). */
+  readonly sourceOnly?: boolean | undefined
   /** The cell's confrontation classification counts, where it wrote one. */
   readonly confrontation?: Confrontation | undefined
   /** The body rows no rule accepts, earliest step first ({@link failingBody}). */
@@ -190,24 +208,33 @@ const badBody = (row: Records.ConfrontationRecord): MainError => {
   }
 }
 
+/** The leading source fault of `findings`, as a main error states it; undefined where there is none. */
+export const sourceFaultOf = (findings: ReadonlyArray<Bundle.RfcFinding>): SourceFault | undefined => {
+  const fault = leading(findings)
+  return fault === undefined
+    ? undefined
+    : { rule: fault.rule, rfc: citation(fault.detail), detail: `${fault.actor ?? "a scripted party"}: ${fault.detail}` }
+}
+
 /** What one cell failed on, or null where it did not fail. */
 export const mainErrorOf = (input: Input): MainError | null => {
   if (input.skipped !== null || input.passed) return null
   if (input.error !== undefined) {
     return { ...none("refused"), rule: INTERPRETER_REFUSED, detail: firstLine(input.error) }
   }
+  const source = sourceFaultOf(input.source ?? [])
+  if (source !== undefined && input.sourceOnly === true) {
+    return { ...none("source-fault"), rule: source.rule, rfc: source.rfc, detail: source.detail }
+  }
+  const error = sutErrorOf(input)
+  return source === undefined ? error : { ...error, source }
+}
+
+/** The SUT's side of a failing cell: what it failed on, the source fault aside. */
+const sutErrorOf = (input: Input): MainError => {
   const charge = leading(input.charged)
   if (charge !== undefined) {
     return { ...none("rfc"), rule: charge.rule, rfc: citation(charge.detail), detail: charge.detail }
-  }
-  const fault = leading(input.harness ?? [])
-  if (fault !== undefined) {
-    return {
-      ...none("harness-fault"),
-      rule: fault.rule,
-      rfc: citation(fault.detail),
-      detail: `${fault.actor ?? "a scripted party"}: ${fault.detail}`
-    }
   }
   const body = input.body?.[0]
   if (input.bodyGated === true && body !== undefined) return badBody(body)

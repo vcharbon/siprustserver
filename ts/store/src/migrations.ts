@@ -81,8 +81,8 @@ const RUN_COLUMNS = [
   "components"
 ] as const
 
-/** The case-result columns every cell view carries, read off `cr`. */
-const CELL_COLUMNS = [
+/** The case-result columns the baseline's cell views carry, read off `cr`. */
+const BASELINE_CELL_COLUMNS = [
   "passed",
   "verdict",
   "skipped",
@@ -99,16 +99,24 @@ const CELL_COLUMNS = [
   "body_failing"
 ] as const
 
+/** The case-result columns every cell view carries, read off `cr`: the source fault beside a main error included. */
+const CELL_COLUMNS = [...BASELINE_CELL_COLUMNS, "error_source"] as const
+
 const listed = (alias: string, columns: ReadonlyArray<string>): string =>
   columns.map((column) => `${alias}.${column}`).join(", ")
 
 /**
- * The three views, (re)created whole. Their definitions name every column, so
- * a store whose tables gained their columns in another order still reads them
- * the same, and a deployment that built its tables by migrations of its own
- * creates the identical views by calling this.
+ * The three views, (re)created whole, as the baseline states them. Their
+ * definitions name every column, so a store whose tables gained their columns
+ * in another order still reads them the same, and a deployment that built its
+ * tables by migrations of its own creates the identical views by calling this;
+ * the store's later migrations restate them over the columns they add.
  */
-export const views: Effect.Effect<void, SqlError, SqlClient> = Effect.gen(function*() {
+export const views: Effect.Effect<void, SqlError, SqlClient> = Effect.suspend(() => viewsOf(BASELINE_CELL_COLUMNS))
+
+/** The three views over `cellColumns`, the case-result columns each cell view carries. */
+const viewsOf = (cellColumns: ReadonlyArray<string>): Effect.Effect<void, SqlError, SqlClient> =>
+  Effect.gen(function*() {
   const sql = yield* SqlClient
   yield* sql`DROP VIEW IF EXISTS current_cells`
   yield* sql`DROP VIEW IF EXISTS run_cells`
@@ -125,7 +133,7 @@ export const views: Effect.Effect<void, SqlError, SqlClient> = Effect.gen(functi
     CREATE VIEW current_cells AS
     SELECT DISTINCT ON (r.capture, r.lane, cr.case_id)
            r.capture, r.lane, cr.case_id, r.id AS run_id, r.set_kind, r.status AS run_status, r.prep_id,
-           r.sweep_id, r.bundle_path, r.finished_at, ${listed("cr", CELL_COLUMNS)}
+           r.sweep_id, r.bundle_path, r.finished_at, ${listed("cr", cellColumns)}
     FROM current_runs r
     JOIN case_results cr ON cr.run_id = r.id
     WHERE r.id >= coalesce((
@@ -140,7 +148,7 @@ export const views: Effect.Effect<void, SqlError, SqlClient> = Effect.gen(functi
            r.job_id, r.started_at, r.finished_at, r.bundle_path,
            r.env, r.branch, r.lane_hash, r.concurrency, r.batch_size, r.starts_per_second,
            r.max_span_seconds, r.memory_max, r.components,
-           cr.case_id, ${listed("cr", CELL_COLUMNS)}
+           cr.case_id, ${listed("cr", cellColumns)}
     FROM runs r
     JOIN case_results cr ON cr.run_id = r.id
   `)
@@ -689,6 +697,29 @@ const frozenCutGuard = Effect.gen(function*() {
 export const FROZEN_CUT_GUARD = "7_frozen_cut_guard"
 
 /**
+ * The verdict class of a scripted party's violation the document does not
+ * state is `source-fault`, everywhere a row names it: `case_results.error_kind`,
+ * `cell_summaries.main_error`'s kind, and the bucket the `rfc` rule counts file
+ * it under. `case_results.error_source` holds the source fault a main error
+ * stands beside (`MainError.source`), null where there is none; the cell views
+ * carry it.
+ */
+const sourceFault = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE case_results ADD COLUMN error_source jsonb`
+  yield* sql`UPDATE case_results SET error_kind = 'source-fault' WHERE error_kind = 'harness-fault'`
+  yield* sql`
+    UPDATE cell_summaries SET main_error = jsonb_set(main_error, '{kind}', '"source-fault"')
+    WHERE main_error->>'kind' = 'harness-fault'
+  `
+  yield* sql`UPDATE run_rule_hits SET bucket = 'source-fault' WHERE family = 'rfc' AND bucket = 'harness-fault'`
+  yield* viewsOf(CELL_COLUMNS)
+})
+
+/** The key of the migration that names the source fault and keeps it beside a main error. */
+export const SOURCE_FAULT = "8_source_fault"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -699,7 +730,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [RUN_SUMMARIES]: runSummaries,
   [SEED_FROZEN_IDS]: seedFrozenIds,
   [ID_GAPS]: idGaps,
-  [FROZEN_CUT_GUARD]: frozenCutGuard
+  [FROZEN_CUT_GUARD]: frozenCutGuard,
+  [SOURCE_FAULT]: sourceFault
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

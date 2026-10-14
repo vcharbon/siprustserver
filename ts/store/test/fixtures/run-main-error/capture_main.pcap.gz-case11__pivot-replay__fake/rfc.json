@@ -10,7 +10,7 @@
       "offending": 12,
       "charged": "127.0.0.1:5060",
       "actor": "uas1",
-      "harness_fault": true
+      "source_fault": true
     }
   ]
 }

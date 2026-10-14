@@ -432,7 +432,7 @@
                         "type": "string",
                         "enum": [
                           "rfc",
-                          "harness-fault",
+                          "source-fault",
                           "died",
                           "failure",
                           "bad-body",
@@ -481,6 +481,33 @@
                       },
                       "detail": {
                         "type": "string"
+                      },
+                      "source": {
+                        "type": "object",
+                        "properties": {
+                          "rule": {
+                            "type": "string"
+                          },
+                          "rfc": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "detail": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "rule",
+                          "rfc",
+                          "detail"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [

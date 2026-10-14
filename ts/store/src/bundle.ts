@@ -18,8 +18,10 @@
  * `confrontation.ndjson` for a failing cell, and whether the body gate
  * refused it off `rule-hits.json`; which of the audit's charges STAND is the caller's ruling
  * (`charges`), asked only where the audit holds a charge, and every gating
- * finding stands where the caller has none. A harness fault the audit wrote is
- * read as it stands: it is the harness's, and no ruling answers for it.
+ * finding stands where the caller has none. A source fault the audit wrote is
+ * read as it stands: it is the source capture's, and no ruling answers for it;
+ * the index's `sourceFaultOnly` says whether it is the main error or stands
+ * beside the SUT's failure.
  */
 import { Bundle, Confrontation as Records, MainError, StepOrder } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -65,6 +67,7 @@ interface Rollup {
     readonly dir?: string
     readonly skipped?: string
     readonly error?: string
+    readonly sourceFaultOnly?: boolean
   }>
 }
 
@@ -101,13 +104,13 @@ const askedDocument = Effect.fn("Bundle.askedDocument")(function*(runDir: string
 
 /**
  * How many findings of `rfc.json` fail the cell: the SUT's gating ones and the
- * scripted parties' harness faults; null where the cell wrote none or was not
+ * scripted parties' source faults; null where the cell wrote none or was not
  * audited.
  */
 const rfcGatingOf = (rfc: Record<string, unknown> | null): number | null => {
   if (rfc === null || rfc["status"] !== "audited" || !Array.isArray(rfc["findings"])) return null
   return (rfc["findings"] as ReadonlyArray<unknown>)
-    .filter((f) => asRecord(f)?.["gating"] === true || asRecord(f)?.["harness_fault"] === true)
+    .filter((f) => asRecord(f)?.["gating"] === true || asRecord(f)?.["source_fault"] === true)
     .length
 }
 
@@ -155,7 +158,7 @@ const findingsOf = (rfc: Record<string, unknown> | null): ReadonlyArray<Bundle.R
         ...(typeof finding["actor"] === "string" ? { actor: finding["actor"] } : {}),
         ...(typeof finding["cancelled_by"] === "string" ? { cancelled_by: finding["cancelled_by"] } : {}),
         ...(typeof finding["caused_by"] === "string" ? { caused_by: finding["caused_by"] } : {}),
-        ...(finding["harness_fault"] === true ? { harness_fault: true } : {}),
+        ...(finding["source_fault"] === true ? { source_fault: true } : {}),
         ...(typeof finding["unjudged"] === "string" ? { unjudged: finding["unjudged"] } : {})
       } satisfies Bundle.RfcFinding]
     })
@@ -255,7 +258,8 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
         ...(typeof cell.error === "string" ? { error: cell.error } : {}),
         verdict: verdictOf(verdict),
         charged,
-        harness: findings.filter((finding) => finding.harness_fault === true),
+        source: findings.filter((finding) => finding.source_fault === true),
+        sourceOnly: cell.sourceFaultOnly === true,
         confrontation: confrontationOf(classification),
         body,
         bodyGated: dir !== undefined && body.length > 0 && (yield* bodyGatedOf(dir))

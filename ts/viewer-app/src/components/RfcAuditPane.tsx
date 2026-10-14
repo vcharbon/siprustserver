@@ -6,13 +6,14 @@
  * audit is the only thing on the page that says why. So it is drawn beside the
  * verdict rather than folded into it, and never dropped.
  *
- * A gating finding is the SUT's, and turns the cell red; a harness fault is a
- * scripted party's violation the document does not state — the harness left
- * the captured trace — and turns it red as the harness's; a scripted party's
+ * A gating finding is the SUT's, and turns the cell red; a source fault is a
+ * scripted party's violation the document does not state — the party replays
+ * the source capture's endpoint, which broke the RFC — and turns it red as the
+ * source's; a scripted party's
  * finding the document states (the reference shows it) or could not judge is
  * information; an advisory one is a rule the lane records and refuses to fail
  * on; a relayed one is the SUT's, cancelled as caused by the party the
- * document states committing it. Gating findings and harness faults are drawn
+ * document states committing it. Gating findings and source faults are drawn
  * in sections of their own because collapsing them would make a red cell and
  * a clean one read alike — and for the same reason an audit that found
  * nothing states that it ran.
@@ -47,8 +48,8 @@ interface Finding {
   readonly offending: number | undefined
   /** This finding is the SUT's, and why the cell is red. */
   readonly gating: boolean
-  /** A scripted party broke a rule the document does not state: the cell is red as the harness's. */
-  readonly harnessFault: boolean
+  /** A scripted party broke a rule the document does not state: the cell is red as the source capture's. */
+  readonly sourceFault: boolean
   /** The rule is recorded and never failed on. */
   readonly advisory: boolean
   /** The document's statement that cancelled it, where one did. */
@@ -69,7 +70,7 @@ const readFinding = (value: unknown): Finding => {
       lane: undefined,
       offending: undefined,
       gating: false,
-      harnessFault: false,
+      sourceFault: false,
       advisory: false,
       cancelledBy: undefined,
       causedBy: undefined,
@@ -84,7 +85,7 @@ const readFinding = (value: unknown): Finding => {
     lane: str(value.lane),
     offending: num(value.offending),
     gating: value.gating === true,
-    harnessFault: value.harness_fault === true,
+    sourceFault: value.source_fault === true,
     advisory: value.advisory === true,
     cancelledBy: str(value.cancelled_by),
     causedBy: str(value.caused_by),
@@ -96,11 +97,11 @@ const readFinding = (value: unknown): Finding => {
 const weight = (finding: Finding): { readonly badge: string; readonly tone: string; readonly title: string } =>
   finding.gating
     ? { badge: "gates", tone: "gating", title: "the SUT's finding: this is why the cell is red" }
-    : finding.harnessFault
+    : finding.sourceFault
     ? {
-      badge: "harness fault",
-      tone: "harness",
-      title: "a scripted party broke a rule the document does not state: the harness left the captured trace"
+      badge: "source fault",
+      tone: "source",
+      title: "a scripted party broke a rule the document does not state: it replays the source capture's endpoint, which broke the RFC"
     }
     : finding.causedBy !== undefined
     ? {
@@ -195,16 +196,16 @@ export const RfcAuditPane = ({ rfc }: { rfc: unknown }): JSX.Element | null => {
         findings={findings.filter((finding) => finding.gating)}
       />
       <Section
-        tone="harness"
-        title="harness fault"
-        lead="a scripted party broke a rule the document does not state: the replay left the captured trace. Not the SUT's, and the cell is not ok."
-        findings={findings.filter((finding) => !finding.gating && finding.harnessFault)}
+        tone="source"
+        title="source fault"
+        lead="a scripted party broke a rule the document does not state: it replays the source capture's endpoint, which broke the RFC. Not the SUT's, and the cell is not ok; a failure of the SUT's is still shown as the cell's main error."
+        findings={findings.filter((finding) => !finding.gating && finding.sourceFault)}
       />
       <Section
         tone="advisory"
         title="not gating"
         lead="recorded, and failed on by nobody: a scripted party's finding the reference shows or the document could not judge, an advisory rule, or a binding one charged to a party this lane does not gate on."
-        findings={findings.filter((finding) => !finding.gating && !finding.harnessFault)}
+        findings={findings.filter((finding) => !finding.gating && !finding.sourceFault)}
       />
       {status !== "audited" && <p className="muted">the audit states "{status}".</p>}
     </>

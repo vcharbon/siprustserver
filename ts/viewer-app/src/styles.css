@@ -604,12 +604,12 @@ h3 {
   color: var(--missing);
 }
 
-/* A harness fault fails the cell, but as the harness's: not the SUT's red. */
-.rfc-audit-harness {
+/* A source fault fails the cell, but as the source capture's: not the SUT's red. */
+.rfc-audit-source {
   border-left-color: var(--extra);
 }
 
-.rfc-audit-harness h4 {
+.rfc-audit-source h4 {
   color: var(--extra);
 }
 
@@ -654,7 +654,7 @@ h3 {
   color: var(--muted);
 }
 
-.rfc-badge-harness {
+.rfc-badge-source {
   color: var(--extra);
   background: #fdf6ec;
   font-weight: 600;
@@ -1086,7 +1086,7 @@ button.tag.main-error {
 }
 
 .tag.error-died,
-.tag.error-harness-fault {
+.tag.error-source-fault {
   color: var(--extra);
   border-color: var(--extra);
   background: color-mix(in srgb, var(--extra) 10%, transparent);
@@ -1104,9 +1104,10 @@ button.tag.main-error {
 }
 
 /* The other reasons a refused call was refused under, after its first; a bad
-   body beside a main error that names another cause. */
+   body or a source fault beside a main error that names another cause. */
 .tag.error-refused.also,
-.tag.error-bad-body.also {
+.tag.error-bad-body.also,
+.tag.error-source-fault.also {
   font-size: 11px;
   font-weight: 400;
   padding: 1px 6px;
@@ -1120,7 +1121,7 @@ button.tag.error-bad-body:hover {
 }
 
 button.tag.error-died:hover,
-button.tag.error-harness-fault:hover {
+button.tag.error-source-fault:hover {
   background: color-mix(in srgb, var(--extra) 20%, transparent);
 }
 

@@ -18,6 +18,7 @@ import { ProgressBar } from "../components/ProgressBar.tsx"
 import { useHeld } from "../held.ts"
 import { unitOf } from "../job-progress.ts"
 import { alsoBadBody } from "../bad-body.ts"
+import { sourceBeside, sourceFaultText } from "../source-fault.ts"
 import { usePolled } from "../poll.ts"
 import { href } from "../router.ts"
 
@@ -26,14 +27,22 @@ const CELLS_SHOWN = 200
 
 const ENDED = new Set(["done", "failed", "interrupted", "died"])
 
-/** The main error in one line: the rule and its citation, where a died call stopped, the failure's tag. */
+/**
+ * The main error in one line: the rule and its citation, where a died call
+ * stopped, the failure's tag; then the source fault beside it, where one is.
+ */
 const errorText = (error: TriageMainError | null): string => {
+  const source = sourceBeside(error)
+  return mainText(error) + (source === null ? "" : ` + ${sourceFaultText(source)}`)
+}
+
+const mainText = (error: TriageMainError | null): string => {
   if (error === null) return "not measured"
   switch (error.kind) {
     case "rfc":
       return `${error.rule ?? "rfc"}${error.rfc === null ? "" : ` · ${error.rfc}`}`
-    case "harness-fault":
-      return `harness fault · ${error.rule ?? "rfc"}${error.rfc === null ? "" : ` · ${error.rfc}`}`
+    case "source-fault":
+      return sourceFaultText({ rule: error.rule ?? "rfc", rfc: error.rfc })
     case "died":
       return `died${error.step === null ? "" : ` at ${error.step}`}${error.expected === null ? "" : ` · expected ${error.expected}`}`
     case "failure":

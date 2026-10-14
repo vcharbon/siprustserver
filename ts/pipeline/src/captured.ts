@@ -67,7 +67,7 @@ export const UNCOVERED = "census-uncovered"
  * The violations the case's own census hits charge a scripted party with at
  * this case's vantage, one per rule and step, and a flag where the census never
  * covered the case's capture — an empty list there is no reading at all, so a
- * scripted party's finding is neither cancelled nor a harness fault: the run
+ * scripted party's finding is neither cancelled nor a source fault: the run
  * writes it `unjudged`, as information (§11.1). `covered` is the
  * report's coverage; absent, coverage is not judged. `hits` is the report's
  * index, so a case reads its own hits and never the whole report.

@@ -56,6 +56,19 @@ describe("ReplaySummary.lines", () => {
     expect(lines[3]).toContain("@current: never ran")
   })
 
+  it("prints a source fault beside the SUT's failure, and alone as its own kind", () => {
+    const source = { rule: "prack-2xx-or-481", rfc: "RFC 3262 §3", detail: "uas1: answered 481" }
+    const both = failed(`${C}-case4`, 9, "s18")
+    const besideIt = cell(`${C}-case4`, 9, { ...both, mainError: { ...both.mainError!, source } })
+    const alone = cell(`${C}-case5`, 9, {
+      passed: false,
+      mainError: { kind: "source-fault", rule: "prack-2xx-or-481", rfc: "RFC 3262 §3", step: null, expected: null, detail: "" }
+    })
+    const lines = ReplaySummary.lines([besideIt, alone], new Map(), "@current")
+    expect(lines[1]).toContain("died expect-timed-out at s18 waiting 200 to INVITE · beside it source-fault prack-2xx-or-481")
+    expect(lines[2]).toContain("failed · source-fault prack-2xx-or-481")
+  })
+
   it("says a skipped cell is skipped, with the lane block", () => {
     const lines = ReplaySummary.lines([cell(`${C}-case2`, 9, { passed: false, skipped: "blocked:x" })], new Map(), "@current")
     expect(lines[0]).toContain("1 skipped")

@@ -26,10 +26,10 @@
       "charged": "127.0.0.1:5071",
       "detail": "Took a 487 to its own INVITE and never ACKed it",
       "gating": false,
-      "harness_fault": true,
       "lane": "127.0.0.1:5071",
       "offending": 11,
-      "rule": "unacked-invite-non-2xx-final"
+      "rule": "unacked-invite-non-2xx-final",
+      "source_fault": true
     },
     {
       "advisory": true,

@@ -265,7 +265,8 @@ export const layer = Layer.effect(
         yield* sql`
           INSERT INTO case_results
             (run_id, case_id, passed, verdict, skipped, failed_step, rfc_gating, classification, document_hash,
-             error_kind, error_rule, error_rfc, error_step, error_expected, error_detail, body_failing)
+             error_kind, error_rule, error_rfc, error_step, error_expected, error_detail, error_source,
+             body_failing)
           VALUES (
             ${runId}, ${entry.caseId}, ${entry.passed}, ${entry.verdict}, ${entry.skipped},
             ${entry.failedStep}, ${entry.rfcGating},
@@ -275,6 +276,7 @@ export const layer = Layer.effect(
             ${documentHash},
             ${error?.kind ?? null}, ${error?.rule ?? null}, ${error?.rfc ?? null},
             ${error?.step ?? null}, ${error?.expected ?? null}, ${error?.detail ?? null},
+            ${error?.source === undefined ? null : JSON.stringify(error.source)}::jsonb,
             ${entry.bodyFailing ?? 0}
           )
           ON CONFLICT (run_id, case_id) DO UPDATE SET
@@ -291,6 +293,7 @@ export const layer = Layer.effect(
             error_step = EXCLUDED.error_step,
             error_expected = EXCLUDED.error_expected,
             error_detail = EXCLUDED.error_detail,
+            error_source = EXCLUDED.error_source,
             body_failing = EXCLUDED.body_failing
         `
       }

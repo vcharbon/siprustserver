@@ -51,7 +51,8 @@ export const errorOf = (cell: CompareReport.Cell): string => {
   if (error === null) return ""
   return `${error.kind}${error.rule === null ? "" : ` ${error.rule}`}` +
     (error.step === null ? "" : ` at ${error.step}`) +
-    (error.expected === null ? "" : ` waiting ${error.expected}`)
+    (error.expected === null ? "" : ` waiting ${error.expected}`) +
+    (error.source === undefined ? "" : ` · beside it source-fault ${error.source.rule}`)
 }
 
 const SideTable = ({ doc }: { doc: CompareReport.CompareReport }): JSX.Element => {

@@ -24,7 +24,8 @@ import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import type { Fragment } from "effect/unstable/sql/Statement"
-import type { MainError, MainErrorKind } from "./model.js"
+import { type ErrorColumns, errorOf } from "./error-columns.js"
+import type { MainError } from "./model.js"
 import type { Outcome } from "./requests.js"
 
 /** What a job does: a request replay, a cut, an ingest, a source retired, runs deleted. */
@@ -316,27 +317,6 @@ const progressOf = (row: ProgressRow): Progress => ({
 const modeOf = (args: Readonly<Record<string, unknown>>, restartOf: string | null): Kin["mode"] =>
   restartOf === null ? null : args["unran"] === true ? "resume" : "again"
 
-interface ErrorColumns {
-  readonly error_kind: string | null
-  readonly error_rule: string | null
-  readonly error_rfc: string | null
-  readonly error_step: string | null
-  readonly error_expected: string | null
-  readonly error_detail: string | null
-}
-
-const errorOf = (row: ErrorColumns): MainError | null =>
-  row.error_kind === null
-    ? null
-    : {
-      kind: row.error_kind as MainErrorKind,
-      rule: row.error_rule,
-      rfc: row.error_rfc,
-      step: row.error_step,
-      expected: row.error_expected,
-      detail: row.error_detail ?? ""
-    }
-
 export const layer = Layer.effect(
   Service,
   Effect.gen(function*() {
@@ -573,7 +553,7 @@ export const layer = Layer.effect(
       >`
         SELECT r.capture, r.lane, r.id AS run_id, cr.case_id,
                cr.error_kind, cr.error_rule, cr.error_rfc, cr.error_step, cr.error_expected, cr.error_detail,
-               cr.body_failing,
+               cr.error_source, cr.body_failing,
                count(*) OVER () AS count
         FROM runs r JOIN case_results cr ON cr.run_id = r.id
         WHERE r.job_id = ${id} AND cr.skipped IS NULL AND NOT cr.passed

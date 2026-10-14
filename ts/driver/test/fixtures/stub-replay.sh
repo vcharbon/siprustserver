@@ -90,7 +90,7 @@ esac
 
 # A case about the post-run RFC audit leaves one finding of the kind its name
 # says: a scripted party's the document states, one it could not judge, one it
-# does not state (a harness fault), or the system under test's own.
+# does not state (a source fault), or the system under test's own.
 party='"actor": "uas1", "advisory": false, "charged": "127.0.0.1:5060", "detail": "answered 200 after the CANCEL", "lane": "127.0.0.1:5060", "offending": 12, "rule": "no-200-after-cancel"'
 case "$case_path" in
   *rfc-party-shown*)
@@ -99,8 +99,29 @@ case "$case_path" in
   *rfc-party-unjudged*)
     printf '{"status": "audited", "findings": [{%s, "gating": false, "unjudged": "census-uncovered"}]}\n' "$party" > "$out_dir/rfc.json"
     ;;
-  *rfc-harness-fault*)
-    printf '{"status": "audited", "findings": [{%s, "gating": false, "harness_fault": true}]}\n' "$party" > "$out_dir/rfc.json"
+  *rfc-source-fault-beside-a-failure*)
+    printf '{"status": "audited", "findings": [{%s, "gating": false, "source_fault": true}]}\n' "$party" > "$out_dir/rfc.json"
+    cat > "$out_dir/verdict.json" <<JSON
+{
+  "case": "stub",
+  "failures": [
+    {
+      "failure": "expect-timed-out",
+      "gated_on": "BYE",
+      "leg": "l1",
+      "step": "s9",
+      "within_ms": 32000
+    }
+  ],
+  "lane": "stub-lane",
+  "status": "failed"
+}
+JSON
+    printf 'the run failed\n' >&2
+    exit 1
+    ;;
+  *rfc-source-fault*)
+    printf '{"status": "audited", "findings": [{%s, "gating": false, "source_fault": true}]}\n' "$party" > "$out_dir/rfc.json"
     ;;
   *rfc-sut-charged*)
     printf '{"status": "audited", "findings": [{"advisory": false, "charged": "127.0.0.1:5080", "detail": "CSeq reused", "gating": true, "lane": "127.0.0.1:5080", "offending": 9, "rule": "cseq-in-dialog-order"}]}\n' > "$out_dir/rfc.json"

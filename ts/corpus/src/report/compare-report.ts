@@ -243,13 +243,18 @@ export interface Outcome {
   readonly mainError: CompareReport.Cell["mainError"]
 }
 
-/** A cell's main error as ` · <kind> <rule> at <step> waiting <expected>`; empty where it has none. */
+/**
+ * A cell's main error as ` · <kind> <rule> at <step> waiting <expected>`, and
+ * the source fault beside it as ` · beside it source-fault <rule>`; empty where
+ * it has none.
+ */
 export const errorLine = (cell: Outcome): string => {
   const error = cell.mainError
   if (error === null) return ""
   return ` · ${error.kind}${error.rule === null ? "" : ` ${error.rule}`}` +
     (error.step === null ? "" : ` at ${error.step}`) +
-    (error.expected === null ? "" : ` waiting ${error.expected}`)
+    (error.expected === null ? "" : ` waiting ${error.expected}`) +
+    (error.source === undefined ? "" : ` · beside it source-fault ${error.source.rule}`)
 }
 
 /** How a cell ended: a pass the verdict did not give says which verdict it restated. */

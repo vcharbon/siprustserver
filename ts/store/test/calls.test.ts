@@ -164,6 +164,30 @@ afterAll(async () => {
 }, 60_000)
 
 describe.skipIf(!served)("Calls", () => {
+  it("serves the source fault a writer stored beside a main error back beside it", () =>
+    withStore(Effect.gen(function*() {
+      const calls = yield* Calls.Service
+      const capture = "capture_source.pcap.gz"
+      const beside: MainError = {
+        ...DIED,
+        source: { rule: "prack-2xx-or-481", rfc: "RFC 3262 §3", detail: "uas1: answered 481 — RFC 3262 §3" }
+      }
+      const alone: MainError = {
+        kind: "source-fault",
+        rule: "prack-2xx-or-481",
+        rfc: "RFC 3262 §3",
+        step: null,
+        expected: null,
+        detail: "uas1: answered 481 — RFC 3262 §3"
+      }
+      yield* run(capture, [
+        caseOf(`${capture}-case1`, { failedStep: "s14", mainError: beside }),
+        caseOf(`${capture}-case2`, { verdict: "ok", rfcGating: 1, mainError: alone })
+      ])
+      const rows = (yield* calls.queue(LANE, { scope: "all", capture }, 0)).rows
+      expect(rows.map((row) => row.mainError)).toEqual([beside, alone])
+    })))
+
   it("queues the standing run's cases and the standing cut's refusals, one row per call", () =>
     withStore(Effect.gen(function*() {
       const calls = yield* Calls.Service

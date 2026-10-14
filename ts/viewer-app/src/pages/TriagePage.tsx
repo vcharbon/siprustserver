@@ -23,7 +23,7 @@
  */
 import type { JSX } from "react"
 import { useEffect, useState } from "react"
-import { api, type TriageCallRow, type TriageFacets, type TriageQueue } from "../api.ts"
+import { api, type TriageCallRow, type TriageFacets, type TriageQueue, type TriageSourceFault } from "../api.ts"
 import { Age } from "../components/Age.tsx"
 import { DropCaptures } from "../components/DropCaptures.tsx"
 import { Link } from "../components/Link.tsx"
@@ -46,6 +46,7 @@ import {
   stateOf
 } from "../queue-filter.ts"
 import { alsoBadBody } from "../bad-body.ts"
+import { sourceBeside, sourceFaultText } from "../source-fault.ts"
 import { rowKey } from "../request-builder.ts"
 import { setQuery, useQuery } from "../router.ts"
 
@@ -117,13 +118,16 @@ const toneOf = (row: TriageCallRow): string =>
  * follow as tags. A case the interpreter refused is a case: its chip sets
  * `rule`, where the chip row counts it. A passed, skipped or unmeasured call
  * has no chip. A call that carries a failing body row its main error does not
- * name shows `+ bad body` beside it, which sets `rule` to `bad-body`.
+ * name shows `+ bad body` beside it, which sets `rule` to `bad-body`; a call
+ * whose SUT failure stands beside a source fault shows `+ source fault` with
+ * the source's rule, which sets `rule` to it.
  */
 const MainError = (
   { row, onChip }: { row: TriageCallRow; onChip: (group: Group, value: string) => void }
 ): JSX.Element => (
   <>
     <MainErrorChip row={row} onChip={onChip} />
+    {row.kind === "case" && !row.passed && <SourceBeside source={sourceBeside(row.mainError)} onChip={onChip} />}
     {row.kind === "case" && alsoBadBody(row.mainError, row.bodyFailing) && (
       <button
         type="button"
@@ -136,6 +140,20 @@ const MainError = (
     )}
   </>
 )
+
+const SourceBeside = (
+  { source, onChip }: { source: TriageSourceFault | null; onChip: (group: Group, value: string) => void }
+): JSX.Element | null =>
+  source === null ? null : (
+    <button
+      type="button"
+      className="tag main-error error-source-fault also"
+      title={`${source.detail}\n\nclick: show every call with this rule`}
+      onClick={() => onChip("rule", source.rule)}
+    >
+      + {sourceFaultText(source)}
+    </button>
+  )
 
 const MainErrorChip = (
   { row, onChip }: { row: TriageCallRow; onChip: (group: Group, value: string) => void }
@@ -166,11 +184,11 @@ const MainErrorChip = (
         error.rule,
         <>{error.rule ?? "rfc"}{error.rfc !== null && <span className="cite"> · {error.rfc}</span>}</>
       )
-    case "harness-fault":
+    case "source-fault":
       return chip(
         "rule",
         error.rule,
-        <>harness fault · {error.rule ?? "rfc"}{error.rfc !== null && <span className="cite"> · {error.rfc}</span>}</>
+        <>source fault · {error.rule ?? "rfc"}{error.rfc !== null && <span className="cite"> · {error.rfc}</span>}</>
       )
     case "died":
       return chip(
