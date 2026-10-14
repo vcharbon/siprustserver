@@ -2,7 +2,7 @@
  * The case-document tier's own decision: which of the charges its rules compute
  * survive the declarations the document already carries.
  */
-import { Tokens, type Flow, type MustFail } from "@sip/contracts"
+import { Tokens, type Call, type Flow, type MustFail } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import { DOCUMENT_RULES, type DocumentInput } from "../src/document-rules.js"
 
@@ -35,7 +35,32 @@ const input = (declared: ReadonlyArray<MustFail.MustFail>): DocumentInput => ({
   capture: "capture_x.pcap.gz",
   caseId: "capture_x.pcap.gz-auto",
   flow: unackedOnA,
+  calls: [],
   declared
+})
+
+describe("a call that dials nobody for no stated reason", () => {
+  const withCalls = (calls: ReadonlyArray<Call.Call>): DocumentInput => ({ ...input([]), calls })
+  const attempt: Call.Attempt = { branch: 0, position: 0, leg: "B", callee: { identity: "called-0-0" } }
+  const rule = DOCUMENT_RULES.find((r) => r.id === "source-dial-not-captured")
+
+  it("is refused as unrunnable, naming the call", () => {
+    expect(rule?.disposition).toBe("unrunnable")
+    expect(refusalOf("source-dial-not-captured", withCalls([{ id: "c1", caller_leg: "A", attempts: [] }])))
+      .toContain("call 'c1' (caller leg A) states no attempt, no refusal and no abandon")
+  })
+
+  it("is not one that dials, refuses or was abandoned", () => {
+    for (
+      const call of [
+        { id: "c1", caller_leg: "A", attempts: [attempt] },
+        { id: "c1", caller_leg: "A", attempts: [], refused: { step: "s2", evidence: "answered 403" } },
+        { id: "c1", caller_leg: "A", attempts: [], abandoned: { step: "s2", evidence: "the caller cancelled" } }
+      ] satisfies ReadonlyArray<Call.Call>
+    ) {
+      expect(refusalOf("source-dial-not-captured", withCalls([call]))).toBeUndefined()
+    }
+  })
 })
 
 describe("a hole the declaration lane already names", () => {

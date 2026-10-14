@@ -26,8 +26,9 @@
  *
  * QUARANTINE is the refusal lane's falsifier and nothing else: under it, a
  * refused case is assembled anyway and the document rides {@link
- * CaseOutcome.quarantined} so a caller can replay what the refusal deleted. It
- * never changes which cases are generated — `built` and `refused` answer
+ * CaseOutcome.quarantined} so a caller can replay what the refusal deleted,
+ * unless an `unrunnable` document rule says no run of it can end. It never
+ * changes which cases are generated — `built` and `refused` answer
  * identically with it on and off — because a falsifier that moved the corpus
  * would be measuring itself.
  */
@@ -114,7 +115,9 @@ const build = (
 
 /**
  * What a refused case carries under quarantine: the document the refusal
- * deleted, or the reason there is none. Nothing under quarantine off.
+ * deleted, or the reason there is none. A document an `unrunnable` rule fires
+ * on is none — no run of it can be driven to its end, so it is no replay of the
+ * refusal — and the rule's own line says why. Nothing under quarantine off.
  */
 const quarantineOf = (
   input: CaseSetInput,
@@ -123,10 +126,22 @@ const quarantineOf = (
   already?: Assembled
 ): Pick<CaseOutcome, "quarantined" | "quarantineError"> => {
   if (input.quarantine !== true) return {}
-  if (already !== undefined) return { quarantined: already }
-  const attempt = build(input, index, spec)
-  return "built" in attempt ? { quarantined: attempt.built } : { quarantineError: attempt.error }
+  const attempt = already === undefined ? build(input, index, spec) : { built: already }
+  if (!("built" in attempt)) return { quarantineError: attempt.error }
+  const unrunnable = [...DOCUMENT_RULES, ...input.policy.refuseOnDocument]
+    .filter((rule) => rule.disposition === "unrunnable")
+  const why = onDocument(unrunnable, { caseId: spec.id, capture: input.capture }, documentInput(input, spec, attempt.built))[0]
+  return why === undefined ? { quarantined: attempt.built } : { quarantineError: why.line }
 }
+
+/** What the case-document tier reads off one assembled document. */
+const documentInput = (input: CaseSetInput, spec: CaseSpec, built: Assembled): DocumentInput => ({
+  capture: input.capture,
+  caseId: spec.id,
+  flow: built.pivot.flow,
+  calls: built.pivot.calls,
+  declared: built.pivot.must_fail ?? []
+})
 
 /**
  * Every rule of one roster that fires, recorded against the case being decided.
@@ -218,12 +233,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     // ORDER is the on-disk order, and every rule that fires is recorded.
     const standing = [
       ...refusals.filter((r) => !withdrawnBy(r, built.coverage)),
-      ...onDocument([...DOCUMENT_RULES, ...input.policy.refuseOnDocument], site, {
-        capture: input.capture,
-        caseId: spec.id,
-        flow: built.pivot.flow,
-        declared: built.pivot.must_fail ?? []
-      })
+      ...onDocument([...DOCUMENT_RULES, ...input.policy.refuseOnDocument], site, documentInput(input, spec, built))
     ]
     outcomes.push(
       standing.length > 0

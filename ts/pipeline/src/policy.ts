@@ -147,8 +147,11 @@ export interface RefusalEvidence {
  * - `not-proposed` — no case was ever on the table. The family is not a call.
  * - `unreachable` — no document can exist for it, so no replay can falsify it.
  *   A DECLARED zero, never a silent one.
+ * - `unrunnable` — the document exists, but no run of it can be driven to its
+ *   end, so no replay can falsify it either. A quarantine carries no document
+ *   such a rule fires on.
  */
-export type Disposition = "refuses" | "defers" | "not-proposed" | "unreachable"
+export type Disposition = "refuses" | "defers" | "not-proposed" | "unreachable" | "unrunnable"
 
 /**
  * One reason a proposed case is not generated, in the one shape every tier

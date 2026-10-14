@@ -9,6 +9,7 @@ import { assemble } from "../src/assemble.js"
 import type { CaseSpec } from "../src/case-spec.js"
 import { decideCases } from "../src/caseset.js"
 import type { CaseRule } from "../src/case-rules.js"
+import type { DocumentRule } from "../src/document-rules.js"
 import { neutralPolicy, policyWith, UNCLASSIFIED, type Refusal } from "../src/policy.js"
 import { abandonedFlows, cancelRaceFlows, derivesNothing, derivesOnePrefix, plan, refusedFlows, sutSet } from "./fixtures.js"
 
@@ -276,6 +277,35 @@ describe("deciding a whole capture", () => {
     expect(out.outcomes[0]!.built).toBeUndefined()
     // The same bytes the generated case would have carried, not a second build.
     expect(out.outcomes[0]!.quarantined?.pivot).toEqual(built().pivot)
+  })
+
+  it("quarantines no document an unrunnable rule fires on, and says why", () => {
+    const refusal: Refusal = {
+      caseId: SPEC.id,
+      capture: CAPTURE,
+      reason: "scope-mechanism-not-statable",
+      disposition: "refuses",
+      line: "refused: the mechanism is out of scope"
+    }
+    const unrunnable: DocumentRule = {
+      id: "scope-never-ends",
+      subject: "scope",
+      disposition: "unrunnable",
+      why: "no run of the document can end, as the test states it",
+      refuses: (input) => ({ line: `${input.caseId}: no run of it can end` })
+    }
+    const out = decideCases({
+      flows: cancelRaceFlows(),
+      capture: CAPTURE,
+      specs: [SPEC],
+      sut: sutSet(),
+      plan: plan(),
+      policy: policyWith({ derives: derivesOnePrefix, refuse: rulesOf([refusal]), refuseOnDocument: [unrunnable] }),
+      quarantine: true
+    })
+    expect(out.refused).toEqual([refusal])
+    expect(out.outcomes[0]!.quarantined).toBeUndefined()
+    expect(out.outcomes[0]!.quarantineError).toBe(`${SPEC.id}: no run of it can end`)
   })
 
   it("quarantines nothing for a case nothing refused", () => {
