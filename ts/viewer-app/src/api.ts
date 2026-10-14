@@ -371,6 +371,20 @@ export interface TriageStudyCellDetail {
   readonly terminated: unknown
   readonly confrontation: readonly unknown[]
   readonly confrontationProblem?: string
+  /** The Call-IDs this cell minted and the wall-clock window it drove the SUT in; null where it states none. */
+  readonly join?: TriageCellJoin | null
+  /** The run's hook logs cut to this cell's window; [] where it states none. */
+  readonly windows?: readonly TriageStudyHook[]
+  /** The call contexts the SUT still held after a batch whose call this cell placed. */
+  readonly held?: readonly unknown[]
+}
+
+/** What joins a cell to the SUT's own records. */
+export interface TriageCellJoin {
+  readonly callIds: readonly string[]
+  /** ISO instants. */
+  readonly from: string
+  readonly to: string
 }
 
 export interface TriageStudySession {
@@ -382,6 +396,8 @@ export interface TriageStudySession {
   readonly cells: readonly TriageStudyCell[]
   /** What the configured hooks recorded around this run; [] where none did. */
   readonly hooks: readonly TriageStudyHook[]
+  /** What each batch's cleanup gate read of the SUT's call state around the run; [] where none did. */
+  readonly held?: readonly unknown[]
 }
 
 /** One hook log kept beside a run: `hooks/<name>.log`, verbatim. */

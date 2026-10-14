@@ -58,6 +58,7 @@ import { ReplayButton } from "../components/ReplayButton.tsx"
 import { RfcAuditPane } from "../components/RfcAuditPane.tsx"
 import { SipMessageView } from "../components/SipMessageView.tsx"
 import { StudyHead } from "../components/StudyHead.tsx"
+import { SutRecords } from "../components/SutRecords.tsx"
 import { VerdictPane } from "../components/VerdictPane.tsx"
 import { findingsByStep, marksOnLadder } from "../findings.ts"
 import { useCommands } from "../commands.ts"
@@ -393,6 +394,9 @@ const CellStudy = (
           <summary>stderr.txt — what the interpreter said</summary>
           <pre className="raw">{detail.stderr}</pre>
         </details>
+      )}
+      {detail?.join !== undefined && detail.join !== null && (
+        <SutRecords join={detail.join} windows={detail.windows ?? []} held={detail.held ?? []} />
       )}
       {evidence.state === "error" && (
         <p className="error">this cell's evidence did not load: {evidence.message}</p>
@@ -778,6 +782,14 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
               <pre className="raw">{hook.text}</pre>
             </details>
           ))}
+          {/* What each batch's cleanup gate read of the SUT's call state:
+              what it held before and after, and what the batch's calls left. */}
+          {((activeSession ?? value.sessions[value.sessions.length - 1])?.held ?? []).length > 0 && (
+            <details className="rerun-log study-held">
+              <summary className="muted">SUT call state around each batch</summary>
+              <JsonView value={(activeSession ?? value.sessions[value.sessions.length - 1])?.held} label="contexts" />
+            </details>
+          )}
           {/* Where the cases and the flows doc below come from. The lanes pin
               their own preps, so the standing cut and the run that produced the
               ladders are stated apart rather than as one fact. */}
