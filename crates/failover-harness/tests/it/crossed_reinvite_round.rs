@@ -53,7 +53,7 @@ async fn cross(name: &str) -> Crossed {
 }
 
 /// The callee sends an INFO through the primary; the caller answers it 200.
-async fn info_through_the_primary(alice: &Agent, bob_dialog: &mut Dialog) {
+pub(crate) async fn info_through_the_primary(alice: &Agent, bob_dialog: &mut Dialog) {
     let mut info = bob_dialog.request(InDialogMethod::Info, None).await;
     alice.receive("INFO").await.respond(200, "OK").await;
     info.expect(200).await;
@@ -61,7 +61,7 @@ async fn info_through_the_primary(alice: &Agent, bob_dialog: &mut Dialog) {
 
 /// The caller hangs up and the call settles: nothing of it is left anywhere,
 /// one CDR.
-async fn caller_hangs_up(est: &mut Established) {
+pub(crate) async fn caller_hangs_up(est: &mut Established) {
     let mut bye = est.dialog.bye().await;
     est.bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS"]).await;
@@ -69,7 +69,7 @@ async fn caller_hangs_up(est: &mut Established) {
 }
 
 /// The callee hangs up through the primary and the call settles.
-async fn callee_hangs_up(est: &mut Established) {
+pub(crate) async fn callee_hangs_up(est: &mut Established) {
     let mut bye = est.bob_dialog.bye().await;
     est.alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS"]).await;

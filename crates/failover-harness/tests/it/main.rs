@@ -12,6 +12,7 @@
 mod stateful_proxy;
 
 mod abandoned_callee_via_lb;
+mod adopted_counter_reverse_fold;
 mod answer_lost_with_primary_no_answer;
 mod backup_capacity;
 mod call_terminate_on_backup;
@@ -44,15 +45,18 @@ mod reinvite_answer_failover;
 mod reinvite_round_gives_up_after_takeover;
 mod reinvite_round_not_yet_replicated;
 mod reject_final_loss_via_lb;
+mod relay_the_primary_never_read;
 mod released_copy;
 mod retransmission_turn_is_quiet;
 mod retry_on_a_challenged_identity;
 mod rfc_acceptance_window;
 mod ring_deadline_takeover;
 mod ringing_call_taken_over_on_departure;
+mod round_the_primary_never_read;
 mod service_answer_deadline;
 mod silent_replication_stream;
 mod spiral_takeover;
+mod split_dialog_sequence;
 mod stale_no_answer_reclaim;
 mod stood_down_round;
 mod swept_call_answered_inside_the_lag;
