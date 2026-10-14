@@ -157,6 +157,7 @@ async fn a_newcomer_before_its_reinvite_ack_carries_a_value_in_the_range() {
 #[tokio::test]
 async fn a_newcomer_on_the_early_dialog_of_an_unanswered_invite_is_refused_500() {
     let h = Harness::with_transit_delay("b2bua-glare-ra-early-dialog", 0);
+    waive_overtaking(&h, "alice");
     let alice = h.agent("alice", "127.0.0.1:6390").await;
     let bob = h.agent("bob", "127.0.0.1:6391").await;
     let b2bua = sut(6391, Some(BEYOND_RFC)).start(&h, "b2bua", "127.0.0.1:6392").await;

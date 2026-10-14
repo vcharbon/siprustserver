@@ -400,6 +400,43 @@ fn a_re_invite_after_a_non_2xx_final_is_compliant() {
     .is_empty());
 }
 
+/// The dialog-creating INVITE drew a To-tagged 1xx, so an early dialog
+/// exists; an INVITE on that early dialog overtakes the first, still in
+/// progress. Once the first takes its final, an INVITE on the dialog is clean.
+#[test]
+fn an_invite_on_the_early_dialog_of_an_open_initial_invite_is_violated() {
+    let f = hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 1, "at", ""),
+            rsp(2_000, BOB, ALICE, 180, "z9hG4bK-1", 1, "at", "bt", ""),
+            req(3_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 2, "at", "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
+    let Decision::Violated(Evidence::OverlappingReInvite { prior_branch, prior_accepted, .. }) =
+        &f[0].decision
+    else {
+        panic!("{:?}", f[0].decision)
+    };
+    assert_eq!(prior_branch.as_str(), "z9hG4bK-1", "the initial INVITE is the prior");
+    assert!(!prior_accepted, "no final arrived — in progress, not Accepted");
+
+    // A fork's early dialog ends with the first INVITE's final, whichever
+    // dialog the 2xx confirms.
+    assert!(hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 1, "at", ""),
+            rsp(2_000, BOB, ALICE, 180, "z9hG4bK-1", 1, "at", "fork1", ""),
+            rsp(3_000, BOB, ALICE, 200, "z9hG4bK-1", 1, "at", "bt", ""),
+            req(4_000, ALICE, BOB, "ACK", "z9hG4bK-k", 1, "at", "bt"),
+            req(5_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 2, "at", "fork1"),
+        ],
+    )
+    .is_empty());
+}
+
 /// Nothing answered the first at all: the second overtakes a transaction
 /// still in progress.
 #[test]
