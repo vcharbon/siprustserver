@@ -1,9 +1,10 @@
 /**
  * `Tools` — the binaries the pipeline runs, as this deployment builds them:
  * the flows extractor (`sipflow`: read, enrich, index), the case generator a
- * cut launches, the replay interpreter every cell execs, and the wrapper the
- * bench measures a phase under; with the source paths whose content decides
- * what an extraction and a cut produce.
+ * cut launches, the replay interpreter every cell execs, the SUT a managed
+ * lane stands per batch, and the wrapper the bench measures a phase under;
+ * with the source paths whose content decides what an extraction and a cut
+ * produce.
  *
  * A tool is brought up to date before it is used, never only-if-absent: a run
  * records the code that made it, so yesterday's binary under today's tree
@@ -18,8 +19,8 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 
-/** The tools a phase asks for by name. */
-export type Tool = "extractor" | "interpreter"
+/** The tools a phase asks for by name: `sut` is the SUT a lane whose SUT is managed stands per batch. */
+export type Tool = "extractor" | "interpreter" | "sut"
 
 /** The tool cannot be brought up to date; the message is why. */
 export class ToolUnavailable extends Schema.TaggedError<ToolUnavailable>()("Corpus.ToolUnavailable", {

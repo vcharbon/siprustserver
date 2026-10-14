@@ -79,13 +79,14 @@ describe("the seams a guess would make dangerous", () => {
 })
 
 describe("the seams that state nothing by default", () => {
-  it("declare no lane: every lane is a paused-clock lane with nothing stood and nothing to check", async () => {
+  it("declare no lane: none is real-clock, and every lane a replay names is refused by name", async () => {
     const hosting = await seam(LaneHosting.Service)
-    expect(hosting.lane("any")).toEqual(LaneHosting.NEUTRAL_LANE)
-    expect(LaneHosting.realClock(hosting)).toEqual([])
-    expect(await Effect.runPromise(hosting.standBatch("any", { under: "/x", memoryMax: "1G", cells: 1 }))).toBeUndefined()
-    expect(await Effect.runPromise(hosting.standSut("any", "/x"))).toBeUndefined()
-    expect(await Effect.runPromise(hosting.preflight("any"))).toBeNull()
+    expect(await Effect.runPromise(LaneHosting.realClock(hosting))).toEqual([])
+    expect(await refusal(hosting.lane("any"))).toContain("lane 'any'")
+    expect(await refusal(hosting.lane("any"))).toContain("LaneHosting.layerWith")
+    expect(await refusal(hosting.standBatch("any", { under: "/x", memoryMax: "1G", cells: 1 }))).toContain("lane 'any'")
+    expect(await refusal(hosting.standSut("any", "/x"))).toContain("lane 'any'")
+    expect(await refusal(hosting.preflight("any"))).toContain("lane 'any'")
   })
 
   it("lay out no side row that states a call key or reaches the interpreter", async () => {
@@ -118,13 +119,14 @@ describe("a deployment's own layer", () => {
   it("answers what the deployment states", async () => {
     const hosting = LaneHosting.layerWith({
       lanes: ["fast", "lab"],
-      lane: (lane) => (lane === "lab" ? { clock: "real", exclusive: true, cellCeiling: 4 } : LaneHosting.NEUTRAL_LANE),
+      lane: (lane) =>
+        Effect.succeed(lane === "lab" ? { clock: "real", exclusive: true, cellCeiling: 4 } : LaneHosting.NEUTRAL_LANE),
       standBatch: () => Effect.succeed(undefined),
       standSut: () => Effect.succeed(undefined),
       preflight: (lane) => Effect.succeed(lane === "lab" ? "the lab is down" : null)
     })
     const read = await Effect.runPromise(Effect.provide(LaneHosting.Service, hosting))
-    expect(LaneHosting.realClock(read)).toEqual(["lab"])
+    expect(await Effect.runPromise(LaneHosting.realClock(read))).toEqual(["lab"])
     expect(await Effect.runPromise(read.preflight("lab"))).toBe("the lab is down")
   })
 })

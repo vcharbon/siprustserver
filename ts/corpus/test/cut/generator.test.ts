@@ -36,7 +36,8 @@ const tools = Tools.layerWith({
 const boxing = Boxing.layerWith({
   box: (request) => ({ command: "env", args: [`BOXED=${request.memoryMax}`, request.command, ...request.args] }),
   refusal: Effect.succeed(null),
-  interpreter: Effect.succeed(undefined)
+  interpreter: Effect.succeed(undefined),
+  interpreterVariables: () => ({})
 })
 
 describe("the generator of a cut", () => {

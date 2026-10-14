@@ -37,10 +37,12 @@ export interface Interface {
   readonly refusal: Effect.Effect<string | null>
   /**
    * The executable a cell runs the interpreter through, which boxes it at the
-   * cap its `REPLAY_MEMORY_MAX` states; `undefined` where a cell execs the
+   * cap {@link interpreterVariables} states; `undefined` where a cell execs the
    * interpreter itself.
    */
   readonly interpreter: Effect.Effect<string | undefined>
+  /** The variables that state a boxed interpreter's cap of `memoryMax` to the box. */
+  readonly interpreterVariables: (memoryMax: string) => Readonly<Record<string, string>>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Boxing") {}
@@ -51,7 +53,8 @@ export const layer = Layer.succeed(
   Service.of({
     box: (request) => ({ command: request.command, args: request.args }),
     refusal: Effect.succeed(null),
-    interpreter: Effect.succeed(undefined)
+    interpreter: Effect.succeed(undefined),
+    interpreterVariables: () => ({})
   })
 )
 

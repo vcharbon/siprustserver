@@ -42,7 +42,7 @@ const services = () =>
     }),
     LaneHosting.layerWith({
       lanes: [PAUSED, SINGLE],
-      lane: (lane) => (lane === SINGLE ? { clock: "real", exclusive: true } : LaneHosting.NEUTRAL_LANE),
+      lane: (lane) => Effect.succeed(lane === SINGLE ? { clock: "real", exclusive: true } : LaneHosting.NEUTRAL_LANE),
       standBatch: () => Effect.succeed(undefined),
       standSut: () => Effect.succeed(undefined),
       preflight: () => Effect.succeed(null)

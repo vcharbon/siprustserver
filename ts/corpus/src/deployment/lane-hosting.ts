@@ -12,9 +12,14 @@
  * one invocation at a time. A lane with a batch process runs every cell of a
  * batch inside it; one without runs each cell as its own interpreter process.
  *
- * The default declares no lane: every lane reads as a paused-clock lane with
- * no ceiling, no batch process, no SUT of its own and nothing to check, which
- * is what a lane whose SUT the cell builds in-process is.
+ * The clock a lane runs on is stated here and nowhere else in the
+ * orchestration: the session it takes, the settle after a build, the bundles
+ * retention keeps and the names a run settles all read it off this seam.
+ *
+ * The default declares no lane, and refuses by name every lane a replay
+ * reaches for: a guessed lane would drive a SUT the deployment never named.
+ * {@link NEUTRAL_LANE} is what a deployment states for a lane whose cells
+ * build their SUT in-process.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -46,37 +51,54 @@ export interface Lane {
   readonly sut?: "managed" | "standing"
 }
 
-/** A lane the deployment does not declare. */
+/** A lane whose cells build their SUT in-process: paused clock, shared, no ceiling. */
 export const NEUTRAL_LANE: Lane = { clock: "paused", exclusive: false }
+
+/** No lane hosting is composed; the message names the lane asked for and how to state it. */
+export class LaneUnstated extends Schema.TaggedError<LaneUnstated>()("Corpus.LaneUnstated", {
+  lane: Schema.String
+}) {
+  override get message(): string {
+    return `no lane hosting is composed — substitute LaneHosting.layerWith to say what lane '${this.lane}' is`
+  }
+}
 
 export interface Interface {
   /** Every lane id the deployment declares. */
   readonly lanes: ReadonlyArray<string>
-  /** What `lane` states; {@link NEUTRAL_LANE} where the deployment declares it not. */
-  readonly lane: (lane: string) => Lane
+  /** What `lane` states. */
+  readonly lane: (lane: string) => Effect.Effect<Lane, LaneUnstated>
   /** Stands the lane's batch process; `undefined` where its cells run on their own. */
-  readonly standBatch: (lane: string, request: BatchRequest) => Effect.Effect<BatchHost | undefined, LaneUnready>
-  /** Stands the lane's SUT for a batch, logging under `under`; `undefined` where the cell builds its own. */
-  readonly standSut: (lane: string, under: string) => Effect.Effect<SutHandle | undefined, LaneUnready>
+  readonly standBatch: (
+    lane: string,
+    request: BatchRequest
+  ) => Effect.Effect<BatchHost | undefined, LaneUnready | LaneUnstated>
+  /**
+   * Stands the lane's SUT for a batch, logging under `under`; `undefined` where
+   * the cell builds its own. A managed SUT's own tool is current by then
+   * (`Tools.ready("sut")`).
+   */
+  readonly standSut: (lane: string, under: string) => Effect.Effect<SutHandle | undefined, LaneUnready | LaneUnstated>
   /** Why the lane cannot be driven on this box now, naming what fixes it; `null` where it can. */
-  readonly preflight: (lane: string) => Effect.Effect<string | null>
+  readonly preflight: (lane: string) => Effect.Effect<string | null, LaneUnstated>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/LaneHosting") {}
 
-/** The lanes among `lanes` whose clock is real. */
-export const realClock = (hosting: Interface): ReadonlyArray<string> =>
-  hosting.lanes.filter((lane) => hosting.lane(lane).clock === "real")
+/** The lanes the deployment declares whose clock is real. */
+export const realClock = (hosting: Interface): Effect.Effect<ReadonlyArray<string>, LaneUnstated> =>
+  Effect.map(Effect.forEach(hosting.lanes, (lane) => hosting.lane(lane)), (states) =>
+    hosting.lanes.filter((_, at) => states[at]!.clock === "real"))
 
-/** The default: no lane declared, every lane the neutral one. */
+/** The default: no lane declared, so every lane a replay names is refused by name. */
 export const layer = Layer.succeed(
   Service,
   Service.of({
     lanes: [],
-    lane: () => NEUTRAL_LANE,
-    standBatch: () => Effect.succeed(undefined),
-    standSut: () => Effect.succeed(undefined),
-    preflight: () => Effect.succeed(null)
+    lane: (lane) => Effect.fail(new LaneUnstated({ lane })),
+    standBatch: (lane) => Effect.fail(new LaneUnstated({ lane })),
+    standSut: (lane) => Effect.fail(new LaneUnstated({ lane })),
+    preflight: (lane) => Effect.fail(new LaneUnstated({ lane }))
   })
 )
 

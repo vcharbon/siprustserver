@@ -36,7 +36,7 @@ const REAL_LANES = ["real", "managed"]
 
 const hosting = LaneHosting.layerWith({
   lanes: ["paused", ...REAL_LANES],
-  lane: (lane) => (REAL_LANES.includes(lane) ? { clock: "real", exclusive: true } : LaneHosting.NEUTRAL_LANE),
+  lane: (lane) => Effect.succeed(REAL_LANES.includes(lane) ? { clock: "real", exclusive: true } : LaneHosting.NEUTRAL_LANE),
   standBatch: () => Effect.succeed(undefined),
   standSut: () => Effect.succeed(undefined),
   preflight: () => Effect.succeed(null)

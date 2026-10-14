@@ -54,11 +54,11 @@ export const forReplay = (
   watch?: Locks.Watch
 ): Effect.Effect<
   void,
-  Held | Roots.RootsUnstated,
+  Held | Roots.RootsUnstated | LaneHosting.LaneUnstated,
   Scope.Scope | FileSystem.FileSystem | Roots.Service | LaneHosting.Service
 > =>
   Effect.gen(function*() {
-    const lane = (yield* LaneHosting.Service).lane(options.lane)
+    const lane = yield* (yield* LaneHosting.Service).lane(options.lane)
     if (lane.exclusive) yield* acquire(Locks.exclusive(`lane-${options.lane}`, what, options.patience, watch))
     yield* acquire(
       lane.clock === "real"

@@ -67,10 +67,10 @@ can state is a `@sip/corpus` seam, substituted with `layerWith`:
 | seam | what the deployment states |
 | --- | --- |
 | `Roots` | its artifact store, session tree, census runs, verdict registry, pcap roots, lock root |
-| `Tools` | how its extractor, case generator and interpreter are built, and which paths decide a cut |
-| `Boxing` | how a child is capped in memory and CPU, why the host cannot box one now, and the executable a cell boxes its interpreter through |
+| `Tools` | how its extractor, case generator, interpreter and managed SUT are built, the wrapper a measured phase runs under, and which paths decide a cut |
+| `Boxing` | how a child is capped in memory and CPU, why the host cannot box one now, the executable a cell boxes its interpreter through, and the variables that tell the interpreter its box |
 | `Extraction` | its anonymiser: how a raw flows document becomes the one the store keeps, the seed it keeps per capture name, and how a failed extraction is recorded |
-| `LaneHosting` | what a lane name means to the orchestrator: clock, exclusivity, ceilings, batch process, SUT, preflight |
+| `LaneHosting` | what a lane name means to the orchestrator — clock, exclusivity, ceilings, batch process, SUT, preflight — and the one place a lane's clock is stated; the default refuses every lane by name |
 | `CaseLayout` | the numbered side rows a case carries for the interpreter's peers |
 | `CellHost` | what a cell runs under, and how a landed cell's charges and rule hits are read |
 | `Identity` | the environment, branch and repositories a run is recorded under |
@@ -81,8 +81,8 @@ Besides them, `@sip/store` `StoreBinding` states its selector spelling,
 capture grammar and migration, and `@sip/cli`'s `CliFacts` what the parser
 needs before any service exists (the default lane, the host env files, the
 help every entry point ends with). Every default layer builds; roots, tools,
-the anonymiser, the cell host, a job's entry point and the tracker's texts
-refuse by name when a command reaches for them, and the rest state nothing.
+the anonymiser, a lane, the cell host, a job's entry point and the tracker's
+texts refuse by name when a command reaches for them, and the rest state nothing.
 The case-id grammar has one source, the binding: the resolver
 (`StoreBinding.resolver`), the id forms and the citation scan all read it.
 

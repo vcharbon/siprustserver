@@ -16,6 +16,7 @@
  */
 export * as AllowedErrors from "./allowed-errors.js"
 export * as Body from "./body.js"
+export * as Batch from "./batch.js"
 export * as Bundle from "./bundle/index.js"
 export * as Call from "./call.js"
 export * as CallKey from "./call-key.js"

@@ -37,7 +37,7 @@ export const captures = Effect.fn("Settled.captures")(function*() {
   const runs = yield* Runs.Service
   const citations = yield* Citations.Service
   const hosting = yield* LaneHosting.Service
-  const pinning = new Set(LaneHosting.realClock(hosting))
+  const pinning = new Set(yield* LaneHosting.realClock(hosting))
   const ran: Array<Ran> = []
   for (const { lane } of yield* runs.lanes) {
     if (pinning.has(lane)) ran.push({ lane, captures: yield* runs.ranOn(lane) })

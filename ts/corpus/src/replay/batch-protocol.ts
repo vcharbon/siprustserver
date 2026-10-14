@@ -11,10 +11,18 @@
  * after the last.
  *
  * The deployment stands both (`LaneHosting`); the replay drives them through
- * these shapes and nothing else.
+ * these shapes and nothing else. What crosses the wire between a batch
+ * process and its client is `@sip/contracts` `Batch`.
  */
+import type { Batch } from "@sip/contracts"
 import type { ReplayCli } from "@sip/toolchain"
 import type * as Effect from "effect/Effect"
+
+/** A call context the SUT held after the batch and not before it. */
+export type HeldContext = Batch.HeldContext
+
+/** What the batch's gate read of the SUT's call contexts. */
+export type ContextsReport = Batch.ContextsReport
 
 /** What a batch process is stood with. */
 export interface BatchRequest {
@@ -26,31 +34,6 @@ export interface BatchRequest {
   readonly memoryMax: string
   /** How many cells the batch runs at once. */
   readonly cells: number
-}
-
-/** A call context the SUT held after the batch and not before it. */
-export interface HeldContext {
-  readonly ref_id: string
-  /** The Call-IDs of the legs that name it. */
-  readonly call_ids: ReadonlyArray<string>
-  /**
-   * The bundle of every cell whose minted Call-ID it serves: one is the
-   * context's cell, charged with it; none or several leave it the batch's.
-   */
-  readonly cells: ReadonlyArray<string>
-}
-
-/** What the batch's gate read of the SUT's call contexts. */
-export interface ContextsReport {
-  /** The context store, `host:port`. */
-  readonly store: string
-  /** How many contexts it held before the batch's first cell. */
-  readonly before?: number
-  /** How many it held once the batch ended. */
-  readonly after?: number
-  readonly held: ReadonlyArray<HeldContext>
-  /** Why the store could not be read, where it could not. */
-  readonly unread?: string
 }
 
 /** A batch process, as the batch holds it. */
@@ -73,6 +56,10 @@ export interface SutHandle {
   readonly metrics: string | undefined
   /** How a managed SUT died, if it has; `undefined` while it is alive. */
   readonly died: () => string | undefined
-  /** Stops a managed SUT; a standing one is left exactly as it was found. */
+  /**
+   * Stops a managed SUT and resolves once its process exited, so the next
+   * batch finds its addresses free; a standing one is left exactly as it was
+   * found.
+   */
   readonly stop: Effect.Effect<void>
 }

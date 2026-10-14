@@ -109,7 +109,7 @@ export const pass = Effect.fn("Cleanup.pass")(function*(request: Request) {
   const plan = yield* Retention.plan({
     sessions: request.paths.sessions,
     livePreps: live === null ? null : live.preps,
-    realLanes: LaneHosting.realClock(hosting),
+    realLanes: yield* LaneHosting.realClock(hosting),
     graceHours: request.keepHours,
     forgetUnrecorded: request.forgetUnrecorded
   })

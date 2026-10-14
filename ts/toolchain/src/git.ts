@@ -60,4 +60,15 @@ export const componentOf = (
     return { name, sha, dirty: status === null ? null : status !== "", tree } satisfies Component
   })
 
+/** The branch the checkout at `dir` is on; `null` on a detached HEAD or where git cannot say. */
+export const branchOf = (dir: string): Effect.Effect<string | null, never, ChildProcessSpawner.ChildProcessSpawner> =>
+  Effect.gen(function*() {
+    const run = yield* runner
+    const named = yield* run.all("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir }).pipe(
+      Effect.map((output) => (output.exitCode === 0 ? output.stdout.trim() : "")),
+      Effect.orElseSucceed(() => "")
+    )
+    return named === "" || named === "HEAD" ? null : named
+  })
+
 export * as Git from "./git.js"
