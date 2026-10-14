@@ -768,3 +768,5 @@ async fn an_unanswered_ending_never_outranks_an_answered_call_in_a_split_element
     let outcome = forward(&p, (7, 3), body_at(answered, Active)).await;
     assert_eq!(outcome, ApplyOutcome::Refused, "the backup's end of the answered call stays");
 }
+
+mod adoption;

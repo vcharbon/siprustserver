@@ -356,10 +356,16 @@ none — a sequence at or past its CSeq; whatever stage the body holds it at. Ro
 is read from the transactions, never from a dialog's sequence alone, which both copies raise
 (below). Rounds are read dialog by dialog: a round a body stands ahead on is progress
 whatever the live copy holds on another dialog, and the fold takes that dialog's round alone,
-the live copy's rounds on other dialogs staying. A step on the answer or ending axis is taken
-whole, so only when the live copy holds no round's progress the body lacks. The fold and the
+the live copy's rounds on other dialogs staying. A step on the answer or ending axis folds
+whole whatever round the live copy holds, and the rounds the live copy stands ahead on stay
+its own (`merge_rounds` from the live copy): only the node holding a round's client
+transaction sees its final. An ending folded into the primary's record answers every
+re-INVITE the record relayed that the ending body does not hold, as this stack's own teardown
+does — a 487 to its originator, a CANCEL to its target (RFC 3261 §15.1.2) — and the call is
+discharged (`ending_crossing_a_round.rs`, the copy's ending). The fold and the
 order the gates read (`lifecycle_behind`, the round ranked after the answer and the ending)
 read the same rule (`call/tests/it/lifecycle.rs`:
+`an_ending_folds_and_the_round_the_record_holds_ahead_stays`,
 `a_round_ended_in_the_other_copy_advances_the_record_holding_it_open`,
 `an_acked_round_advances_the_record_awaiting_its_ack`,
 `a_round_the_other_copy_opened_advances_a_record_that_never_reached_it`,
@@ -433,7 +439,14 @@ toward its end is behind. So the `Put` rule is "refuse a branch, and refuse a `b
 the Element's `b`". One frame the stored vector dominates still applies: at the Element's
 own `(p,b)`, over an Element an acting backup authored whose body is behind the frame's —
 the authority refused that body, adopted its `b`, and republished its own call at that
-version (ADR-0047 D7).
+version (ADR-0047 D7) — and over an Element whose `p` the acting backup adopted without the
+authority's body, a frame not behind it: the authority's call at that version is its body,
+the Element's only names it. So the Element a returning primary reboots from holds the
+primary's record, not the copy's body lacking the primary's writes (`repl/puller/tests.rs`,
+`the_authoritys_call_replaces_an_element_whose_p_was_adopted`;
+`adopted_counter_reverse_fold.rs`, the UPDATE answered past the primary's reboot). The
+Reverse gate refuses such a body likewise, so the primary's store keeps its own call and the
+body rides up to the fold (`a_reverse_flush_on_an_adopted_p_never_replaces_our_call`).
 
 **The `Delete` guard keys on the answer.** The one fact worth refusing delete-wins for is an
 answer the authority never had: a forward `Delete` is refused exactly when the Element is

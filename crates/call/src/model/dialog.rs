@@ -57,6 +57,34 @@ pub struct PendingRequest {
     /// back to it echoes (RFC 3261 §8.2.6.1); `None` where it stated none.
     #[serde(default)]
     pub source_timestamp: Option<String>,
+    /// The node that relayed the request: its client transaction carries the
+    /// relay, and the final returns there (RFC 3261 §18.2.2). Empty where no
+    /// node is named.
+    #[serde(default)]
+    pub relayed_by: String,
+}
+
+impl PendingRequest {
+    /// A relay of `method` sent at `outbound_cseq` for the originator's
+    /// request at `inbound_cseq`, coming `direction`; nothing else is known of
+    /// it yet.
+    pub fn new(method: &str, outbound_cseq: i64, inbound_cseq: i64, direction: Direction) -> Self {
+        PendingRequest {
+            method: method.into(),
+            outbound_cseq,
+            inbound_cseq,
+            source_vias: Vec::new(),
+            source_call_id: String::new(),
+            source_from: String::new(),
+            source_to: String::new(),
+            direction,
+            cancelled: false,
+            offered_100rel: false,
+            offered: false,
+            source_timestamp: None,
+            relayed_by: String::new(),
+        }
+    }
 }
 
 /// A 2xx to an INVITE this side sent and still awaits the ACK for (RFC 3261

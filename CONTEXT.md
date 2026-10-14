@@ -515,7 +515,8 @@ when it carries lifecycle progress the vector cannot see: an answer or an ending
 folded whole, or the end of a re-INVITE round the live copy holds unfinished or
 the opening of one it never reached, dialog by dialog, whose facts alone are
 merged in. The Reverse rule never folds whole a body whose `p` the backup
-adopted without the primary's body (`CallTopology::gen_adopted`), and every
+adopted without the primary's body (`CallTopology::gen_adopted`) — nor stores it — and the
+authority's call at an Element's own `(p,b)` replaces such a body there; every
 fold and refusal takes the higher dialog sequences. A **fold** adopts `max` of both counters and
 moves neither, so the split heals and the other owner's next write orders
 against what it published; a

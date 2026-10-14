@@ -103,7 +103,7 @@ pub use reliable::{
     shown_as, shown_emission, start_shown_ladder, starts_shown_sequence, Arrival,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
-pub use round::{merge_rounds, round_ahead, round_further, round_opened};
+pub use round::{holds_rounds_of, merge_rounds, round_ahead, round_further, round_opened};
 pub use sequence::{holds_relays_of, raise_sequences};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,

@@ -398,6 +398,7 @@ fn an_in_dialog_request_neither_answered_nor_relayed_breaks_the_answer_invariant
             offered: false,
             offered_100rel: false,
             source_timestamp: None,
+            relayed_by: String::new(),
         },
     );
     let turn = Turn { before: None, after: &relayed, received: Some(&req), sent: &[] };

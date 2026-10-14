@@ -47,6 +47,30 @@ pub fn round_ahead(incoming: &Call, held: &Call) -> bool {
     round_further(incoming, held) || round_opened(incoming, held)
 }
 
+/// Does `held` — a record, or none — hold every re-INVITE round `other` holds
+/// unfinished whose transaction the node `by` holds: the same transaction or
+/// a later one, on the same dialog? An open round is `by`'s when `by` relayed
+/// it; an answered one is read as `by`'s, the node awaiting its ACK. Read
+/// from the transactions alone: a dialog's sequence, which every fold and
+/// refusal raises, says nothing of a round's presence.
+pub fn holds_rounds_of(held: Option<&Call>, other: &Call, by: &str) -> bool {
+    every_leg(other).all(|other_leg| {
+        let held_leg = held.and_then(|h| find_leg(h, &other_leg.leg_id));
+        other_leg.dialogs.iter().all(|o| {
+            let Some(round) = unfinished(o) else { return true };
+            let theirs = match round.stage {
+                Stage::Open { outbound_cseq } => {
+                    invite_relays(o).any(|p| p.outbound_cseq == outbound_cseq && p.relayed_by == by)
+                }
+                Stage::Answered => true,
+            };
+            let ours = held_leg.and_then(|l| l.dialogs.by_tags(&o.our_tag, &o.peer_tag));
+            let txn = ours.and_then(|d| d.pending_invite_txn.as_ref());
+            !theirs || txn.is_some_and(|t| t.branch == round.branch || t.cseq > round.cseq)
+        })
+    })
+}
+
 /// `held` with every round `incoming` stands ahead on ([`round_ahead`]) taken
 /// from `incoming`, and nothing else: per such dialog, its INVITE relays, its
 /// INVITE client transaction and the ACK state of that transaction's 2xx, the

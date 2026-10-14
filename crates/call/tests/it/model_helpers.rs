@@ -82,18 +82,10 @@ fn the_peer_sequence_never_decreases() {
 fn pending_request_lifecycle() {
     let call = representative_call();
     let entry = PendingRequest {
-        method: "OPTIONS".into(),
-        outbound_cseq: 42,
-        inbound_cseq: 42,
-        source_vias: vec![],
         source_call_id: "cid".into(),
         source_from: "f".into(),
         source_to: "t".into(),
-        direction: Direction::FromB,
-        cancelled: false,
-        offered_100rel: false,
-        offered: false,
-        source_timestamp: None,
+        ..PendingRequest::new("OPTIONS", 42, 42, Direction::FromB)
     };
     let call = add_pending_request(call, "b-1", &b_id(), entry);
     assert!(find_pending_request(b_dialog(&call), 42).is_some());
@@ -455,18 +447,8 @@ fn a_responder_dialog_that_carries_nothing_answers_200_here() {
 #[test]
 fn a_relayed_provisional_is_reliable_only_to_an_invite_whose_originator_offered_100rel() {
     let pending = |method: &str, offered_100rel: bool| PendingRequest {
-        method: method.to_string(),
-        outbound_cseq: 2,
-        inbound_cseq: 2,
-        source_vias: Vec::new(),
-        source_call_id: String::new(),
-        source_from: String::new(),
-        source_to: String::new(),
-        direction: Direction::FromA,
-        cancelled: false,
         offered_100rel,
-        offered: false,
-        source_timestamp: None,
+        ..PendingRequest::new(method, 2, 2, Direction::FromA)
     };
     assert!(admits_reliable_provisional(&pending("INVITE", true)));
     assert!(
@@ -496,18 +478,9 @@ fn the_shown_leg_is_the_one_whose_dialog_carries_the_shown_tag() {
 fn relayed_reinvite(mut call: Call, outbound_cseq: i64, cancelled: bool) -> Call {
     let d = call.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).expect("the b-leg dialog");
     d.inbound_pending_requests.push(PendingRequest {
-        method: "INVITE".to_string(),
-        outbound_cseq,
-        inbound_cseq: 7,
-        source_vias: Vec::new(),
-        source_call_id: String::new(),
-        source_from: String::new(),
-        source_to: String::new(),
-        direction: Direction::FromA,
         cancelled,
         offered_100rel: true,
-        offered: false,
-        source_timestamp: None,
+        ..PendingRequest::new("INVITE", outbound_cseq, 7, Direction::FromA)
     });
     call
 }
@@ -963,18 +936,11 @@ fn the_carrying_dialog_is_the_confirmed_or_the_only_live_one() {
 fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
     let mut call = settled_call();
     let open = PendingRequest {
-        method: "UPDATE".into(),
-        outbound_cseq: 3,
-        inbound_cseq: 3,
-        source_vias: vec![],
         source_call_id: "cid".into(),
         source_from: "f".into(),
         source_to: "t".into(),
-        direction: Direction::FromA,
-        cancelled: false,
-        offered_100rel: false,
         offered: true,
-        source_timestamp: None,
+        ..PendingRequest::new("UPDATE", 3, 3, Direction::FromA)
     };
     let lost = Dialog {
         state: DialogState::Retired(RetiredDialog { open_relays: vec![open], release: None }),

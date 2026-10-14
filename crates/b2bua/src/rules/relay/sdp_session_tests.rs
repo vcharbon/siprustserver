@@ -302,18 +302,13 @@ fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
         panic!("a relay target");
     };
     let pending = call::PendingRequest {
-        method: method.into(),
-        outbound_cseq: 7,
-        inbound_cseq: 7,
         source_vias: vec![format!("SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-{method}")],
         source_call_id: "c".into(),
         source_from: "<sip:a@192.0.2.1>;tag=a".into(),
         source_to: "<sip:b@192.0.2.100>;tag=b".into(),
-        direction: call::Direction::FromA,
-        cancelled: false,
         offered_100rel: true,
         offered: with_sdp,
-        source_timestamp: None,
+        ..call::PendingRequest::new(method, 7, 7, call::Direction::FromA)
     };
     let target = std::iter::once(&mut call.a_leg)
         .chain(call.b_legs.iter_mut())

@@ -14,10 +14,12 @@ use super::RouterCtx;
 use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 
 mod bulk;
+mod ending;
 mod fold;
 mod reap;
 pub(super) use bulk::reclaim_all;
 use bulk::reclaim_into_live;
+use ending::discharge_folded_terminal;
 use fold::{fold_quietly, Fold};
 pub(crate) use reap::reap_expired_replicas;
 
@@ -181,34 +183,6 @@ pub(super) async fn discharge_materialized_terminal(
         None,
     )
     .await;
-}
-
-/// Discharge an already-`Terminated` body (a backup's deferred terminal, folded
-/// into our live map or reclaimed on reboot) through the ONE enforcement funnel.
-/// `before` is the live (non-terminal) snapshot so `enforce`'s `became_terminated`
-/// edge fires — `discharge_result`/`discharge_as_own` cannot be reused here because
-/// they synthesise the terminal from a NON-terminal call, whereas this body is
-/// already Terminated (the edge would be vacuous and the ObligationSet would never
-/// settle the CDR / limiter / RemoveCall). The CDR + limiter release + propagated
-/// delete all ride `process_result`, exactly as a primary-served BYE would.
-async fn discharge_folded_terminal(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    before: &Call,
-    terminal: Call,
-    now_ms: i64,
-) {
-    let result = crate::rules::invariants::enforce(
-        &ctx.obligations,
-        before,
-        crate::rules::invariants::finalize(crate::effects::HandlerResult::new(terminal)),
-        now_ms,
-        // Folded already-terminal body: same off-the-wire contract as
-        // `discharge_materialized_terminal` above.
-        crate::rules::invariants::UnansweredCaller::Leave,
-    );
-    process_result(ctx, call_ref, result, now_ms, &"the discharge of a folded terminal body", None)
-        .await;
 }
 
 /// The call's `(p,b)` version vector rendered for a lifecycle line

@@ -137,22 +137,27 @@ queued for the copy is served first (ADR-0010 X2). Under the per-call lock the c
 stands down when:
 
 - the primary's body is the same call and **covers every write the copy made**: its
-  `b` is at or past the copy's live `b`, and it holds every request the copy relays and
-  awaits a final for: every re-INVITE round at the copy's stage or past it
-  (`call::helpers::round_ahead`), every other relay as it is
-  (`call::helpers::holds_relays_of`). One increment
+  `b` is at or past the copy's live `b`, the copy stands ahead of it on no re-INVITE
+  round (`call::helpers::round_ahead`), and it holds every request whose final only the
+  copy sees: each round the copy holds unfinished on a transaction of its own, as the
+  same transaction or behind a later one (`call::helpers::holds_rounds_of`, read from
+  the transactions, never from a sequence a refusal raised), and each other request the
+  copy relayed itself, as the same relay (`call::helpers::holds_relays_of`;
+  `PendingRequest::relayed_by` names the relaying node). A relay the copy holds as the
+  primary's own returns its final to the primary and pins nothing. One increment
   of a copy's `b` is one write this node made as the call's acting backup; a quiet
   turn, a fold or an adopted version moves nothing. A primary reaches a `b` only by
   reading the copy's write that carries it — applied or folded into its record, or
   refused (a body behind its record, or one with no lifecycle progress its record
   lacks) and its counter adopted (ADR-0031 D3). A refused request is in no record but
   the copy's, and its final follows the copy's Via (RFC 3261 §18.2.2), so the copy
-  stands down only once the primary's body carries it, or saw a round end
-  (`round_the_primary_never_read.rs`, `relay_the_primary_never_read.rs`;
+  plays on with it until its final (`round_the_primary_never_read.rs`,
+  `relay_the_primary_never_read.rs`, `ending_crossing_a_round.rs`;
   `router/stand_down/tests.rs`). A copy that wrote
   nothing is covered by any write of its primary. The returning node's recovery pulls
   the copy's writes before it reclaims, so its reclaim write covers them; or
-- the primary deleted the call (the same incarnation, or one the delete does not name).
+- the primary deleted the call (the same incarnation, or one the delete does not name),
+  and the copy holds no request whose final only it sees.
 
 The rule is read at the turn, not at the apply: the copy may have written again in
 between. Standing down releases the copy local-only: its timers are cancelled, nothing

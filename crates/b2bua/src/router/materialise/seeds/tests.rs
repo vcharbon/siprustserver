@@ -146,6 +146,7 @@ fn relayed_reinvite(outbound_cseq: i64, cancelled: bool) -> PendingRequest {
         offered_100rel: false,
         offered: false,
         source_timestamp: None,
+        relayed_by: String::new(),
     }
 }
 

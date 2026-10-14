@@ -198,9 +198,12 @@ fn crossed_rounds_fold_each_on_its_own_dialog() {
 }
 
 #[test]
-fn a_whole_step_never_drops_a_round_the_record_holds_ahead() {
+fn an_ending_folds_and_the_round_the_record_holds_ahead_stays() {
     let mut ending = round(CallModelState::Terminating, ROUND, RoundStage::Open);
     ending.a_leg.invite_final_sent = ANSWERED;
     let answered = round(CallModelState::Active, ROUND, RoundStage::Answered);
-    assert!(!lifecycle_advances(&ending, &answered), "the record took the round's 2xx");
+    assert_eq!(lifecycle_progress(&ending, &answered), Some(Progress::Lifecycle));
+    let folded = merge_rounds(ending.clone(), &answered);
+    assert!(!round_ahead(&answered, &folded), "the record's answered round stays");
+    assert_eq!(folded.state, CallModelState::Terminating, "the call is ending");
 }

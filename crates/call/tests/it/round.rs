@@ -75,6 +75,7 @@ fn info_toward_the_caller(call: &mut Call) {
         offered_100rel: false,
         offered: false,
         source_timestamp: None,
+        relayed_by: String::new(),
     });
 }
 

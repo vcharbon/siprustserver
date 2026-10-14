@@ -46,18 +46,16 @@ fn dialog(
     d.route_set = vec!["<sip:fproxy.example.com;lr>".into(), "<sip:edge1.example.com;lr>".into()];
     d.inbound_pending_requests = (0..pending)
         .map(|i| PendingRequest {
-            method: "INVITE".into(),
-            outbound_cseq: cseq + 10 + i as i64,
-            inbound_cseq: cseq + 10 + i as i64,
             source_vias: vec!["SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-x".into()],
             source_call_id: source_call_id.to_string(),
             source_from: "<sip:alice@example.com>;tag=alice-001".into(),
             source_to: "<sip:bob@example.com>;tag=b2bua-aleg".into(),
-            direction: Direction::FromA,
-            cancelled: false,
-            offered_100rel: false,
-            offered: false,
-            source_timestamp: None,
+            ..PendingRequest::new(
+                "INVITE",
+                cseq + 10 + i as i64,
+                cseq + 10 + i as i64,
+                Direction::FromA,
+            )
         })
         .collect();
     d.ack_branch = Some(format!("z9hG4bK-ack-{cseq:x}"));
@@ -462,6 +460,7 @@ fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
                     offered_100rel: false,
                     offered: false,
                     source_timestamp,
+                    relayed_by: String::new(),
                 }
             },
         )

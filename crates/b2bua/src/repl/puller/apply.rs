@@ -65,7 +65,7 @@ impl Puller {
     /// |---|---|---|
     /// | [`Bootstrap`](ApplyMode::Bootstrap) | apply unless `(sp, sb)` dominates | apply |
     /// | [`Forward`](ApplyMode::Forward) | apply unless `(sp, sb)` dominates, refuse when the body branches off the Element or `sb > b_in` | apply unless the Element is a live call the authority never answered (by a flush or by this `Delete`) |
-    /// | [`Reverse`](ApplyMode::Reverse) | apply iff `p_in == sp && b_in > sb` | apply |
+    /// | [`Reverse`](ApplyMode::Reverse) | apply iff `p_in == sp && b_in > sb` and the body's `p` is not adopted | apply |
     ///
     /// With no local copy every mode applies; the store's own resurrection
     /// tombstone, not this gate, is what stops a re-create of a just-deleted call.
@@ -123,9 +123,10 @@ impl Puller {
                         incarnation.as_deref(),
                     );
                 // The Forward direction reads the frame's body twice — for the
-                // branch compare and for the authority's view of the answer — so
-                // it is decoded once, here.
-                let incoming = (mode == ApplyMode::Forward)
+                // branch compare and for the authority's view of the answer —
+                // and the Reverse direction once, for an adopted `p`; it is
+                // decoded once, here.
+                let incoming = matches!(mode, ApplyMode::Forward | ApplyMode::Reverse)
                     .then(|| body.as_deref().and_then(|b| self.codec.decode(b).ok()))
                     .flatten();
                 // Stored `(sp,sb)` DOMINATES incoming `(p,b)` ⇒ skip (idempotent /
@@ -160,10 +161,17 @@ impl Puller {
                     // backup mutation (`b_in > sb`); no local copy → accept (the
                     // reactive reclaim materialises it). Else keep our own — and
                     // hand it up, re-delivery included: the fold reads the body for
-                    // progress the vector cannot carry (ADR-0014 amendment).
+                    // progress the vector cannot carry (ADR-0014 amendment). A
+                    // `p` the backup adopted without our body is no untouched
+                    // branch point: our store keeps our own call (ADR-0031, "an
+                    // adopted counter is not the body it counts").
                     ApplyMode::Reverse if another_call => ApplyOutcome::Superseded,
                     ApplyMode::Reverse => match stored {
-                        Some((sp, sb)) if call_gen != sp || call_bgen <= sb => {
+                        Some((sp, sb))
+                            if call_gen != sp
+                                || call_bgen <= sb
+                                || incoming.as_ref().is_some_and(adopted_p) =>
+                        {
                             ApplyOutcome::Refused
                         }
                         _ => ApplyOutcome::Applied,
@@ -262,6 +270,10 @@ impl Puller {
     ///    body stands behind the frame's, the authority adopted the backup's
     ///    counter without its body (refusing it as behind its own) and published
     ///    its own call at that version. The frame applies, so the Element heals.
+    ///    So does a frame not behind an Element whose `p` the acting backup
+    ///    adopted without the authority's body (`CallTopology::gen_adopted`):
+    ///    the authority's call at that version is its body, the Element's only
+    ///    names it.
     /// 2. `sb > 0` and the frame's body stands behind the Element's ⇒ the
     ///    authority is serving a BRANCH of this call. Refused.
     /// 3. `sb > b_in` ⇒ the frame names a version behind the one the Element
@@ -287,7 +299,7 @@ impl Puller {
             let adopted = (sp, sb) == version;
             return match (adopted, incoming) {
                 (true, Some(incoming))
-                    if held().await.is_some_and(|h| lifecycle_behind(&h, incoming)) =>
+                    if held().await.is_some_and(|h| holds_the_version(&h, incoming)) =>
                 {
                     ApplyOutcome::Applied
                 }
@@ -431,6 +443,20 @@ impl Puller {
         };
         sink.send(cmd);
     }
+}
+
+/// Whether the authority's `incoming` body, at the Element's own `(p,b)`,
+/// is that version's body over the acting backup's `held`: `held` stands
+/// behind it, or `held`'s `p` was adopted without the authority's body and
+/// `incoming` is not behind it.
+fn holds_the_version(held: &call::Call, incoming: &call::Call) -> bool {
+    lifecycle_behind(held, incoming) || (adopted_p(held) && !lifecycle_behind(incoming, held))
+}
+
+/// Whether `body`'s `p` names a primary version whose body it does not hold
+/// (`CallTopology::gen_adopted`).
+fn adopted_p(body: &call::Call) -> bool {
+    body.topology.as_ref().is_some_and(|t| t.gen_adopted)
 }
 
 /// What a `Data` frame wrote, as [`Puller::signal`] hands it up: a `Put`'s

@@ -9,13 +9,21 @@ use std::sync::Arc;
 use call::testkit::{stage_leg, stage_reinvite_round, RoundStage};
 use call::{Call, CallBodyCodec, Direction, LegState, MsgpackCodec, PendingRequest};
 
-use super::{covers, offer};
+use super::{covers as covers_on, finishes_nothing_alone, offer};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::router::materialise::{materialise, Materialised, Origin};
 use crate::router::test_support::{invite, node, src, Node};
 use crate::router::PrimaryWrite;
 use crate::store::{CallStore, PartitionRole, PutOpts};
+
+/// The node serving the takeover copy.
+const COPY: &str = "w1";
+
+/// [`covers_on`] the copy's node.
+fn covers(primary: &Call, copy: &Call) -> bool {
+    covers_on(primary, copy, COPY)
+}
 
 /// A ringing call `w0` owns and `w1` backs up: live, its caller unanswered.
 fn ringing(cid: &str) -> Call {
@@ -88,11 +96,10 @@ fn a_primary_holding_the_copys_round_at_its_stage_or_past_covers_it() {
     assert!(covers(&in_round(2, Some(RoundStage::Refused)), &copy), "the primary saw it end");
 }
 
-#[test]
-fn a_primary_lacking_a_request_the_copy_relays_does_not_cover_it() {
-    let primary = in_round(2, None);
-    let mut copy = primary.clone();
-    let d = copy.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+/// `call` with one more INFO relayed toward the caller by node `by`, awaiting
+/// its final.
+fn relaying(mut call: Call, by: &str) -> Call {
+    let d = call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.our_cseq += 1;
     d.inbound_pending_requests.push(PendingRequest {
         method: "INFO".into(),
@@ -107,9 +114,53 @@ fn a_primary_lacking_a_request_the_copy_relays_does_not_cover_it() {
         offered_100rel: false,
         offered: false,
         source_timestamp: None,
+        relayed_by: by.into(),
     });
+    call
+}
+
+#[test]
+fn a_primary_lacking_a_request_the_copy_relays_does_not_cover_it() {
+    let primary = in_round(2, None);
+    let copy = relaying(primary.clone(), COPY);
     assert!(!covers(&primary, &copy), "the INFO's final follows the copy's Via");
     assert!(covers(&copy, &copy), "a primary holding the relay covers it");
+}
+
+/// A relay the copy holds as the primary's own — read with the primary's
+/// body, its final returning to the primary — pins nothing, whatever the
+/// primary's record now holds of it.
+#[test]
+fn a_relay_another_node_made_never_pins_the_copy() {
+    let primary = in_round(2, None);
+    let copy = relaying(primary.clone(), "w0");
+    assert!(covers(&primary, &copy));
+    assert!(finishes_nothing_alone(None, &copy, COPY), "nor on the primary's delete");
+}
+
+/// The primary's delete releases a copy that holds nothing only it can
+/// finish; a copy holding its own relay, or a round it relayed, plays on.
+#[test]
+fn a_deleted_record_releases_only_a_copy_that_finishes_nothing_alone() {
+    let call = in_round(2, None);
+    assert!(finishes_nothing_alone(None, &call, COPY));
+    assert!(!finishes_nothing_alone(None, &relaying(call.clone(), COPY), COPY));
+    let mut round = in_round(2, Some(RoundStage::Open));
+    let d = round.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    d.inbound_pending_requests.iter_mut().for_each(|p| p.relayed_by = COPY.into());
+    assert!(!finishes_nothing_alone(None, &round, COPY), "the round's final is the copy's");
+}
+
+/// A primary that refused the copy's round raised its sequence past the
+/// round's CSeq: that is no reach of the round, read from its transaction.
+#[test]
+fn a_raised_sequence_is_no_round_the_primary_holds() {
+    let mut copy = in_round(2, Some(RoundStage::Open));
+    let d = copy.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    d.inbound_pending_requests.iter_mut().for_each(|p| p.relayed_by = COPY.into());
+    let mut primary = in_round(2, None);
+    primary.a_leg.dialogs.confirmed_mut().expect("the caller's dialog").our_cseq += 5;
+    assert!(!covers(&primary, &copy), "the copy alone holds the round's transaction");
 }
 
 #[test]

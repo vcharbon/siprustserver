@@ -57,8 +57,9 @@ pub enum Progress {
 /// the ending axes progress is a chain, not a rank: `incoming` made every
 /// step `held` made on both, so a terminal body whose caller was never
 /// answered does not outrank a live answered one, and a step further on
-/// either is the call further along — taken whole, so only when `held` holds
-/// no round's progress `incoming` lacks. Alike on both axes, a round
+/// either is the call further along, whatever round `held` holds — the
+/// rounds `held` stands ahead on stay its own when the body folds
+/// ([`super::round::merge_rounds`] from `held`). Alike on both axes, a round
 /// `incoming` stands ahead on, on any dialog, is progress of its own: each
 /// dialog's round has one client transaction, and the rounds `held` stands
 /// ahead on, on other dialogs, stay its own when the rounds fold.
@@ -67,7 +68,7 @@ pub fn lifecycle_progress(incoming: &Call, held: &Call) -> Option<Progress> {
     if i.0 < h.0 || i.1 < h.1 {
         None
     } else if i != h {
-        (!round_ahead(held, incoming)).then_some(Progress::Lifecycle)
+        Some(Progress::Lifecycle)
     } else {
         round_ahead(incoming, held).then_some(Progress::Round)
     }
