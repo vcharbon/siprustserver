@@ -153,7 +153,7 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
       dir,
       ...(outcome.crashed ? { error: firstLine(outcome.detail) } : {}),
       ...(outcome.skipped === undefined ? {} : { skipped: outcome.skipped }),
-      ...(outcome.sourceFaultOnly === undefined ? {} : { sourceFaultOnly: outcome.sourceFaultOnly })
+      ...(outcome.sourceFault === undefined ? {} : { sourceFault: outcome.sourceFault })
     },
     detail: outcome.detail
   } satisfies CellRun
@@ -183,8 +183,8 @@ interface CellOutcome {
    * and no campaign fails because of it.
    */
   readonly skipped?: Tokens.LaneVerdict
-  /** The cell failed on a source fault alone: the SUT's side passed. */
-  readonly sourceFaultOnly?: true
+  /** The cell's RFC audit holds a source fault: information beside `passed`, which it never decides. */
+  readonly sourceFault?: true
 }
 
 /**
@@ -263,11 +263,10 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   )
   // The lane's post-run RFC audit is the one instrument that sees a SUT
   // violation the scripted peers answer without complaint: a gating finding
-  // fails the cell exactly as a failed verdict does. A source fault fails it
-  // too, as the source capture's, and is ruled apart from the SUT's side so it
-  // never hides a failure the SUT answers for. A scripted party's other
-  // findings are information. A bundle without the file was not audited, and
-  // says nothing.
+  // fails the cell exactly as a failed verdict does. A scripted party's
+  // findings are information, a source fault included: the cell is judged on
+  // the SUT alone, and the source fault is named beside that verdict. A bundle
+  // without the file was not audited, and says nothing.
   const rfcPath = path.join(absolute, RFC_FILE)
   const audit = (yield* fs.exists(rfcPath))
     ? yield* Bundle.decodeRunRfcAudit(JSON.parse(yield* fs.readFileString(rfcPath)) as unknown)
@@ -312,16 +311,16 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       : `${verdict.status} restated as ${final.passed ? "passed" : "failed"}: ` +
         `${final.reason ?? "no reason stated"}`
   return {
-    passed: sutPassed && source.length === 0,
+    passed: sutPassed,
     detail: source.length === 0
       ? sutSaid
       : sutPassed
-      ? `a source fault failed the cell: a scripted party broke a rule the source capture's endpoint broke, ` +
-        `which the document does not state ${sourceSaid}`
+      ? `a source fault stands as information: a scripted party broke a rule the source capture's endpoint ` +
+        `broke, which the document does not state ${sourceSaid}`
       : `${sutSaid}\nbeside it, a source fault ${sourceSaid}`,
     crashed: false,
     stderr: report.stderr,
-    ...(sutPassed && source.length > 0 ? { sourceFaultOnly: true as const } : {})
+    ...(source.length > 0 ? { sourceFault: true as const } : {})
   } satisfies CellOutcome
 })
 

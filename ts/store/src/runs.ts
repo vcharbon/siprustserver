@@ -276,7 +276,7 @@ export const layer = Layer.effect(
             ${documentHash},
             ${error?.kind ?? null}, ${error?.rule ?? null}, ${error?.rfc ?? null},
             ${error?.step ?? null}, ${error?.expected ?? null}, ${error?.detail ?? null},
-            ${error?.source === undefined ? null : JSON.stringify(error.source)}::jsonb,
+            ${entry.sourceFault === undefined ? null : JSON.stringify(entry.sourceFault)}::jsonb,
             ${entry.bodyFailing ?? 0}
           )
           ON CONFLICT (run_id, case_id) DO UPDATE SET

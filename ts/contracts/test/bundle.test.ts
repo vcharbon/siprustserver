@@ -65,7 +65,7 @@ describe("the post-run RFC audit", () => {
     expect(rfcAuditPassed(audit)).toBe(false)
   })
 
-  it("fails on a scripted party's source fault apart from the SUT's charges, and never on a cancelled or unjudged one", () => {
+  it("names a scripted party's source fault apart from the SUT's charges, and fails on none of a party's findings", () => {
     const audit = decodeRunRfcAuditSync(JSON.parse(read(BUNDLE, "rfc.json")) as unknown)
     expect(rfcSourceFaults(audit).map((f) => [f.rule, f.actor])).toEqual([
       ["unacked-invite-non-2xx-final", "uas1"]
@@ -89,7 +89,8 @@ describe("the post-run RFC audit", () => {
     expect(rfcAuditPassed(info)).toBe(true)
     const fault = decodeRunRfcAuditSync({ status: "audited", findings: [{ ...party, source_fault: true }] })
     expect(rfcGating(fault)).toEqual([])
-    expect(rfcAuditPassed(fault)).toBe(false)
+    expect(rfcSourceFaults(fault).length).toBe(1)
+    expect(rfcAuditPassed(fault)).toBe(true)
   })
 
   it("reads not-audited as its own value, never as a clean audit", () => {

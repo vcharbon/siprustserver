@@ -75,14 +75,19 @@ export const CaseResult = Schema.Struct({
   failedStep: Schema.NullOr(Schema.String),
   /**
    * Findings of the lane's post-run RFC audit (`rfc.json`) that fail the cell:
-   * the SUT's gating ones and the source faults; null where the cell was not
-   * audited, which is not a zero.
+   * the SUT's gating ones; null where the cell was not audited, which is not a
+   * zero.
    */
   rfcGating: Schema.NullOr(Schema.Number),
   /** The body rows no rule accepts, whatever the main error names; absent reads as 0. */
   bodyFailing: Schema.optionalKey(Schema.Number),
   /** What the cell failed on; null where it passed, was skipped, or was recorded unmeasured. */
   mainError: Schema.NullOr(MainError),
+  /**
+   * The cell's source fault, passed or failed: information that fails nothing,
+   * and `mainError.source` where the cell failed; absent where it has none.
+   */
+  sourceFault: Schema.optionalKey(MainErrors.SourceFault),
   classification: Schema.Unknown,
   /** The v3 case document this case ran, for content-hash storage; null = not captured. */
   document: Schema.Unknown
@@ -195,7 +200,7 @@ export const Standing = Schema.Struct({
   skipReasons: Schema.Array(Schema.String),
   /** Every current case, as itself: which call, and how IT ended at its current run. */
   caseResults: Schema.Array(CaseOutcome),
-  /** RFC-audit findings that fail the current cases (SUT gating and source faults); 0 where none was audited. */
+  /** RFC-audit findings that fail the current cases (the SUT's gating ones); 0 where none was audited. */
   rfcGating: Schema.Number,
   /** The current cases' confrontation classification, summed. Not the run's outcome. */
   deltas: Deltas,

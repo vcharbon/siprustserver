@@ -70,7 +70,7 @@ export const layer = Layer.effect(
                 error_step = ${error?.step ?? null},
                 error_expected = ${error?.expected ?? null},
                 error_detail = ${error?.detail ?? null},
-                error_source = ${error?.source === undefined ? null : JSON.stringify(error.source)}::jsonb,
+                error_source = ${entry.sourceFault === undefined ? null : JSON.stringify(entry.sourceFault)}::jsonb,
                 body_failing = ${entry.bodyFailing ?? 0}
             WHERE run_id = ${runId} AND case_id = ${entry.caseId}
             RETURNING case_id

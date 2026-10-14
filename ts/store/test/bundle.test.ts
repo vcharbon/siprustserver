@@ -37,7 +37,8 @@ describe("Bundle.read", () => {
       "case10",
       "case11",
       "case12",
-      "case13"
+      "case13",
+      "case14"
     ])
 
     expect(cells.get("case1")!.mainError).toEqual({
@@ -137,21 +138,19 @@ describe("Bundle.read", () => {
     })
     expect(cells.get("case10")!.bodyFailing).toEqual(2)
 
-    // A cell failed on a scripted party's violation the document does not
-    // state alone reads as the source's fault, naming the party; the SUT is
-    // charged nothing.
-    expect(cells.get("case11")!.passed).toBe(false)
-    // Counted among the findings that fail it, so the row never reads 0 rfc.
-    expect(cells.get("case11")!.rfcGating).toEqual(1)
-    expect(cells.get("case11")!.mainError).toEqual({
-      kind: "source-fault",
+    // A cell whose only finding is a scripted party's violation the document
+    // does not state passed: the source fault is information, named apart, and
+    // fails nothing.
+    const source = {
       rule: "no-200-after-cancel",
       rfc: "RFC 3261 §9.2",
-      step: null,
-      expected: null,
       detail: "uas1: Answered an INVITE it had already taken a CANCEL for with a 200 — " +
         "RFC 3261 §9.2 has the cancelled UAS answer 487"
-    })
+    }
+    expect(cells.get("case11")!.passed).toBe(true)
+    expect(cells.get("case11")!.rfcGating).toEqual(0)
+    expect(cells.get("case11")!.mainError).toBeNull()
+    expect(cells.get("case11")!.sourceFault).toEqual(source)
 
     // A scripted party's violation the reference shows is information: the
     // cell passed and states no error.
@@ -168,13 +167,21 @@ describe("Bundle.read", () => {
       step: "s14",
       expected: "200 to INVITE",
       detail: "gated on early dialog \"f5\", which must be a dialog of its own",
-      source: {
-        rule: "no-200-after-cancel",
-        rfc: "RFC 3261 §9.2",
-        detail: "uas1: Answered an INVITE it had already taken a CANCEL for with a 200 — " +
-          "RFC 3261 §9.2 has the cancelled UAS answer 487"
-      }
+      source
     })
+    expect(cells.get("case13")!.sourceFault).toEqual(source)
+
+    // A death the accepted shape record at its step answers, on a cell a
+    // header record no rule accepts refused: that record is the main error.
+    expect(cells.get("case14")!.mainError).toEqual({
+      kind: "failure",
+      rule: "unlisted",
+      rfc: null,
+      step: "s22",
+      expected: null,
+      detail: "an-unlisted-rule: header:allow:response:200:OPTIONS"
+    })
+    expect(cells.get("case14")!.sourceFault).toBeUndefined()
   })
 
   it("honours the caller's ruling on the charges, and hands it the cell and the whole audit", async () => {

@@ -6,20 +6,21 @@
  * The precedence is the one {@link MainError} states: the interpreter's
  * refusal, else the charged audit finding on the earliest offending message,
  * else the step the run died waiting at, else the first failure under its own
- * tag, else the earliest body row no rule accepts. Where the body gate is
- * what refused the cell (every verdict failure a named rule accepts), that row
- * leads right after the refusal and the charges. A scripted party's source
- * fault never hides any of them: it is the main error only of a cell the SUT's
- * side passed, and stands beside the SUT's failure otherwise. A cell that
- * passed or was skipped has no main error. A failing cell with nothing to read
- * is said to have none rather than left blank, so a row never shows a failure
- * with no name.
+ * tag, else the first record no rule accepts, else the earliest body row no
+ * rule accepts. Where the body gate is what refused the cell (every verdict
+ * failure a named rule accepts), that row leads right after the refusal and
+ * the charges. A verdict failure a lane rule answered (a passing shape record
+ * at its step) never leads over a record no rule accepts. A scripted party's
+ * source fault is never a main error: it fails no cell, and stands beside the
+ * SUT's failure where one stands. A cell that passed or was skipped has no
+ * main error. A failing cell with nothing to read is said to have none rather
+ * than left blank, so a row never shows a failure with no name.
  */
 import * as Schema from "effect/Schema"
 import * as Bundle from "./bundle/index.js"
 import * as Records from "./confrontation.js"
 
-export const MainErrorKind = Schema.Literals(["rfc", "source-fault", "died", "failure", "bad-body", "refused"])
+export const MainErrorKind = Schema.Literals(["rfc", "died", "failure", "bad-body", "refused"])
 export type MainErrorKind = typeof MainErrorKind.Type
 
 /**
@@ -43,14 +44,16 @@ export interface SourceFault extends Schema.Schema.Type<typeof SourceFault> {}
  * audit finding on the earliest offending message — `rule` the rule id, `rfc`
  * its citation), else `died` (the first `unmatched-datagram` /
  * `expect-timed-out` — `step` where, `expected` the message it waited for),
- * else `failure` (the first failure, `rule` its tag), else `bad-body` (the first
- * body row no rule accepts, the session description's included — `rule`
- * `bad-body`, `step` the row's, `detail` its signature and the first differing
- * captured → replayed line). A cell the SUT's side passed and a source fault
- * failed is `source-fault` ({@link SourceFault}'s fields, `step` and
- * `expected` null). Every other kind carries the cell's source fault, where it
- * has one, in `source`. A cut's own refusal rides the same shape: `rule` is
- * the first refusal reason.
+ * else `failure` (the first failure, `rule` its tag), else `failure` for the
+ * first non-body record no rule accepts (`rule` its class, `unknown` or
+ * `unlisted`, `step` its step, `detail` the naming rule and its signature),
+ * else `bad-body` (the first body row no rule accepts, the session
+ * description's included — `rule` `bad-body`, `step` the row's, `detail` its
+ * signature and the first differing captured → replayed line). A death or
+ * failure a passing shape record answers at its own step is skipped where a
+ * record no rule accepts, or a body row, can be named instead. Every kind
+ * carries the cell's source fault, where it has one, in `source`. A cut's own
+ * refusal rides the same shape: `rule` is the first refusal reason.
  */
 export const MainError = Schema.Struct({
   kind: MainErrorKind,
@@ -60,7 +63,7 @@ export const MainError = Schema.Struct({
   step: Schema.NullOr(Schema.String),
   expected: Schema.NullOr(Schema.String),
   detail: Schema.String,
-  /** The source fault beside the SUT's failure; absent where the cell has none, or failed on it alone. */
+  /** The cell's source fault, beside the SUT's failure; absent where the cell has none. */
   source: Schema.optionalKey(SourceFault)
 })
 export interface MainError extends Schema.Schema.Type<typeof MainError> {}
@@ -75,10 +78,10 @@ export interface Input {
   readonly charged: ReadonlyArray<Bundle.RfcFinding>
   /** The audit's source faults: scripted parties' violations the document does not state. */
   readonly source?: ReadonlyArray<Bundle.RfcFinding> | undefined
-  /** The cell failed on its source fault alone: the SUT's side passed (`CellSummary.sourceFaultOnly`). */
-  readonly sourceOnly?: boolean | undefined
   /** The cell's confrontation classification counts, where it wrote one. */
   readonly confrontation?: Confrontation | undefined
+  /** The cell's confrontation records, where it wrote them: what answers a failure, and what no rule accepts. */
+  readonly records?: ReadonlyArray<Records.ConfrontationRecord> | undefined
   /** The body rows no rule accepts, earliest step first ({@link failingBody}). */
   readonly body?: ReadonlyArray<Records.ConfrontationRecord> | undefined
   /** The body gate refused the cell: without its rows, the bless would have held (`rule-hits.json`). */
@@ -223,12 +226,34 @@ export const mainErrorOf = (input: Input): MainError | null => {
     return { ...none("refused"), rule: INTERPRETER_REFUSED, detail: firstLine(input.error) }
   }
   const source = sourceFaultOf(input.source ?? [])
-  if (source !== undefined && input.sourceOnly === true) {
-    return { ...none("source-fault"), rule: source.rule, rfc: source.rfc, detail: source.detail }
-  }
   const error = sutErrorOf(input)
   return source === undefined ? error : { ...error, source }
 }
+
+/**
+ * The step a passing shape record answers a failure at: a refused datagram or
+ * an absence at the failure's own step, a stray at none; undefined for a
+ * failure no record answers.
+ */
+const answerStep = (failure: Bundle.Failure): string | undefined => {
+  if (failure.failure === "unmatched-datagram" || failure.failure === "expect-timed-out") return failure.step
+  if (failure.failure === "unexpected-datagram" || failure.failure === "datagram-after-flow") return ""
+  return undefined
+}
+
+/** Whether a passing shape record answers `failure` at its step: a difference a lane rule accepted. */
+const answered = (failure: Bundle.Failure, records: ReadonlyArray<Records.ConfrontationRecord>): boolean => {
+  const at = answerStep(failure)
+  return at !== undefined && records.some((r) => r.kind === "shape" && r.step === at && Records.recordPasses(r))
+}
+
+/** A non-body record no rule accepts: its class, its step, the rule naming it and its signature. */
+const refusingRecord = (record: Records.ConfrontationRecord): MainError => ({
+  ...none("failure"),
+  rule: record.class,
+  step: record.step === "" ? null : record.step,
+  detail: `${record.rule === "" ? "" : `${record.rule}: `}${record.signature}`
+})
 
 /** The SUT's side of a failing cell: what it failed on, the source fault aside. */
 const sutErrorOf = (input: Input): MainError => {
@@ -242,21 +267,27 @@ const sutErrorOf = (input: Input): MainError => {
   if (verdict === undefined) {
     return { ...none("failure"), rule: "no-verdict", detail: "the cell wrote no verdict" }
   }
-  const failures = verdict.failures ?? []
+  const records = input.records ?? []
+  const refusing = records.find((r) => r.kind !== "body" && !Records.recordPasses(r))
+  const all = verdict.failures ?? []
+  const open = all.filter((failure) => !answered(failure, records))
+  // An answered failure leads only where nothing else can be named.
+  const failures = open.length > 0 ? open : refusing === undefined && body === undefined ? all : []
   const death = failures.find(isDeath)
   if (death !== undefined) return died(death)
   const first = failures[0]
+  if (first === undefined && refusing !== undefined) return refusingRecord(refusing)
   if (first === undefined && body !== undefined) return badBody(body)
   // A clean verdict the reclassifier still refused: the confrontation records
   // are what refused it, so the detail names them.
   if (first === undefined) {
-    const records = input.confrontation
+    const counts = input.confrontation
     return {
       ...none("failure"),
       rule: "reclassified",
-      detail: records === undefined
+      detail: counts === undefined
         ? `verdict ${verdict.status} with no failure named and no classification`
-        : `confrontation: ${records.unknown} unknown, ${records.unlisted} unlisted`
+        : `confrontation: ${counts.unknown} unknown, ${counts.unlisted} unlisted`
     }
   }
   return {

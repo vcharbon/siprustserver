@@ -12,8 +12,9 @@
     { "cell": { "case": "capture_main.pcap.gz-case8", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "capture_main.pcap.gz-case8__pivot-replay__fake" },
     { "cell": { "case": "capture_main.pcap.gz-case9", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "capture_main.pcap.gz-case9__pivot-replay__fake" },
     { "cell": { "case": "capture_main.pcap.gz-case10", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "capture_main.pcap.gz-case10__pivot-replay__fake" },
-    { "cell": { "case": "capture_main.pcap.gz-case11", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "capture_main.pcap.gz-case11__pivot-replay__fake", "sourceFaultOnly": true },
+    { "cell": { "case": "capture_main.pcap.gz-case11", "shape": "pivot-replay", "infra": "fake" }, "passed": true, "dir": "capture_main.pcap.gz-case11__pivot-replay__fake", "sourceFault": true },
     { "cell": { "case": "capture_main.pcap.gz-case12", "shape": "pivot-replay", "infra": "fake" }, "passed": true, "dir": "capture_main.pcap.gz-case12__pivot-replay__fake" },
-    { "cell": { "case": "capture_main.pcap.gz-case13", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "capture_main.pcap.gz-case13__pivot-replay__fake" }
+    { "cell": { "case": "capture_main.pcap.gz-case13", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "capture_main.pcap.gz-case13__pivot-replay__fake", "sourceFault": true },
+    { "cell": { "case": "capture_main.pcap.gz-case14", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "capture_main.pcap.gz-case14__pivot-replay__fake" }
   ]
 }

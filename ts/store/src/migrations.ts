@@ -697,21 +697,26 @@ const frozenCutGuard = Effect.gen(function*() {
 export const FROZEN_CUT_GUARD = "7_frozen_cut_guard"
 
 /**
- * The verdict class of a scripted party's violation the document does not
- * state is `source-fault`, everywhere a row names it: `case_results.error_kind`,
- * `cell_summaries.main_error`'s kind, and the bucket the `rfc` rule counts file
- * it under. `case_results.error_source` holds the source fault a main error
- * stands beside (`MainError.source`), null where there is none; the cell views
- * carry it.
+ * A scripted party's violation the document does not state is a SOURCE FAULT:
+ * information that fails no cell and is never a main error.
+ * `case_results.error_source` holds a case's source fault, passed or failed
+ * (`CaseResult.sourceFault`, `MainError.source`), null where it has none, and
+ * the cell views carry it. A row whose main error names the class under its
+ * former token keeps the fault there, its main error unmeasured; a summary's
+ * main error naming it is unmeasured too; the `rfc` rule counts file it under
+ * `source-fault`.
  */
 const sourceFault = Effect.gen(function*() {
   const sql = yield* SqlClient
   yield* sql`ALTER TABLE case_results ADD COLUMN error_source jsonb`
-  yield* sql`UPDATE case_results SET error_kind = 'source-fault' WHERE error_kind = 'harness-fault'`
   yield* sql`
-    UPDATE cell_summaries SET main_error = jsonb_set(main_error, '{kind}', '"source-fault"')
-    WHERE main_error->>'kind' = 'harness-fault'
+    UPDATE case_results
+    SET error_source = jsonb_build_object('rule', error_rule, 'rfc', error_rfc, 'detail', coalesce(error_detail, '')),
+        error_kind = NULL, error_rule = NULL, error_rfc = NULL, error_step = NULL, error_expected = NULL,
+        error_detail = NULL
+    WHERE error_kind = 'harness-fault'
   `
+  yield* sql`UPDATE cell_summaries SET main_error = NULL WHERE main_error->>'kind' = 'harness-fault'`
   yield* sql`UPDATE run_rule_hits SET bucket = 'source-fault' WHERE family = 'rfc' AND bucket = 'harness-fault'`
   yield* viewsOf(CELL_COLUMNS)
 })

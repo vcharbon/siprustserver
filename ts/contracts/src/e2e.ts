@@ -108,13 +108,12 @@ export const CellSummary = Schema.Struct({
    */
   skipped: Schema.optionalKey(LaneVerdict),
   /**
-   * Set when the cell failed on a SOURCE FAULT alone: the system under test's
-   * side passed (its verdict, its charges and the deployment's bless), and a
-   * scripted party broke an RFC rule the source capture's endpoint broke, which
-   * the document does not state. Absent on every other cell, a cell whose SUT
-   * side failed beside a source fault included.
+   * Set when the cell's RFC audit holds a SOURCE FAULT: a scripted party broke
+   * an RFC rule the source capture's endpoint broke, which the document does
+   * not state. Information beside the verdict, passed or failed: it fails no
+   * cell, which `passed` judges on the system under test alone.
    */
-  sourceFaultOnly: Schema.optionalKey(Schema.Literal(true))
+  sourceFault: Schema.optionalKey(Schema.Literal(true))
 })
 export interface CellSummary extends Schema.Schema.Type<typeof CellSummary> {}
 
@@ -202,7 +201,7 @@ export const cellSummaryJson = (summary: CellSummary): Record<string, unknown> =
     dir: summary.dir,
     error: summary.error,
     skipped: summary.skipped,
-    sourceFaultOnly: summary.sourceFaultOnly
+    sourceFault: summary.sourceFault
   })
 
 export const cellSkipJson = (skip: CellSkip): Record<string, unknown> => ({

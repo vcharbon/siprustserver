@@ -1,32 +1,25 @@
 /**
- * The source fault beside a main error: a call whose main error is the SUT's
- * failure and which also carries a source fault says both, the source fault as
- * a marker of its own; a call that failed on a source fault alone says it once,
- * as its main error.
+ * The source fault a call carries: information, shown as a marker of its own
+ * beside whatever the row says — the SUT's main error on a failing call, the
+ * `passed` tag on a passing one — and never a main error.
  */
 import { describe, expect, it } from "vitest"
-import type { TriageMainError } from "../src/api.ts"
-import { sourceBeside, sourceFaultText } from "../src/source-fault.ts"
-
-const died: TriageMainError = {
-  kind: "died",
-  rule: null,
-  rfc: null,
-  step: "s18",
-  expected: "481 to PRACK",
-  detail: "gated on response 481; 200 arrived"
-}
+import type { TriageCallRow } from "../src/api.ts"
+import { sourceFaultText, sourceOf } from "../src/source-fault.ts"
 
 const source = { rule: "prack-2xx-or-481", rfc: "RFC 3262 §3", detail: "uas1: answered 481 — RFC 3262 §3" }
 
-describe("sourceBeside", () => {
-  it("reads the source fault a main error stands beside", () => {
-    expect(sourceBeside({ ...died, source })).toEqual(source)
+const row = (over: Partial<TriageCallRow>): TriageCallRow => ({ kind: "case", ...over }) as TriageCallRow
+
+describe("sourceOf", () => {
+  it("reads the source fault of a call, passing or failing", () => {
+    expect(sourceOf(row({ passed: true, sourceFault: source }))).toEqual(source)
+    expect(sourceOf(row({ passed: false, sourceFault: source }))).toEqual(source)
   })
 
-  it("reads none where the main error carries none, or nothing was measured", () => {
-    expect(sourceBeside(died)).toBeNull()
-    expect(sourceBeside(null)).toBeNull()
+  it("reads none where the call carries none, or the cut refused it", () => {
+    expect(sourceOf(row({ passed: true }))).toBeNull()
+    expect(sourceOf(row({ kind: "refused", sourceFault: source }))).toBeNull()
   })
 })
 

@@ -659,7 +659,6 @@
                         "type": "string",
                         "enum": [
                           "rfc",
-                          "source-fault",
                           "died",
                           "failure",
                           "bad-body",
@@ -965,7 +964,6 @@
                         "type": "string",
                         "enum": [
                           "rfc",
-                          "source-fault",
                           "died",
                           "failure",
                           "bad-body",

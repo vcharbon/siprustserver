@@ -46,7 +46,7 @@ import {
   stateOf
 } from "../queue-filter.ts"
 import { alsoBadBody } from "../bad-body.ts"
-import { sourceBeside, sourceFaultText } from "../source-fault.ts"
+import { sourceFaultText, sourceOf } from "../source-fault.ts"
 import { rowKey } from "../request-builder.ts"
 import { setQuery, useQuery } from "../router.ts"
 
@@ -118,16 +118,16 @@ const toneOf = (row: TriageCallRow): string =>
  * follow as tags. A case the interpreter refused is a case: its chip sets
  * `rule`, where the chip row counts it. A passed, skipped or unmeasured call
  * has no chip. A call that carries a failing body row its main error does not
- * name shows `+ bad body` beside it, which sets `rule` to `bad-body`; a call
- * whose SUT failure stands beside a source fault shows `+ source fault` with
- * the source's rule, which sets `rule` to it.
+ * name shows `+ bad body` beside it, which sets `rule` to `bad-body`. A call
+ * carrying a source fault, passed or failed, shows `+ source fault` with its
+ * rule, as information: no filter counts it.
  */
 const MainError = (
   { row, onChip }: { row: TriageCallRow; onChip: (group: Group, value: string) => void }
 ): JSX.Element => (
   <>
     <MainErrorChip row={row} onChip={onChip} />
-    {row.kind === "case" && !row.passed && <SourceBeside source={sourceBeside(row.mainError)} onChip={onChip} />}
+    <SourceBeside source={sourceOf(row)} />
     {row.kind === "case" && alsoBadBody(row.mainError, row.bodyFailing) && (
       <button
         type="button"
@@ -141,18 +141,11 @@ const MainError = (
   </>
 )
 
-const SourceBeside = (
-  { source, onChip }: { source: TriageSourceFault | null; onChip: (group: Group, value: string) => void }
-): JSX.Element | null =>
+const SourceBeside = ({ source }: { source: TriageSourceFault | null }): JSX.Element | null =>
   source === null ? null : (
-    <button
-      type="button"
-      className="tag main-error error-source-fault also"
-      title={`${source.detail}\n\nclick: show every call with this rule`}
-      onClick={() => onChip("rule", source.rule)}
-    >
+    <span className="tag main-error error-source-fault also" title={`information, not the SUT's:\n${source.detail}`}>
       + {sourceFaultText(source)}
-    </button>
+    </span>
   )
 
 const MainErrorChip = (
@@ -183,12 +176,6 @@ const MainErrorChip = (
         "rule",
         error.rule,
         <>{error.rule ?? "rfc"}{error.rfc !== null && <span className="cite"> · {error.rfc}</span>}</>
-      )
-    case "source-fault":
-      return chip(
-        "rule",
-        error.rule,
-        <>source fault · {error.rule ?? "rfc"}{error.rfc !== null && <span className="cite"> · {error.rfc}</span>}</>
       )
     case "died":
       return chip(

@@ -354,25 +354,25 @@ describe("the post-run RFC audit", () => {
     expect((await audited("rfc-party-unjudged")).cell.passed).toBe(true)
   })
 
-  it("fails a scripted party's finding the reference does not show as a source fault, not the SUT's", async () => {
+  it("passes a cell whose only finding is a scripted party's the reference does not show, marked as a source fault", async () => {
     const { cell, detail } = await audited("rfc-source-fault")
-    expect(cell.passed).toBe(false)
-    expect(cell.sourceFaultOnly).toBe(true)
-    expect(detail).toContain("a source fault failed the cell")
+    expect(cell.passed).toBe(true)
+    expect(cell.sourceFault).toBe(true)
+    expect(detail).toContain("a source fault stands as information")
     expect(detail).toContain("no-200-after-cancel [127.0.0.1:5060] by uas1")
     expect(detail).not.toContain("the RFC audit failed the cell")
   })
 
-  it("never lets a source fault hide the SUT's own failure: the detail names both", async () => {
+  it("never lets a source fault hide the SUT's own failure: the cell fails and the detail names both", async () => {
     const { cell, detail } = await audited("rfc-source-fault-beside-a-failure")
     expect(cell.passed).toBe(false)
-    expect(cell.sourceFaultOnly).toBeUndefined()
+    expect(cell.sourceFault).toBe(true)
     expect(detail).toContain("the run failed")
     expect(detail).toContain("beside it, a source fault")
     expect(detail).toContain("no-200-after-cancel [127.0.0.1:5060] by uas1")
   })
 
-  it("rules the SUT's side apart from the source fault: a bless of the SUT's side leaves the cell failed on the source fault alone", async () => {
+  it("judges the SUT's side alone: a bless of the SUT's side passes the cell over its source fault", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
     const run = await campaign([replayCell({ case: caseNamed(cases, "rfc-source-fault-beside-a-failure.v3.json") })], {
@@ -383,9 +383,8 @@ describe("the post-run RFC audit", () => {
       }
     })
     const cell = run.index.cells[0]!
-    expect(cell.passed).toBe(false)
-    expect(cell.sourceFaultOnly).toBe(true)
-    expect(run.cells[0]!.detail).toContain("a source fault failed the cell")
+    expect(cell.passed).toBe(true)
+    expect(cell.sourceFault).toBe(true)
   })
 
   it("fails the SUT's own finding as the RFC audit's", async () => {

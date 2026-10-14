@@ -67,6 +67,8 @@ export interface CallRow {
   readonly mainError: MainError | null
   /** The body rows no rule accepts, whatever `mainError` names; absent reads as 0. */
   readonly bodyFailing?: number
+  /** The case's source fault, passed or failed: information that fails nothing; absent where it has none. */
+  readonly sourceFault?: MainErrors.SourceFault
   /** When the run finished, or when the refusing cut was taken. */
   readonly finishedAt: string | null
 }
@@ -316,6 +318,7 @@ export const layer = Layer.effect(
       reasons: row.reasons,
       features: row.features,
       mainError: errorOf(row),
+      ...(row.kind === "case" && row.error_source !== null ? { sourceFault: row.error_source } : {}),
       bodyFailing: Number(row.body_failing),
       finishedAt: row.finished_at === null ? null : new Date(row.finished_at).toISOString()
     })

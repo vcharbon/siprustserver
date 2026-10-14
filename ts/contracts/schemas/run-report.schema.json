@@ -432,7 +432,6 @@
                         "type": "string",
                         "enum": [
                           "rfc",
-                          "source-fault",
                           "died",
                           "failure",
                           "bad-body",

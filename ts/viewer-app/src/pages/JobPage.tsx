@@ -18,7 +18,7 @@ import { ProgressBar } from "../components/ProgressBar.tsx"
 import { useHeld } from "../held.ts"
 import { unitOf } from "../job-progress.ts"
 import { alsoBadBody } from "../bad-body.ts"
-import { sourceBeside, sourceFaultText } from "../source-fault.ts"
+import { sourceFaultText } from "../source-fault.ts"
 import { usePolled } from "../poll.ts"
 import { href } from "../router.ts"
 
@@ -32,8 +32,8 @@ const ENDED = new Set(["done", "failed", "interrupted", "died"])
  * stopped, the failure's tag; then the source fault beside it, where one is.
  */
 const errorText = (error: TriageMainError | null): string => {
-  const source = sourceBeside(error)
-  return mainText(error) + (source === null ? "" : ` + ${sourceFaultText(source)}`)
+  const source = error?.source
+  return mainText(error) + (source === undefined ? "" : ` + ${sourceFaultText(source)}`)
 }
 
 const mainText = (error: TriageMainError | null): string => {
@@ -41,8 +41,6 @@ const mainText = (error: TriageMainError | null): string => {
   switch (error.kind) {
     case "rfc":
       return `${error.rule ?? "rfc"}${error.rfc === null ? "" : ` · ${error.rfc}`}`
-    case "source-fault":
-      return sourceFaultText({ rule: error.rule ?? "rfc", rfc: error.rfc })
     case "died":
       return `died${error.step === null ? "" : ` at ${error.step}`}${error.expected === null ? "" : ` · expected ${error.expected}`}`
     case "failure":

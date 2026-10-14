@@ -8,15 +8,15 @@
  *
  * A gating finding is the SUT's, and turns the cell red; a source fault is a
  * scripted party's violation the document does not state — the party replays
- * the source capture's endpoint, which broke the RFC — and turns it red as the
- * source's; a scripted party's
- * finding the document states (the reference shows it) or could not judge is
- * information; an advisory one is a rule the lane records and refuses to fail
- * on; a relayed one is the SUT's, cancelled as caused by the party the
- * document states committing it. Gating findings and source faults are drawn
- * in sections of their own because collapsing them would make a red cell and
- * a clean one read alike — and for the same reason an audit that found
- * nothing states that it ran.
+ * the source capture's endpoint, which broke the RFC — information that turns
+ * nothing red; a scripted party's finding the document states (the reference
+ * shows it) or could not judge is information; an advisory one is a rule the
+ * lane records and refuses to fail on; a relayed one is the SUT's, cancelled
+ * as caused by the party the document states committing it. Gating findings
+ * and source faults are drawn in sections of their own because collapsing them
+ * into the rest would hide the one that fails the cell and the one whose
+ * source broke the RFC — and for the same reason an audit that found nothing
+ * states that it ran.
  *
  * `rfc.json` reaches the browser untyped, so every field is read through a
  * guard: a finding this pane cannot read is listed as raw JSON rather than
@@ -48,7 +48,7 @@ interface Finding {
   readonly offending: number | undefined
   /** This finding is the SUT's, and why the cell is red. */
   readonly gating: boolean
-  /** A scripted party broke a rule the document does not state: the cell is red as the source capture's. */
+  /** A scripted party broke a rule the document does not state: the source capture's, information. */
   readonly sourceFault: boolean
   /** The rule is recorded and never failed on. */
   readonly advisory: boolean
@@ -198,7 +198,7 @@ export const RfcAuditPane = ({ rfc }: { rfc: unknown }): JSX.Element | null => {
       <Section
         tone="source"
         title="source fault"
-        lead="a scripted party broke a rule the document does not state: it replays the source capture's endpoint, which broke the RFC. Not the SUT's, and the cell is not ok; a failure of the SUT's is still shown as the cell's main error."
+        lead="a scripted party broke a rule the document does not state: it replays the source capture's endpoint, which broke the RFC. Information, not the SUT's: the cell is judged on the SUT alone."
         findings={findings.filter((finding) => !finding.gating && finding.sourceFault)}
       />
       <Section

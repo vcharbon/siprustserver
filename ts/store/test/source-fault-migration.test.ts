@@ -1,9 +1,9 @@
 /**
  * The source-fault migration against a real postgres: a store migrated up to
- * the migration before it, holding rows stored under the class's former token,
- * reads every one of them as `source-fault` once the store's migrations run to
- * the end, and its case results carry the source fault a main error stands
- * beside. The suite builds and drops its own database.
+ * the migration before it, holding rows whose main error is the class under
+ * its former token, keeps each fault as the row's source fault and its main
+ * error unmeasured (a source fault is no main error), and files the rule counts
+ * under `source-fault`. The suite builds and drops its own database.
  */
 import * as Effect from "effect/Effect"
 import * as Migrator from "effect/unstable/sql/Migrator"
@@ -36,7 +36,7 @@ afterAll(async () => {
 }, 60_000)
 
 describe.skipIf(!served)("the source-fault migration", () => {
-  it("restates every stored row of the former token as source-fault, and keeps the source beside a main error", () =>
+  it("keeps each stored row's fault of the former token as its source fault, its main error unmeasured", () =>
     Server.on(
       SCRATCH,
       Effect.gen(function*() {
@@ -64,16 +64,17 @@ describe.skipIf(!served)("the source-fault migration", () => {
 
         yield* StoreMigrator.run
 
-        const results = yield* sql<{ error_kind: string; error_source: unknown }>`
-          SELECT error_kind, error_source FROM case_results
+        const source = { rule: "no-200-after-cancel", rfc: null, detail: "uas1: answered 200 after the CANCEL" }
+        const results = yield* sql<{ error_kind: string | null; error_rule: string | null; error_source: unknown }>`
+          SELECT error_kind, error_rule, error_source FROM case_results
         `
-        expect(results).toEqual([{ error_kind: "source-fault", error_source: null }])
-        const summaries = yield* sql<{ kind: string }>`SELECT main_error->>'kind' AS kind FROM cell_summaries`
-        expect(summaries).toEqual([{ kind: "source-fault" }])
+        expect(results).toEqual([{ error_kind: null, error_rule: null, error_source: source }])
+        const summaries = yield* sql<{ main_error: unknown }>`SELECT main_error FROM cell_summaries`
+        expect(summaries).toEqual([{ main_error: null }])
         const hits = yield* sql<{ bucket: string }>`SELECT bucket FROM run_rule_hits`
         expect(hits).toEqual([{ bucket: "source-fault" }])
         const viewed = yield* sql<{ error_source: unknown }>`SELECT error_source FROM run_cells`
-        expect(viewed).toEqual([{ error_source: null }])
+        expect(viewed).toEqual([{ error_source: source }])
       })
     ), 60_000)
 })

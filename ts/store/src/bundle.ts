@@ -14,14 +14,14 @@
  * what says so, and the case is recorded as neither passed nor failed.
  *
  * Each cell's main error is decided here from what the cell wrote
- * (`main-error.ts`), its failing body rows read off
+ * (`main-error.ts`), its confrontation records read off
  * `confrontation.ndjson` for a failing cell, and whether the body gate
  * refused it off `rule-hits.json`; which of the audit's charges STAND is the caller's ruling
  * (`charges`), asked only where the audit holds a charge, and every gating
  * finding stands where the caller has none. A source fault the audit wrote is
- * read as it stands: it is the source capture's, and no ruling answers for it;
- * the index's `sourceFaultOnly` says whether it is the main error or stands
- * beside the SUT's failure.
+ * read as it stands: it is the source capture's, no ruling answers for it, and
+ * it fails nothing — it is the case's `sourceFault`, passed or failed, and
+ * stands beside a failing case's main error.
  */
 import { Bundle, Confrontation as Records, MainError, StepOrder } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -29,7 +29,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
 import type { CaseResult, RunStatus } from "./model.js"
 
-const { BAD_BODY, failingBody, mainErrorOf } = MainError
+const { BAD_BODY, failingBody, mainErrorOf, sourceFaultOf } = MainError
 const { stepOrderOf } = StepOrder
 type Confrontation = MainError.Confrontation
 
@@ -67,7 +67,6 @@ interface Rollup {
     readonly dir?: string
     readonly skipped?: string
     readonly error?: string
-    readonly sourceFaultOnly?: boolean
   }>
 }
 
@@ -103,15 +102,12 @@ const askedDocument = Effect.fn("Bundle.askedDocument")(function*(runDir: string
 })
 
 /**
- * How many findings of `rfc.json` fail the cell: the SUT's gating ones and the
- * scripted parties' source faults; null where the cell wrote none or was not
- * audited.
+ * How many findings of `rfc.json` fail the cell: the SUT's gating ones; null
+ * where the cell wrote none or was not audited.
  */
 const rfcGatingOf = (rfc: Record<string, unknown> | null): number | null => {
   if (rfc === null || rfc["status"] !== "audited" || !Array.isArray(rfc["findings"])) return null
-  return (rfc["findings"] as ReadonlyArray<unknown>)
-    .filter((f) => asRecord(f)?.["gating"] === true || asRecord(f)?.["source_fault"] === true)
-    .length
+  return (rfc["findings"] as ReadonlyArray<unknown>).filter((f) => asRecord(f)?.["gating"] === true).length
 }
 
 /**
@@ -186,13 +182,13 @@ const recordOf = (line: string): Records.ConfrontationRecord | undefined => {
 }
 
 /**
- * The cell's body rows no rule accepts, earliest document step
- * first; a line that does not decode is skipped, and a cell with no readable
+ * The cell's confrontation records, earliest document step first; a line that
+ * does not decode is skipped, and a cell with no readable
  * `confrontation.ndjson` has none.
  */
-const failingBodyOf = (dir: string, document: unknown) =>
+const recordsOf = (dir: string, document: unknown) =>
   Effect.map(linesOfFile(path.join(dir, "confrontation.ndjson")), (lines) =>
-    Records.inStepOrder(failingBody(lines.flatMap((line) => recordOf(line) ?? [])), stepOrderOf(document)))
+    Records.inStepOrder(lines.flatMap((line) => recordOf(line) ?? []), stepOrderOf(document)))
 
 /** Whether the cell's `rule-hits.json` counts the body gate as what refused it. */
 const bodyGatedOf = (dir: string) =>
@@ -242,8 +238,12 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
     const charged = passed || skipped !== null || dir === undefined || !findings.some((f) => f.gating)
       ? []
       : yield* charges(dir, findings)
-    // Only a failing cell can carry one: the body gate fails every other.
-    const body = passed || skipped !== null || dir === undefined ? [] : yield* failingBodyOf(dir, document)
+    // Only a failing cell's records are read: the body gate fails every cell
+    // carrying a body row no rule accepts, and nothing else reads them.
+    const records = passed || skipped !== null || dir === undefined ? [] : yield* recordsOf(dir, document)
+    const body = failingBody(records)
+    const source = findings.filter((finding) => finding.source_fault === true)
+    const sourceFault = sourceFaultOf(source)
     cases.push({
       caseId,
       passed,
@@ -258,12 +258,13 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
         ...(typeof cell.error === "string" ? { error: cell.error } : {}),
         verdict: verdictOf(verdict),
         charged,
-        source: findings.filter((finding) => finding.source_fault === true),
-        sourceOnly: cell.sourceFaultOnly === true,
+        source,
         confrontation: confrontationOf(classification),
+        records,
         body,
         bodyGated: dir !== undefined && body.length > 0 && (yield* bodyGatedOf(dir))
       }),
+      ...(sourceFault === undefined ? {} : { sourceFault }),
       classification,
       document
     })

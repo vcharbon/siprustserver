@@ -2771,10 +2771,10 @@ an entry here, whose `step` lands on that transaction — it is CANCELLED: still
 written, beside the statement that cancels it, as information. Where the
 document does not state it, it is a SOURCE FAULT (`source_fault` in
 `rfc.json`): the scripted peer replays what the source capture's endpoint did,
-that endpoint broke the RFC, and the document never says so. The cell fails as
-the source's fault, never as the SUT's defect, and a source fault never hides a
-failure the SUT answers for: the cell's main error is the SUT's failure where
-one stands, the source fault named beside it. A captured document flagged
+that endpoint broke the RFC, and the document never says so. It is the
+source's fault, never the SUT's defect: written as information, it fails no
+cell. The cell is judged on the SUT alone, and where it fails, its main error is
+the SUT's failure with the source fault named beside it. A captured document flagged
 `census-uncovered` never read its source's violations, so it can state none:
 there the peer's finding is `unjudged`, written with that reason, as
 information. A captured document's entries come from

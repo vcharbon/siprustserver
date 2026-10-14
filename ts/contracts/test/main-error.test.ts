@@ -9,7 +9,7 @@
 import type * as Bundle from "../src/bundle/index.js"
 import type * as Confrontation from "../src/confrontation.js"
 import { describe, expect, it } from "vitest"
-import { citation, failingBody, gatedOnText, mainErrorOf } from "../src/main-error.js"
+import { citation, failingBody, gatedOnText, MainErrorKind, mainErrorOf, sourceFaultOf } from "../src/main-error.js"
 
 const finding = (
   rule: string,
@@ -147,16 +147,10 @@ describe("mainErrorOf", () => {
       detail: "uas1: Answered with a 200 after the CANCEL — RFC 3261 §9.2 has it answer 487"
     }
 
-    it("is its own kind, naming the party, where the SUT's side passed", () => {
-      expect(mainErrorOf({ ...failed, verdict: verdict([died]), charged: [], source: [fault], sourceOnly: true }))
-        .toEqual({
-          kind: "source-fault",
-          rule: "no-200-after-cancel",
-          rfc: "RFC 3261 §9.2",
-          step: null,
-          expected: null,
-          detail: "uas1: Answered with a 200 after the CANCEL — RFC 3261 §9.2 has it answer 487"
-        })
+    it("is never a main error: it fails no cell, and a cell that passed says nothing", () => {
+      expect(MainErrorKind.literals).not.toContain("source-fault")
+      expect(mainErrorOf({ passed: true, skipped: null, verdict: verdict([]), charged: [], source: [fault] })).toBeNull()
+      expect(sourceFaultOf([fault])).toEqual(beside)
     })
 
     it("never hides the step the run died at: the death leads, the source fault beside it", () => {
@@ -191,9 +185,63 @@ describe("mainErrorOf", () => {
       expect([error?.kind, error?.source]).toEqual(["bad-body", beside])
     })
 
-    it("is said once: a cell that failed on it alone carries no source beside its main error", () => {
-      expect(mainErrorOf({ ...failed, verdict: verdict([]), charged: [], source: [fault], sourceOnly: true }))
-        .not.toHaveProperty("source")
+  })
+
+  describe("a failure a lane rule answered", () => {
+    // The death at s14 is answered by the accepted shape record at its step;
+    // the cell is red on the header record no rule of the lane accepts.
+    const answeredDeath = bodyRow({
+      kind: "shape",
+      step: "s14",
+      signature: "shape:status-substitution:481->487:response:487:INVITE",
+      name: "",
+      scope: "response:487:INVITE",
+      captured: ["status-substitution:481->487"],
+      replayed: [],
+      class: "accepted",
+      rule: "a-named-substitution"
+    })
+    const unlistedHeader = bodyRow({
+      kind: "header",
+      step: "s22",
+      signature: "header:allow:response:200:OPTIONS",
+      name: "Allow",
+      scope: "response:200:OPTIONS",
+      captured: ["INVITE, ACK"],
+      replayed: ["INVITE, ACK, BYE"],
+      class: "unlisted",
+      rule: "an-unlisted-rule"
+    })
+
+    it("never leads where a record no rule accepts refused the cell: that record does", () => {
+      expect(mainErrorOf({
+        ...failed,
+        verdict: verdict([died]),
+        charged: [],
+        records: [answeredDeath, unlistedHeader]
+      })).toEqual({
+        kind: "failure",
+        rule: "unlisted",
+        rfc: null,
+        step: "s22",
+        expected: null,
+        detail: "an-unlisted-rule: header:allow:response:200:OPTIONS"
+      })
+    })
+
+    it("still leads where nothing else refused the cell, so the row names a failure", () => {
+      expect(mainErrorOf({ ...failed, verdict: verdict([died]), charged: [], records: [answeredDeath] })?.kind)
+        .toBe("died")
+    })
+
+    it("leaves an unanswered death leading over a refusing record", () => {
+      const elsewhere = { ...answeredDeath, step: "s9" }
+      expect(mainErrorOf({
+        ...failed,
+        verdict: verdict([died]),
+        charged: [],
+        records: [elsewhere, unlistedHeader]
+      })?.kind).toBe("died")
     })
   })
 

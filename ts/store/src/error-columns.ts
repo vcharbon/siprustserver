@@ -1,7 +1,8 @@
 /**
  * A case result's main error as `case_results` stores it, one column per
- * field and the source fault beside it as `error_source`, read back into the
- * {@link MainError} the writer stored.
+ * field, and the case's source fault as `error_source` — stored for a passing
+ * case too, where it is the only thing the columns hold — read back into the
+ * {@link MainError} and source fault the writer stored.
  */
 import type { MainError as MainErrors } from "@sip/contracts"
 import type { MainError, MainErrorKind } from "./model.js"
@@ -17,7 +18,7 @@ export interface ErrorColumns {
   readonly error_source: MainErrors.SourceFault | null
 }
 
-/** The main error the columns hold; null where the row stores none. */
+/** The main error the columns hold, the source fault beside it; null where the row stores none. */
 export const errorOf = (row: ErrorColumns): MainError | null =>
   row.error_kind === null
     ? null

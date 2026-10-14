@@ -8,9 +8,9 @@
 //! same violation on the same transaction cancels it (written beside it, for
 //! information); one the document does not state is a SOURCE FAULT — the
 //! scripted party replays what the source capture's endpoint did, and that
-//! endpoint broke the RFC — which fails the cell as such; one a
+//! endpoint broke the RFC — named apart, for information; one a
 //! document that never read its captured trace's violations cannot judge is
-//! `unjudged`, for information. An advisory finding is written so a triage
+//! `unjudged`, for information. Only the SUT's gating findings fail the cell. An advisory finding is written so a triage
 //! session can read it, never counted. `not-audited` is a value of its own, so
 //! a lane that recorded nothing can never be read as a clean audit.
 
@@ -65,8 +65,8 @@ pub struct RfcFinding {
     pub caused_by: Option<String>,
     /// `true` ⇒ a document actor's hard-gate violation the document does not
     /// state: the scripted party replays the source capture's endpoint, which
-    /// broke the rule, and the document never says so. Fails the cell as a
-    /// source fault, never as the system under test's.
+    /// broke the rule, and the document never says so. Information: it fails
+    /// no cell, and is never the system under test's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub source_fault: bool,
     /// Why a document actor's uncancelled hard-gate violation is judged
@@ -96,16 +96,16 @@ impl RunRfcAudit {
         self.count(|f| f.gating)
     }
 
-    /// The findings that fail the cell as a source fault.
+    /// The source faults: scripted parties' violations the document does not
+    /// state, written for information.
     pub fn source_faults(&self) -> usize {
         self.count(|f| f.source_fault)
     }
 
-    /// The run passes the audit: audited with no gating finding and no
-    /// source fault, or not audited at all (an absence the lane states, never
-    /// a pass it claims).
+    /// The run passes the audit: audited with no gating finding, or not
+    /// audited at all (an absence the lane states, never a pass it claims).
     pub fn passed(&self) -> bool {
-        self.gating() == 0 && self.source_faults() == 0
+        self.gating() == 0
     }
 
     fn count(&self, admits: impl Fn(&RfcFinding) -> bool) -> usize {
@@ -137,14 +137,15 @@ mod tests {
         }
     }
 
-    /// A scripted party's unstated violation fails the audit without counting
-    /// as the system under test's; its two marks are written only where set.
+    /// A scripted party's unstated violation is counted and written, and never
+    /// fails the audit: it is not the system under test's. Its two marks are
+    /// written only where set.
     #[test]
-    fn a_source_fault_fails_the_audit_and_is_not_the_systems() {
+    fn a_source_fault_is_information_and_never_fails_the_audit() {
         let fault = RfcFinding { actor: Some("uas1".into()), source_fault: true, ..finding(false) };
         let audit = RunRfcAudit::Audited { findings: vec![fault] };
         assert_eq!((audit.gating(), audit.source_faults()), (0, 1));
-        assert!(!audit.passed());
+        assert!(audit.passed());
         let text = serde_json::to_string(&audit).unwrap();
         assert!(text.contains(r#""source_fault":true"#), "{text}");
         assert!(!text.contains("unjudged"), "{text}");

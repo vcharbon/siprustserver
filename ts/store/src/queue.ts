@@ -118,7 +118,7 @@ export interface Row {
    * `failedSteps` above cannot be read back onto a call.
    */
   readonly caseResults: ReadonlyArray<CaseOutcome>
-  /** Findings of the latest run's post-run RFC audit that fail it: a SUT violation the scripted peers tolerated, or a source fault. */
+  /** Findings of the latest run's post-run RFC audit that fail it: a SUT violation the scripted peers tolerated. */
   readonly rfcGating: number
   /** The latest run's confrontation classification, summed over its cases. */
   readonly deltas: Deltas
