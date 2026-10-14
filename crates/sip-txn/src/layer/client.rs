@@ -163,13 +163,13 @@ impl Owner {
         let ViaMarks { call_ref, leg_id, incarnation_mark } = extract_via_custom_params(&msg);
         self.note_dialog_cseq(call_ref.as_deref(), &msg);
 
-        // The transaction opens after the send, in the step that arms its
-        // give-up timer, so `created_at` (the bound's origin) follows the send.
+        // Opened after the send, so `created_at` (the bound's origin) follows it.
         self.send_buffer(endpoint, &buf, dest).await;
         self.open_txn(NewTransaction {
             id: TxnId::Client(branch.clone()),
             kind: txn_type,
             method: msg.method().clone(),
+            cseq: msg.cseq().seq(),
             call_id: msg.call_id().as_str().to_string(),
             from_tag: msg.from().tag().unwrap_or_default().to_string(),
             original_request: matches!(txn_type, TxnKind::Invite).then(|| msg.clone()),

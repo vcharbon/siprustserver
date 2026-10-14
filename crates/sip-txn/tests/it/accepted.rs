@@ -1,7 +1,8 @@
 //! RFC 6026 §7.1 / §8.7: an INVITE server transaction that sent a 2xx is
-//! Accepted until Timer L. It absorbs copies of its INVITE, drawing the 2xx
-//! the TU sent and never a 100 or a second transaction, and passes every ACK
-//! up; Timer L, measured from the 2xx, takes it out of the map.
+//! Accepted until Timer L. It absorbs copies of its INVITE — never a 100 or a
+//! second transaction — and passes every ACK up; Timer L, measured from the
+//! 2xx, takes it out of the map. Each copy draws the 2xx the TU sent: this
+//! stack's choice, where §8.7 sends nothing.
 
 use crate::common;
 use common::*;

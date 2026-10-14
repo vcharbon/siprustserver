@@ -38,8 +38,9 @@ pub(super) enum TxnState {
     Confirmed,
     /// RFC 6026 Accepted, after a 2xx; nothing retransmits or times out here.
     /// An INVITE server txn that sent a 2xx (§7.1, §8.7): held for Timer L,
-    /// answering each copy of its INVITE with that 2xx and passing every ACK
-    /// up. An orphaned INVITE client txn whose 2xx the layer ACKed itself
+    /// passing every ACK up and handing no copy of its INVITE up; this stack
+    /// answers each copy with that 2xx where §8.7 sends nothing (`replay_cached`).
+    /// An orphaned INVITE client txn whose 2xx the layer ACKed itself
     /// (§7.2): held for Timer M, re-passing that ACK to every repeat of the
     /// 2xx (RFC 3261 §13.2.2.4).
     Accepted,
@@ -165,6 +166,7 @@ pub(super) struct NewTransaction {
     pub(super) id: TxnId,
     pub(super) kind: TxnKind,
     pub(super) method: Method,
+    pub(super) cseq: u32,
     pub(super) call_id: String,
     pub(super) from_tag: String,
     pub(super) original_request: Option<SipRequest>,
@@ -184,6 +186,7 @@ impl Transaction {
             id: head.id,
             kind: head.kind,
             method: head.method,
+            cseq: head.cseq,
             call_id: head.call_id,
             from_tag: head.from_tag,
             original_request: head.original_request,
@@ -260,6 +263,9 @@ pub(super) struct Transaction {
     /// of every message on it, and the `method` a rung of its ladder is
     /// counted under.
     pub(super) method: Method,
+    /// The CSeq number of the request this transaction is for: a CANCEL names
+    /// its INVITE by it (RFC 3261 §9.1), after the request itself is dropped.
+    pub(super) cseq: u32,
     pub(super) call_id: String,
     pub(super) from_tag: String,
     pub(super) original_request: Option<SipRequest>,

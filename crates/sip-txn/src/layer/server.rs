@@ -307,6 +307,7 @@ impl Owner {
             id: TxnId::Server(id.to_key()),
             kind,
             method: req.method().clone(),
+            cseq: req.cseq().seq(),
             call_id: req.call_id().as_str().to_string(),
             from_tag: req.from().tag().unwrap_or_default().to_string(),
             // INVITE server txns keep the request for the CANCEL→487 path; a
@@ -452,13 +453,11 @@ impl Owner {
     /// The retransmission path (RFC 3261 §17.2.1): a request a server
     /// transaction matches (§17.2.3) draws that transaction's cached
     /// response — a repeat no timer paced, counted as `trigger` under the
-    /// request's method and the response's status; an Accepted INVITE
-    /// transaction answers a copy of its INVITE with the 2xx the TU sent and
-    /// hands nothing up (RFC 6026 §8.7). A `Proceeding` INVITE
-    /// server transaction holding no response yet (a seed rebuilt from a
-    /// record, ADR-0014) owes the retransmission its most recent provisional:
-    /// a 100 Trying is composed from `req`, sent and cached, as the admit path
-    /// does for the first copy. A non-INVITE transaction still awaiting its
+    /// request's method and the response's status; an Accepted INVITE answers
+    /// a copy with its 2xx, this stack's choice where RFC 6026 §8.7 sends
+    /// nothing (a takeover seed never sent the 2xx the copy missed). A seed
+    /// `Proceeding` with no response yet (ADR-0014) owes a 100 Trying, composed
+    /// from `req`, sent and cached. A non-INVITE transaction still awaiting its
     /// first response sends nothing: its request is the consumer's to answer.
     /// A copy the event queue drops, or the consumer discards before handling
     /// it ([`TransactionLayer::forget_unanswered`](crate::TransactionLayer::forget_unanswered)),

@@ -40,16 +40,17 @@ impl Owner {
         // INVITE's top-Via branch and sent-by (RFC 3261 §9.1, §9.2), so a
         // compliant peer keys it directly — an O(1) `get` instead of an
         // O(total_txns) scan; we still confirm callId+fromTag (and fall back to
-        // the scan, still on the sent-by, for a peer that didn't preserve the
-        // branch).
+        // the scan, still on the sent-by and the CSeq number, for a peer that
+        // didn't preserve the branch).
         let cancel_via = req.top_via();
+        let cseq = req.cseq().seq();
         let is_cancel_target = |t: &Transaction| {
             t.kind == TxnKind::Invite
                 && t.call_id == call_id.as_str()
                 && t.from_tag == from_tag
                 && t.state.is_active()
         };
-        let matched = self.cancelled_invite(cancel_via, is_cancel_target);
+        let matched = self.cancelled_invite(cancel_via, cseq, is_cancel_target);
 
         // A server INVITE txn that has sent its final is still held — Accepted
         // after a 2xx for Timer L (RFC 6026 §7.1), Completed after a non-2xx for
@@ -67,7 +68,7 @@ impl Owner {
                         TxnState::Completed | TxnState::Confirmed | TxnState::Accepted
                     )
             };
-            if let Some(key) = self.cancelled_invite(cancel_via, is_answered_target) {
+            if let Some(key) = self.cancelled_invite(cancel_via, cseq, is_answered_target) {
                 let to_tag = self.uas_to_tag_of(key.id());
                 let cancel_ok = generate_response(
                     &req,
@@ -159,16 +160,21 @@ impl Owner {
         true
     }
 
-    /// The INVITE server transaction a CANCEL with top Via `via` names and
-    /// `pick` accepts: the one on its branch and sent-by (§9.2), else any on
-    /// its sent-by, for a peer that did not keep the INVITE's branch.
+    /// The INVITE server transaction a CANCEL with top Via `via` and CSeq
+    /// number `cseq` names and `pick` accepts: the one on its branch and
+    /// sent-by (§9.2), else, for a peer that did not keep the INVITE's
+    /// branch, one on its sent-by whose INVITE carried `cseq` (§9.1). Another
+    /// INVITE of the same dialog is another transaction.
     fn cancelled_invite(
         &self,
         via: &Via,
+        cseq: u32,
         pick: impl Fn(&Transaction) -> bool,
     ) -> Option<ServerTxnKey> {
         let same_sender = |t: &Transaction| {
-            t.server_id().is_some_and(|id| id.sent_by() == via.sent_by_ref()) && pick(t)
+            t.server_id().is_some_and(|id| id.sent_by() == via.sent_by_ref())
+                && t.cseq == cseq
+                && pick(t)
         };
         ServerTxnId::cancelled_invite(via)
             .and_then(|id| self.server(id))

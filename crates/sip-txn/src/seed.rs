@@ -41,8 +41,11 @@ pub enum TxnSeed {
     /// A server INVITE this side answered 2xx and still awaits the ACK for:
     /// `response`, the 2xx as it left, keyed by its top-Via branch and sent-by
     /// (RFC 3261 §17.2.3). It runs in RFC 6026 Accepted for Timer L from the
-    /// seed, answering each copy of the INVITE with `response` and passing
-    /// every ACK up. A transaction already on its key that has sent no final —
+    /// seed, passing every ACK up, and answers each copy of the INVITE with
+    /// `response` — this stack's choice over §8.7's silent absorption: the
+    /// node holding the seed never sent the 2xx the copy may have missed. It
+    /// holds a takeover copy for Timer L unless an ACK on its own branch
+    /// detaches it: a 2xx's ACK takes a new branch. A transaction already on its key that has sent no final —
     /// the one the INVITE's retransmission opened before the record was read —
     /// takes `response` as its final and sends it once.
     ServerAccepted { response: SipResponse, leg_id: Option<String> },
