@@ -18,25 +18,31 @@
  *   pin <selector> [--ticket T] | unpin <selector> | pins  # runs kept by hand
  *   close-sweep <N>              # close a sweep whose process is gone
  *   close-prep <N>               # finish a prep whose cut is gone
+ *   forget <capture>... [--pattern RE]... [--population] [--citations F] [--confirm]
+ *                                # every row, history and file of captures; a dry run without --confirm
  *
  * A deployment adds verbs of its own beside these (`command`'s `extra`).
  *
  * The verbs are wiring: what seed and rebuild import is `@sip/corpus`
  * `BundleImport`, what the backfills measure is `Backfill`, what `where`
- * reads is `Where`.
+ * reads is `Where`, what `forget` plans and removes is `@sip/corpus`
+ * `housekeeping/forget`.
  */
+import { GRACE_HOURS } from "@sip/corpus/content/content-gc"
 import { excludedFile, readReasons } from "@sip/corpus/cut/excluded"
 import * as Backfill from "@sip/corpus/housekeeping/backfill"
 import * as BundleImport from "@sip/corpus/housekeeping/bundle-import"
+import * as Forgetting from "@sip/corpus/housekeeping/forget"
 import * as PrepClose from "@sip/corpus/housekeeping/prep-close"
 import * as SweepClose from "@sip/corpus/housekeeping/sweep-close"
+import * as CitationsFile from "@sip/corpus/ids/citations-file"
 import { listLine as jobLine } from "@sip/corpus/jobs/job-lines"
 import type { Paths } from "@sip/corpus/paths"
 import * as CaseDoc from "@sip/corpus/report/case-doc"
 import * as Where from "@sip/corpus/report/where"
 import { read as readOverlay } from "@sip/corpus/triage-overlay"
 import { captures as universeOf } from "@sip/corpus/universe"
-import { Delta, Jobs, Model, Pins, Queue, Runs, RunSets, StoreBinding, Sweeps } from "@sip/store"
+import { Delta, Forget, Jobs, Model, Pins, Queue, Runs, RunSets, StoreBinding, Sweeps } from "@sip/store"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
@@ -122,6 +128,56 @@ const where = Effect.fn("Store.where")(function*(
   if (!options.cases && read.cases > 0) {
     yield* Console.log(`  ${"cases".padEnd(10)} ${read.cases} case(s) — --cases lists each case directory`)
   }
+})
+
+/**
+ * A forget, planned and printed; with `confirm`, carried out. A pattern that
+ * does not compile and a refusal exit non-zero, nothing removed.
+ */
+const forget = Effect.fn("Store.forget")(function*(
+  paths: Paths,
+  input: {
+    readonly captures: ReadonlyArray<string>
+    readonly pattern: ReadonlyArray<string>
+    readonly population: boolean
+    readonly confirm: boolean
+    readonly citations: Option.Option<string>
+    readonly grace: number
+  }
+) {
+  const patterns: Array<RegExp> = []
+  for (const source of input.pattern) {
+    try {
+      patterns.push(new RegExp(source))
+    } catch (error) {
+      yield* Console.error(`[forget] refused: /${source}/ is no regular expression: ${String(error)}`)
+      return yield* exit(2)
+    }
+  }
+  const citations = Option.isSome(input.citations) ? yield* CitationsFile.read(input.citations.value) : []
+  const request = { paths, names: input.captures, patterns, citations, population: input.population }
+  if (!input.confirm) {
+    const planned = yield* Forgetting.plan(request)
+    for (const line of Forgetting.lines(planned)) yield* Console.log(line)
+    yield* Console.log(
+      planned.refusals.length > 0
+        ? "[forget] dry run: nothing removed, and --confirm would be refused"
+        : "[forget] dry run: nothing removed; --confirm forgets"
+    )
+    return
+  }
+  const applied = yield* Forgetting.apply({ ...request, graceHours: input.grace }).pipe(
+    Effect.catchTag("Forget.Refused", (refused) => Effect.succeed(refused))
+  )
+  if (applied instanceof Forget.Refused) {
+    for (const reason of applied.reasons) yield* Console.error(`[forget] refused: ${reason}`)
+    return yield* exit(2)
+  }
+  for (const line of Forgetting.lines(applied.plan)) yield* Console.log(line)
+  yield* Console.log(
+    `[forget] done: ${applied.plan.store.captures.length} capture(s) forgotten, their files removed; ` +
+      `the cache pass collected ${applied.cache.cases.length} case and ${applied.cache.flows.length} flows entr(ies)`
+  )
 })
 
 /** The rule hits of runs never measured, counted, and what was found said. */
@@ -427,6 +483,42 @@ export const verbs = <E, R>(facts: CliFacts, rootPaths: Effect.Effect<Paths, E, 
       })
   ).pipe(Command.withDescription("Close a sweep whose process is gone, and the runs it left open"))
 
+  const forgetCommand = Command.make(
+    "forget",
+    {
+      captures: Argument.string("capture").pipe(
+        Argument.withDescription("A capture name, exactly as the store keys it"),
+        Argument.variadic()
+      ),
+      pattern: Flag.string("pattern").pipe(
+        Flag.withDescription(
+          "A regular expression over every capture name the store or the artifact store holds; repeatable"
+        ),
+        Flag.atLeast(0)
+      ),
+      population: Flag.boolean("population").pipe(
+        Flag.withDescription("Forget captures still in the population too"),
+        Flag.withDefault(false)
+      ),
+      confirm: Flag.boolean("confirm").pipe(
+        Flag.withDescription("Drop the rows, then remove the files; without it, plan only"),
+        Flag.withDefault(false)
+      ),
+      citations: Flag.string("citations").pipe(
+        Flag.withDescription("Report the citations this JSON list holds beside those the store records"),
+        Flag.optional
+      ),
+      grace: Flag.float("grace").pipe(
+        Flag.withDescription("Hours an unreferenced content object is kept by the cache pass after"),
+        Flag.withDefault(GRACE_HOURS)
+      )
+    },
+    (input) =>
+      Effect.gen(function*() {
+        yield* forget(yield* rootPaths, input)
+      })
+  ).pipe(Command.withDescription("Forget captures: every row keyed by them, their history and files; a dry run without --confirm"))
+
   const closePrepCommand = Command.make(
     "close-prep",
     { prep: IdFlags.argument("prep", "prep").pipe(Argument.withDescription("The prep whose cut is gone")) },
@@ -459,7 +551,8 @@ export const verbs = <E, R>(facts: CliFacts, rootPaths: Effect.Effect<Paths, E, 
     unpinCommand,
     pinsCommand,
     closeSweepCommand,
-    closePrepCommand
+    closePrepCommand,
+    forgetCommand
   ] as const
 }
 
