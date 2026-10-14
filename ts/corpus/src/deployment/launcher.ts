@@ -47,6 +47,8 @@ export interface Interface {
   readonly hooksCwd: string
   /** The hooks around every job, in the order they run. */
   readonly hooks: Effect.Effect<ReadonlyArray<Hook>>
+  /** The command an operator runs to freeze a capture's earlier case ids, as a refusal names it. */
+  readonly seedIds: string
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Launcher") {}
@@ -57,7 +59,8 @@ export const layer = Layer.sync(Service, () =>
     entry: (kind) => Effect.fail(new LaunchUnstated({ kind })),
     cwd: process.cwd(),
     hooksCwd: process.cwd(),
-    hooks: Effect.succeed([])
+    hooks: Effect.succeed([]),
+    seedIds: "the deployment's case-id seed"
   }))
 
 /** A deployment's own launcher. */

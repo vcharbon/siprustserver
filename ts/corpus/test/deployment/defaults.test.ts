@@ -58,7 +58,7 @@ describe("the seams a guess would make dangerous", () => {
     expect(await refusal(roots.locks)).toContain("Roots.layerWith")
     expect(await refusal(tools.ready("interpreter"))).toContain("Tools.layerWith")
     expect(await refusal(tools.generator)).toContain("Tools.layerWith")
-    expect(await refusal(extraction.anonymise({ raw: "r", dir: "d", capture: "c", seed: { file: "s", fresh: true } })))
+    expect(await refusal(extraction.anonymise({ raw: "r", dir: "d", artifacts: "a", capture: "c" })))
       .toContain("Extraction.layerWith")
     expect(await refusal(host.tests)).toContain("CellHost.layerWith")
     expect(await refusal(Layer.build(host.services({ interpreter: "i", audit: "a" })).pipe(Effect.scoped, Effect.provide(NodeServices.layer))))

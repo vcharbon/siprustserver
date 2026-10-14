@@ -4,10 +4,16 @@
  *
  * The extractor reads the pcaps into a raw flows document in a scratch file;
  * this deployment's anonymiser turns it into the kept document in the
- * capture's directory under the seed the store keeps for that capture, and
- * refuses a document in which a value it must replace survives. The raw file
- * goes with the extraction whatever happens. Which name the kept document has
- * and which report the anonymiser leaves beside it are the deployment's too.
+ * capture's directory, and refuses a document in which a value it must replace
+ * survives. The raw file goes with the extraction whatever happens.
+ *
+ * An anonymisation is REPRODUCIBLE under the seed the deployment keeps for a
+ * capture name: the anonymiser uses the kept one where there is one and keeps
+ * a fresh one where there is none. Where and how a seed is kept is the
+ * deployment's; the ingest only asks whether one is kept, and carries it to
+ * the next generation of a name whose bytes changed under it. Which name the
+ * kept document has, and how a failed extraction is recorded beside it, are
+ * the deployment's too.
  *
  * The default composes no anonymiser and refuses every extraction by name:
  * a store that kept a raw document by default is one a capture's private
@@ -29,18 +35,12 @@ export class AnonymiseFailed extends Schema.TaggedError<AnonymiseFailed>()("Corp
   }
 }
 
-/** The seed one anonymisation runs under: the kept file, and whether it is minted afresh into it. */
-export interface Seed {
-  readonly file: string
-  readonly fresh: boolean
-}
-
-/** One anonymisation: the raw document, the directory the kept one lands in, under which capture name and seed. */
+/** One anonymisation: the raw document, the directory the kept one lands in, the store and the capture name. */
 export interface AnonymiseRequest {
   readonly raw: string
   readonly dir: string
+  readonly artifacts: string
   readonly capture: string
-  readonly seed: Seed
 }
 
 /** What the ingest left of a capture it could not extract. */
@@ -64,11 +64,23 @@ export interface Interface {
   /** The kept flows document's file name for `capture`, in its directory. */
   readonly documentName: (capture: string) => Effect.Effect<string, ExtractionUnstated>
   /**
-   * The report the anonymiser leaves in a capture's directory: `{ capture,
-   * error, cases }`, an empty `cases` with an `error` where it refused.
+   * `request.raw` anonymised into `request.dir`, under the seed kept for the
+   * capture name (kept afresh where none is); a success replaces any failure
+   * recorded there.
    */
-  readonly reportName: Effect.Effect<string, ExtractionUnstated>
   readonly anonymise: (request: AnonymiseRequest) => Effect.Effect<void, AnonymiseFailed | ExtractionUnstated>
+  /** Where the seed of `capture` is kept in the store `artifacts`; `undefined` where none is. */
+  readonly keptSeed: (artifacts: string, capture: string) => Effect.Effect<string | undefined, ExtractionUnstated>
+  /** The seed kept for `from`, kept for `to` as well: a next generation anonymised under the same seed. */
+  readonly carrySeed: (
+    artifacts: string,
+    from: string,
+    to: string
+  ) => Effect.Effect<void, AnonymiseFailed | ExtractionUnstated>
+  /** The line a failed extraction left in the capture's directory `dir`; `undefined` where it left none. */
+  readonly failureOf: (dir: string, capture: string) => Effect.Effect<string | undefined, ExtractionUnstated>
+  /** A failed extraction of `capture`, recorded in `dir` as the anonymiser records its own refusals. */
+  readonly recordFailure: (dir: string, capture: string, error: string) => Effect.Effect<void, ExtractionUnstated>
   /** The refusal a capture whose extraction failed is recorded under at the cut. */
   readonly sourceRefusal: (failure: Failure) => Effect.Effect<ExclusionRecord, ExtractionUnstated>
 }
@@ -80,8 +92,11 @@ export const layer = Layer.sync(Service, () => {
   const unstated = Effect.fail(new ExtractionUnstated())
   return Service.of({
     documentName: () => unstated,
-    reportName: unstated,
     anonymise: () => unstated,
+    keptSeed: () => unstated,
+    carrySeed: () => unstated,
+    failureOf: () => unstated,
+    recordFailure: () => unstated,
     sourceRefusal: () => unstated
   })
 })

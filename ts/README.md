@@ -5,7 +5,7 @@ A pnpm workspace. Nine packages, four of them one layer each of the same stack:
 | package | name | owns |
 | --- | --- | --- |
 | `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, pure readings of those formats (call key, step order, a cell's main error), and the report formats the tooling publishes (`sip.compare/1`, `sip.run-report/1`, their JSON Schemas under `contracts/schemas/`) |
-| `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) — the ONLY package that knows subprocesses exist |
+| `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) and the process primitives above them (a command into a file or a log, a detached command and its liveness, `git`, a node child's heap) — the ONLY package that knows subprocesses exist |
 | `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, and case assembly |
 | `driver/` | `@sip/driver` | the campaign orchestrator: cells in, one `campaign.json` out, exit code is the verdict |
 | `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
@@ -69,12 +69,12 @@ can state is a `@sip/corpus` seam, substituted with `layerWith`:
 | `Roots` | its artifact store, session tree, census runs, verdict registry, pcap roots, lock root |
 | `Tools` | how its extractor, case generator and interpreter are built, and which paths decide a cut |
 | `Boxing` | how a child is capped in memory and CPU, why the host cannot box one now, and the executable a cell boxes its interpreter through |
-| `Extraction` | its anonymiser: how a raw flows document becomes the one the store keeps |
+| `Extraction` | its anonymiser: how a raw flows document becomes the one the store keeps, the seed it keeps per capture name, and how a failed extraction is recorded |
 | `LaneHosting` | what a lane name means to the orchestrator: clock, exclusivity, ceilings, batch process, SUT, preflight |
 | `CaseLayout` | the numbered side rows a case carries for the interpreter's peers |
 | `CellHost` | what a cell runs under, and how a landed cell's charges and rule hits are read |
 | `Identity` | the environment, branch and repositories a run is recorded under |
-| `Launcher` | the entry point each job kind runs, and the hooks around every job |
+| `Launcher` | the entry point each job kind runs, the hooks around every job, and the command that freezes a capture's case ids |
 | `Tracker` | its ticket tracker: the state of a registry record's ticket, and every ticket's texts |
 
 Besides them, `@sip/store` `StoreBinding` states its selector spelling,
