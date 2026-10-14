@@ -61,6 +61,7 @@ mod spiral_takeover;
 mod split_dialog_sequence;
 mod stale_no_answer_reclaim;
 mod stood_down_round;
+mod superseded_relay;
 mod swept_call_answered_inside_the_lag;
 mod swept_call_primary_returns;
 mod takeover_request_uri_rewritten;

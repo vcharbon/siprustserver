@@ -20,7 +20,8 @@ use super::peer_metrics::record_keepalive_timeout_peer;
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
-use super::responses::build_481;
+use super::stray_cancel::reject_stray_cancel;
+use super::superseded_relay::drop_superseded_relay;
 use super::RouterCtx;
 use crate::answer_deadline::Screened;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
@@ -210,6 +211,9 @@ pub(super) async fn process(
                 ),
             )
         } else {
+            // A relay no node can finish is gone before the rules read the
+            // call, so its request is relayed afresh.
+            let call = drop_superseded_relay(call, &event);
             rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms)
         }
     };
@@ -344,30 +348,6 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
         Materialised::Served { call, .. } | Materialised::Resident(call) => Some(call),
         Materialised::Refused(_) => None,
     }
-}
-
-/// RFC 3261 §9.2 for a CANCEL that matched no INVITE transaction in the layer
-/// and none a call here could rebuild: 481 under `to_tag`, the tag the call's
-/// final to the INVITE carried where a call resolves, and no effect on any
-/// call. The 481 sent when `event` was such a CANCEL.
-async fn reject_stray_cancel(
-    ctx: &RouterCtx,
-    call: &Call,
-    leg_id: &str,
-    to_tag: Option<&str>,
-    event: &CallEvent,
-) -> Option<sip_message::SipResponse> {
-    let CallEvent::Sip { message, src, .. } = event else { return None };
-    let SipMessage::Request(req) = message.as_ref() else { return None };
-    if req.method() != Method::Cancel {
-        return None;
-    }
-    // A message of the leg the CANCEL resolved to: it takes the call's stated
-    // headers.
-    let mut refusal = build_481(req, to_tag);
-    crate::rules::stated_headers::stamp_response(call, leg_id, &mut refusal);
-    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
-    Some(refusal)
 }
 
 /// A request the router answered on a live call's behalf is still a message

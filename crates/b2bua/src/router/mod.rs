@@ -60,6 +60,8 @@ mod restore_hygiene;
 mod route_payload;
 mod stand_down;
 mod store_fault_gate;
+mod stray_cancel;
+mod superseded_relay;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod timer_screen;
