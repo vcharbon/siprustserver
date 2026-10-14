@@ -57,9 +57,9 @@ pub enum Progress {
 /// the ending axes progress is a chain, not a rank: `incoming` made every
 /// step `held` made on both, so a terminal body whose caller was never
 /// answered does not outrank a live answered one, and a step further on
-/// either is the call further along, whatever round `held` holds — the
-/// rounds `held` stands ahead on stay its own when the body folds
-/// ([`super::round::merge_rounds`] from `held`). Alike on both axes, a round
+/// either is the call further along, whatever round `held` holds: a record
+/// not yet answered holds no re-INVITE round, and an ending answers the
+/// rounds `held` relayed as the call ends. Alike on both axes, a round
 /// `incoming` stands ahead on, on any dialog, is progress of its own: each
 /// dialog's round has one client transaction, and the rounds `held` stands
 /// ahead on, on other dialogs, stay its own when the rounds fold.

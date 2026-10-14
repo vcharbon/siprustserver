@@ -16,8 +16,7 @@ use super::FlushDirection;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::router) enum Fold {
     /// The whole body: the vector says it is newer, or it is the call further
-    /// along on the answer or the ending axis; the rounds this node stands
-    /// ahead on stay its own.
+    /// along on the answer or the ending axis.
     Whole,
     /// Only the re-INVITE rounds the body stands ahead on: the end of one this
     /// node holds unfinished, the opening of one it never reached
@@ -40,8 +39,7 @@ impl Fold {
 /// ([`adopt_counters`]) and replaces the live copy without a bump of this
 /// node's own axis ([`CallState::update_quiet`](crate::store::CallState::update_quiet))
 /// and without a flush; this node's store keeps the version it last flushed.
-/// A whole fold holds the other owner's content with the rounds this node
-/// stands ahead on kept (its own relays and transactions); a rounds fold holds this
+/// A whole fold holds the other owner's content; a rounds fold holds this
 /// node's content with the rounds merged in. Either holds on every dialog the
 /// higher of the two views' sequences ([`call::helpers::raise_sequences`]):
 /// this node's next request continues from every one the other owner sent
@@ -59,7 +57,7 @@ pub(in crate::router) async fn fold_quietly(
     now_ms: i64,
 ) {
     let mut folded = match fold {
-        Fold::Whole => raise_sequences(merge_rounds(replica, live), live),
+        Fold::Whole => raise_sequences(replica, live),
         Fold::Rounds => {
             let mut merged = raise_sequences(merge_rounds(live.clone(), &replica), &replica);
             adopt_counters(&mut merged, &replica);

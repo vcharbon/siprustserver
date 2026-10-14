@@ -357,15 +357,15 @@ is read from the transactions, never from a dialog's sequence alone, which both 
 (below). Rounds are read dialog by dialog: a round a body stands ahead on is progress
 whatever the live copy holds on another dialog, and the fold takes that dialog's round alone,
 the live copy's rounds on other dialogs staying. A step on the answer or ending axis folds
-whole whatever round the live copy holds, and the rounds the live copy stands ahead on stay
-its own (`merge_rounds` from the live copy): only the node holding a round's client
-transaction sees its final. An ending folded into the primary's record answers every
+whole whatever round the live copy holds: a call not yet answered holds no re-INVITE round,
+and only the node holding a round's client transaction sees its final, so an ending folded
+into the primary's record answers every
 re-INVITE the record relayed that the ending body does not hold, as this stack's own teardown
 does — a 487 to its originator, a CANCEL to its target (RFC 3261 §15.1.2) — and the call is
 discharged (`ending_crossing_a_round.rs`, the copy's ending). The fold and the
 order the gates read (`lifecycle_behind`, the round ranked after the answer and the ending)
 read the same rule (`call/tests/it/lifecycle.rs`:
-`an_ending_folds_and_the_round_the_record_holds_ahead_stays`,
+`an_ending_is_progress_whatever_round_the_record_holds`,
 `a_round_ended_in_the_other_copy_advances_the_record_holding_it_open`,
 `an_acked_round_advances_the_record_awaiting_its_ack`,
 `a_round_the_other_copy_opened_advances_a_record_that_never_reached_it`,
