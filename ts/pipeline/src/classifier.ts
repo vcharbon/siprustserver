@@ -50,8 +50,8 @@ export interface DocumentShape {
   /**
    * EVERY step the flow states, in flow order — the choreography itself, so a
    * deployment can read a document question its rules have not asked before
-   * without a new field here each time. {@link unackedFinals} is one such
-   * question, kept because it predates this and rules already name it.
+   * without a new field here each time; {@link unackedFinals} is one such
+   * question the rules name by its own field.
    *
    * Joined to a probe through {@link Probe.ProbeSite}: the probe says WHERE it
    * was observed, this says what the document states there and around it.

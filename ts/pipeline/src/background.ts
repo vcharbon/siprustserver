@@ -135,7 +135,7 @@ export const claimedByBackground = (
   if (claimed.size === 0) return claimed
 
   // Retransmissions of a claimed message: `repeat_of` where the document
-  // states it, the legacy retx+type+CSeq match where it does not.
+  // states it, the retx+type+CSeq match where it does not.
   for (const o of obs) {
     const msg = msgOf(o)
     if (msg.repeat_of !== undefined) {

@@ -53,7 +53,7 @@ export interface Interface {
   readonly captures: Effect.Effect<ReadonlyArray<string>, SqlError>
   readonly size: Effect.Effect<number, SqlError>
   /**
-   * The captures a legacy corpus named, adopted as the population — ONCE. A
+   * The captures a corpus directory names, adopted as the population — ONCE. A
    * table that already holds a row is left exactly as it is and the answer is
    * 0, so the seed is a migration an operator can re-run without wondering.
    */

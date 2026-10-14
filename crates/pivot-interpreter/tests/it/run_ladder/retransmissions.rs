@@ -53,7 +53,7 @@ async fn an_absorbed_retransmission_is_recorded_and_never_reaches_an_expect() {
 }
 
 /// The `retransmits` COUNT (§6.9), both directions of one call and both halves
-/// of the issue-22 two-view table.
+/// of its two-view table.
 ///
 /// The caller's own ladder is EMITTED — three byte-identical INVITEs, paced by
 /// RFC 3261 §17.1.1.2's Timer A, because the document states how many repeats

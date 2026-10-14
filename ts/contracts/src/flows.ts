@@ -5,10 +5,10 @@
  * Two document-wide conventions carry over:
  *
  * - **Omission.** An optional value is omitted when absent, a collection when
- *   empty. `null` appears only where the schema-4 fields already used it
- *   (`invite`, `final_status`, `terminated_by`, `Party.tag`, `ViaJson.branch`,
+ *   empty. `null` appears only in the core fields that state it (`invite`,
+ *   `final_status`, `terminated_by`, `Party.tag`, `ViaJson.branch`,
  *   `Identity.user` / `.digits`, `DialogRef` tags) — those are {@link nullable}.
- * - **Enrichment is derived.** Every field beyond the schema-4 core is a pure
+ * - **Enrichment is derived.** Every field beyond that core is a pure
  *   function of the message bytes and of the document's own structure.
  *
  * This is the ONE contract decoded LENIENTLY: the Rust struct does not carry

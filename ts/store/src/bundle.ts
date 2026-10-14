@@ -5,7 +5,7 @@
  * each passed, and every cell carries the `pivot.json` it actually ran, its
  * `verdict.json`, its `classification.json` and its `rfc.json` — a cell that
  * wrote no `pivot.json` records the document its run-spec asked for. So the same reader serves the
- * live recorder, the day-one seed and the rebuild — the DB never learns
+ * live recorder, the seed and the rebuild — the DB never learns
  * anything the bundle did not already prove.
  *
  * A missing part is an answer, not an error: a run that died before it wrote

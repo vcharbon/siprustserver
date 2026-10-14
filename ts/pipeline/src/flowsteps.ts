@@ -741,7 +741,7 @@ const repeatOfCarriage = new WeakMap<Flows.FlowsDoc, boolean>()
  * transaction. Type alone collapses a re-INVITE's retransmitted final onto the
  * initial INVITE's step, which is how a hold reads as longer than the call.
  *
- * The LEGACY path, for a document carrying no `repeat_of`.
+ * The match for a document that carries no `repeat_of`.
  */
 const lastMatching = (
   timings: ReadonlyArray<StepTiming>,
