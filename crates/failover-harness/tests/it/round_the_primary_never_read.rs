@@ -104,16 +104,20 @@ async fn a_round_held_one_way_behind_the_primarys_write_completes() {
     answer_and_end(est, round, at_bob).await;
 }
 
-/// The replication is cut both ways and the copy serves the caller's whole
+/// The replication is held both ways and the copy serves the caller's whole
 /// round while the primary is read dead; then the primary, read alive,
-/// serves the callee's whole round on the caller's dialog, and the cut
-/// heals. Each round is the other node's progress on its own dialog: the
-/// primary's record holds the copy's round, its transaction and its ACK, so a
-/// repeat of the callee's 2xx is re-ACKed from it (RFC 3261 §13.2.2.4).
+/// serves the callee's whole round on the caller's dialog. The copy's writes
+/// are released first, so the primary reads the copy's round before the copy
+/// reads the primary's. Each round is the other node's progress on its own
+/// dialog: the primary's record holds the copy's round, its transaction and
+/// its ACK, so a repeat of the callee's 2xx is re-ACKed from it (RFC 3261
+/// §13.2.2.4).
 #[tokio::test(start_paused = true)]
 async fn a_round_served_at_the_copy_across_the_primarys_own_round_reaches_the_primary() {
     let mut est = establish("round-crossing-the-primarys-round").await;
-    est.fh.partition(&est.primary_ord, &est.bak_ord);
+    let (p_ord, b_ord) = (est.primary_ord.clone(), est.bak_ord.clone());
+    est.fh.stall(&b_ord, &p_ord);
+    est.fh.stall(&p_ord, &b_ord);
     let (mut round, mut at_bob) = open_the_round_at_the_copy(&mut est).await;
     at_bob.respond(200, "OK").with_sdp(ANSWER).await;
     round.expect(200).await;
@@ -130,12 +134,14 @@ async fn a_round_served_at_the_copy_across_the_primarys_own_round_reaches_the_pr
     theirs.expect(200).await;
     est.bob_dialog.ack(None).await;
     est.alice.receive("ACK").await;
-    est.fh.heal(&est.primary_ord, &est.bak_ord);
+    est.fh.resume(&b_ord, &p_ord);
     est.fh.advance(SETTLE).await;
 
     let primary = if est.primary_ord == "b1" { &est.w_b1 } else { &est.w_b2 };
     let record = primary.live_call(&est.call_ref).expect("the primary serves the call");
     assert_eq!(callee_txn(&record), Some(served), "the primary's record holds the copy's round");
+    est.fh.resume(&p_ord, &b_ord);
+    est.fh.advance(SETTLE).await;
     caller_hangs_up(&mut est).await;
 }
 
