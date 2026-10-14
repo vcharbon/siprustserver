@@ -12,6 +12,7 @@ mod attempts;
 mod callref;
 mod codec_roundtrip;
 mod index_key;
+mod invite_glare;
 mod lifecycle;
 mod model_helpers;
 mod round;

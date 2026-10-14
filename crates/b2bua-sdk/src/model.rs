@@ -1180,8 +1180,8 @@ impl<'a> RuleContext<'a> {
 
     /// Whether the current INVITE meets glare (RFC 3261 §14.1), by the same
     /// predicate the exchange count reads ([`call::helpers::invite_glare`]):
-    /// an INVITE transaction still open on the source dialog or on the
-    /// dialog its relay would be regenerated on.
+    /// an INVITE transaction open on the source dialog or its relay's, or
+    /// the sender's dialog-creating INVITE still without a final.
     pub fn invite_glare(&self) -> bool {
         call::helpers::invite_glare(self.call.0, self.source_leg_id, self.request_dialog_id())
     }

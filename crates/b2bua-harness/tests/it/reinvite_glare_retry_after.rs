@@ -1,8 +1,9 @@
 //! The answer to a re-INVITE that meets glare, and its `Retry-After` (RFC 3261
 //! §14.2, §20.33).
 //!
-//! - The sender's earlier INVITE has no final yet: 500 with a `Retry-After` of
-//!   0 to 10 s (§14.2, first clause), whatever range is configured.
+//! - The sender's earlier INVITE has no final yet, a relayed re-INVITE or its
+//!   dialog-creating INVITE: 500 with a `Retry-After` of 0 to 10 s (§14.2,
+//!   first clause), whatever range is configured.
 //! - Its earlier INVITE has a 2xx not yet ACKed: 491, with a value from
 //!   `glare_retry_after` when one is configured, none otherwise.
 //! - An INVITE of the stack's own is in progress on that face (a crossing, or
@@ -141,6 +142,42 @@ async fn a_newcomer_before_its_reinvite_ack_carries_a_value_in_the_range() {
 
     bob_dialog.ack_for(cseq1, None).await;
     alice.receive("ACK").await;
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _report = h.finish().await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// Alice INVITEs on the early dialog a 180 opened while her first INVITE has
+/// no final: §14.2 owes 500 with a `Retry-After` of 0 to 10 s, and the
+/// newcomer reaches no callee.
+#[tokio::test]
+async fn a_newcomer_on_the_early_dialog_of_an_unanswered_invite_is_refused_500() {
+    let h = Harness::with_transit_delay("b2bua-glare-ra-early-dialog", 0);
+    let alice = h.agent("alice", "127.0.0.1:6390").await;
+    let bob = h.agent("bob", "127.0.0.1:6391").await;
+    let b2bua = sut(6391, Some(BEYOND_RFC)).start(&h, "b2bua", "127.0.0.1:6392").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    let mut early = call.send_request(InDialogMethod::Invite).send().await;
+    let refused = early.expect(500).await;
+    let secs: u32 = stated_by_response(&refused, "Retry-After")
+        .expect("the 500 carries a Retry-After")
+        .parse()
+        .expect("delta-seconds");
+    assert!(secs <= 10, "{secs}");
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
