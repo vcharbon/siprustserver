@@ -22,7 +22,9 @@ use failover_harness::WorkerHealth;
 use scenario_harness::{InDialogTxn, ServerTxn};
 use sip_message::generators::InDialogMethod;
 
-use crate::call_terminate_on_backup::{establish, Established, ANSWER, OFFER};
+use crate::call_terminate_on_backup::{
+    crash_primary, establish, reboot_and_reclaim, Established, ANSWER, OFFER,
+};
 use crate::crossed_reinvite_round::{caller_hangs_up, info_through_the_primary};
 
 /// How long the replication between the two nodes takes to settle.
@@ -110,6 +112,38 @@ async fn the_info_the_primary_holds_open_outlives_the_copys_adopted_counter() {
 #[tokio::test(start_paused = true)]
 async fn an_update_the_primary_saw_answered_stays_answered_past_the_copys_adopted_counter() {
     let mut est = establish("adopted-counter-update-answered").await;
+    update_answered_at_the_primary_alone(&mut est).await;
+    next_update_and_hang_up(&mut est).await;
+}
+
+/// The same, then the primary crashes and reboots onto what replication
+/// holds of the call (ADR-0047 D7): the backup's Element holds the primary's
+/// record, the UPDATE answered, so the caller's next UPDATE reaches the
+/// callee.
+#[tokio::test(start_paused = true)]
+async fn an_update_the_primary_saw_answered_stays_answered_past_its_reboot() {
+    let mut est = establish("adopted-counter-update-reboot").await;
+    update_answered_at_the_primary_alone(&mut est).await;
+    let Established { fh, proxy, w_b1, w_b2, primary_ord, .. } = &mut est;
+    let (primary, backup) = if primary_ord == "b1" { (w_b1, &*w_b2) } else { (w_b2, &*w_b1) };
+    crash_primary(primary, backup, primary_ord, proxy);
+    fh.advance(Duration::from_millis(300)).await;
+    reboot_and_reclaim(fh, primary, backup, primary_ord, proxy).await;
+    next_update_and_hang_up(&mut est).await;
+}
+
+/// The caller's next UPDATE reaches the callee, and the caller hangs up.
+async fn next_update_and_hang_up(est: &mut Established) {
+    let mut next = est.dialog.request(InDialogMethod::Update, None).await;
+    est.bob.receive("UPDATE").await.respond(200, "OK").await;
+    next.expect(200).await;
+    caller_hangs_up(est).await;
+}
+
+/// The caller's UPDATE, which both nodes read; the copy's writes held while
+/// it relays the callee's INFO; the UPDATE's 200 through the primary; a
+/// second INFO through the copy; the copy's writes released.
+async fn update_answered_at_the_primary_alone(est: &mut Established) {
     let (p_ord, b_ord) = (est.primary_ord.clone(), est.bak_ord.clone());
     let mut update = est.dialog.request(InDialogMethod::Update, None).await;
     let mut update_at_bob = est.bob.receive("UPDATE").await;
@@ -125,13 +159,8 @@ async fn an_update_the_primary_saw_answered_stays_answered_past_the_copys_adopte
     est.proxy.set_health(&p_ord, WorkerHealth::Dead);
     info_through_the_primary(&est.alice, &mut est.bob_dialog).await;
     est.fh.advance(Duration::from_millis(100)).await;
-    release_the_copy(&mut est).await;
+    release_the_copy(est).await;
     est.fh.advance(SETTLE).await;
-
-    let mut next = est.dialog.request(InDialogMethod::Update, None).await;
-    est.bob.receive("UPDATE").await.respond(200, "OK").await;
-    next.expect(200).await;
-    caller_hangs_up(&mut est).await;
 }
 
 /// The copy's writes are held, and it relays the callee's INFO. The primary

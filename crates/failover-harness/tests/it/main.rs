@@ -23,6 +23,7 @@ mod drain_exits_caught_up_inside_grace;
 mod drain_flushes_releases_before_a_verified_exit;
 mod drain_waits_for_a_backup_behind;
 mod dual_face;
+mod ending_crossing_a_round;
 mod failover;
 mod failure_dump_names_the_node;
 mod fault_primitives;

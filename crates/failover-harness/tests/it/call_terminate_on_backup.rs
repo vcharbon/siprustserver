@@ -231,7 +231,7 @@ pub(crate) fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
 /// Reboot the (crashed) primary EMPTY at a higher gen + new pod IP, re-learn its
 /// address, drive it ready, mark it Alive, and let the go-active reclaim run. The
 /// no-probe analogue of `runner::reboot_and_reclaim` (we set health directly).
-async fn reboot_and_reclaim(
+pub(crate) async fn reboot_and_reclaim(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
     backup: &ReplicatedB2buaSut,
@@ -257,7 +257,7 @@ async fn reboot_and_reclaim(
 
 /// Crash the primary and present the complete k8s death signal (dead in the proxy
 /// + endpoint removed from the survivor's membership).
-fn crash_primary(
+pub(crate) fn crash_primary(
     primary: &mut ReplicatedB2buaSut,
     backup: &ReplicatedB2buaSut,
     primary_ord: &str,
