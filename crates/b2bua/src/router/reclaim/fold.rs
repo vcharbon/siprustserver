@@ -8,6 +8,7 @@ use std::sync::Arc;
 use call::helpers::{merge_rounds, raise_sequences, Progress};
 use call::Call;
 
+use super::super::materialise::answered_invite_seeds;
 use super::super::restore_hygiene::sanitize_restored_timers;
 use super::super::RouterCtx;
 use super::FlushDirection;
@@ -44,7 +45,10 @@ impl Fold {
 /// higher of the two views' sequences ([`call::helpers::raise_sequences`]):
 /// this node's next request continues from every one the other owner sent
 /// (RFC 3261 §12.2.1.1). Folded into the call's record (`direction`), the body
-/// is the primary's. The live timer service follows the timers the fold took.
+/// is the primary's, and every INVITE it holds answered 2xx and awaiting its
+/// ACK is seeded in the layer, so a copy of that INVITE draws the 2xx
+/// ([`answered_invite_seeds`]; an identity already held is left as it is).
+/// The live timer service follows the timers the fold took.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::router) async fn fold_quietly(
     ctx: &Arc<RouterCtx>,
@@ -69,7 +73,11 @@ pub(in crate::router) async fn fold_quietly(
         t.gen_adopted = false;
     }
     resync_timers(ctx, call_ref, live, &mut folded, skew_offset_ms, now_ms).await;
+    let seeds = if direction.into_the_record() { answered_invite_seeds(&folded) } else { vec![] };
     ctx.state.update_quiet(folded);
+    if !seeds.is_empty() {
+        let _ = ctx.txn.seed(call_ref, seeds).await;
+    }
 }
 
 /// A fold adopts BOTH counters: the folded body takes `max` of the two views on

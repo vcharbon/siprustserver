@@ -241,6 +241,20 @@ pub(super) async fn reoffer_trigger(
     ctx.txn.reoffer((**message).clone(), *src).await.unwrap_or(Reoffer::Unmatched)
 }
 
+/// The seeds a fold into the call's record hands the layer: the INVITE server
+/// transactions answered 2xx whose ACK the folded record still awaits, in RFC
+/// 6026 Accepted with the 2xx it retains. They are the only transactions of
+/// another node's rounds this node can serve while that node lives: a copy of
+/// the INVITE reaches whichever node the proxy reads alive, and the 2xx that
+/// answers it is in the record; the rest of a round runs where its Via sends
+/// the target's responses, the node that relayed it.
+pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnSeed> {
+    seeds::seeds_for(call)
+        .into_iter()
+        .filter(|s| matches!(s, sip_txn::TxnSeed::ServerAccepted { .. }))
+        .collect()
+}
+
 /// Whether `call` names an INVITE transaction a live copy must serve — one a
 /// materialisation would seed ([`seeds::seeds_for`]): an INVITE awaiting its
 /// final, whose bound and finals the copy owns, or a 2xx awaiting its ACK,
