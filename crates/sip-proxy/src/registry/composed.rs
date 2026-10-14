@@ -45,10 +45,11 @@ impl ComposedWorkerRegistry {
         let s = set.clone();
         // The shared self-heal loop (ADR-0012 D1/D2), identical to the one the
         // b2bua repl supervisor consumes. Every wakeup just recomposes from the
-        // authoritative snapshot.
+        // authoritative snapshot, as the node that spawned the registry.
+        let node = observe::NodeScope::current();
         let task =
             topology::spawn_membership_reconcile(membership, RECONCILE_PERIOD, move |_snapshot| {
-                s.recompose()
+                node.enter(|| s.recompose())
             });
         Self { set, task }
     }

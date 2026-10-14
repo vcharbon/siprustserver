@@ -82,6 +82,13 @@ async fn a_two_node_dump_names_the_node_of_every_trace_fact_and_log_line() {
         fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
         assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 
+        // A membership delta after boot: b1 sees b2 leave and come back, and
+        // lines what its reconcile does about it.
+        w_b1.simulate_peer_removed("b2");
+        fh.advance(Duration::from_secs(1)).await;
+        w_b1.simulate_peer_added("b2");
+        fh.advance(Duration::from_secs(2)).await;
+
         panic!("the scenario fails on purpose so its dump is written");
     })
     .await;
@@ -107,8 +114,19 @@ async fn a_two_node_dump_names_the_node_of_every_trace_fact_and_log_line() {
     }
 
     let log = section(dump, "SUT log");
-    assert!(!log.contains("node=unknown"), "every log line names its node: {log}");
-    for node in nodes {
-        assert!(log.contains(&format!("node={node}")), "{node} names itself in the log: {log}");
+    let logged: Vec<&str> =
+        log.split_whitespace().filter_map(|w| w.strip_prefix("node=")).collect();
+    for node in &logged {
+        assert!(
+            nodes.contains(node) || *node == "proxy",
+            "every log line names a node of the cell, got node={node}: {log}"
+        );
     }
+    for node in nodes {
+        assert!(logged.contains(&node), "{node} names itself in the log: {log}");
+    }
+    assert!(
+        log.lines().any(|l| l.contains("replication peer parked") && l.contains("node=b1#g1")),
+        "b1's reconcile of the later membership delta names b1: {log}"
+    );
 }

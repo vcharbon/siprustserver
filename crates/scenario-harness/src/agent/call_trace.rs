@@ -34,8 +34,12 @@ fn fact_line(e: &CapturedEvent, kind: &str) -> String {
     };
     let at = at.unwrap_or_else(|| "?".to_string());
     let node = e.node.as_deref().unwrap_or("?");
-    format!("[{at}] {node} {kind:<16} {detail}{first_line}")
+    format!("[{at}] {node:<NODE_WIDTH$} {kind:<16} {detail}{first_line}")
 }
+
+/// The node column's width: an incarnation label (`b1#g12`) and a little more,
+/// so the kind column stays aligned across nodes.
+const NODE_WIDTH: usize = 8;
 
 /// The trace-plane facts among `events`, one block per call in the order the
 /// calls first appear, each block its facts in emission order.
@@ -98,9 +102,9 @@ mod tests {
         let events =
             vec![fact("c1", "rule.fired", 1, "route-initial-invite", ""), taken_over, unnamed];
         let lines = render_call_traces(&events);
-        assert!(lines[1].starts_with("  [T+0.001s] n1 rule.fired "), "{lines:?}");
-        assert!(lines[2].starts_with("  [T+0.009s] n2#g1 sip.in "), "{lines:?}");
-        assert!(lines[3].starts_with("  [T+0.010s] ? rule.fired "), "{lines:?}");
+        assert!(lines[1].starts_with("  [T+0.001s] n1       rule.fired "), "{lines:?}");
+        assert!(lines[2].starts_with("  [T+0.009s] n2#g1    sip.in "), "{lines:?}");
+        assert!(lines[3].starts_with("  [T+0.010s] ?        rule.fired "), "{lines:?}");
     }
 
     #[test]

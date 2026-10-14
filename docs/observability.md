@@ -58,9 +58,10 @@ call is sampled nothing revokes it.
 There is **no wire propagation** — proxy and worker sample independently and a
 takeover backup opens its own root span linked to the nominal's. Correlate on
 the `sip.call_id` attribute, which every span carries; `trace_id` correlates the
-nominal and its takeover backup, and `node` names the node that served each span. Every event carries `at_ms` (when the fact
-happened) — on the backfill path that is NOT the emission timestamp, so read
-`at_ms` for the call's timeline.
+nominal and its takeover backup, and `node` names the node that served each
+span. Every event carries `at_ms` (when the fact happened) — on the backfill
+path that is NOT the emission timestamp, so read `at_ms` for the call's
+timeline.
 
 Why a call you expected is not there, in order of likelihood: no exporter
 configured (`trace_dropped_no_exporter_total`), the burst bucket

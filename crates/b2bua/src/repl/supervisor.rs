@@ -341,10 +341,9 @@ impl ReplicationSupervisor {
     ///
     /// Both the boot snapshot and every subsequent wakeup (delta, `Lagged`
     /// overflow, or periodic tick) flow through one idempotent
-    /// `reconcile_from_snapshot` — the shared
-    /// [`topology::spawn_membership_reconcile`] driver owns the
-    /// subscribe-before-snapshot ordering, the 5 s safety-net ticker, and the
-    /// non-fatal `Lagged` handling (ADR-0012 D1/D2).
+    /// `reconcile_from_snapshot`, run as the node `start` is called under. The
+    /// shared [`topology::spawn_membership_reconcile`] driver owns the
+    /// subscribe-before-snapshot ordering, the 5 s ticker and `Lagged` (ADR-0012 D1/D2).
     pub fn start(&self, membership: Arc<dyn Membership>) {
         *self.inner.membership.lock().unwrap() = Some(membership.clone());
         *self.inner.started_at.lock().unwrap() = Some(tokio::time::Instant::now());
@@ -353,9 +352,10 @@ impl ReplicationSupervisor {
         }
         let this = self.clone();
         let period = self.inner.reconcile_period;
+        let node = observe::NodeScope::current();
         let handle =
             topology::spawn_membership_reconcile(membership.clone(), period, move |snapshot| {
-                this.reconcile_from_snapshot(snapshot);
+                node.enter(|| this.reconcile_from_snapshot(snapshot));
             });
         *self.inner.reconcile.lock().unwrap() = Some(handle);
 

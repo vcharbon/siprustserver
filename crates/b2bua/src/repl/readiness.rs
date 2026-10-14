@@ -164,14 +164,12 @@ impl Readiness {
 
     fn latch_draining(&self, reason: &'static str) {
         if !self.inner.draining.swap(true, Ordering::SeqCst) {
-            self.inner.node.enter(|| {
-                tracing::info!(
-                    node = observe::node(),
-                    state = "Draining",
-                    reason,
-                    "readiness transition"
-                );
-            });
+            tracing::info!(
+                node = %self.inner.node,
+                state = "Draining",
+                reason,
+                "readiness transition"
+            );
         }
     }
 
@@ -222,28 +220,24 @@ impl Readiness {
             // `swap`, not `store`: two probes racing the opening gate must
             // produce ONE transition line.
             if !self.inner.ready_latched.swap(true, Ordering::SeqCst) {
-                self.inner.node.enter(|| {
-                    tracing::info!(
-                        node = observe::node(),
-                        state = "Ready",
-                        reason = "membership settled, every peer bootstrapped and current",
-                        "readiness transition"
-                    );
-                });
+                tracing::info!(
+                    node = %self.inner.node,
+                    state = "Ready",
+                    reason = "membership settled, every peer bootstrapped and current",
+                    "readiness transition"
+                );
             }
             return ReadinessState::Ready;
         }
         if !self.inner.not_ready_logged.swap(true, Ordering::SeqCst) {
-            self.inner.node.enter(|| {
-                tracing::info!(
-                    node = observe::node(),
-                    state = "NotReady",
-                    membership_settled = settled,
-                    all_bootstrapped = bootstrapped,
-                    all_current = current,
-                    "readiness transition"
-                );
-            });
+            tracing::info!(
+                node = %self.inner.node,
+                state = "NotReady",
+                membership_settled = settled,
+                all_bootstrapped = bootstrapped,
+                all_current = current,
+                "readiness transition"
+            );
         }
         ReadinessState::NotReady
     }

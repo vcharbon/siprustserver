@@ -94,6 +94,16 @@ impl NodeScope {
     }
 }
 
+/// The scope's node, as [`node`] reads it inside the scope.
+impl std::fmt::Display for NodeScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(node) => f.write_str(node),
+            None => f.write_str(process_node()),
+        }
+    }
+}
+
 /// `fut` serving the node of the code that calls this.
 pub fn keep_node<F: Future>(fut: F) -> TaskLocalFuture<Option<Arc<str>>, F> {
     NodeScope::current().scope(fut)
@@ -140,7 +150,9 @@ mod tests {
     async fn a_held_scope_runs_code_as_its_node_from_anywhere() {
         let held = NodeScope::named("n3#g1").enter(NodeScope::current);
         assert_eq!(held.enter(node), "n3#g1");
+        assert_eq!(held.to_string(), "n3#g1", "a scope displays its node");
         assert_eq!(NodeScope::default().enter(node), process_node());
+        assert_eq!(NodeScope::default().to_string(), process_node());
     }
 
     #[tokio::test]
