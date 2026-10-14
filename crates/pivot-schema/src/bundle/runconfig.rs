@@ -294,11 +294,6 @@ impl RunConfig {
         self.claim_numbers.entry(identity.into()).or_default().push(user.into());
         self
     }
-
-    pub fn with_endpoint(mut self, endpoint: impl Into<String>, addr: impl Into<String>) -> Self {
-        self.endpoint_addresses.insert(endpoint.into(), addr.into());
-        self
-    }
 }
 
 #[cfg(test)]

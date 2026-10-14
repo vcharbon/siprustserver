@@ -16,7 +16,7 @@
 use sip_message::header::{HeaderName, Reason};
 use sip_message::{Method, SipMessage};
 
-use crate::flow::{CallGroup, FlowLeg, Flows, LegId, MatchEvidence};
+use crate::flow::{CallGroup, Flows, LegId, MatchEvidence};
 use crate::txn::{transactions, Txn};
 
 use super::ast::*;
@@ -302,10 +302,4 @@ fn msgs_of(ctx: &Ctx, bind: Bind) -> Vec<(LegId, usize)> {
             .flat_map(|l| (0..ctx.flows.legs[l].msgs.len()).map(move |i| (l, i)))
             .collect(),
     }
-}
-
-/// A leg's transaction view — the join is query-time, so a consumer that
-/// wants it outside a query asks for it here.
-pub fn leg_transactions(leg: &FlowLeg) -> Vec<Txn> {
-    transactions(leg)
 }
