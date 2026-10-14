@@ -370,3 +370,89 @@ fn an_in_dialog_request_on_a_leg_that_rang_nothing_is_refused() {
         Err(StackError::NoDialog { leg: "B".into(), method: "BYE".into() })
     );
 }
+
+/// The callee's answer to the caller's newest INVITE, under fork `tag`.
+fn answer_invite(uas: &mut LegStack, status: u16, reason: &str, tag: &str) -> SipResponse {
+    uas.respond(
+        &Answer { status, reason, cseq_method: Some("INVITE"), early_tag: Some(tag) },
+        &[],
+        Vec::new(),
+        None,
+    )
+    .expect("the callee answers the INVITE")
+}
+
+/// RFC 3261 §12.3: a non-2xx final to an INVITE ends the early dialogs its
+/// provisionals opened, so the caller rings nothing once the 487 is in. A
+/// request the script still puts on that dialog is one a peer sent into a
+/// dialog already ended, which the far side answers 481 (§12.2.2): it is
+/// composed on what the ended dialog held, its tag, target and sequence.
+#[test]
+fn a_non_2xx_final_ends_the_early_dialogs_its_invite_opened() {
+    let mut uac = calling();
+    let (mut uas, _) = ringing("B");
+    let rings = uas
+        .respond(
+            &Answer {
+                status: 183,
+                reason: "Session Progress",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &reliable("1"),
+            Vec::new(),
+            None,
+        )
+        .expect("the callee rings reliably");
+    uac.learn_response(&rings);
+    let target = uac.remote_target().to_string();
+    let prack = uac.prack(None, &[], Vec::new(), None, None).expect("the caller PRACKs");
+    assert_eq!(prack.cseq().seq(), 2);
+    let cancel = uac.cancel(&[]).expect("the caller CANCELs");
+    uas.learn_request(&cancel);
+    let cancelled = uas
+        .respond(
+            &Answer { status: 200, reason: "OK", cseq_method: Some("CANCEL"), early_tag: None },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the CANCEL is answered");
+    uac.learn_response(&cancelled);
+    assert!(uac.rings_early(), "the CANCEL's 200 ends nothing");
+    uac.learn_response(&answer_invite(&mut uas, 487, "Request Terminated", "B-early-f1"));
+    assert!(!uac.rings_early(), "the 487 ended the early dialog");
+    assert!(!uac.has_dialog());
+    let bye = uac
+        .in_dialog(Method::Bye, &[], Vec::new(), None, None)
+        .expect("the BYE is composed on the ended dialog");
+    assert_eq!(bye.to().tag(), Some("B-early-f1"));
+    assert_eq!(bye.request_uri().to_string(), target);
+    assert_eq!(bye.cseq().seq(), 3, "the ended dialog's sequence carries on past its PRACK");
+}
+
+/// RFC 3261 §12.3 scopes the ending to ONE INVITE: the forks its final
+/// ended no longer compete with a fork an INVITE sent after it rings, so an
+/// UPDATE naming none rides the one still ringing.
+#[test]
+fn an_ended_fork_does_not_compete_with_one_still_ringing() {
+    let mut uac = calling();
+    let (mut uas, _) = ringing("B");
+    uac.learn_response(&answer_invite(&mut uas, 183, "Session Progress", "B-early-f1"));
+    uac.learn_response(&answer_invite(&mut uas, 487, "Request Terminated", "B-early-f1"));
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:caller@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let offered_again = uac
+        .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+        .expect("the caller offers the call again");
+    uas.learn_request(&offered_again);
+    uac.learn_response(&answer_invite(&mut uas, 180, "Ringing", "B-early-f2"));
+    assert!(uac.rings_early());
+    let update = uac
+        .update(None, &[], Vec::new(), None, None)
+        .expect("the one fork still ringing needs no name");
+    assert_eq!(update.to().tag(), Some("B-early-f2"));
+}

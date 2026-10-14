@@ -77,8 +77,7 @@ crates/loadgen/tests/it/smoke.rs 2768
 crates/media/src/transport.rs 533
 crates/pivot-interpreter/src/close.rs 656
 crates/pivot-interpreter/src/close/tests.rs 914
-crates/pivot-interpreter/src/cursor.rs 669
-crates/pivot-interpreter/src/cursor/tests.rs 918
+crates/pivot-interpreter/src/cursor.rs 542
 crates/pivot-interpreter/src/gate.rs 610
 crates/pivot-interpreter/src/plan.rs 1620
 crates/pivot-interpreter/src/render/tests.rs 901

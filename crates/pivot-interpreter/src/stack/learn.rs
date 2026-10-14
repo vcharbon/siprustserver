@@ -1,16 +1,18 @@
 //! The dialog facts a leg learns from what it receives.
 
-use super::{reliably, rseq_of, LegStack, ReliableProvisional};
+use super::{creates_dialog, reliably, rseq_of, LegStack, ReliableProvisional};
 use sip_message::generators::StackDialog;
 use sip_message::{Method, SipRequest, SipResponse};
 
 impl LegStack {
     /// Learn the dialog facts a response carries: the remote tag and the route
     /// set from a 1xx/2xx to a dialog-creating request alone (RFC 3261
-    /// §12.1.2), the remote target from any non-final or 2xx (§12.2.1.2). A
-    /// final to a CANCEL or a BYE, or a non-2xx final, states no dialog fact
-    /// and leaves the dialog as it is; so does, once a 2xx confirmed the
-    /// dialog, a response under another fork's tag (§13.2.2.4).
+    /// §12.1.2), the remote target from any non-final or 2xx (§12.2.1.2). Only
+    /// a 2xx to a dialog-creating request opens the leg's dialog (§12.1). A
+    /// final to a CANCEL or a BYE states no dialog fact and leaves the dialog
+    /// as it is; a non-2xx final to an INVITE ends the early dialogs its
+    /// provisionals opened (§12.3); once a 2xx confirmed the dialog, a
+    /// response under another fork's tag changes nothing of it (§13.2.2.4).
     pub fn learn_response(&mut self, response: &SipResponse) {
         let status = response.status();
         let other_dialog =
@@ -59,15 +61,24 @@ impl LegStack {
                 local_cseq: seeded.unwrap_or(self.dialog.local_cseq),
                 ..self.dialog.clone()
             };
-            self.ring_early(&tag, fork, rseq);
+            self.ring_early(&tag, response.cseq().seq(), fork, rseq);
+        }
+        // A non-2xx final to an INVITE creates no dialog and ends the early
+        // dialogs its provisionals opened (RFC 3261 §12.3).
+        if status >= 300 && *response.cseq().method() == Method::Invite {
+            self.end_early(response.cseq().seq());
         }
         // A 2xx to a PRACK or UPDATE an early dialog carried confirms nothing
         // (RFC 3261 §12.1, RFC 3262 §4, RFC 3311 §5.1): the fork keeps its own
         // sequence, and the INVITE's 2xx continues it.
         let answers_early_request =
             !self.confirmed && matches!(response.cseq().method(), Method::Prack | Method::Update);
-        if response.status() >= 200 && response.status() < 300 && !answers_early_request {
-            self.has_dialog = true;
+        if (200..300).contains(&status) && !answers_early_request {
+            // Only a 2xx to a dialog-creating request opens the leg's dialog;
+            // the 2xx to a CANCEL, a BYE or an OPTIONS opens none (§12.1).
+            if creates_dialog(response.cseq().method()) {
+                self.has_dialog = true;
+            }
             if let Some(tag) = response.to().tag() {
                 let fork = self.early_dialog(tag).map(|early| early.dialog.local_cseq);
                 if !self.confirmed && *response.cseq().method() == Method::Invite {
@@ -131,9 +142,7 @@ impl LegStack {
 /// request: a 1xx (other than 100) or 2xx to an INVITE or SUBSCRIBE (RFC 3261
 /// §12.1, RFC 6665 §4.1.2). Every other response states no dialog fact.
 fn establishes_dialog(response: &SipResponse) -> bool {
-    let status = response.status();
-    let creating = matches!(response.cseq().method(), Method::Invite | Method::Subscribe);
-    creating && (101..300).contains(&status)
+    creates_dialog(response.cseq().method()) && (101..300).contains(&response.status())
 }
 
 #[cfg(test)]

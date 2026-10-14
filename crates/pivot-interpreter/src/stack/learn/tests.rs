@@ -1,4 +1,4 @@
-use crate::stack::tests::{calling, reliable, ringing};
+use crate::stack::tests::{calling, reliable, ringing, stack};
 use crate::stack::*;
 
 /// RFC 3261 §12.2.1.1 at confirmation: the leg continues the CONFIRMED
@@ -263,4 +263,72 @@ fn a_request_on_another_forks_early_dialog_leaves_the_confirmed_dialog_as_it_was
     assert_eq!(uac.remote_target(), target);
     assert_eq!(uac.route_set(), routes.as_slice());
     assert_eq!(uac.remote_tag(), Some("B-f3"));
+}
+
+/// The caller's side of an INVITE its CANCEL ended: the callee answers the
+/// CANCEL 200, then the INVITE 487, each under a To-tag and neither with a
+/// Contact.
+fn cancelled_before_any_ring() -> LegStack {
+    let mut uac = calling();
+    let (mut uas, _) = ringing("B");
+    let answer = |status, reason, method| Answer {
+        status,
+        reason,
+        cseq_method: Some(method),
+        early_tag: None,
+    };
+    let trying = uas.respond(&answer(100, "Trying", "INVITE"), &[], Vec::new(), None).expect("100");
+    uac.learn_response(&trying);
+    let cancel = uac.cancel(&[]).expect("the caller CANCELs");
+    uas.learn_request(&cancel);
+    for (status, reason, method) in [(200, "OK", "CANCEL"), (487, "Request Terminated", "INVITE")] {
+        let response = uas
+            .respond(&answer(status, reason, method), &[], Vec::new(), None)
+            .expect("the callee answers");
+        assert!(response.contacts().as_slice().is_empty(), "{status} states no Contact");
+        uac.learn_response(&response);
+    }
+    uac
+}
+
+/// RFC 3261 §12.1: only a 2xx or a provisional to a dialog-creating request
+/// creates a dialog. The 200 to a CANCEL creates none, and neither does the
+/// INVITE's 487, so the caller holds no dialog and an in-dialog request is
+/// refused by name rather than composed with no remote target.
+#[test]
+fn a_cancelled_invite_leaves_the_caller_no_dialog() {
+    let mut uac = cancelled_before_any_ring();
+    assert!(!uac.has_dialog(), "the CANCEL's 200 opened a dialog");
+    assert_eq!(
+        uac.in_dialog(Method::Invite, &[], Vec::new(), None, None),
+        Err(StackError::NoDialog { leg: "A".into(), method: "INVITE".into() })
+    );
+}
+
+/// RFC 3261 §12.1: a 2xx to a request that creates no dialog opens none,
+/// before an INVITE as after one. A caller whose OPTIONS drew a 200 still
+/// holds no dialog.
+#[test]
+fn a_2xx_to_a_request_outside_a_dialog_opens_none() {
+    let mut uac = stack("A", "r1a2b3");
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:caller@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let options = uac
+        .out_of_dialog(Method::Options, &addresses, &[], Vec::new(), None, None)
+        .expect("the caller asks for capabilities");
+    let mut uas = stack("B", "r1a2b3");
+    uas.learn_request(&options);
+    let ok = uas
+        .respond(
+            &Answer { status: 200, reason: "OK", cseq_method: Some("OPTIONS"), early_tag: None },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the callee answers");
+    uac.learn_response(&ok);
+    assert!(!uac.has_dialog(), "the OPTIONS' 200 opened a dialog");
 }

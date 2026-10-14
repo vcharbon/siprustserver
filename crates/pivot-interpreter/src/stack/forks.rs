@@ -5,17 +5,21 @@ use sip_message::generators::StackDialog;
 use sip_message::Method;
 
 impl LegStack {
-    /// Whether the leg rings an early dialog it can address a request on: no
-    /// final has opened a dialog yet, and a provisional under a To-tag opened
-    /// one on either side (RFC 3261 §12.1).
+    /// Whether the leg rings an early dialog: no 2xx has opened a dialog yet,
+    /// and a provisional under a To-tag opened one on either side that no
+    /// non-2xx final has ended (RFC 3261 §12.1, §12.3).
+    #[cfg(test)]
     pub fn rings_early(&self) -> bool {
-        !self.has_dialog && !self.early.is_empty()
+        !self.has_dialog && self.early.iter().any(|(_, early)| !early.ended)
     }
 
     /// The early dialog a request rides: the one `early` names, else the
-    /// leg's only one. None and several are refusals: which dialog a request
-    /// rides decides which endpoint it reaches, and §14 has the tool infer
-    /// nothing.
+    /// leg's only one still ringing, else, where none rings, the leg's only
+    /// ended one: a peer that sends into a dialog a final already ended is
+    /// answered 481 by the far side (RFC 3261 §12.2.2), and the request is
+    /// composed on what that dialog held. None and several are refusals:
+    /// which dialog a request rides decides which endpoint it reaches, and §14
+    /// has the tool infer nothing.
     pub(super) fn early_tag_for(
         &self,
         early: Option<&str>,
@@ -24,29 +28,52 @@ impl LegStack {
         if let Some(named) = early {
             return Ok(named.to_string());
         }
-        match self.early.len() {
-            0 => Err(StackError::NoDialog { leg: self.leg.clone(), method: method.to_string() }),
-            1 => Ok(self.early[0].0.clone()),
-            dialogs => Err(StackError::EarlyDialogAmbiguous {
+        let tags = |ended: bool| -> Vec<&String> {
+            self.early.iter().filter(|(_, e)| e.ended == ended).map(|(tag, _)| tag).collect()
+        };
+        let ringing = tags(false);
+        let candidates = if ringing.is_empty() { tags(true) } else { ringing };
+        match candidates.as_slice() {
+            [] => Err(StackError::NoDialog { leg: self.leg.clone(), method: method.to_string() }),
+            [only] => Ok((*only).clone()),
+            several => Err(StackError::EarlyDialogAmbiguous {
                 leg: self.leg.clone(),
                 method: method.to_string(),
-                dialogs,
+                dialogs: several.len(),
             }),
         }
     }
 
-    /// Open or refresh the early dialog `tag` names. A later provisional on the
-    /// same fork refreshes the target and route set it carried; the dialog's own
-    /// sequence number stands.
-    pub(super) fn ring_early(&mut self, tag: &str, dialog: StackDialog, rseq: Option<u32>) {
+    /// Open or refresh the early dialog `tag` names, as a provisional to the
+    /// INVITE of CSeq `invite` rang it. A later provisional on the same fork
+    /// refreshes the target and route set it carried; the dialog's own sequence
+    /// number stands. A provisional under the tag of an ENDED dialog opens a
+    /// new one.
+    pub(super) fn ring_early(
+        &mut self,
+        tag: &str,
+        invite: u32,
+        dialog: StackDialog,
+        rseq: Option<u32>,
+    ) {
+        let fresh = EarlyDialog { dialog, rseq, invite, ended: false };
         match self.early.iter_mut().find(|(known, _)| known == tag) {
+            Some((_, early)) if early.ended => *early = fresh,
             Some((_, early)) => {
-                early.dialog = StackDialog { local_cseq: early.dialog.local_cseq, ..dialog };
+                early.dialog = StackDialog { local_cseq: early.dialog.local_cseq, ..fresh.dialog };
                 if rseq.is_some() {
                     early.rseq = rseq;
                 }
             }
-            None => self.early.push((tag.to_string(), EarlyDialog { dialog, rseq })),
+            None => self.early.push((tag.to_string(), fresh)),
+        }
+    }
+
+    /// End the early dialogs the provisionals to the INVITE of CSeq `invite`
+    /// opened: a non-2xx final to that INVITE terminates them (RFC 3261 §12.3).
+    pub(super) fn end_early(&mut self, invite: u32) {
+        for (_, early) in self.early.iter_mut().filter(|(_, early)| early.invite == invite) {
+            early.ended = true;
         }
     }
 

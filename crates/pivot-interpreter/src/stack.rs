@@ -84,6 +84,12 @@ struct EarlyDialog {
     dialog: StackDialog,
     /// The RSeq of the last reliable provisional that rode it, where one has.
     rseq: Option<u32>,
+    /// The CSeq of the INVITE whose provisional opened it.
+    invite: u32,
+    /// Whether a non-2xx final to that INVITE ended it (RFC 3261 §12.3). An
+    /// ended dialog rings no more, and keeps what it held for a request a
+    /// peer still sends into it.
+    ended: bool,
 }
 
 /// One leg's dialog and transaction state.
@@ -94,10 +100,12 @@ pub struct LegStack {
     /// Where an out-of-dialog request is addressed before a route set exists.
     pub route_target: SocketAddr,
     dialog: StackDialog,
-    /// Whether the leg has learned enough to send in-dialog.
+    /// Whether a 2xx to a dialog-creating request, sent or received, opened
+    /// the leg's dialog (RFC 3261 §12.1, RFC 6665 §4.1.2). No other final
+    /// opens one.
     has_dialog: bool,
     /// Whether an INVITE 2xx has CONFIRMED the leg's dialog (RFC 3261 §13).
-    /// Distinct from `has_dialog`, which any final answer opens: only
+    /// Distinct from `has_dialog`, which a SUBSCRIBE's 2xx opens too: only
     /// confirmation ends the early phase, adopts the answering fork's sequence,
     /// and retires the fork ride a PRACK takes before it.
     confirmed: bool,
@@ -123,8 +131,8 @@ pub struct LegStack {
     /// received — what `${leg:<id>.rseq}` publishes. It is one number per leg,
     /// so a leg ringing several forks at once reads the newest.
     last_rseq: Option<u32>,
-    /// The forks this leg is ringing, by the To-tag each answers under, in the
-    /// order they rang.
+    /// The early dialogs this leg rang, still ringing or ended, by the To-tag
+    /// each answers under, in the order they rang.
     early: Vec<(String, EarlyDialog)>,
     /// This run's identity nonce. It rides the Via branch as well as the
     /// Call-ID and the tag: RFC 3261 §8.1.1.7 requires a branch unique across
@@ -206,8 +214,17 @@ impl LegStack {
         self.target_refreshes = n;
     }
 
+    /// Whether a 2xx to a dialog-creating request opened the leg's dialog.
+    #[cfg(test)]
     pub fn has_dialog(&self) -> bool {
         self.has_dialog
+    }
+
+    /// Whether a request this leg sends now stands outside any dialog: no 2xx
+    /// opened one, the leg sent no INVITE, and it rang no early dialog
+    /// (RFC 3261 §12.1).
+    pub fn outside_any_dialog(&self) -> bool {
+        !self.has_dialog && self.sent_invites.is_empty() && self.early.is_empty()
     }
 
     /// Whether an INVITE 2xx has confirmed the leg's dialog (RFC 3261 §13).
@@ -341,6 +358,12 @@ pub(crate) fn reliably(response: &SipResponse) -> bool {
         .header::<header::Require>()
         .and_then(Result::ok)
         .is_some_and(|tokens| tokens.contains("100rel"))
+}
+
+/// Whether a request creates a dialog when a 2xx answers it: an INVITE or a
+/// SUBSCRIBE (RFC 3261 §12.1, RFC 6665 §4.1.2).
+pub(crate) fn creates_dialog(method: &Method) -> bool {
+    matches!(method, Method::Invite | Method::Subscribe)
 }
 
 /// The `RSeq` a response carries, where it carries a readable one.

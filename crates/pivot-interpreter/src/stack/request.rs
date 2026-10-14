@@ -28,10 +28,15 @@ impl LegStack {
         cseq: Option<u32>,
     ) -> Result<SipRequest, StackError> {
         let (ruri, from, to) = (addresses.ruri, addresses.from, addresses.to);
-        let verb = out_of_dialog_method(&method).ok_or_else(|| StackError::UnsupportedMethod {
-            leg: self.leg.clone(),
-            method: method.to_string(),
-        })?;
+        let Some(verb) = out_of_dialog_method(&method) else {
+            let (leg, name) = (self.leg.clone(), method.to_string());
+            // A request that only ever rides a dialog, asked for outside one,
+            // names a leg with no dialog rather than a method with no recipe.
+            return Err(match in_dialog_method(&method) {
+                Some(_) => StackError::NoDialog { leg, method: name },
+                None => StackError::UnsupportedMethod { leg, method: name },
+            });
+        };
         self.dialog.local_uri = from.to_string();
         self.dialog.remote_uri = to.to_string();
         self.dialog.local_cseq = cseq.unwrap_or(self.dialog.local_cseq + 1);
@@ -73,10 +78,11 @@ impl LegStack {
         self.in_dialog_on(None, method, headers, body, content_type, cseq)
     }
 
-    /// Compose an in-dialog request on the dialog the leg has: the one a final
+    /// Compose an in-dialog request on the dialog the leg has: the one a 2xx
     /// opened, else the early dialog `early` names — the leg's only one where
     /// it names none (RFC 3261 §12.1.1: a UAS's provisional under a To-tag
-    /// opens an early dialog on its side too, and a BYE may ride it, §15).
+    /// opens an early dialog on its side too, and a BYE may ride it, §15). A
+    /// dialog with no remote target is refused: there is nothing to address.
     pub fn in_dialog_on(
         &mut self,
         early: Option<&str>,
@@ -101,6 +107,7 @@ impl LegStack {
                 }
             })?,
         };
+        self.addressable(&dialog, &method)?;
         let via = self.via();
         let opts = GenerateInDialogRequestOpts {
             via: Some(via),
@@ -156,7 +163,7 @@ impl LegStack {
     /// fork's dialog and numbered in its own sequence (RFC 3261 §12.2.1.1), so
     /// the To-tag and the RAck name ONE dialog. A PRACK is in-dialog on a
     /// dialog that is not confirmed yet; once the leg's dialog confirms, it
-    /// rides that.
+    /// rides that. A dialog with no remote target refuses it.
     pub fn prack(
         &mut self,
         early: Option<&str>,
@@ -194,6 +201,12 @@ impl LegStack {
             })
             .flatten()
             .filter(|tag| self.early_dialog(tag).is_some());
+        let dialog = fork
+            .as_deref()
+            .and_then(|tag| self.early_dialog(tag))
+            .map(|e| e.dialog.clone())
+            .unwrap_or_else(|| self.dialog.clone());
+        self.addressable(&dialog, &Method::Prack)?;
         if let Some(at) = chosen {
             self.unacknowledged.remove(at);
         }
@@ -207,11 +220,6 @@ impl LegStack {
             cseq,
             ..Default::default()
         };
-        let dialog = fork
-            .as_deref()
-            .and_then(|tag| self.early_dialog(tag))
-            .map(|e| e.dialog.clone())
-            .unwrap_or_else(|| self.dialog.clone());
         let result = generate_in_dialog_request(InDialogMethod::Prack, &dialog, &opts);
         match fork {
             Some(tag) => {
@@ -247,6 +255,9 @@ impl LegStack {
     /// The 2xx arm alone honours it — a non-2xx ACK is composed by the INVITE
     /// client transaction (RFC 3261 §17.1.1.3), whose number is not the core's
     /// to state, so an override there is refused rather than dropped.
+    ///
+    /// The 2xx arm is addressed to the dialog's remote target (RFC 3261
+    /// §13.2.2.4), and a dialog with none refuses it.
     pub fn ack_for(
         &mut self,
         response: &SipResponse,
@@ -263,8 +274,15 @@ impl LegStack {
             .or_else(|| self.sent_invites.last())
             .cloned()
             .ok_or_else(|| StackError::NoInvite { leg: self.leg.clone(), method: "ACK".into() })?;
-        self.acked_invites.insert(invite.cseq().seq());
         if response.status() < 300 {
+            // The ACK rides the dialog the 2xx created, under ITS To-tag (RFC
+            // 3261 §13.2.2.4) — not whatever tag the leg learned since.
+            let dialog = match response.to().tag() {
+                Some(tag) => StackDialog { remote_tag: tag.to_string(), ..self.dialog.clone() },
+                None => self.dialog.clone(),
+            };
+            self.addressable(&dialog, &Method::Ack)?;
+            self.acked_invites.insert(invite.cseq().seq());
             let txn = InviteClientTransactionHandle { original_invite: invite };
             let via = self.via();
             let opts = GenerateAckFor2xxOpts {
@@ -275,18 +293,28 @@ impl LegStack {
                 cseq,
                 ..Default::default()
             };
-            // The ACK rides the dialog the 2xx created, under ITS To-tag (RFC
-            // 3261 §13.2.2.4) — not whatever tag the leg learned since.
-            let dialog = match response.to().tag() {
-                Some(tag) => StackDialog { remote_tag: tag.to_string(), ..self.dialog.clone() },
-                None => self.dialog.clone(),
-            };
             Ok(generate_ack_for_2xx(Some(&txn), &dialog, &opts))
-        } else if cseq.is_some() {
-            Err(StackError::CseqOverrideOnAbsorbedAck { leg: self.leg.clone() })
         } else {
-            Ok(generate_ack_for_non_2xx(&invite, response, &frozen(headers)))
+            self.acked_invites.insert(invite.cseq().seq());
+            if cseq.is_some() {
+                Err(StackError::CseqOverrideOnAbsorbedAck { leg: self.leg.clone() })
+            } else {
+                Ok(generate_ack_for_non_2xx(&invite, response, &frozen(headers)))
+            }
         }
+    }
+
+    /// Refuse a request on a dialog with no remote target: no response that
+    /// opened it carried a Contact (RFC 3261 §12.1.2), so there is no
+    /// Request-URI to address it to.
+    fn addressable(&self, dialog: &StackDialog, method: &Method) -> Result<(), StackError> {
+        if dialog.remote_target.is_empty() {
+            return Err(StackError::NoRemoteTarget {
+                leg: self.leg.clone(),
+                method: method.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// The CANCEL for this leg's pending INVITE.

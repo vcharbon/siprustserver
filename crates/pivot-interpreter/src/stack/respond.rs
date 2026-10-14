@@ -1,6 +1,6 @@
 //! The responses a leg composes to the requests it received.
 
-use super::{frozen, media_type, reliably, rseq_of, Answer, LegStack, StackError};
+use super::{creates_dialog, frozen, media_type, reliably, rseq_of, Answer, LegStack, StackError};
 use sip_message::generators::{generate_response, GenerateResponseOpts, StackDialog};
 use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr, TemplateHeader};
 
@@ -106,28 +106,36 @@ impl LegStack {
         // A provisional under a To-tag opens an early dialog on this side
         // (RFC 3261 §12.1.1): the fork answers under that tag, on the dialog
         // the INVITE established, in its own CSeq space.
-        if (101..200).contains(&status) && *request.cseq().method() == Method::Invite {
+        let invite = request.cseq().method() == Method::Invite;
+        if (101..200).contains(&status) && invite {
             let fork =
                 StackDialog { local_tag: to_tag.clone(), local_cseq: 0, ..self.dialog.clone() };
-            self.ring_early(&to_tag, fork, rseq);
+            self.ring_early(&to_tag, request.cseq().seq(), fork, rseq);
         }
         if status >= 200 {
             self.finalled.insert(request.cseq().seq());
         }
-        if status >= 200 && request.cseq().method() == Method::Invite {
+        // A non-2xx final to an INVITE creates no dialog and ends the early
+        // dialogs its provisionals opened (RFC 3261 §12.3).
+        if status >= 300 && invite {
+            self.end_early(request.cseq().seq());
+        }
+        // Only a 2xx to a dialog-creating request opens the leg's dialog (RFC
+        // 3261 §12.1.1).
+        if (200..300).contains(&status) && creates_dialog(request.cseq().method()) {
             self.has_dialog = true;
-            if (200..300).contains(&status) {
-                // The fork that answers IS the dialog that confirmed, so the
-                // leg takes its tag and continues that fork's OWN sequence
-                // (RFC 3261 §12.2.1.1) — never a number another fork burned.
-                let fork = self.early_dialog(&to_tag).map(|e| e.dialog.local_cseq);
-                self.dialog.local_tag = to_tag;
-                if !self.confirmed {
-                    self.confirmed = true;
-                    self.dialog.local_cseq = fork.unwrap_or(self.dialog.local_cseq);
-                } else {
-                    self.dialog.local_cseq = self.dialog.local_cseq.max(fork.unwrap_or(0));
-                }
+        }
+        if (200..300).contains(&status) && invite {
+            // The fork that answers IS the dialog that confirmed, so the leg
+            // takes its tag and continues that fork's OWN sequence (RFC 3261
+            // §12.2.1.1) — never a number another fork burned.
+            let fork = self.early_dialog(&to_tag).map(|e| e.dialog.local_cseq);
+            self.dialog.local_tag = to_tag;
+            if !self.confirmed {
+                self.confirmed = true;
+                self.dialog.local_cseq = fork.unwrap_or(self.dialog.local_cseq);
+            } else {
+                self.dialog.local_cseq = self.dialog.local_cseq.max(fork.unwrap_or(0));
             }
         }
         Ok(response)

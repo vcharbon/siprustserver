@@ -1,6 +1,6 @@
 use super::*;
 
-fn plan(flow: &str) -> Plan {
+pub(super) fn plan(flow: &str) -> Plan {
     let text = format!(
         r#"{{
               "pivot_version": 3,
@@ -23,9 +23,9 @@ fn plan(flow: &str) -> Plan {
     Plan::compile(document).expect("the fixture compiles")
 }
 
-const D: &str = r#"{"ms":0,"from":"trigger","compressible":true,"timer_linked":false}"#;
+pub(super) const D: &str = r#"{"ms":0,"from":"trigger","compressible":true,"timer_linked":false}"#;
 
-fn send(id: &str, leg: &str, method: &str) -> String {
+pub(super) fn send(id: &str, leg: &str, method: &str) -> String {
     format!(
         r#"{{"id":"{id}","leg":"{leg}","op":"send","msg":{{"method":"{method}"}},"delay":{D}}}"#
     )
@@ -46,7 +46,7 @@ fn racing_expect(id: &str, leg: &str, status: u16, with: &str) -> String {
 /// An `expect` anchored on a step this leg does not carry: the relay of a
 /// cross-leg origination, whose instant is the anchor plus a latency the
 /// document does not hold.
-fn relayed(id: &str, leg: &str, status: u16, from: &str) -> String {
+pub(super) fn relayed(id: &str, leg: &str, status: u16, from: &str) -> String {
     let d = format!(r#"{{"ms":0,"from":"step:{from}","compressible":true,"timer_linked":false}}"#);
     format!(
         r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"status":{status},"cseq-method":"INVITE"}},"delay":{d}}}"#
@@ -70,26 +70,26 @@ fn relayed_request(id: &str, leg: &str, method: &str, from: &str) -> String {
 }
 
 /// An expect gated on a response to a transaction the leg names.
-fn answer(id: &str, leg: &str, status: u16, method: &str) -> String {
+pub(super) fn answer(id: &str, leg: &str, status: u16, method: &str) -> String {
     format!(
         r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"status":{status},"cseq-method":"{method}"}},"delay":{D}}}"#
     )
 }
 
 /// An expect gated on a status alone, naming no transaction.
-fn status_only(id: &str, leg: &str, status: u16) -> String {
+pub(super) fn status_only(id: &str, leg: &str, status: u16) -> String {
     format!(
         r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"status":{status}}},"delay":{D}}}"#
     )
 }
 
-fn request_expect(id: &str, leg: &str, method: &str) -> String {
+pub(super) fn request_expect(id: &str, leg: &str, method: &str) -> String {
     format!(
         r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"method":"{method}"}},"delay":{D}}}"#
     )
 }
 
-fn optional(id: &str, leg: &str, status: u16) -> String {
+pub(super) fn optional(id: &str, leg: &str, status: u16) -> String {
     format!(
         r#"{{"id":"{id}","leg":"{leg}","op":"expect","optional":true,"check":"record","msg":{{"status":{status},"cseq-method":"INVITE"}},"delay":{D}}}"#
     )
@@ -104,7 +104,7 @@ fn optional_relayed_request(id: &str, leg: &str, method: &str, from: &str) -> St
 }
 
 /// An `optional` expect gated on a response to a transaction the leg names.
-fn optional_answer(id: &str, leg: &str, status: u16, method: &str) -> String {
+pub(super) fn optional_answer(id: &str, leg: &str, status: u16, method: &str) -> String {
     format!(
         r#"{{"id":"{id}","leg":"{leg}","op":"expect","optional":true,"check":"record","msg":{{"status":{status},"cseq-method":"{method}"}},"delay":{D}}}"#
     )
@@ -529,135 +529,6 @@ fn an_alt_behind_a_send_is_never_armed_early() {
     assert_eq!(cursor.frontier(), ["s2"], "the alt waits for the send in front of it");
 }
 
-/// Two answers this leg is owed on two transactions it opened carry no
-/// order between them (RFC 3261 §17): the BYE's 200 arms beside the
-/// INVITE's 487 the document lists first, and whichever lands first is
-/// taken first.
-#[test]
-fn an_answer_to_a_transaction_this_leg_opened_arms_beside_another_transaction_s_answer() {
-    let p = plan(&format!(
-        "[{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        send("s2", "A", "BYE"),
-        answer("s3", "A", 487, "INVITE"),
-        answer("s4", "A", 200, "BYE")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    cursor.complete("s2");
-    assert_eq!(cursor.frontier(), ["s3", "s4"], "both transactions are open: both armed");
-    cursor.complete("s4");
-    assert_eq!(cursor.frontier(), ["s3"], "the 487 is still owed");
-    cursor.complete("s3");
-    assert!(cursor.is_done());
-}
-
-/// The answer may be on the wire from the moment its request went out, so
-/// a send this leg has not made yet cannot be what orders it — and walking
-/// past that send never emits it early.
-#[test]
-fn an_answer_to_an_open_transaction_arms_behind_a_send() {
-    let p = plan(&format!(
-        "[{},{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        send("s2", "A", "BYE"),
-        answer("s3", "A", 487, "INVITE"),
-        send("s4", "A", "ACK"),
-        answer("s5", "A", 200, "BYE")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    cursor.complete("s2");
-    assert_eq!(cursor.frontier(), ["s3", "s5"], "the ACK behind the 487 is walked past");
-    cursor.complete("s5");
-    cursor.complete("s3");
-    assert_eq!(cursor.frontier(), ["s4"], "the ACK arms only once its turn comes");
-}
-
-/// The request is the gate: an answer to a request this leg has not sent
-/// yet is an arrival nothing has provoked, and list order is all there is.
-#[test]
-fn an_answer_whose_request_has_not_gone_out_waits_its_turn() {
-    let p = plan(&format!(
-        "[{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        answer("s2", "A", 180, "INVITE"),
-        send("s3", "A", "BYE"),
-        answer("s4", "A", 200, "BYE")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    assert_eq!(cursor.frontier(), ["s2"], "the BYE has not gone out");
-}
-
-/// Within ONE transaction list order binds: a provisional before its final.
-/// Beside an answer on ANOTHER transaction, only the transaction's first
-/// pending answer arms, and its final stays behind it.
-#[test]
-fn answers_on_one_transaction_keep_list_order() {
-    let p = plan(&format!(
-        "[{},{},{}]",
-        send("s1", "A", "INVITE"),
-        answer("s2", "A", 180, "INVITE"),
-        answer("s3", "A", 200, "INVITE")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    assert_eq!(cursor.frontier(), ["s2"], "the final waits behind the provisional");
-
-    let q = plan(&format!(
-        "[{},{},{},{},{}]",
-        send("t1", "A", "INVITE"),
-        send("t2", "A", "PRACK"),
-        answer("t3", "A", 200, "PRACK"),
-        answer("t4", "A", 180, "INVITE"),
-        answer("t5", "A", 200, "INVITE")
-    ));
-    let mut other = Cursor::new(&q);
-    other.complete("t1");
-    other.complete("t2");
-    assert_eq!(
-        other.frontier(),
-        ["t3", "t4"],
-        "the INVITE's next provisional arms beside the PRACK's answer; its final does not"
-    );
-}
-
-/// An expect gated on a status alone names no transaction, so nothing says
-/// which request it answers, and it waits its turn.
-#[test]
-fn an_answer_naming_no_transaction_waits_its_turn() {
-    let p = plan(&format!(
-        "[{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        send("s2", "A", "BYE"),
-        answer("s3", "A", 487, "INVITE"),
-        status_only("s4", "A", 200)
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    cursor.complete("s2");
-    assert_eq!(cursor.frontier(), ["s3"]);
-}
-
-/// A final already taken closed its transaction (RFC 3261 §17.1): a later
-/// answer of the same method — a fork's second 2xx — is not an open
-/// transaction's and keeps its place in the list.
-#[test]
-fn a_transaction_a_final_already_answered_opens_nothing() {
-    let p = plan(&format!(
-        "[{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        answer("s2", "A", 200, "INVITE"),
-        request_expect("s3", "A", "BYE"),
-        answer("s4", "A", 200, "INVITE")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    cursor.complete("s2");
-    assert_eq!(cursor.frontier(), ["s3"], "the second 2xx waits behind the BYE");
-}
-
 /// A final on a transaction retires the required expect it was charged on:
 /// the step settles, what stands behind it arms, and an `after` or a dwell
 /// anchored on it is satisfied.
@@ -741,31 +612,6 @@ fn a_required_expect_behind_a_retired_final_of_its_transaction_is_not_walked_to(
     assert_eq!(cursor.frontier(), ["s4"], "the 200 is not the retired transaction's answer");
 }
 
-/// The send that opened the transaction an expect waits on: the leg's last
-/// send of that method before it, whatever stands between; none for a
-/// status-only expect or a leg that never sent the method.
-#[test]
-fn the_opening_send_is_the_last_send_of_the_method_before_the_expect() {
-    let p = plan(&format!(
-        "[{},{},{},{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        send("s2", "A", "PRACK"),
-        answer("s3", "A", 200, "PRACK"),
-        send("s4", "A", "PRACK"),
-        answer("s5", "A", 481, "PRACK"),
-        answer("s6", "A", 600, "INVITE"),
-        status_only("s7", "A", 200)
-    ));
-    let cursor = Cursor::new(&p);
-    assert_eq!(cursor.opening_send("s3"), Some("s2"));
-    assert_eq!(cursor.opening_send("s5"), Some("s4"));
-    assert_eq!(cursor.opening_send("s6"), Some("s1"));
-    assert_eq!(cursor.opening_send("s7"), None, "a status alone names no transaction");
-    assert_eq!(cursor.opening_send("s1"), None, "a send waits on nothing");
-    let relay = plan(&format!("[{},{}]", send("s1", "B", "INVITE"), relayed("s2", "A", 183, "s1")));
-    assert_eq!(Cursor::new(&relay).opening_send("s2"), None, "this leg sent no INVITE");
-}
-
 /// An answer armed beside a REQUIRED expect still pending (§6.7c) releases
 /// no tolerated absence standing between the two: their order against the
 /// answer is unknown, and the INVITE's 180 behind its pending 183 may still
@@ -816,103 +662,4 @@ fn a_relay_armed_past_a_pending_send_releases_no_optional_behind_it() {
     assert_eq!(cursor.status("s5"), Some(StepStatus::Pending), "the one behind it is not");
     cursor.complete("s4");
     assert_eq!(cursor.frontier(), ["s5"]);
-}
-
-/// An armed answer of the same METHOD refuses the candidate even where it
-/// waits on an older transaction: two steps with one discriminator armed
-/// together would take each other's datagram.
-#[test]
-fn an_answer_does_not_arm_beside_an_armed_answer_of_the_same_method() {
-    let p = plan(&format!(
-        "[{},{},{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        send("s2", "A", "PRACK"),
-        optional_answer("s3", "A", 200, "PRACK"),
-        send("s4", "A", "PRACK"),
-        request_expect("s5", "A", "INFO"),
-        answer("s6", "A", 200, "PRACK")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    cursor.complete("s2");
-    cursor.complete("s4");
-    assert_eq!(cursor.frontier(), ["s3", "s5"], "s6 waits: s3 would take its 200");
-}
-
-fn answer_send(id: &str, leg: &str, status: u16, method: &str) -> String {
-    format!(
-        r#"{{"id":"{id}","leg":"{leg}","op":"send","msg":{{"status":{status},"cseq-method":"{method}"}},"delay":{D}}}"#
-    )
-}
-
-/// RFC 3261 §9.2: the callee owes the 200 to a CANCEL and the INVITE's 487
-/// at once. A BYE the capture shows arriving first does not gate them, so a
-/// system that sends no such BYE is still answered; the BYE's own 200 waits.
-#[test]
-fn the_answers_a_received_cancel_draws_go_out_past_an_unrelated_arrival() {
-    let p = plan(&format!(
-        "[{},{},{},{},{},{},{}]",
-        request_expect("s1", "B", "INVITE"),
-        answer_send("s2", "B", 180, "INVITE"),
-        request_expect("s3", "B", "CANCEL"),
-        request_expect("s4", "B", "BYE"),
-        answer_send("s5", "B", 200, "CANCEL"),
-        answer_send("s6", "B", 200, "BYE"),
-        answer_send("s7", "B", 487, "INVITE")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    cursor.complete("s2");
-    assert_eq!(cursor.frontier(), ["s3"], "nothing is owed before the CANCEL");
-    cursor.complete("s3");
-    assert_eq!(cursor.frontier(), ["s4", "s5", "s7"], "the BYE's 200 waits for the BYE");
-}
-
-/// A block standing between the leg's blocking step and the candidate stops
-/// the walk: an `unordered` group is never walked past.
-#[test]
-fn an_unordered_group_in_front_stops_the_walk_to_an_open_transaction_s_answer() {
-    let group = format!(
-        r#"{{"id":"u1","op":"unordered","steps":[{},{}]}}"#,
-        request_expect("s4", "A", "INFO"),
-        request_expect("s5", "A", "UPDATE")
-    );
-    let p = plan(&format!(
-        "[{},{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        send("s2", "A", "BYE"),
-        answer("s3", "A", 180, "INVITE"),
-        group,
-        answer("s6", "A", 200, "BYE")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    cursor.complete("s2");
-    assert_eq!(cursor.frontier(), ["s3"], "the group is not walked past");
-}
-
-/// A block that IS the leg's blocking item lets an answer to another open
-/// transaction arm beside it: the branch heads are armed already, and a
-/// candidate on their own transaction is refused.
-#[test]
-fn an_answer_arms_beside_an_armed_alt() {
-    let alt = format!(
-        r#"{{"id":"a1","op":"alt","branches":[
-                 {{"name":"answered","steps":[{}]}},
-                 {{"name":"busy","steps":[{}]}}]}}"#,
-        answer("s3", "A", 200, "INVITE"),
-        answer("s4", "A", 486, "INVITE")
-    );
-    let p = plan(&format!(
-        "[{},{},{},{},{}]",
-        send("s1", "A", "INVITE"),
-        send("s2", "A", "BYE"),
-        alt,
-        answer("s5", "A", 200, "BYE"),
-        answer("s6", "A", 487, "INVITE")
-    ));
-    let mut cursor = Cursor::new(&p);
-    cursor.complete("s1");
-    cursor.complete("s2");
-    assert_eq!(cursor.frontier(), ["s3", "s4", "s5"], "the INVITE's 487 is refused");
 }

@@ -5,6 +5,10 @@
 pub enum StackError {
     /// An in-dialog request on a leg with no dialog yet.
     NoDialog { leg: String, method: String },
+    /// An in-dialog request on a dialog that holds no remote target: no
+    /// response that opened it carried a Contact (RFC 3261 §12.1.2), so
+    /// there is no Request-URI to address it to.
+    NoRemoteTarget { leg: String, method: String },
     /// A response with no request to answer.
     NoRequest { leg: String, status: u16 },
     /// An ACK or CANCEL with no INVITE to scope it to.
@@ -33,6 +37,11 @@ impl std::fmt::Display for StackError {
             StackError::NoDialog { leg, method } => {
                 write!(f, "leg {leg}: {method} is in-dialog and the leg has no dialog yet")
             }
+            StackError::NoRemoteTarget { leg, method } => write!(
+                f,
+                "leg {leg}: {method} rides a dialog with no remote target: no response that \
+                 opened it carried a Contact"
+            ),
             StackError::NoRequest { leg, status } => {
                 write!(f, "leg {leg}: {status} answers a request the leg never received")
             }

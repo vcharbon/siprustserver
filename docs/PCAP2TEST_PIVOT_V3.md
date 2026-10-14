@@ -70,6 +70,14 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-10-14 — a scripted leg's dialog opens on a 2xx to a dialog-creating
+request alone, and a tolerated absence binds no transaction's turn.** The 200
+to a CANCEL and a non-2xx final open no dialog; a non-2xx final ends the early
+dialogs of its INVITE; a request with no dialog to ride or no remote target
+fails its step by name (§8). A pending `optional` answer standing in front of an
+answer to an open transaction no longer keeps it from arming (§6.7c). No
+document field changes.
+
 **2026-10-09 — a replayed MSCML response echoes its request's id.** RFC 5022
 §4.1 lets the client put an `id` on a request's command element, chosen live,
 and §10.2 has the `<response>` echo it. A media server does not queue, and
@@ -1482,15 +1490,18 @@ document:
   names no transaction and waits its turn;
 - the leg's last `send` of that method before the expect has COMPLETED. Before
   that nothing has provoked the answer, and list order is all there is;
-- the expect is that transaction's FIRST pending answer. Within one transaction
-  list order binds — a provisional before its final, one final before the next
-  2xx a fork draws — so an answer standing behind an earlier pending answer of
-  the same transaction waits behind it;
+- the expect is that transaction's FIRST pending REQUIRED answer. Within one
+  transaction list order binds — a provisional before its final, one final
+  before the next 2xx a fork draws — so an answer standing behind an earlier
+  pending required answer of the same transaction waits behind it. A pending
+  `optional` answer in front binds nothing: it is a tolerated absence (§6.5),
+  and the candidate's arrival releases it;
 - no completed or retired expect has taken a FINAL of that transaction since
   the send: a final ends the transaction (§17.1), and a later answer of the
   same method is another transaction's, not yet opened;
-- nothing already armed on the leg answers the same METHOD, an older
-  transaction's included: two armed steps with one discriminator would take
+- no REQUIRED expect already armed on the leg answers the same METHOD, an
+  older transaction's included, and no armed `optional` one shares the
+  candidate's discriminator: two armed steps with one discriminator would take
   each other's datagram;
 - a message step only, walked to across message steps only: a block (`alt`,
   `unordered`) standing between the leg's first blocking item and the candidate
@@ -2012,6 +2023,15 @@ The tier model is UNCHANGED:
   numbers composed as `${num:…}`; it is then the field's whole value. A
   positional ref states it only where its number composed.
 - **Tier 3, frozen**, stored verbatim: everything else, in wire order.
+
+**The dialog a scripted request rides is tier-1 state.** A leg's dialog opens
+on a 2xx to a dialog-creating request, sent or received (INVITE, SUBSCRIBE;
+RFC 3261 §12.1); no other final opens one. A provisional under a To-tag opens
+an early dialog, and a non-2xx final to its INVITE ends it (§12.3): it rings no
+more, and a request the document still sends on it, a peer sending into a
+dialog already ended that the far side answers 481 (§12.2.2), is composed on
+what it held. A request with no dialog to ride, or riding one no Contact gave a
+remote target, fails its step by name.
 
 `RSeq` splits by direction: a **send** freezes the captured value (the scripted
 endpoint must put a concrete number on the wire for RAck translation), an

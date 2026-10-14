@@ -295,3 +295,38 @@ fn a_reliable_provisional_the_document_repeats_keeps_its_number() {
     }
     assert_eq!(uas.early_rseq("B-early-f1"), Some(7001));
 }
+
+/// RFC 3261 §12.1.1: only a 2xx to the INVITE creates the callee's dialog. A
+/// callee that answered 487 under a To-tag holds none, so a BYE on that tag
+/// is refused by name, whichever way the step composes it.
+#[test]
+fn a_callee_that_answered_487_holds_no_dialog_to_bye() {
+    let (mut uas, _) = ringing("B");
+    let terminated = uas
+        .respond(
+            &Answer {
+                status: 487,
+                reason: "Request Terminated",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the callee answers 487");
+    assert_eq!(to_tag(&terminated), "B-early-f1");
+    assert!(!uas.has_dialog(), "the 487 opened a dialog");
+    let refused = Err(StackError::NoDialog { leg: "B".into(), method: "BYE".into() });
+    assert_eq!(uas.in_dialog(Method::Bye, &[], Vec::new(), None, None), refused);
+    let addresses = Addresses {
+        ruri: "sip:caller@pivot.invalid",
+        from: "<sip:callee@pivot.invalid>",
+        to: "<sip:caller@pivot.invalid>",
+    };
+    assert_eq!(
+        uas.out_of_dialog(Method::Bye, &addresses, &[], Vec::new(), None, None),
+        refused,
+        "a BYE never opens a dialog"
+    );
+}

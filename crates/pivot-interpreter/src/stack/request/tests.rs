@@ -558,3 +558,77 @@ fn an_in_dialog_request_carries_the_body_and_media_type_the_step_states() {
     assert_eq!(header(&info, sip_message::HeaderName::ContentType), "application/example-binary");
     assert_eq!(header(&info, sip_message::HeaderName::ContentLength), "12");
 }
+
+/// `response` as a peer that stated no Contact would have sent it.
+fn without_contact(response: &SipResponse) -> SipResponse {
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    let text = String::from_utf8(response.image().to_vec()).expect("text");
+    let kept: Vec<&str> = text.split("\r\n").filter(|line| !line.starts_with("Contact:")).collect();
+    match CustomParser::new().parse(kept.join("\r\n").as_bytes()).expect("parses") {
+        SipMessage::Response(r) => r,
+        _ => panic!("a response"),
+    }
+}
+
+/// RFC 3261 §12.1.2: a dialog's remote target is the Contact its 2xx
+/// carried. A 2xx that carried none leaves the dialog nothing to address,
+/// so the ACK and the BYE on it are refused by name, never composed with
+/// an empty Request-URI.
+#[test]
+fn a_confirmed_dialog_with_no_remote_target_refuses_its_requests_by_name() {
+    let mut uac = calling();
+    let (mut uas, _) = ringing("B");
+    let ok = uas
+        .respond(
+            &Answer { status: 200, reason: "OK", cseq_method: Some("INVITE"), early_tag: None },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the callee answers");
+    let ok = without_contact(&ok);
+    uac.learn_response(&ok);
+    assert!(uac.has_dialog());
+    assert_eq!(uac.remote_target(), "");
+    assert_eq!(
+        uac.ack_for(&ok, &[], Vec::new(), None, None),
+        Err(StackError::NoRemoteTarget { leg: "A".into(), method: "ACK".into() })
+    );
+    assert_eq!(
+        uac.in_dialog(Method::Bye, &[], Vec::new(), None, None),
+        Err(StackError::NoRemoteTarget { leg: "A".into(), method: "BYE".into() })
+    );
+}
+
+/// RFC 3261 §12.1.2 on an early dialog: its remote target is the Contact of
+/// the provisional that opened it. A reliable provisional that carried none
+/// leaves the PRACK and the UPDATE nothing to address, and both are refused
+/// by name.
+#[test]
+fn an_early_dialog_with_no_remote_target_refuses_its_requests_by_name() {
+    let mut uac = calling();
+    let (mut uas, _) = ringing("B");
+    let rings = uas
+        .respond(
+            &Answer {
+                status: 183,
+                reason: "Session Progress",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &reliable("1"),
+            Vec::new(),
+            None,
+        )
+        .expect("the callee rings reliably");
+    uac.learn_response(&without_contact(&rings));
+    assert_eq!(
+        uac.prack(None, &[], Vec::new(), None, None),
+        Err(StackError::NoRemoteTarget { leg: "A".into(), method: "PRACK".into() })
+    );
+    assert_eq!(
+        uac.update(None, &[], Vec::new(), None, None),
+        Err(StackError::NoRemoteTarget { leg: "A".into(), method: "UPDATE".into() })
+    );
+}
