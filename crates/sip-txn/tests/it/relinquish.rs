@@ -75,7 +75,7 @@ async fn a_relinquished_call_sends_nothing_and_its_callees_answer_arrives_unmatc
 /// no longer reaches it — while the call's other transactions stay.
 #[tokio::test(start_paused = true)]
 async fn a_relinquished_server_invite_draws_no_final_and_the_rest_stays() {
-    let mut stack = Stack::build(5, 64, 64).await;
+    let stack = Stack::build(5, 64, 64).await;
     let (client, server) = ("z9hG4bK-rs-c", "z9hG4bK-rs-s");
     assert_eq!(stack.txn.seed(CALL_REF, seeds(client, server)).await.unwrap(), 2);
 
