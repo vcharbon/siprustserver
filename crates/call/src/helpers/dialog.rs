@@ -110,12 +110,12 @@ pub fn add_pending_request(call: Call, leg_id: &str, id: &DialogId, entry: Pendi
 
 /// Whether an INVITE transaction is still open on this dialog (RFC 3261
 /// §14.1): a transparently relayed INVITE awaiting its final response, or an
-/// INVITE this side sent on its own with no 2xx taken (rule 1), or a 2xx
-/// un-ACKed on either face — one this side sent (a re-INVITE's or the call's
-/// own answer) or one taken here whose ACK has not left yet (rule 2; RFC 6026
-/// names the interval *Accepted*). While any holds, a new INVITE on the
-/// dialog is glare and is refused, 491 or 500 by which INVITE is open (RFC
-/// 3261 §14.2).
+/// INVITE this side sent on the dialog, relayed or its own, with no 2xx taken
+/// (rule 1), or a 2xx un-ACKed on either face — one this side sent (a
+/// re-INVITE's or the call's own answer) or one taken here whose ACK has not
+/// left yet (rule 2; RFC 6026 names the interval *Accepted*). While any
+/// holds, a new INVITE on the dialog is glare and is refused, 491 or 500 by
+/// which INVITE is open (RFC 3261 §14.2).
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
     dialog.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
         || own_invite_untaken(dialog)
@@ -126,8 +126,9 @@ pub fn invite_transaction_open(dialog: &Dialog) -> bool {
 
 /// Whether the INVITE client transaction cached on the dialog has no 2xx
 /// taken: a 2xx arms its ACK (`ack_branch`) or the ACK the peer owes
-/// (`awaited_ack_cseq`), and a non-2xx final forgets the transaction
-/// ([`close_rejected_invite_round`]).
+/// (`awaited_ack_cseq`). A non-2xx final forgets the transaction on a leg
+/// holding a confirmed dialog ([`close_rejected_invite_round`]); on a leg
+/// holding none it keeps it and ends the leg's early dialogs instead.
 fn own_invite_untaken(dialog: &Dialog) -> bool {
     dialog.pending_invite_txn.is_some()
         && dialog.ack_branch.is_none()
@@ -137,22 +138,29 @@ fn own_invite_untaken(dialog: &Dialog) -> bool {
 /// Whether an INVITE from `source_leg_id`'s peer, on its dialog `source`,
 /// meets glare (RFC 3261 §14.1): an INVITE transaction still open
 /// ([`invite_transaction_open`]) on that dialog or on the dialog its relay
-/// would be regenerated on ([`relay_peer_dialog`]), or the peer's own
-/// dialog-creating INVITE still without a final.
+/// would be regenerated on ([`relay_peer_dialog`]), or the dialog-creating
+/// INVITE of either leg still without a final: the sender's own, or the relay
+/// target's, whose early dialog the relay would ride.
 pub fn invite_glare(call: &Call, source_leg_id: &str, source: Option<&DialogId>) -> bool {
     let named = named_dialog(call, source_leg_id, source);
     named.is_some_and(invite_transaction_open)
-        || (named.is_some() && initial_invite_unanswered(call, source_leg_id))
-        || relay_peer_dialog(call, source_leg_id, source)
-            .is_some_and(|(_, d)| invite_transaction_open(d))
+        || (named.is_some() && source_initial_invite_unanswered(call, source_leg_id))
+        || relay_peer_dialog(call, source_leg_id, source).is_some_and(|(leg, d)| {
+            invite_transaction_open(d) || initial_invite_unanswered(call, leg)
+        })
 }
 
-/// Whether `leg_id`'s dialog-creating INVITE, received here, has no final
-/// sent yet: an INVITE the peer sends on one of the leg's early dialogs is a
-/// second INVITE before the first's final (RFC 3261 §14.2, first clause).
-fn initial_invite_unanswered(call: &Call, leg_id: &str) -> bool {
-    find_leg(call, leg_id)
-        .is_some_and(|l| l.outbound_invite.is_none() && l.invite_final_sent.is_none())
+/// Whether `leg` is the originator's leg and the dialog-creating INVITE this
+/// stack received on it has no final sent yet: an INVITE on one of its early
+/// dialogs is a second INVITE before the first's final (RFC 3261 §14.2,
+/// first clause).
+fn initial_invite_unanswered(call: &Call, leg: &Leg) -> bool {
+    leg.leg_id == call.a_leg.leg_id && leg.invite_final_sent.is_none()
+}
+
+/// [`initial_invite_unanswered`] for the leg named `leg_id`.
+fn source_initial_invite_unanswered(call: &Call, leg_id: &str) -> bool {
+    find_leg(call, leg_id).is_some_and(|leg| initial_invite_unanswered(call, leg))
 }
 
 /// The dialog of `leg_id` that `id` names.
@@ -178,7 +186,7 @@ pub fn sender_invite_unanswered(
     });
     relayed
         || (named_dialog(call, source_leg_id, source).is_some()
-            && initial_invite_unanswered(call, source_leg_id))
+            && source_initial_invite_unanswered(call, source_leg_id))
 }
 
 /// Whether `source_leg_id`'s peer has an earlier INVITE of its own whose 2xx
