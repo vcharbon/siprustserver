@@ -347,6 +347,10 @@ impl RoutingStrategy for LoadBalancerStrategy {
         params.get("w_pri").map(String::as_str).filter(|w| !w.is_empty())
     }
 
+    fn stickiness_backup<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {
+        params.get("w_bak").map(String::as_str).filter(|w| !w.is_empty())
+    }
+
     fn verified_cookie(&self, params: &RouteParams, msg: &SipMessage) -> Option<RouteParams> {
         self.own_fields(params, msg)
     }

@@ -1014,12 +1014,12 @@ async fn matrix_crash_mid_invite() {
 /// callee is silent and the worker's 100 is lost on its way to the caller, so
 /// both INVITE client transactions keep their Timer A: the caller's rung and
 /// the primary's b-leg rung reach the proxy after the backup was killed. The
-/// proxy repeats each forward — same target, same branch (the §16.6 / §17.2.3
-/// memo) — with its own Record-Route cookie re-stamped for the membership it
-/// now has (`w_bak` empty). The primary's server transaction absorbs the a-leg
-/// copy, the callee the b-leg copy, the call completes on the survivor, and the
-/// trace is clean under `rung-byte-identical`: the proxy's own cookie row is
-/// the one row the auditor leaves to the emitter (ADR-0032 X3).
+/// proxy repeats each forward — same target, same branch, and the cookie its
+/// first copy carried (the §16.6 / §17.2.3 memo), the dead backup still named:
+/// the taker keeps the first copy's route set (§12.1.1), so the dialog keeps
+/// one cookie. The primary's server transaction absorbs the a-leg copy, the
+/// callee the b-leg copy, the call completes on the survivor, and the trace is
+/// clean under `rung-byte-identical`.
 #[tokio::test(start_paused = true)]
 async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     let mut fh = FailoverHarness::new("s10b-backup-crash-between-timer-a-copies", &["b1", "b2"]);
@@ -1062,8 +1062,8 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     alice.try_send_datagram(&invite, proxy.addr()).await.unwrap();
     fh.advance(Duration::from_millis(100)).await;
 
-    // The proxy repeated its forward to the SAME primary under the SAME branch;
-    // only its own cookie row changed: the dead backup is no longer named.
+    // The proxy repeated its forward to the SAME primary under the SAME branch
+    // and the SAME cookie: the dead backup is still named.
     let forwarded: Vec<Vec<u8>> = fh
         .sip_entries()
         .into_iter()
@@ -1087,9 +1087,8 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
         "{}",
         cookie(&forwarded[0])
     );
-    assert!(cookie(&forwarded[1]).contains("w_bak=\"\""), "{}", cookie(&forwarded[1]));
-    assert_ne!(forwarded[0], forwarded[1], "the re-stamped cookie is a different datagram");
-    // The b-leg rung took the same re-stamp on its way to bob.
+    assert_eq!(cookie(&forwarded[1]), cookie(&forwarded[0]), "the cookie repeats");
+    // The b-leg rung went to bob too.
     let to_bob = fh
         .sip_entries()
         .into_iter()

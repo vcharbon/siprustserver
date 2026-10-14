@@ -153,13 +153,18 @@ whatever that sender's health. A dialog-creating request a leaving worker sends 
 its address is tombstoned is Record-Routed with the cookie it would have carried a moment
 earlier: `w_pri` the ordinal the tombstone names, `w_bak` the rendezvous winner among the
 other `Alive` workers (`strategies/load_balancer.rs`). The proxy also puts that cookie on
-the Via it pushes on a worker's INVITE (`core/request/via_cookie.rs`), so the cookie,
-not the tombstone's window, carries the dialog: an INVITE response whose sender's
-address names no worker any more still goes to the cookie's worker at the address it
-holds now, else to `w_bak`; a stranger's request carries no such Via and its response
-follows the Via. Its in-dialog requests resolve by ordinal for the dialog's life; an
-address neither live nor tombstoned gets no cookie (`core/departed_originator_tests.rs`,
-including a 200 answered after the window lapsed; `outbound_invite_after_the_departure.rs`).
+the Via it pushes on a worker's INVITE (`core/request/via_cookie.rs`); the INVITE's
+CANCEL and non-2xx ACK carry the INVITE's Via, cookie included, from its memo, and a
+retransmission repeats its first copy's cookie on the Record-Route and the Via. So the
+cookie, not the tombstone's window, carries the dialog: an INVITE response whose
+sender's address names neither of the cookie's workers — nobody, past the window, or a
+worker that took the address since — goes to the cookie's worker at the address it
+holds now, else to `w_bak`, else nowhere; a response to the cookie's backup, a
+takeover copy's, follows the Via to it; a stranger's request carries no such Via and
+its response follows the Via. Its in-dialog requests resolve by ordinal for the
+dialog's life; an address neither live nor tombstoned gets no cookie
+(`core/departed_originator_tests.rs`; `core/response/via_cookie_tests.rs`;
+`outbound_invite_after_the_departure.rs`).
 The tombstone is **re-armed by every response the
 proxy sees for that address** (its next Via's sent-by names it, whatever the method),
 so it lives Timer H past the last sign of life, whatever

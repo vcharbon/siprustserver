@@ -139,20 +139,24 @@ pub fn ack_hop_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u
 /// when `target` is one of our workers: a CANCEL whose remembered worker has
 /// died re-resolves through the same `decode_stickiness` ladder every in-dialog
 /// request takes, so it reaches the node holding the call's replica. `None`
-/// for a downstream target. In a retransmission memo it is the cookie the
-/// forwarded request carried on this proxy's Via, so a retransmission carries
-/// it again (`core/request/via_cookie`); `None` when that Via carried none.
+/// for a downstream target and for the retransmission memos.
+///
+/// `minted` is the cookie this proxy minted for the forwarded request's
+/// Record-Route, and `via_cookie` the cookie it put on its own Via
+/// (`core/request/via_cookie`): a retransmission repeats both, and the CANCEL
+/// and non-2xx ACK of an INVITE carry its `via_cookie`, whatever the worker
+/// set did since.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelEntry {
     pub target: ProxyAddr,
     pub branch: String,
     pub stickiness: Option<RouteParams>,
+    pub minted: Option<RouteParams>,
+    pub via_cookie: Option<RouteParams>,
 }
 
 struct StoredEntry {
-    target: ProxyAddr,
-    branch: String,
-    stickiness: Option<RouteParams>,
+    entry: CancelEntry,
     expires_at_ms: u64,
 }
 
@@ -214,15 +218,7 @@ impl CancelBranchLru {
     /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos.
     pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
         let expires_at_ms = self.now_ms() + ttl_ms;
-        self.table.lock().unwrap().insert(
-            key.to_string(),
-            StoredEntry {
-                target: entry.target,
-                branch: entry.branch,
-                stickiness: entry.stickiness,
-                expires_at_ms,
-            },
-        );
+        self.table.lock().unwrap().insert(key.to_string(), StoredEntry { entry, expires_at_ms });
     }
 
     /// Look up a remembered entry (for a CANCEL / ACK). Lazily evicts an expired
@@ -235,11 +231,7 @@ impl CancelBranchLru {
                 table.remove(key);
                 None
             }
-            Some(e) => Some(CancelEntry {
-                target: e.target.clone(),
-                branch: e.branch.clone(),
-                stickiness: e.stickiness.clone(),
-            }),
+            Some(e) => Some(e.entry.clone()),
             None => None,
         }
     }
@@ -277,6 +269,8 @@ mod tests {
             target: ProxyAddr::new("10.0.0.2", 5070),
             branch: branch.to_string(),
             stickiness: None,
+            minted: None,
+            via_cookie: None,
         }
     }
 

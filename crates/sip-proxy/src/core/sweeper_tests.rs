@@ -58,6 +58,8 @@ async fn run_sweeps_expired_pending_invite_entries() {
             target: ProxyAddr::new("10.0.0.2", 5070),
             branch: "z9hG4bK-x".into(),
             stickiness: None,
+            minted: None,
+            via_cookie: None,
         },
         RTX_ENTRY_TTL_MS,
     );

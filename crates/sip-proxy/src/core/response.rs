@@ -25,12 +25,13 @@
 //! the cookie's backup. A non-INVITE response answers a client transaction only
 //! its sender holds (§17.1.2) and follows the Via whatever the sender's health.
 //!
-//! Past that window the cookie carries the dialog, not the address: an INVITE
-//! response whose next Via names no worker, but whose top Via (this proxy's)
-//! carries a cookie that verifies, goes to the cookie's worker at the address
-//! it holds now, else to the cookie's backup, else nowhere. A worker's request
-//! carries the cookie on that Via (`core/request/via_cookie`); a stranger's
-//! carries none, and its response follows the Via.
+//! The cookie carries the dialog, not the address: an INVITE response whose
+//! top Via (this proxy's) carries a cookie that verifies, and whose next Via
+//! names neither of the cookie's workers — nobody, past that window, or a
+//! worker that took the address since — goes to the cookie's worker at the
+//! address it holds now, else to the cookie's backup, else nowhere. A worker's
+//! request carries the cookie on that Via (`core/request/via_cookie`); a
+//! stranger's carries none, and its response follows the Via.
 
 use sip_message::header::Via;
 use sip_message::types::SipResponse;
@@ -106,13 +107,13 @@ impl ProxyCore {
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         self.registry.rearm_departed(&sent_by);
-        let by_via_cookie = if cseq.method() == Method::Invite
-            && self.registry.lookup_by_address(&sent_by).is_none()
-        {
-            self.via_cookie_route(&resp, &hops[0]).await
+        let by_via_cookie = if cseq.method() == Method::Invite {
+            let named = self.registry.lookup_by_address(&sent_by);
+            self.via_cookie_route(&resp, &hops[0], named.as_ref().map(|w| w.id.as_str())).await
         } else {
             None
         };
+        let routed_by_cookie = by_via_cookie.is_some();
         let (mut host, mut port) = match (by_via_cookie, face) {
             (Some(Some(target)), _) => (target.host, target.port),
             (Some(None), _) => {
@@ -158,7 +159,7 @@ impl ProxyCore {
         // ephemeral port, which matches no registry entry. A departed address
         // answers `Dead` from the registry's tombstone, so this branch covers
         // it too.
-        let dead_worker = (cseq.method() == Method::Invite)
+        let dead_worker = (cseq.method() == Method::Invite && !routed_by_cookie)
             .then(|| self.registry.lookup_by_address(&sent_by))
             .flatten()
             .filter(|dest| dest.health == WorkerHealth::Dead);
@@ -252,6 +253,8 @@ impl ProxyCore {
                         target: ProxyAddr::from(src),
                         branch: found.branch.clone(),
                         stickiness: None,
+                        minted: None,
+                        via_cookie: None,
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
@@ -284,19 +287,30 @@ impl ProxyCore {
         self.registry.lookup_by_address(&sent_by).is_some().then_some(sent_by)
     }
 
-    /// Where an INVITE response goes whose sender's address names no worker,
-    /// by the cookie on `ours`, the Via this proxy pushed on the request: the
-    /// worker that sent the request, so the dialog it created, carries the
-    /// response, not the address. `None`: `ours` carries no cookie that
-    /// verifies, and the response is a stranger's. `Some(None)`: the cookie's
-    /// worker holds no address and no backup is usable, so the response goes
-    /// nowhere. Else the cookie's worker at the address it holds now, or the
-    /// cookie's backup.
-    async fn via_cookie_route(&self, resp: &SipResponse, ours: &Via) -> Option<Option<ProxyAddr>> {
+    /// Where an INVITE response goes by the cookie on `ours`, the Via this
+    /// proxy pushed on the request, when the sender's address names neither of
+    /// the cookie's workers (`named` is the worker it names, if any): the
+    /// address no longer names the worker that sent the request, so the dialog
+    /// it created carries the response, not the address. `None`: `ours`
+    /// carries no cookie that verifies (a stranger's request), or the address
+    /// names the cookie's worker or its backup, and the response takes the
+    /// ordinary path. `Some(None)`: the cookie's worker holds no address and
+    /// no backup is usable, so the response goes nowhere. Else the cookie's
+    /// worker at the address it holds now, or the cookie's backup.
+    async fn via_cookie_route(
+        &self,
+        resp: &SipResponse,
+        ours: &Via,
+        named: Option<&str>,
+    ) -> Option<Option<ProxyAddr>> {
         let msg = SipMessage::Response(resp.clone());
         let cookie =
             self.strategy.verified_cookie(&crate::headers::via_cookie_params(ours), &msg)?;
         let worker = self.strategy.stickiness_primary(&cookie)?;
+        if named.is_some_and(|n| n == worker || Some(n) == self.strategy.stickiness_backup(&cookie))
+        {
+            return None;
+        }
         if let Some(moved) =
             self.registry.resolve(worker).filter(|w| w.health != WorkerHealth::Dead)
         {

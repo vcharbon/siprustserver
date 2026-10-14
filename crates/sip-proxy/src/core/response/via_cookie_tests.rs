@@ -330,3 +330,81 @@ async fn a_forged_route_cookie_is_not_carried() {
     assert!(!via.contains("w_bak=w9"), "{via}");
     assert!(via.contains(&format!(";sig={}", minted["sig"])), "the minted cookie rides: {via}");
 }
+
+/// `raw` with a `Resource-Priority` emergency value after its Via.
+fn emergency(raw: &str) -> String {
+    raw.replacen("rport\r\n", "rport\r\nResource-Priority: esnet.0\r\n", 1)
+}
+
+/// The proxy's Record-Route line that carries the cookie, if any.
+fn cookie_record_route(bytes: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("record-route:") && l.contains("sig="))
+        .map(str::to_string)
+}
+
+/// `w1`'s initial INVITE forwarded: its bytes. `raw` is the INVITE.
+async fn initial_forwarded(f: &Fixture, raw: &str) -> Vec<u8> {
+    f.core.handle_request_from(parse(raw), w1()).await;
+    one_sent(f).1
+}
+
+fn preloaded() -> String {
+    format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n")
+}
+
+// An emergency INVITE's cookie says so (`e=1`); its CANCEL carries no
+// Resource-Priority, and still carries the INVITE's Via (§9.1).
+#[tokio::test]
+async fn an_emergency_invites_cancel_carries_its_via() {
+    let f = fixture();
+    let invite = emergency(&request("INVITE", "z9hG4bKem", &preloaded(), "", "1 INVITE"));
+    let via = top_via(&initial_forwarded(&f, &invite).await);
+    assert!(via.contains(";e=1"), "{via}");
+    let cancel = request("CANCEL", "z9hG4bKem", &preloaded(), "", "1 CANCEL");
+    f.core.handle_request_from(parse(&cancel), w1()).await;
+    assert_eq!(top_via(&one_sent(&f).1), via, "the CANCEL's Via is its INVITE's");
+}
+
+// The worker set moves between an INVITE and its CANCEL: the CANCEL still
+// carries the INVITE's Via, whose backup the set no longer offers.
+#[tokio::test]
+async fn a_cancel_after_the_worker_set_moved_carries_its_invites_via() {
+    let f = fixture();
+    let invite = request("INVITE", "z9hG4bKmv", &preloaded(), "", "1 INVITE");
+    let via = top_via(&initial_forwarded(&f, &invite).await);
+    f.registry.remove("w2");
+    let cancel = request("CANCEL", "z9hG4bKmv", &preloaded(), "", "1 CANCEL");
+    f.core.handle_request_from(parse(&cancel), w1()).await;
+    assert_eq!(top_via(&one_sent(&f).1), via, "the CANCEL's Via is its INVITE's");
+}
+
+// The INVITE's worker departs and its address's window lapses on a long ring:
+// the CANCEL it still sends carries the INVITE's Via.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_past_its_workers_tombstone_carries_its_invites_via() {
+    let f = fixture();
+    f.registry.remove("w1");
+    let invite = request("INVITE", "z9hG4bKlap", &preloaded(), "", "1 INVITE");
+    let via = top_via(&initial_forwarded(&f, &invite).await);
+    let window = crate::registry::tombstone::DEPARTED_ADDRESS_TTL_MS;
+    tokio::time::advance(std::time::Duration::from_millis(window + 1_000)).await;
+    let cancel = request("CANCEL", "z9hG4bKlap", &preloaded(), "", "1 CANCEL");
+    f.core.handle_request_from(parse(&cancel), w1()).await;
+    assert_eq!(top_via(&one_sent(&f).1), via, "the CANCEL's Via is its INVITE's");
+}
+
+// A retransmission of a worker's INVITE repeats the cookie its first copy
+// carried, on the Record-Route and on the Via, whatever the set did since.
+#[tokio::test]
+async fn a_retransmitted_invite_repeats_its_first_copys_cookies() {
+    let f = fixture();
+    let invite = request("INVITE", "z9hG4bKrtx", &preloaded(), "", "1 INVITE");
+    let first = initial_forwarded(&f, &invite).await;
+    f.registry.remove("w2");
+    let again = initial_forwarded(&f, &invite).await;
+    assert_eq!(top_via(&again), top_via(&first), "the Via cookie repeats");
+    assert_eq!(cookie_record_route(&again), cookie_record_route(&first), "so does the RR's");
+    assert!(cookie_record_route(&first).is_some_and(|rr| rr.contains("w_bak=w2")));
+}

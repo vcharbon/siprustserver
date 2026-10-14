@@ -71,6 +71,7 @@ struct Fixture {
     core: ProxyCore,
     strategy: Arc<LoadBalancerStrategy>,
     registry: SimulatedWorkerRegistry,
+    metrics: Arc<ProxyMetrics>,
     wire: Arc<Wire>,
 }
 
@@ -109,9 +110,9 @@ fn fixture() -> Fixture {
         Arc::new(registry.clone()),
     )
     .clock(clock)
-    .metrics(metrics)
+    .metrics(metrics.clone())
     .build(Box::new(WireHandle(wire.clone())));
-    Fixture { core, strategy, registry, wire }
+    Fixture { core, strategy, registry, metrics, wire }
 }
 
 fn parse(raw: &str) -> SipMessage {
@@ -253,6 +254,57 @@ async fn a_200_answered_past_the_tombstone_reaches_the_ordinal_at_its_new_addres
     f.core.handle_response_from(answer(&fwd, "200 OK"), uas()).await;
     let replacement: SocketAddr = format!("{REPLACEMENT}:5060").parse().unwrap();
     assert_eq!(f.one_sent().0, replacement);
+}
+
+// Past the window, neither the cookie's worker nor its backup holds an
+// address: the 200 goes nowhere, counted as dropped, and never along the Via
+// to the departed address.
+#[tokio::test(start_paused = true)]
+async fn a_200_past_the_tombstone_with_no_usable_backup_is_dropped() {
+    let f = fixture();
+    let fwd = invite_rung_past_the_tombstone(&f).await;
+    f.registry.set_health("w2", WorkerHealth::Dead);
+    f.core.handle_response_from(answer(&fwd, "200 OK"), uas()).await;
+    assert!(f.wire.sent.lock().unwrap().is_empty(), "nothing is sent");
+    let text = f.metrics.prometheus_text();
+    assert!(text.contains("sip_messages_total{label=\"outbound:dropped\"} 1\n"), "{text}");
+}
+
+// Past the window, another worker took the departed worker's address: the
+// address names neither of the cookie's workers, so the cookie carries the 200
+// to the backup, never to the address's new holder.
+#[tokio::test(start_paused = true)]
+async fn a_200_past_the_tombstone_skips_a_worker_that_took_the_address() {
+    let f = fixture();
+    let fwd = invite_rung_past_the_tombstone(&f).await;
+    f.registry.add(WorkerEntry::alive("w5", ProxyAddr::new(W1_POD, 5060)));
+    f.core.handle_response_from(answer(&fwd, "200 OK"), uas()).await;
+    let w2: SocketAddr = format!("{W2_POD}:5060").parse().unwrap();
+    assert_eq!(f.one_sent().0, w2, "the cookie's backup takes the 200");
+}
+
+// The cookie's backup serves the dialog as a takeover copy while its primary
+// is still alive and sends a re-INVITE carrying the dialog's cookie: the
+// address names the cookie's backup, so the 200 follows the Via to it, the
+// node holding the transaction.
+#[tokio::test]
+async fn a_200_to_the_cookies_backup_follows_the_via() {
+    let f = fixture();
+    let invite = parse(&initial_invite(W1_POD));
+    let cookie = f.strategy.encode_stickiness(&ProxyAddr::new(W1_POD, 5060), &invite).unwrap();
+    let cookie_text: String = cookie.iter().map(|(k, v)| format!(";{k}={v}")).collect();
+    let route = format!(
+        "Route: <sip:{PROXY_VIP}:5060;outbound;lr>, <sip:{PROXY_VIP}:5060{cookie_text};lr>\r\n"
+    );
+    let reinvite = initial_invite(W2_POD)
+        .replace(&format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n"), &route)
+        .replace("To: <sip:bob@10.244.7.13>\r\n", "To: <sip:bob@10.244.7.13>;tag=b\r\n")
+        .replace("CSeq: 1 INVITE", "CSeq: 2 INVITE");
+    f.core.handle_request_from(parse(&reinvite), format!("{W2_POD}:5060").parse().unwrap()).await;
+    let (_, fwd) = f.one_sent();
+    f.core.handle_response_from(answer(&fwd, "200 OK"), uas()).await;
+    let w2: SocketAddr = format!("{W2_POD}:5060").parse().unwrap();
+    assert_eq!(f.one_sent().0, w2, "the 200 returns to the copy that sent the re-INVITE");
 }
 
 // An address neither in the worker set nor tombstoned names no worker: no

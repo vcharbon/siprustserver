@@ -267,6 +267,13 @@ impl ProxyCore {
         };
         draft = draft.set(mf_next);
 
+        // A retransmission repeats the cookies its first copy carried, on the
+        // Record-Route and on the Via, whatever moved in the worker set since:
+        // the downstream server transaction absorbs the copy, and the route
+        // set and responses it keeps are the first copy's (§12.1.1, §17.2.1),
+        // so the dialog keeps one cookie. The memo holds them for the
+        // retransmission window.
+        let repeated = rtx_hit.as_ref().and_then(|found| found.minted.clone());
         let (routed, minted_cookie) = self.insert_double_record_route(
             draft,
             msg,
@@ -275,21 +282,14 @@ impl ProxyCore {
             &target,
             c.worker_outbound,
             &c.via_worker,
+            repeated.as_ref(),
         );
         draft = routed;
-        // A retransmission carries the Via cookie its first copy carried, so
-        // its bytes repeat the first copy's (§17.1.1.2) whatever moved in the
-        // worker set since; the memo holds it for the retransmission window.
         let originator = c.via_worker.clone().unwrap_or_else(|| ProxyAddr::from(src));
-        let via_cookie = c
-            .worker_outbound
-            .then(|| {
-                rtx_hit
-                    .as_ref()
-                    .and_then(|found| found.stickiness.clone())
-                    .or_else(|| self.via_cookie(msg, req, &c.own_routes, &originator))
-            })
-            .flatten();
+        let via_cookie = match rtx_hit.as_ref() {
+            Some(found) => found.via_cookie.clone(),
+            None => self.via_cookie(msg, req, &c, &originator, minted_cookie.as_ref()),
+        };
 
         // ── §16.11: the pushed branch is a function of the message ──────────
         // A retransmission of this request, and its CANCEL and non-2xx ACK,
@@ -307,7 +307,7 @@ impl ProxyCore {
             .requesting_rport();
         draft = draft.push_front(via_with_cookie(pushed, via_cookie.as_ref()));
 
-        // Remember the target, and the Via cookie, so a retransmit of THIS
+        // Remember the target and both cookies, so a retransmit of THIS
         // request repeats the forward. Short TTL: retransmits stop at Timer B/F.
         if method != Method::Cancel {
             if let Some(k) = &rtx_key {
@@ -316,7 +316,9 @@ impl ProxyCore {
                     CancelEntry {
                         target: target.clone(),
                         branch: our_branch.clone(),
-                        stickiness: via_cookie.clone(),
+                        stickiness: None,
+                        minted: minted_cookie.clone(),
+                        via_cookie: via_cookie.clone(),
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
@@ -335,12 +337,16 @@ impl ProxyCore {
             // the proxy carries none). A worker-outbound INVITE's cookie names
             // the worker, not the downstream target, so it is not kept.
             let carried = c.cookie.as_ref().and_then(|p| self.strategy.verified_cookie(p, msg));
-            let stickiness = if c.worker_outbound { None } else { carried.or(minted_cookie) };
-            self.cancel_lru.remember(
-                &key,
-                CancelEntry { target: target.clone(), branch: our_branch, stickiness },
-                crate::cancel_lru::INVITE_ENTRY_TTL_MS,
-            );
+            let stickiness =
+                if c.worker_outbound { None } else { carried.or(minted_cookie.clone()) };
+            let entry = CancelEntry {
+                target: target.clone(),
+                branch: our_branch,
+                stickiness,
+                minted: None,
+                via_cookie: via_cookie.clone(),
+            };
+            self.cancel_lru.remember(&key, entry, crate::cancel_lru::INVITE_ENTRY_TTL_MS);
             self.metrics.set_pending_invite_lru_size(self.cancel_lru.size() as u64);
         }
 

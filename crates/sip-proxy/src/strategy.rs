@@ -128,6 +128,12 @@ pub trait RoutingStrategy: Send + Sync {
     /// failover consults only a cookie this names the dead worker in.
     fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str>;
 
+    /// The worker id a cookie names as the call's backup, read without
+    /// verifying it. `None` → the cookie names no backup.
+    fn stickiness_backup<'p>(&self, _params: &'p RouteParams) -> Option<&'p str> {
+        None
+    }
+
     /// The cookie in `params` (the params of one of the proxy's own Route
     /// URIs) as a header of the proxy's own may carry it: this strategy's own
     /// fields alone, and only when they verify for `msg`'s call. `None` →
