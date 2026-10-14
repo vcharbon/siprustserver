@@ -52,6 +52,7 @@ fn relay(method: &str, outbound_cseq: i64) -> PendingRequest {
         offered_100rel: false,
         offered: false,
         source_timestamp: None,
+        relayed_by: "w1".into(),
     }
 }
 
