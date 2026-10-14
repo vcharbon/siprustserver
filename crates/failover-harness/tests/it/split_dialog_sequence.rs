@@ -55,9 +55,10 @@ async fn a_refused_copys_sequence_toward_the_caller_outlives_its_stand_down() {
 }
 
 /// The copy relays the caller's re-INVITE and the primary reads it, holding
-/// the round open; then only the copy's writes toward the primary are held.
-/// The copy relays the callee's INFO and serves the round to its ACK, while
-/// the primary relays the caller's INFO; then the copy's writes are released.
+/// the round open; then the replication is cut both ways. The copy relays the
+/// callee's INFO and serves the round to its ACK, while the primary relays
+/// the caller's INFO; then the cut heals, and the primary reads the copy's
+/// last write alone.
 #[tokio::test(start_paused = true)]
 async fn a_round_folded_alone_keeps_the_copys_sequence_toward_the_caller() {
     let mut est = establish("split-sequence-round-fold").await;
@@ -68,7 +69,7 @@ async fn a_round_folded_alone_keeps_the_copys_sequence_toward_the_caller() {
     let mut at_bob = est.bob.receive("INVITE").await;
     round.expect(100).await;
     est.fh.advance(Duration::from_millis(300)).await;
-    est.fh.stall(&b_ord, &p_ord);
+    est.fh.partition(&p_ord, &b_ord);
     info_through_the_primary(&est.alice, &mut est.bob_dialog).await;
     est.proxy.set_health(&p_ord, WorkerHealth::Alive);
     caller_info(&mut est).await;
@@ -79,7 +80,7 @@ async fn a_round_folded_alone_keeps_the_copys_sequence_toward_the_caller() {
     est.dialog.ack_for(answer.cseq().seq(), None).await;
     est.bob.receive("ACK").await;
     est.fh.advance(Duration::from_millis(100)).await;
-    est.fh.resume(&b_ord, &p_ord);
+    est.fh.heal(&p_ord, &b_ord);
     est.fh.advance(SETTLE).await;
     est.proxy.set_health(&p_ord, WorkerHealth::Alive);
     callee_hangs_up(&mut est).await;
