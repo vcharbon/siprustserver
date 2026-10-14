@@ -414,7 +414,8 @@ fn retain_reinvite_2xx(leg: &mut Leg, branch: &str) {
 /// A re-INVITE whose 2xx the dialog retains awaiting its ACK seeds an
 /// Accepted server INVITE on the 2xx's branch, attributed to the dialog's
 /// leg; that branch is a server seed an in-dialog INVITE can be a copy of,
-/// and the call has no INVITE in flight.
+/// and the call has an INVITE transaction a live copy must serve: the 2xx's
+/// retransmission ladder.
 #[test]
 fn a_retained_reinvite_2xx_seeds_an_accepted_server_invite() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
@@ -428,7 +429,7 @@ fn a_retained_reinvite_2xx_seeds_an_accepted_server_invite() {
     });
     assert_eq!(leg_id, Some("b-1"), "the originator's leg holds the dialog");
     assert!(names_server_branch(&call, RELAYED_BRANCH), "a copy of its INVITE is re-offered");
-    assert!(!super::super::has_invite_in_flight(&call), "an answered round awaits only its ACK");
+    assert!(super::super::has_invite_to_serve(&call), "its 2xx awaits the ACK");
 }
 
 /// The b-leg client seed's `provisional` flag and the `Reason` lines of the

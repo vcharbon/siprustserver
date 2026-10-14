@@ -251,8 +251,8 @@ pub enum ReplCommand {
     /// the copy can stand down on it (`stand_down`, ADR-0047 D7).
     ForwardFlushApplied { call_ref: String, write: PrimaryWrite },
     /// The peer of this ordinal left the membership set while its flows ran: a
-    /// real stop. Its calls this node backs up with an INVITE in flight are
-    /// taken over at once (`departure`, ADR-0047). Sent once per stop.
+    /// real stop. Its calls this node backs up with an INVITE transaction to
+    /// serve are taken over at once (`departure`, ADR-0047). Sent once per stop.
     PeerDeparted(String),
 }
 

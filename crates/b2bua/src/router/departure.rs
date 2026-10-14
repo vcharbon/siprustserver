@@ -1,10 +1,12 @@
 //! The departure sweep (ADR-0047): a peer that left the membership set is
 //! gone, and a caller or callee it left mid-INVITE may send nothing more — a
 //! caller that heard a 100 runs no Timer B (RFC 3261 §17.1.1.2), and a silent
-//! callee stays silent. Every call this node backs up for the peer with an
-//! INVITE transaction in flight is taken over at once: its timers run at their
-//! replicated deadlines, its transactions are rebuilt, and an undecided call is
-//! answered. A call with no INVITE in flight is left to the reactive path
+//! callee stays silent, and nobody else repeats a 2xx the caller lost (RFC
+//! 3261 §13.3.1.4). Every call this node backs up for the peer with an INVITE
+//! transaction to serve — awaiting its final, or its 2xx awaiting the ACK — is
+//! taken over at once: its timers run at their replicated deadlines, its
+//! transactions are rebuilt, and an undecided call is answered. A call with
+//! no INVITE transaction to serve is left to the reactive path
 //! (ADR-0014 §1): taking every quiet dialog over at once is the stale-CSeq
 //! storm that rule exists to avoid.
 //!
@@ -18,7 +20,7 @@ use std::sync::Arc;
 
 use call::CallModelState;
 
-use super::materialise::{has_invite_in_flight, materialise, Materialised, Origin};
+use super::materialise::{has_invite_to_serve, materialise, Materialised, Origin};
 use super::undecided::{is_undecided, settle_undecided};
 use super::RouterCtx;
 use crate::store::PartitionRole;
@@ -42,7 +44,8 @@ enum Swept {
     TakenAndSettled,
 }
 
-/// Take over every call of `refs` with an INVITE in flight, one at a time.
+/// Take over every call of `refs` with an INVITE transaction to serve, one at
+/// a time.
 async fn sweep(ctx: &Arc<RouterCtx>, ordinal: &str, refs: Vec<String>) {
     let scanned = refs.len();
     let (mut taken, mut settled) = (0usize, 0usize);
@@ -66,12 +69,13 @@ async fn sweep(ctx: &Arc<RouterCtx>, ordinal: &str, refs: Vec<String>) {
     );
 }
 
-/// Take `call_ref` over when its body names an INVITE in flight. The body is
+/// Take `call_ref` over when its body names an INVITE transaction to serve
+/// ([`has_invite_to_serve`]). The body is
 /// read once without the lock to leave a quiet call untouched; a call already
 /// live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
     let Ok((call, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
-    if call.state == CallModelState::Terminated || !has_invite_in_flight(&call) {
+    if call.state == CallModelState::Terminated || !has_invite_to_serve(&call) {
         return Swept::Left;
     }
     let guard = ctx.state.lock(call_ref).await;

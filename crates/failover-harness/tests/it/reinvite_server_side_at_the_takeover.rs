@@ -34,6 +34,7 @@ use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
+use crate::departure_support::kill_announced;
 use crate::inflight_resend::{
     assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
     last_request_sent, reboot_and_reclaim, round_invites_sent_to, settle_to_one_cdr, split_mut,
@@ -178,6 +179,48 @@ async fn a_reinvite_retransmitted_after_another_takeover_draws_its_replicated_2x
     drop((info, reinvite));
 
     dialog.ack_for(cseq, None).await;
+    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob).await;
+    assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
+
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_secs(60)).await;
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    drop(proxy);
+}
+
+/// The same answered round, the caller having heard the 100 so she sends
+/// nothing more, the 2xx lost on its way to her; the serving node's
+/// departure is announced and no message for the call follows. The departure
+/// sweep takes the call over and resumes the retained 2xx's ladder (RFC 3261
+/// §13.3.1.4): the 2xx reaches the caller and her ACK reaches the callee once.
+#[tokio::test(start_paused = true)]
+async fn a_retained_2xx_is_retransmitted_by_the_survivor_after_its_nodes_departure() {
+    let mut fh = FailoverHarness::new("reinvite-2xx-resumed-on-departure", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+
+    let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
+    let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
+
+    // ── Answered and replicated; the 2xx lost on the way to the caller ──────
+    let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
+    reinvite.expect(100).await;
+    let mut at_bob = bob.receive("INVITE").await;
+    fh.cut_signalling("alice", alice.addr());
+    at_bob.respond(200, "OK").with_sdp(REANSWER).await;
+    fh.advance(REPLICATE).await;
+
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    let hydrated_before = kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    fh.restore_signalling("alice", alice.addr());
+
+    // ── The survivor's ladder brings the 2xx to the caller ──────────────────
+    reinvite.expect(200).await;
+    assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
+    dialog.ack(None).await;
     let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
 

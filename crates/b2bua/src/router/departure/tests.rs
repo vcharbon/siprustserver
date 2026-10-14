@@ -1,5 +1,6 @@
 //! The departure sweep over a wired core: of a departed peer's backup
-//! partition it takes over exactly the calls with an INVITE in flight, and an
+//! partition it takes over exactly the calls with an INVITE transaction to
+//! serve, and an
 //! undecided one among them is answered 503 through the caller's INVITE
 //! transaction, or settled with nothing on the wire when that transaction's
 //! branch is already another call's here.
