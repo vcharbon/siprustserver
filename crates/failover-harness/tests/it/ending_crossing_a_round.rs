@@ -10,7 +10,8 @@
 //!   primary takes the end, answers the caller's re-INVITE and discharges the
 //!   call — one CDR, nothing left;
 //! - the primary ends the call while the copy holds the callee's round: the
-//!   copy keeps the round until its final reaches the callee.
+//!   copy keeps the round until its final reaches the callee, through the
+//!   primary's writes and through its delete of the call.
 
 use std::time::Duration;
 
@@ -97,5 +98,32 @@ async fn the_copy_keeps_its_round_through_the_primarys_ending() {
     round.expect(487).await;
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
+    settle(&est).await;
+}
+
+/// The same, but the callee answers the BYE first: the primary ends the call
+/// and deletes it while the copy still holds the callee's round. The copy
+/// keeps it through the delete, and the caller's 487 still reaches the
+/// callee.
+#[tokio::test(start_paused = true)]
+async fn the_copy_keeps_its_round_through_the_primarys_delete() {
+    let mut est = establish("primary-delete-crossing-the-copys-round").await;
+    let (p_ord, b_ord) = (est.primary_ord.clone(), est.bak_ord.clone());
+    est.proxy.set_health(&p_ord, WorkerHealth::Dead);
+    est.fh.advance(Duration::from_millis(200)).await;
+    est.fh.stall(&b_ord, &p_ord);
+    let mut round = est.bob_dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    let mut at_alice = est.alice.receive("INVITE").await;
+    round.expect(100).await;
+    est.fh.advance(Duration::from_millis(300)).await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Alive);
+    let mut bye = est.dialog.bye().await;
+    est.bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    est.fh.resume(&b_ord, &p_ord);
+    est.fh.advance(SETTLE).await;
+
+    at_alice.respond(487, "Request Terminated").await;
+    round.expect(487).await;
     settle(&est).await;
 }
