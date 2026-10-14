@@ -46,7 +46,7 @@ export interface BatchHost {
   readonly end: Effect.Effect<string | undefined>
   /** What the gate read of the SUT's call contexts once `end` resolved; `undefined` before, and where the lane reads none. */
   readonly contexts: () => ContextsReport | undefined
-  /** Ends the process now, its cells in flight with it; a process already gone is left. */
+  /** Ends the process now, its cells in flight with it, and resolves once it exited; a process already gone is left. */
   readonly kill: Effect.Effect<void>
 }
 

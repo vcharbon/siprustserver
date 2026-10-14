@@ -9,7 +9,9 @@
  * - The lines: a run-spec path per line in; per line out one of `ready` (the
  *   process serves its lane), `cell` (one run-spec ended, in the `replay
  *   <run-spec>` exit vocabulary) and `end` (the batch's cleanup gate, once its
- *   input closed). A line that is none of them is the process's own talk.
+ *   input closed). A JSON object carrying one of their keys that does not
+ *   decode is malformed, never talk; a line that is none of them is the
+ *   process's own talk.
  * - The contexts report: what the gate read of the SUT's call contexts.
  * - `sut-join.json`: the Call-IDs a real-lane cell minted and the wall-clock
  *   window it drove the SUT in.
@@ -82,16 +84,39 @@ export const Line = Schema.Struct({
 })
 export interface Line extends Schema.Schema.Type<typeof Line> {}
 
-/** `text` as a protocol line; `undefined` where it is the process's own talk. */
-export const lineOf = (text: string): Line | undefined => {
+/** The keys that make a JSON object a protocol line. */
+const KEYS = ["ready", "cell", "end"] as const
+
+/**
+ * How one line the process wrote reads: a protocol `line`; `malformed`, a JSON
+ * object carrying a protocol key whose value does not decode, with the key and
+ * the run-spec path it names where it names one; or the process's own `talk`.
+ */
+export type Read =
+  | { readonly _tag: "line"; readonly line: Line }
+  | {
+    readonly _tag: "malformed"
+    readonly key: (typeof KEYS)[number]
+    readonly spec: string | undefined
+    readonly why: string
+  }
+  | { readonly _tag: "talk" }
+
+/** `text` read as one line of the process's stdout. */
+export const readLine = (text: string): Read => {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
-    return undefined
+    return { _tag: "talk" }
   }
-  const decoded = Schema.decodeUnknownOption(Line)(parsed)
-  return decoded._tag === "Some" ? decoded.value : undefined
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { _tag: "talk" }
+  const key = KEYS.find((name) => name in parsed)
+  if (key === undefined) return { _tag: "talk" }
+  const decoded = Schema.decodeUnknownResult(Line)(parsed)
+  if (decoded._tag === "Success") return { _tag: "line", line: decoded.success }
+  const named = (parsed as { readonly cell?: { readonly spec?: unknown } }).cell?.spec
+  return { _tag: "malformed", key, spec: typeof named === "string" ? named : undefined, why: String(decoded.failure) }
 }
 
 /** The bundle file a real-lane cell states its join to the SUT's records in. */
