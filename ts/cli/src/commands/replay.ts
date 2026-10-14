@@ -386,14 +386,9 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
 
 /** The exit code of a job's passes: a stop wins, else the worst pass's closing code. */
 const closingCode = Effect.fn("ReplayCli.closingCode")(function*(replays: ReadonlyArray<Replay>) {
-  const codes = yield* Effect.forEach(replays, (one) => reported(one))
+  const codes = yield* Effect.forEach(replays, (one) => report(one))
   return codes.includes(INTERRUPTED_EXIT) ? INTERRUPTED_EXIT : Math.max(0, ...codes)
 })
-
-/** The closing table and its code, and where the viewer studies the captures. */
-const reported = (replay: Replay, options: { readonly errorsFail?: boolean } = {}) =>
-  Effect.tap(report(replay, options), () =>
-    Console.log("[replay] study any of them at /triage/<capture> in the flow viewer"))
 
 /**
  * Why `--from-census` cannot be honoured on this line, or `null`: it names
@@ -483,7 +478,7 @@ const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Inpu
     yield* Console.error(`[replay] refused: ${replay}`)
     return 2
   }
-  const code = yield* reported(replay, { errorsFail: errorsFail(options.selection.universe, input.strict) })
+  const code = yield* report(replay, { errorsFail: errorsFail(options.selection.universe, input.strict) })
   if (input.summary) for (const line of yield* ReplaySummary.read(`@sweep:${replay.sweep}`, options.lane)) yield* Console.log(line)
   yield* afterSweep(options, replay.outcomes.length)
   return code

@@ -12,8 +12,10 @@
  *
  * A path the tree does not hold contributes nothing. It cannot: a phase whose
  * code is missing cannot run at all, and refusing here would turn a missing
- * checkout into an unreadable hash error. Each fingerprint is read once per
- * process: a campaign's thousands of captures share one tree.
+ * checkout into an unreadable hash error. A command reads each fingerprint
+ * once per process for the inputs its deployment states — a campaign's
+ * thousands of captures share one tree — while a long-lived reader (the
+ * viewer) reads it now, so an edit shows.
  */
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
@@ -87,30 +89,40 @@ const censusInput = Effect.gen(function*() {
   return file === undefined ? [] : [{ name: `census/${path.basename(file)}`, file }]
 })
 
-let extractorHeld: string | undefined
-let cutHeld: string | undefined
+/** The fingerprints this process read, by the inputs that decided them. */
+const held = new Map<string, string>()
 
-/** What decides an extraction: the deployment's extraction paths. */
-export const extractor = Effect.suspend(() =>
-  extractorHeld !== undefined
-    ? Effect.succeed(extractorHeld)
-    : Effect.gen(function*() {
-      const decides = yield* Effect.flatMap(Tools.Service, (tools) => tools.decides)
-      extractorHeld = yield* contentHash(decides.root, decides.extraction)
-      return extractorHeld
-    })
-)
+/** `read`, once per process for the inputs `key` names. */
+const once = <E, R>(key: string, read: Effect.Effect<string, E, R>): Effect.Effect<string, E, R> =>
+  Effect.suspend(() => {
+    const hit = held.get(key)
+    return hit !== undefined ? Effect.succeed(hit) : Effect.tap(read, (hash) => Effect.sync(() => held.set(key, hash)))
+  })
 
-/** What decides a cut: the deployment's cut paths and the census run it reads. */
-export const cut = Effect.suspend(() =>
-  cutHeld !== undefined
-    ? Effect.succeed(cutHeld)
-    : Effect.gen(function*() {
-      const decides = yield* Effect.flatMap(Tools.Service, (tools) => tools.decides)
-      cutHeld = yield* contentHash(decides.root, decides.cut, yield* censusInput)
-      return cutHeld
-    })
-)
+const keyOf = (phase: string, root: string, paths: ReadonlyArray<string>, extra: ReadonlyArray<Input> = []) =>
+  JSON.stringify([phase, root, paths, extra])
+
+const decided = Effect.flatMap(Tools.Service, (tools) => tools.decides)
+
+/** What decides an extraction, read now: for a long-lived reader, which must see an edit. */
+export const extractorNow = Effect.flatMap(decided, (decides) => contentHash(decides.root, decides.extraction))
+
+/** What decides a cut, read now: for a long-lived reader, which must see an edit. */
+export const cutNow = Effect.gen(function*() {
+  const decides = yield* decided
+  return yield* contentHash(decides.root, decides.cut, yield* censusInput)
+})
+
+/** What decides an extraction: the deployment's extraction paths, read once per process. */
+export const extractor = Effect.flatMap(decided, (decides) =>
+  once(keyOf("extraction", decides.root, decides.extraction), contentHash(decides.root, decides.extraction)))
+
+/** What decides a cut: the deployment's cut paths and the census run it reads, read once per process. */
+export const cut = Effect.gen(function*() {
+  const decides = yield* decided
+  const census = yield* censusInput
+  return yield* once(keyOf("cut", decides.root, decides.cut, census), contentHash(decides.root, decides.cut, census))
+})
 
 /** A fingerprint as a report line shows it. */
 export const short = (fingerprint: string): string => fingerprint.slice(0, 12)

@@ -100,25 +100,35 @@ const takenOn = (fs: FileSystem.FileSystem, file: string): Taken => ({
   release: fs.remove(file, { force: true }).pipe(Effect.ignore)
 })
 
+/** Tells one process's drafts apart. */
+let drafts = 0
+
+/** A holder's draft beside the lock it is written for; never a `.json` a reader scan reads. */
+const draftOf = (file: string): string => `${file}.${process.pid}.${++drafts}.draft`
+
 /**
- * Take `file`, or say who has it. Written exclusively (`wx`), so two callers
- * racing for one lock cannot both win it.
+ * Take `file`, or say who has it. The holder is written whole to a draft of
+ * its own, then hard-linked into place — the link fails where the file
+ * exists — so two callers racing for one lock cannot both win it, and no
+ * reader ever finds a holder's file half written.
  */
 const claim = Effect.fn("Locks.claim")(function*(file: string, what: string, now: string) {
   const fs = yield* FileSystem.FileSystem
   yield* fs.makeDirectory(path.dirname(file), { recursive: true }).pipe(Effect.ignore)
-  const write = fs.writeFileString(
-    file,
-    `${JSON.stringify({ pid: process.pid, since: now, what } satisfies Holder)}\n`,
-    { flag: "wx" }
-  )
-  if (yield* write.pipe(Effect.as(true), Effect.orElseSucceed(() => false))) return takenOn(fs, file) as Taken | Held
-  const holder = yield* liveHolder(file)
-  if (holder !== undefined) return { held: describe(holder, file) } satisfies Held
-  return yield* write.pipe(
-    Effect.as(takenOn(fs, file) as Taken | Held),
-    Effect.catch((error) => Effect.succeed({ held: `${file} could not be locked: ${error.message}` } satisfies Held))
-  )
+  const draft = draftOf(file)
+  const written = yield* fs.writeFileString(
+    draft,
+    `${JSON.stringify({ pid: process.pid, since: now, what } satisfies Holder)}\n`
+  ).pipe(Effect.result)
+  if (written._tag === "Failure") return { held: `${file} could not be locked: ${written.failure.message}` } as Taken | Held
+  const linked = fs.link(draft, file).pipe(Effect.as(true), Effect.orElseSucceed(() => false))
+  return yield* Effect.gen(function*() {
+    if (yield* linked) return takenOn(fs, file) as Taken | Held
+    const holder = yield* liveHolder(file)
+    if (holder !== undefined) return { held: describe(holder, file) } satisfies Held
+    if (yield* linked) return takenOn(fs, file)
+    return { held: `${file} could not be locked` } satisfies Held
+  }).pipe(Effect.ensuring(fs.remove(draft, { force: true }).pipe(Effect.ignore)))
 })
 
 /**
@@ -174,7 +184,7 @@ const readers = Effect.fn("Locks.readers")(function*(guarded: Guarded) {
   const fs = yield* FileSystem.FileSystem
   const entries = yield* fs.readDirectory(readerDir(guarded)).pipe(Effect.orElseSucceed(() => [] as Array<string>))
   const live: Array<Holder> = []
-  for (const entry of entries) {
+  for (const entry of entries.filter((name) => name.endsWith(".json"))) {
     const holder = yield* liveHolder(path.join(readerDir(guarded), entry))
     if (holder !== undefined) live.push(holder)
   }

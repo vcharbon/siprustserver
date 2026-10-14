@@ -11,6 +11,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
+import { CaseLayout } from "../../src/deployment/index.js"
 import * as Where from "../../src/report/where.js"
 
 /** A capture named with no pcap suffix, as an anonymised generation is. */
@@ -48,7 +49,7 @@ const runs = Layer.succeed(
 const read = (capture: string, cases: boolean) =>
   Effect.runPromise(
     Where.read(paths, capture, { cases, cutCommand: (named) => `cut ${named}` }).pipe(
-      Effect.provide(Layer.mergeAll(cuts, runs, NodeServices.layer))
+      Effect.provide(Layer.mergeAll(cuts, runs, CaseLayout.layer, NodeServices.layer))
     )
   )
 

@@ -7,6 +7,7 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
+import * as FileSystemTag from "effect/FileSystem"
 import type * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
 import * as fs from "node:fs"
@@ -154,5 +155,36 @@ describe("a box-wide singleton", () => {
     await release(await take(Locks.exclusive(`${name}-other`, "another lane", NO_WAIT)))
     await release(first)
     await release(await take(Locks.exclusive(name, "lane run B", NO_WAIT)))
+  })
+
+  /**
+   * A file system whose exclusive create lands the file empty and its content
+   * a moment later, as an open-then-write does: a holder's file read in that
+   * window must never read as a stale lock to break.
+   */
+  const slowExclusive = Layer.effect(
+    FileSystemTag.FileSystem,
+    Effect.map(FileSystemTag.FileSystem, (real) => ({
+      ...real,
+      writeFileString: (file: string, data: string, options?: Parameters<FileSystem.FileSystem["writeFileString"]>[2]) =>
+        options?.flag === "wx"
+          ? real.writeFileString(file, "", options).pipe(
+            Effect.andThen(Effect.sleep("150 millis")),
+            Effect.andThen(real.writeFileString(file, data))
+          )
+          : real.writeFileString(file, data, options)
+    }))
+  ).pipe(Layer.provide(NodeServices.layer))
+
+  it("goes to one of two callers racing for it, a holder still writing its file included", async () => {
+    const name = `race-${process.pid}`
+    const one = Locks.exclusive(name, "lane run A", NO_WAIT)
+    const two = Effect.sleep("40 millis").pipe(Effect.andThen(Locks.exclusive(name, "lane run B", NO_WAIT)))
+    const both = await Effect.runPromise(
+      Effect.all([one, two], { concurrency: "unbounded" }).pipe(
+        Effect.provide(Layer.merge(rootsAt(root), slowExclusive))
+      )
+    )
+    expect(both.filter(Locks.isTaken)).toHaveLength(1)
   })
 })

@@ -5,7 +5,7 @@
  * fails either way, and a stopped one answers the interrupted code.
  */
 import * as Effect from "effect/Effect"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { errorsFail } from "../../src/options.js"
 import { INTERRUPTED_EXIT, report, type Replay } from "../../src/replay/replay.js"
 
@@ -50,5 +50,17 @@ describe("report", () => {
 
   it("answers the interrupted code for a stopped replay, whatever else it found", async () => {
     expect(await code(replay({ interrupted: true, dirty: ["held a call"] }))).toBe(INTERRUPTED_EXIT)
+  })
+
+  it("says where the viewer studies the captures, for every caller of the table", async () => {
+    const said = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    try {
+      await code(replay())
+      expect(said.mock.calls.map((call) => String(call[0]))).toContain(
+        "[replay] study any of them at /triage/<capture> in the flow viewer"
+      )
+    } finally {
+      said.mockRestore()
+    }
   })
 })

@@ -701,7 +701,8 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
 })
 
 /**
- * The closing table, and the exit code that says whether anything broke.
+ * The closing table, where the viewer studies the captures, and the exit code
+ * that says whether anything broke.
  *
  * A batch whose SUT was still holding a call when it was given back fails the
  * invocation like an error does: the post-call cleanup check is never
@@ -723,6 +724,7 @@ export const report = (replay: Replay, options: { readonly errorsFail?: boolean 
         (replay.dirty.length === 0 ? "" : ` dirty-batches=${replay.dirty.length}`) +
         (replay.deadHosts.length === 0 ? "" : ` dead-batch-processes=${replay.deadHosts.length}`)
     )
+    yield* Console.log("[replay] study any of them at /triage/<capture> in the flow viewer")
     if (replay.interrupted) return INTERRUPTED_EXIT
     const errors = (options.errorsFail ?? true) && by("error") > 0
     return errors || replay.dirty.length > 0 || replay.deadHosts.length > 0 ? 1 : 0

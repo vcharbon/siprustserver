@@ -137,7 +137,7 @@ export const plan = Effect.fn("Retention.plan")(function*(request: PlanRequest) 
 })
 
 /**
- * The bytes the files under `dir` declare. Answered only when a caller asks for
+ * The bytes the files under `dir` declare, no link followed. Answered only when a caller asks for
  * it: recursing every removable directory is the most expensive thing this pass
  * can do, and no ruling depends on the number.
  */
@@ -148,6 +148,7 @@ export const sizeOf = (dir: string): Effect.Effect<number, never, FileSystem.Fil
     const entries = yield* fs.readDirectory(dir).pipe(Effect.orElseSucceed(() => [] as Array<string>))
     for (const entry of entries) {
       const child = path.join(dir, entry)
+      if (yield* fs.readLink(child).pipe(Effect.as(true), Effect.orElseSucceed(() => false))) continue
       const info = yield* fs.stat(child).pipe(Effect.orElseSucceed(() => undefined))
       if (info === undefined) continue
       if (info.type === "Directory") total += yield* sizeOf(child)
