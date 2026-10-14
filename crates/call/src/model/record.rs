@@ -79,6 +79,21 @@ pub struct CallTopology {
     pub gen: i64,
     /// Backup counter `b` of the `(p,b)` version vector.
     pub bak_gen: i64,
+    /// `gen` names a primary version whose body this body does not hold: a
+    /// backup took it from the primary's write it refused, or from a fold of
+    /// only the primary's re-INVITE rounds. Such a body is never a newer
+    /// version of the primary's at that `gen`. False on every primary's body:
+    /// the primary's own write and every fold at the primary clear it.
+    #[serde(default)]
+    pub gen_adopted: bool,
+}
+
+impl CallTopology {
+    /// The topology of a call `pri` serves and `bak` backs up, at `(gen,
+    /// bak_gen)`, its `gen` the primary's own.
+    pub fn new(pri: impl Into<String>, bak: impl Into<String>, gen: i64, bak_gen: i64) -> Self {
+        CallTopology { pri: pri.into(), bak: bak.into(), gen, bak_gen, gen_adopted: false }
+    }
 }
 
 /// The single active leg pair (1↔1). `None` on the [`Call`] means 1↔0.

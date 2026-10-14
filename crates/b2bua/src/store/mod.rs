@@ -411,10 +411,17 @@ impl CallState {
     /// A bump counts a write this node made that changes the call; a quiet turn
     /// ([`crate::effects::QuietTurn`]) and a fold of the other owner's body go
     /// through [`update_quiet`](Self::update_quiet) and move no axis.
+    ///
+    /// The primary's write is its own body at its own `gen`, which therefore
+    /// no longer names a version adopted without its body
+    /// ([`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)).
     pub fn update(&self, mut call: Call) {
         if let Some(t) = call.topology.as_mut() {
             match role_of(&self.self_ordinal, &call.call_ref) {
-                PartitionRole::Primary => t.gen += 1,
+                PartitionRole::Primary => {
+                    t.gen += 1;
+                    t.gen_adopted = false;
+                }
                 PartitionRole::Backup => t.bak_gen += 1,
             }
         }
@@ -797,43 +804,34 @@ impl CallState {
             return;
         };
         let indexes = call_index_keys(call);
-        // The authoritative `(p,b)` lives on the in-memory call (bumped by
+        // The authoritative topology lives on the in-memory call (bumped by
         // `update`); the passed `call` may be a pre-bump clone, so prefer the
         // stored topology.
-        let (call_gen, call_bgen) = self
-            .inner
-            .lock()
-            .unwrap()
-            .calls
-            .get(&call.call_ref)
-            .and_then(|c| c.topology.as_ref())
-            .or(call.topology.as_ref())
-            .map(|t| (t.gen, t.bak_gen))
-            .unwrap_or((0, 0));
-        // Embed the authoritative `(p,b)` in the BODY too, not just the frame meta.
-        // `call` is the pre-`update` clone (its `topology` counters are one bump
-        // stale), so a node that hydrates from this body would branch at the stale
-        // `(p,b)` — invisible while a backup only ever takes over a CRASHED primary
-        // (its meta is gone on reboot), but it desynced a reverse-flush against an
-        // ALIVE primary (the misroute): the backup branched one `p` behind, so the
-        // Reverse `(p,b)` apply rule rejected its flush and the live primary never
-        // reconciled (FixCallTerminateOnBackup C2/C3/C11). Keep the body's embedded
-        // version vector consistent with its `(p,b)`.
-        let body = match call.topology.as_ref() {
-            // Already consistent (the common path — `call` IS the authoritative
-            // copy, e.g. a fresh flush) → encode it directly, no clone.
-            Some(t) if t.gen == call_gen && t.bak_gen == call_bgen => self.codec.encode(call),
-            // A pre-`update` clone whose counters are one bump stale → patch the
-            // embedded `(p,b)` to the authoritative value before encoding.
-            Some(_) => {
+        let stored = {
+            let inner = self.inner.lock().unwrap();
+            inner.calls.get(&call.call_ref).and_then(|c| c.topology.clone())
+        }
+        .or_else(|| call.topology.clone());
+        let (call_gen, call_bgen) = stored.as_ref().map(|t| (t.gen, t.bak_gen)).unwrap_or((0, 0));
+        // Embed the authoritative topology in the BODY too, not just the frame
+        // meta. `call` is the pre-`update` clone (its `topology` counters are one
+        // bump stale), so a node that hydrates from this body would branch at the
+        // stale `(p,b)` — invisible while a backup only ever takes over a CRASHED
+        // primary (its meta is gone on reboot), but it desynced a reverse-flush
+        // against an ALIVE primary (the misroute): the backup branched one `p`
+        // behind, so the Reverse `(p,b)` apply rule rejected its flush and the
+        // live primary never reconciled (FixCallTerminateOnBackup C2/C3/C11).
+        let body = match (call.topology.as_ref(), stored.as_ref()) {
+            // A pre-`update` clone whose topology is stale → patch it to the
+            // authoritative one before encoding.
+            (Some(t), Some(s)) if t != s => {
                 let mut consistent = call.clone();
-                if let Some(t) = consistent.topology.as_mut() {
-                    t.gen = call_gen;
-                    t.bak_gen = call_bgen;
-                }
+                consistent.topology = Some(s.clone());
                 self.codec.encode(&consistent)
             }
-            None => self.codec.encode(call),
+            // Already consistent (the common path — `call` IS the authoritative
+            // copy, e.g. a fresh flush) → encode it directly, no clone.
+            _ => self.codec.encode(call),
         };
         let (role, primary, mut opts) = self.store_target(&call.call_ref);
         opts.incarnation = Some(call.incarnation().to_string());

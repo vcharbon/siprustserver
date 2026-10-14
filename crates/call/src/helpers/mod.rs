@@ -80,8 +80,7 @@ pub use leg_end::{
 };
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{
-    lifecycle_advances, lifecycle_behind, lifecycle_position, lifecycle_progress,
-    lifecycle_regresses, Progress,
+    lifecycle_advances, lifecycle_behind, lifecycle_position, lifecycle_progress, Progress,
 };
 pub use message_ring::{record_message, seal_turn};
 pub use obligation::{
@@ -105,7 +104,7 @@ pub use reliable::{
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
 pub use round::{merge_rounds, round_ahead, round_further, round_opened};
-pub use sequence::{holds_relays_of, raise_sequences, raise_settled_sequences, sequence_behind};
+pub use sequence::{holds_relays_of, raise_sequences};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,
     refer_processed_locally, relay_first_18x_first_relayed, relay_first_18x_messages,

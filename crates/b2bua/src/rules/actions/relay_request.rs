@@ -236,6 +236,7 @@ impl ActionExecutor<'_> {
             *call = call::helpers::update_dialog(call.clone(), target_leg, &t_id, |d| {
                 d.pending_invite_txn = Some(call::InviteTxnHandle {
                     branch: branch.clone(),
+                    cseq: i64::from(out_req.cseq().seq()),
                     original_invite: out_req.image().to_vec(),
                     destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
                 });

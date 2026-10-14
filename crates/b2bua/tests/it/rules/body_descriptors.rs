@@ -40,6 +40,7 @@ fn bridged() -> call::Call {
     call::testkit::stage_leg(&mut leg, LegState::Confirmed);
     with_dialog(&mut leg, "b-tag").pending_invite_txn = Some(InviteTxnHandle {
         branch: "z9hG4bKb1".into(),
+        cseq: 1,
         original_invite: invite().image().to_vec(),
         destination: HostPort { host: "10.0.0.2".into(), port: 5070 },
     });

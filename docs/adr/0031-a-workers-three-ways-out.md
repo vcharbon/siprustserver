@@ -337,33 +337,37 @@ not progress — and is refused in both directions. "Answered" is read from the 
 a-leg's initial INVITE server transaction took (`call::helpers::caller_answered`), which is
 durable: it stays true once the leg is `Terminated`, where `LegState::Confirmed` does not.
 
-**A re-INVITE round is a third chain.** A round is the INVITE client transaction one dialog
-relays toward its peer (`call::helpers::round`): *open* while its relay awaits a final, then
-*answered* (a 2xx taken, the originator's ACK awaited) and *ACKed*, or ended by a non-2xx;
-it never goes back. Its final reaches the node holding the client transaction, so a round's
-end the other copy saw is progress a record holding the round unfinished cannot make
-itself. A body stands further along a round the live copy holds open when its same dialog
-no longer holds the relay at the round's CSeq and its own sequence is at or past it — it
-saw the round end, however it ended, and perhaps the next round begin — and further along
-an answered round when it no longer awaits that 2xx's ACK and either its ACK left or the
-next round stands on the dialog. **A round's opening is progress too**: the copy that
-relayed the request holds the client transaction, and only it sees the final. A body
-opened a round the live copy never reached when its dialog holds an INVITE client
-transaction the live copy's same dialog does not hold, and its own sequence there stands
-past the live copy's (the live copy sent nothing at the round's CSeq), whatever stage the
-round stands at. A refused round leaves only its sequence behind. Progress is a chain on
-rounds as on the axes: a body lacking a round the live copy opened, or ended, made no
-progress whatever else it carries, so rounds opened on both dialogs across a split fold
-neither way. The fold, the regression and the order the gates read
-(`lifecycle_behind`, the round ranked after the answer and the ending) read the same rule
-(`call/tests/it/lifecycle.rs`:
+**A re-INVITE round is a third chain, one per dialog.** A round is the INVITE client
+transaction one dialog relays toward its peer (`call::helpers::round`), ordered on its
+dialog by the CSeq it went out with (`InviteTxnHandle::cseq`): *open* while its relay
+awaits a final, then *answered* (a 2xx taken, the originator's ACK awaited) and *ACKed*, or
+ended by a non-2xx; it never goes back. Its final reaches the node holding the client
+transaction, so a round's end the other copy saw is progress a record holding the round
+unfinished cannot make itself. A body stands further along a round the live copy holds open
+when its same dialog no longer holds the relay at the round's CSeq and holds the same
+transaction (it took the 2xx), a later one (a next round began), or none and a sequence at
+or past the round's (a non-2xx ended it, which leaves no transaction); further along an
+answered round when it no longer awaits that 2xx's ACK and either its ACK left or a later
+transaction stands on the dialog. **A round's opening is progress too**: the copy that
+relayed the request holds the client transaction, and only it sees the final. A body opened
+a round the live copy never reached when its dialog holds an INVITE client transaction and
+the live copy's same dialog holds neither that transaction nor a later one, nor — holding
+none — a sequence at or past its CSeq; whatever stage the body holds it at. Round presence
+is read from the transactions, never from a dialog's sequence alone, which both copies raise
+(below). Rounds are read dialog by dialog: a round a body stands ahead on is progress
+whatever the live copy holds on another dialog, and the fold takes that dialog's round alone,
+the live copy's rounds on other dialogs staying. A step on the answer or ending axis is taken
+whole, so only when the live copy holds no round's progress the body lacks. The fold and the
+order the gates read (`lifecycle_behind`, the round ranked after the answer and the ending)
+read the same rule (`call/tests/it/lifecycle.rs`:
 `a_round_ended_in_the_other_copy_advances_the_record_holding_it_open`,
 `an_acked_round_advances_the_record_awaiting_its_ack`,
 `a_round_the_other_copy_opened_advances_a_record_that_never_reached_it`,
-`crossed_rounds_are_no_progress_either_way`,
-`rounds_opened_on_both_dialogs_crossed_are_no_progress_either_way`;
+`a_sequence_raised_past_a_round_does_not_reach_it`,
+`crossed_rounds_fold_each_on_its_own_dialog`,
+`rounds_opened_on_both_dialogs_crossed_are_each_progress_on_its_dialog`;
 `crossed_reinvite_round.rs`: the refused, the next-round and the answered-then-next-round
-cells; `round_the_primary_never_read.rs`).
+cells; `round_the_primary_never_read.rs`, the round crossing the primary's own round).
 
 **A round's end folds alone, and so does its opening.** The answer and the ending start or
 end the call, and a body further along on either folds whole. A body whose only progress is
@@ -392,27 +396,29 @@ self-releases, and this node's next flush then names a version its peer has long
 past. Without any of this the split never closes: the refused owner keeps flushing behind the
 Element's `b` and every later flush is refused in its turn.
 
-**The record never lowers a dialog sequence.** Every request either owner relays or takes
-moves a dialog's own or remote sequence, and the peer saw it. At the primary, every fold
-takes the higher of both views' sequences on each dialog both hold
-(`call::helpers::raise_sequences`), so the record's next request continues past every one
-the backup sent (RFC 3261 §12.2.1.1); so does every refusal, on each dialog where the
-backup holds no round unfinished (`raise_settled_sequences`): the refused round is not in
-the record, and a sequence raised past it would read as its end, standing the copy down
-with it (`a_refusal_raises_no_sequence_past_a_round_the_record_lacks`). A fold
-brings facts into the primary's record and seeds no transaction there. A takeover copy's
-refusal moves its counter alone,
-so the copy's sequences are those of the requests it relayed or took and of the bodies it
-folded, which is what the primary's vector rule reads. **An adopted counter is not the body
-it counts**: a backup's `p` may be one it
-adopted without the body that carried it, so the Reverse vector's verdict (`p` unchanged,
-`b` advanced) folds the body whole only when it is neither behind the live copy
-(`lifecycle_behind`) nor below it on a dialog sequence (`call::helpers::sequence_behind`:
-it lacks a request the primary sent or took); otherwise only its progress folds, a round's
-alone (`router/reclaim/tests.rs`:
-`the_vector_clause_never_folds_a_body_below_our_dialog_sequence`,
+**No fold or refusal lowers a dialog sequence.** Every request either owner relays or takes
+moves a dialog's own or remote sequence, and the peer saw it. Every fold and every refusal,
+at either node, takes the higher of both views' sequences on each dialog both hold
+(`call::helpers::raise_sequences`), so this node's next request continues past every one the
+other owner sent (RFC 3261 §12.2.1.1). Round presence never reads that sequence (above).
+A fold brings facts into the primary's record and seeds no transaction there.
+
+**An adopted counter is not the body it counts.** A backup's `p` may name a primary version
+whose body it does not hold: it took that `p` from the primary's write it refused, or from a
+fold of only the primary's rounds (`adopt_counters`). The body records it
+(`CallTopology::gen_adopted`): set when a backup's `p` moves past the body's content, cleared
+by the primary's own write and by every fold at the primary, whose body is the primary's.
+One such mark means exactly "this body's `p` is not the version of the primary's body it
+holds"; it orders nothing and counts nothing. The Reverse vector's verdict (`p` unchanged,
+`b` advanced) folds a body whole only when it is unmarked and not behind the live copy
+(`lifecycle_behind`); a marked body folds only through its progress — an answer or an
+ending whole, a round's alone — so the vector clause never drops or brings back a write of
+the primary's: a relay it holds or closed, an UPDATE it saw answered, a sequence it advanced
+(`router/reclaim/tests.rs`:
+`the_vector_clause_never_folds_a_body_whose_p_was_adopted`,
+`a_refusal_raises_the_dialog_sequence_and_nothing_else`,
 `a_round_fold_raises_the_records_sequence_on_every_dialog`,
-`a_refusal_raises_the_records_dialog_sequence_and_only_the_records`;
+`a_refusal_raises_the_sequence_past_a_round_it_never_reaches`;
 `adopted_counter_reverse_fold.rs`, `split_dialog_sequence.rs`,
 `round_the_primary_never_read.rs`, the round served whole at the copy).
 

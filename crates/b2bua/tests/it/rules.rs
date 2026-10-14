@@ -5466,11 +5466,9 @@ fn on_verdict(call: &call::Call, outcome: &str) -> HandlerResult {
 fn ringing_call() -> call::Call {
     let mut leg = b_leg_pending();
     // The INVITE this leg is ringing on, which its CANCEL names (RFC 3261 §9.1).
-    leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(call::InviteTxnHandle {
-        branch: "z9hG4bK-b1".into(),
-        original_invite: invite().image().to_vec(),
-        destination: call::HostPort { host: "10.0.0.2".into(), port: 5070 },
-    });
+    let dest = call::HostPort { host: "10.0.0.2".into(), port: 5070 };
+    let handle = call::InviteTxnHandle::new("z9hG4bK-b1", 1, invite().image().to_vec(), dest);
+    leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(handle);
     let call = call::helpers::add_b_leg(test_call(), leg);
     let (_, actions) = handle_from_b1(&call, &b_leg_ringing_event(false));
     let ringing = execute_from_b1(&call, &b_leg_ringing_event(false), &actions).call;
@@ -5762,11 +5760,10 @@ mod charging_in_dialog {
             .push_raw(HeaderName::from("P-Charging-Vector"), vector.to_string())
             .freeze()
             .expect("the dialling INVITE");
-        leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(InviteTxnHandle {
-            branch: format!("z9hG4bK{leg_id}"),
-            original_invite: dialled.image().to_vec(),
-            destination: HostPort { host: "10.0.0.2".into(), port: 5070 },
-        });
+        let dest = HostPort { host: "10.0.0.2".into(), port: 5070 };
+        let branch = format!("z9hG4bK{leg_id}");
+        let handle = InviteTxnHandle::new(&branch, 1, dialled.image().to_vec(), dest);
+        leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(handle);
         leg
     }
 

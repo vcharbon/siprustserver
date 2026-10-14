@@ -40,11 +40,11 @@ impl Fold {
 /// node's own axis ([`CallState::update_quiet`](crate::store::CallState::update_quiet))
 /// and without a flush; this node's store keeps the version it last flushed.
 /// A whole fold holds the other owner's content; a rounds fold holds this
-/// node's content with the rounds merged in. Folded into the call's record
-/// (`direction`), either holds on every dialog the higher of the two views'
-/// sequences ([`call::helpers::raise_sequences`]): the record's next request
-/// continues from every one the other owner sent (RFC 3261 §12.2.1.1). The
-/// live timer service follows the timers the fold took.
+/// node's content with the rounds merged in. Either holds on every dialog the
+/// higher of the two views' sequences ([`call::helpers::raise_sequences`]):
+/// this node's next request continues from every one the other owner sent
+/// (RFC 3261 §12.2.1.1). Folded into the call's record (`direction`), the body
+/// is the primary's. The live timer service follows the timers the fold took.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::router) async fn fold_quietly(
     ctx: &Arc<RouterCtx>,
@@ -56,18 +56,18 @@ pub(in crate::router) async fn fold_quietly(
     skew_offset_ms: i64,
     now_ms: i64,
 ) {
-    let record = direction.into_the_record();
     let mut folded = match fold {
-        Fold::Whole if record => raise_sequences(replica, live),
-        Fold::Whole => replica,
+        Fold::Whole => raise_sequences(replica, live),
         Fold::Rounds => {
-            let merged = merge_rounds(live.clone(), &replica);
-            let mut merged = if record { raise_sequences(merged, &replica) } else { merged };
+            let mut merged = raise_sequences(merge_rounds(live.clone(), &replica), &replica);
             adopt_counters(&mut merged, &replica);
             merged
         }
     };
     adopt_counters(&mut folded, live);
+    if let (true, Some(t)) = (direction.into_the_record(), folded.topology.as_mut()) {
+        t.gen_adopted = false;
+    }
     resync_timers(ctx, call_ref, live, &mut folded, skew_offset_ms, now_ms).await;
     ctx.state.update_quiet(folded);
 }
@@ -75,12 +75,16 @@ pub(in crate::router) async fn fold_quietly(
 /// A fold adopts BOTH counters: the folded body takes `max` of the two views on
 /// each axis. Every version either owner published is then at or below the
 /// live copy's, so this node's next write dominates them and the split vector
-/// heals instead of each side refusing the other for ever (ADR-0031 D3). A body
-/// without topology is not replicable and is left alone.
-fn adopt_counters(folded: &mut Call, live: &Call) {
-    if let (Some(f), Some(l)) = (folded.topology.as_mut(), live.topology.as_ref()) {
-        f.gen = f.gen.max(l.gen);
-        f.bak_gen = f.bak_gen.max(l.bak_gen);
+/// heals instead of each side refusing the other for ever (ADR-0031 D3). A `p`
+/// raised past the folded content's own names a primary version that content
+/// does not hold ([`call::CallTopology::gen_adopted`]); the call's record
+/// clears that mark, its body being the primary's. A body without topology is
+/// not replicable and is left alone.
+fn adopt_counters(folded: &mut Call, other: &Call) {
+    if let (Some(f), Some(o)) = (folded.topology.as_mut(), other.topology.as_ref()) {
+        f.gen_adopted |= o.gen > f.gen;
+        f.gen = f.gen.max(o.gen);
+        f.bak_gen = f.bak_gen.max(o.bak_gen);
     }
 }
 

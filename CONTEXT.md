@@ -513,11 +513,10 @@ unconditionally except Forward, which yields for the **answer** alone — an
 or refused, has ever carried the authority's own answer. A refused flush is folded into a live copy
 when it carries lifecycle progress the vector cannot see: an answer or an ending,
 folded whole, or the end of a re-INVITE round the live copy holds unfinished or
-the opening of one it never reached, whose facts alone are merged in. The
-Reverse rule folds whole only a body not below the primary's dialog sequences
-(an adopted `p` names a version, not its body), and a fold or a refusal at the
-primary takes the higher dialog sequences (a refusal never past a round the
-primary lacks). A **fold** adopts `max` of both counters and
+the opening of one it never reached, dialog by dialog, whose facts alone are
+merged in. The Reverse rule never folds whole a body whose `p` the backup
+adopted without the primary's body (`CallTopology::gen_adopted`), and every
+fold and refusal takes the higher dialog sequences. A **fold** adopts `max` of both counters and
 moves neither, so the split heals and the other owner's next write orders
 against what it published; a
 **refusal** adopts only the axis the other owner bumps — `b` at a primary, `p`

@@ -6,9 +6,7 @@
 
 use std::sync::Arc;
 
-use call::helpers::{
-    lifecycle_behind, lifecycle_progress, raise_settled_sequences, sequence_behind,
-};
+use call::helpers::{lifecycle_behind, lifecycle_progress, raise_sequences};
 use call::{Call, CallModelState};
 
 use super::interpret::process_result;
@@ -253,10 +251,9 @@ impl FlushDirection {
     }
 
     /// Whether this direction lands in the call's record: a Reverse flush
-    /// reaches the primary's live copy, whose next request on each dialog
-    /// continues from every one either owner sent. A takeover copy's body
-    /// carries the sequences of the requests it holds and no other, so the
-    /// primary's vector rule can read them ([`reverse_fold`]).
+    /// reaches the primary's live copy, whose body is the primary's and so
+    /// names no version adopted without its body
+    /// ([`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)).
     pub(super) fn into_the_record(self) -> bool {
         matches!(self, FlushDirection::Reverse)
     }
@@ -368,12 +365,11 @@ pub(super) async fn fold_refused_flush(
 /// takes only the axis the *other* owner bumps — `b` at a primary, `p` at a
 /// backup — through [`adopt_version`](crate::store::CallState::adopt_version),
 /// which records it without the authoritative bump an ordinary mutation makes.
-/// The call's record — a primary — takes the higher dialog sequences too, on
-/// every dialog where the backup holds no re-INVITE round unfinished
-/// ([`raise_settled_sequences`]): the backup's requests left on the wire, and
-/// the record's next request on each dialog continues from them (RFC 3261
-/// §12.2.1.1); a round the record refused stays one it never reached, so the
-/// backup's copy keeps it (`router::stand_down::covers`).
+/// It takes the higher dialog sequences too ([`raise_sequences`]): the other
+/// owner's requests left on the wire, and this node's next request on each
+/// dialog continues from them (RFC 3261 §12.2.1.1). A round the refused body
+/// holds stays one this node never reached: rounds are read from their
+/// transactions, not from the sequence (`call::helpers::round_opened`).
 ///
 /// The adopted view is **flushed**, not only written to the live map: an
 /// adoption that never reaches the store is inert — it is lost if a takeover
@@ -396,11 +392,9 @@ fn adopt_seen_counter(
     let (Some(l), Some(r)) = (live.topology.as_ref(), replica.topology.as_ref()) else {
         return;
     };
-    if direction.into_the_record() {
-        let raised = raise_settled_sequences(live.clone(), replica);
-        if raised != *live {
-            ctx.state.update_quiet(raised);
-        }
+    let raised = raise_sequences(live.clone(), replica);
+    if raised != *live {
+        ctx.state.update_quiet(raised);
     }
     let (gen, bak_gen) = match direction {
         FlushDirection::Reverse => (l.gen, r.bak_gen),
@@ -415,26 +409,26 @@ fn adopt_seen_counter(
 
 /// The ADR-0014 **Reverse** apply rule for a live-map fold, and how the
 /// reverse-flushed `replica` folds into our `live` copy. It folds whole when
-/// the `(p,b)` vector says it is newer (`p` unchanged since the backup
-/// branched, `b` advanced) and its body carries what our `p` counts, or when
-/// it carries lifecycle progress a reclaimed copy cannot have made on its own:
-/// a `p` bump from a turn on a stale record does not outrank the backup's
-/// answer or teardown. It folds only its rounds when its sole progress is a
-/// re-INVITE round's end or opening ([`lifecycle_progress`]): our own writes
-/// since the backup branched stay. A backup's `p` may be one it adopted
-/// without the body that carried it (ADR-0031 D3), so the vector's verdict
-/// stands only for a body neither behind ours ([`lifecycle_behind`], the order
-/// the forward gate reads too: an unanswered teardown never ends an answered
-/// call) nor below ours on a dialog sequence ([`sequence_behind`]: it lacks a
-/// request we sent or took). A call with no topology never folds.
+/// the `(p,b)` vector says it is newer — `p` unchanged since the backup
+/// branched, `b` advanced, and the backup's body holds the version our `p`
+/// names — or when it carries lifecycle progress a reclaimed copy cannot have
+/// made on its own: a `p` bump from a turn on a stale record does not outrank
+/// the backup's answer or teardown. It folds only its rounds when its sole
+/// progress is a re-INVITE round's end or opening ([`lifecycle_progress`]):
+/// our own writes since the backup branched stay. A `p` the backup adopted
+/// without the body that carried it (ADR-0031 D3,
+/// [`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)) never makes
+/// its body newer, and neither does a body behind ours ([`lifecycle_behind`],
+/// the order the forward gate reads too: an unanswered teardown never ends an
+/// answered call). A call with no topology never folds.
 fn reverse_fold(replica: &Call, live: &Call) -> Option<Fold> {
     let (Some(r), Some(l)) = (replica.topology.as_ref(), live.topology.as_ref()) else {
         return None;
     };
     let newer = r.gen == l.gen
+        && !r.gen_adopted
         && r.bak_gen > l.bak_gen
-        && !lifecycle_behind(replica, live)
-        && !sequence_behind(replica, live);
+        && !lifecycle_behind(replica, live);
     if newer {
         return Some(Fold::Whole);
     }

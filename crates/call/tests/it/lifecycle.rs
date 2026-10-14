@@ -7,8 +7,8 @@
 
 use crate::common;
 use call::helpers::{
-    lifecycle_advances, lifecycle_behind, lifecycle_progress, round_ahead, round_further,
-    round_opened, Progress,
+    lifecycle_advances, lifecycle_behind, lifecycle_progress, merge_rounds, round_ahead,
+    round_further, round_opened, Progress,
 };
 use call::model::{Call, CallModelState};
 use call::testkit::{stage_reinvite_round, RoundStage};
@@ -139,14 +139,41 @@ fn a_round_past_which_the_record_sent_is_no_opening() {
 }
 
 #[test]
-fn rounds_opened_on_both_dialogs_crossed_are_no_progress_either_way() {
+fn rounds_opened_on_both_dialogs_crossed_are_each_progress_on_its_dialog() {
     let mut callers = at(ANSWERED, CallModelState::Active);
     stage_reinvite_round(&mut callers.b_legs[0], ROUND, RoundStage::Open);
     let mut callees = at(ANSWERED, CallModelState::Active);
     stage_reinvite_round(&mut callees.a_leg, "z9hG4bK-round-2", RoundStage::Open);
     assert!(round_opened(&callers, &callees) && round_opened(&callees, &callers));
-    assert!(!lifecycle_advances(&callers, &callees), "progress is a chain");
-    assert!(!lifecycle_advances(&callees, &callers), "on every round");
+    assert_eq!(lifecycle_progress(&callers, &callees), Some(Progress::Round));
+    assert_eq!(lifecycle_progress(&callees, &callers), Some(Progress::Round));
+    let both = merge_rounds(merge_rounds(callers.clone(), &callees), &callers);
+    assert!(!round_ahead(&callers, &both) && !round_ahead(&callees, &both), "both rounds held");
+}
+
+#[test]
+fn a_sequence_raised_past_a_round_does_not_reach_it() {
+    let opened = round(CallModelState::Active, ROUND, RoundStage::Acked);
+    let mut raised = at(ANSWERED, CallModelState::Active);
+    let d = raised.b_legs[0].dialogs.confirmed_mut().expect("the callee's dialog");
+    d.pending_invite_txn = Some(call::model::InviteTxnHandle {
+        branch: "z9hG4bK-initial".into(),
+        cseq: 1,
+        original_invite: Vec::new(),
+        destination: call::model::HostPort { host: "staged.invalid".into(), port: 5060 },
+    });
+    d.our_cseq += 5;
+    assert!(round_opened(&opened, &raised), "an earlier transaction is no reach of the round");
+}
+
+#[test]
+fn a_round_on_a_dialog_ahead_folds_whatever_the_other_dialog_holds() {
+    let mut copy = round(CallModelState::Active, ROUND, RoundStage::Acked);
+    stage_reinvite_round(&mut copy.a_leg, "z9hG4bK-round-2", RoundStage::Open);
+    let mut record = round(CallModelState::Active, ROUND, RoundStage::Answered);
+    stage_reinvite_round(&mut record.a_leg, "z9hG4bK-round-2", RoundStage::Answered);
+    assert_eq!(lifecycle_progress(&copy, &record), Some(Progress::Round), "the callee's ACK");
+    assert_eq!(lifecycle_progress(&record, &copy), Some(Progress::Round), "the caller's 2xx");
 }
 
 #[test]
@@ -158,11 +185,22 @@ fn an_answered_round_never_outranks_the_record_ending_the_call() {
 }
 
 #[test]
-fn crossed_rounds_are_no_progress_either_way() {
+fn crossed_rounds_fold_each_on_its_own_dialog() {
     let mut first_answered = round(CallModelState::Active, ROUND, RoundStage::Answered);
     stage_reinvite_round(&mut first_answered.a_leg, "z9hG4bK-round-2", RoundStage::Open);
     let mut second_answered = round(CallModelState::Active, ROUND, RoundStage::Open);
     stage_reinvite_round(&mut second_answered.a_leg, "z9hG4bK-round-2", RoundStage::Answered);
-    assert!(!lifecycle_advances(&first_answered, &second_answered), "progress is a chain");
-    assert!(!lifecycle_advances(&second_answered, &first_answered), "on every round");
+    let progress = lifecycle_progress(&first_answered, &second_answered);
+    assert_eq!(progress, Some(Progress::Round), "the callee's round, answered");
+    let merged = merge_rounds(second_answered.clone(), &first_answered);
+    assert!(!round_ahead(&first_answered, &merged), "both answered rounds held");
+    assert!(!round_ahead(&second_answered, &merged));
+}
+
+#[test]
+fn a_whole_step_never_drops_a_round_the_record_holds_ahead() {
+    let mut ending = round(CallModelState::Terminating, ROUND, RoundStage::Open);
+    ending.a_leg.invite_final_sent = ANSWERED;
+    let answered = round(CallModelState::Active, ROUND, RoundStage::Answered);
+    assert!(!lifecycle_advances(&ending, &answered), "the record took the round's 2xx");
 }

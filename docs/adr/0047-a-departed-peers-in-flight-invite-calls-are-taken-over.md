@@ -176,9 +176,10 @@ re-INVITE round is a third chain").
 
 - **Reverse.** A backup's `p` may be one it adopted without the body that carried it,
   so the live-map fold of a reverse flush takes the vector's verdict (`p` unchanged,
-  `b` advanced) only for a body neither behind the primary's nor below it on a dialog
-  sequence (ADR-0031, "the record never lowers a dialog sequence"); lifecycle progress
-  folds as before (`router/reclaim/tests.rs`, `adopted_counter_reverse_fold.rs`).
+  `b` advanced) only for a body not behind the primary's and not marked as adopted
+  (ADR-0031, "an adopted counter is not the body it counts"); any other body folds
+  through its lifecycle or round progress alone (`router/reclaim/tests.rs`,
+  `adopted_counter_reverse_fold.rs`).
 - **Forward.** While the vector is split, a forward `Put` behind the Element is a
   branch and is refused (ADR-0031 D3); an answered body is not behind an Element
   holding a copy's ending of a call it never saw answered, so the authority's answer

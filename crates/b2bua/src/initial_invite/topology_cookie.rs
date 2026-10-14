@@ -53,7 +53,7 @@ pub(super) fn read_topology_cookie(invite: &SipRequest, self_ordinal: &str) -> C
     let bak = cookie.param("w_bak").and_then(ParamValue::as_str).unwrap_or("").to_string();
     // Brand-new call: primary counter p = 1 (the primary "created" it), backup
     // counter b = 0 (no takeover yet). See `CallTopology` / ADR-0014.
-    CookieRead::Topology(CallTopology { pri, bak, gen: 1, bak_gen: 0 })
+    CookieRead::Topology(CallTopology::new(pri, bak, 1, 0))
 }
 
 /// What the inbound INVITE's Record-Route says about the proxy's stickiness

@@ -1,12 +1,11 @@
 //! The in-dialog requests two copies of one call carry
-//! (`call::helpers::sequence`): a body below the other on a dialog both hold
-//! lacks a request the other sent or took there, the higher of the two is
-//! what the next request continues from (RFC 3261 §12.2.1.1), and a relay one
-//! copy awaits a final for is held by the other only as that relay.
+//! (`call::helpers::sequence`): the higher of the two sequences is what the
+//! next request continues from (RFC 3261 §12.2.1.1), and a relay one copy
+//! awaits a final for is held by the other only as that relay.
 
 use crate::common;
-use call::helpers::{holds_relays_of, raise_sequences, sequence_behind};
-use call::model::{Call, Dialog, Direction, PendingRequest};
+use call::helpers::{holds_relays_of, raise_sequences};
+use call::model::{Call, Dialog, DialogState, Direction, PendingRequest, RetiredDialog};
 
 fn caller_mut(call: &mut Call) -> &mut Dialog {
     call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog")
@@ -14,31 +13,6 @@ fn caller_mut(call: &mut Call) -> &mut Dialog {
 
 fn callee_mut(call: &mut Call) -> &mut Dialog {
     call.b_legs[0].dialogs.confirmed_mut().expect("the callee's dialog")
-}
-
-#[test]
-fn a_body_below_on_either_sequence_lacks_a_request() {
-    let held = common::representative_call();
-    assert!(!sequence_behind(&held, &held), "a body is never below itself");
-
-    let mut sent = held.clone();
-    callee_mut(&mut sent).our_cseq += 1;
-    assert!(sequence_behind(&held, &sent), "a request the other copy sent the callee");
-    assert!(!sequence_behind(&sent, &held), "past it is not below it");
-
-    let mut took = held.clone();
-    let d = caller_mut(&mut took);
-    d.peer_cseq = d.peer_cseq.map(|c| c + 1);
-    assert!(sequence_behind(&held, &took), "a request the other copy took from the caller");
-}
-
-#[test]
-fn a_dialog_only_one_body_holds_is_not_read() {
-    let held = common::representative_call();
-    let mut other = held.clone();
-    callee_mut(&mut other).our_cseq += 1;
-    other.b_legs.clear();
-    assert!(!sequence_behind(&other, &held));
 }
 
 /// `call` relaying one more `method` toward the caller, awaiting its final.
@@ -75,6 +49,34 @@ fn a_record_holds_the_relays_of_a_copy_only_with_each_of_them() {
         holds_relays_of(&held, &relaying(held.clone(), "INVITE")),
         "rounds read their own rule"
     );
+}
+
+/// Both copies relayed a request at one CSeq across a cut: the record's relay
+/// answers another originator's request, and is not the copy's.
+#[test]
+fn a_relay_at_the_same_cseq_for_another_request_is_not_the_copys() {
+    let held = common::representative_call();
+    let copy = relaying(held.clone(), "INFO");
+    let mut other = relaying(held.clone(), "INFO");
+    caller_mut(&mut other).inbound_pending_requests.last_mut().expect("the INFO").inbound_cseq =
+        2002;
+    assert!(!holds_relays_of(&other, &copy), "another originator CSeq");
+    let mut other = relaying(held.clone(), "MESSAGE");
+    caller_mut(&mut other).inbound_pending_requests.last_mut().expect("the relay").method =
+        "info".into();
+    assert!(holds_relays_of(&other, &copy), "methods compare without case");
+}
+
+/// A retired dialog's relays still await their finals (RFC 3261 §8.1.3.3).
+#[test]
+fn a_retired_dialogs_open_relays_are_relays_of_the_copy() {
+    let held = common::representative_call();
+    let mut copy = relaying(held.clone(), "INFO");
+    let d = caller_mut(&mut copy);
+    let open_relays = std::mem::take(&mut d.inbound_pending_requests);
+    d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
+    assert!(!holds_relays_of(&held, &copy));
+    assert!(holds_relays_of(&copy, &copy));
 }
 
 #[test]

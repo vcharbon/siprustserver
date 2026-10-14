@@ -146,6 +146,7 @@ pub fn stage_reinvite_round(leg: &mut Leg, branch: &str, stage: RoundStage) {
     d.our_cseq += 1;
     d.pending_invite_txn = Some(InviteTxnHandle {
         branch: branch.into(),
+        cseq: d.our_cseq,
         original_invite: Vec::new(),
         destination: HostPort { host: "staged.invalid".into(), port: 5060 },
     });

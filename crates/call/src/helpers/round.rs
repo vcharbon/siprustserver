@@ -1,15 +1,18 @@
 //! The re-INVITE rounds two copies of one call share, and how one copy's view
-//! of a round's end lands in the other (ADR-0031, "a re-INVITE round is a
-//! third chain").
+//! of a round lands in the other (ADR-0031, "a re-INVITE round is a third
+//! chain").
 //!
 //! A round is the INVITE client transaction one dialog relays toward its peer,
-//! named by the leg, the dialog's two tags and the transaction's branch. It
-//! goes open (its relay awaits a final) → answered (a 2xx taken, the
-//! originator's ACK awaited) → ACKed, or ends on a non-2xx, and never goes
-//! back. Its final reaches the node holding the client transaction, so a
-//! round's end another copy saw is progress a record holding the round
-//! unfinished cannot make itself; so is a round's opening the record never
-//! reached, whatever stage the other copy holds it at.
+//! named by the leg, the dialog's two tags and the transaction's branch, and
+//! ordered on its dialog by the CSeq it went out with. It goes open (its relay
+//! awaits a final) → answered (a 2xx taken, the originator's ACK awaited) →
+//! ACKed, or ends on a non-2xx, and never goes back. Its final reaches the
+//! node holding the client transaction, so a round's end another copy saw is
+//! progress a record holding the round unfinished cannot make itself; so is a
+//! round's opening the record never reached, whatever stage the other copy
+//! holds it at. Rounds are read per dialog, from the transaction and its ACK
+//! state; a dialog's sequence speaks only for a round a non-2xx ended, which
+//! leaves no transaction behind.
 
 use crate::model::{Call, Dialog, DialogId, Obligation, PendingRequest, TimerEntry};
 
@@ -18,22 +21,21 @@ use super::lens::update_leg;
 use super::peering::relay_peer_dialog;
 
 /// Does `incoming` stand further along a round `held` holds unfinished, on
-/// any dialog? Further along an open round: `incoming`'s same dialog no longer
-/// holds the relay at the round's CSeq and its own sequence is at or past it
-/// — it saw the round end, answered or refused, and possibly a next round
-/// begin. Further along an answered round: `incoming` no longer awaits that
-/// 2xx's ACK, and either the same transaction's ACK left or a next round's
-/// transaction stands on the dialog at or past `held`'s sequence.
+/// any dialog? Further along an open round: `incoming`'s same dialog no
+/// longer holds the relay at the round's CSeq, and holds the same transaction
+/// (it took the round's 2xx), a later one (a next round began), or none and a
+/// sequence at or past the round's (a non-2xx ended it). Further along an
+/// answered round: `incoming` no longer awaits that 2xx's ACK, and either the
+/// same transaction's ACK left or a later transaction stands on the dialog.
 pub fn round_further(incoming: &Call, held: &Call) -> bool {
     !rounds_ended(incoming, held).is_empty()
 }
 
 /// Does `incoming` hold a round `held` never reached, on a dialog both hold?
-/// `incoming`'s dialog holds an INVITE client transaction that `held`'s same
-/// dialog does not hold, and `incoming`'s own sequence there stands past
-/// `held`'s: `held` sent nothing at the round's CSeq. The round is open,
-/// answered or ACKed in `incoming`; a round refused leaves no transaction and
-/// only its sequence behind.
+/// `incoming`'s dialog holds an INVITE client transaction, and `held`'s same
+/// dialog holds neither that transaction nor a later one, nor — holding none
+/// at all — a sequence at or past its CSeq (the trace a refused round leaves).
+/// The round is open, answered or ACKed in `incoming`.
 pub fn round_opened(incoming: &Call, held: &Call) -> bool {
     !rounds_opened(incoming, held).is_empty()
 }
@@ -53,7 +55,7 @@ pub fn round_ahead(incoming: &Call, held: &Call) -> bool {
 /// sequence; that 2xx's ladder timers; and the session state of both legs
 /// when `incoming` opened at least as many offer/answer exchanges on each of
 /// them, so no exchange count is lowered (RFC 3264 §8). Every other fact is
-/// `held`'s, its own requests on either dialog included.
+/// `held`'s, its own requests and its own rounds on other dialogs included.
 pub fn merge_rounds(mut held: Call, incoming: &Call) -> Call {
     let mut ahead = rounds_ended(incoming, &held);
     for opened in rounds_opened(incoming, &held) {
@@ -77,31 +79,30 @@ struct RoundAhead {
     inbound_cseq: Option<i64>,
 }
 
-/// What `held` holds of a dialog's round, while unfinished.
-enum Unfinished<'a> {
-    Open { outbound_cseq: i64, inbound_cseq: i64 },
-    Answered { branch: &'a str, inbound_cseq: i64, our_cseq: i64 },
+/// A round a dialog holds unfinished: its transaction, and where it stands.
+struct Unfinished<'a> {
+    branch: &'a str,
+    /// The CSeq the round's INVITE went out with.
+    cseq: i64,
+    /// The CSeq the round's originator sent its INVITE with.
+    inbound_cseq: i64,
+    stage: Stage,
 }
 
-/// Whether `dialog` holds a re-INVITE round unfinished: open, or answered
-/// with its ACK awaited.
-pub(crate) fn holds_round_unfinished(dialog: &Dialog) -> bool {
-    unfinished(dialog).is_some()
+enum Stage {
+    /// The relay at `outbound_cseq` awaits its final.
+    Open { outbound_cseq: i64 },
+    /// The 2xx is taken; the originator's ACK is awaited.
+    Answered,
 }
 
 fn unfinished(dialog: &Dialog) -> Option<Unfinished<'_>> {
     let txn = dialog.pending_invite_txn.as_ref()?;
-    match invite_relays(dialog).next() {
-        Some(relay) => Some(Unfinished::Open {
-            outbound_cseq: relay.outbound_cseq,
-            inbound_cseq: relay.inbound_cseq,
-        }),
-        None => dialog.awaited_ack_cseq.map(|inbound_cseq| Unfinished::Answered {
-            branch: txn.branch.as_str(),
-            inbound_cseq,
-            our_cseq: dialog.our_cseq,
-        }),
-    }
+    let (inbound_cseq, stage) = match invite_relays(dialog).next() {
+        Some(relay) => (relay.inbound_cseq, Stage::Open { outbound_cseq: relay.outbound_cseq }),
+        None => (dialog.awaited_ack_cseq?, Stage::Answered),
+    };
+    Some(Unfinished { branch: txn.branch.as_str(), cseq: txn.cseq, inbound_cseq, stage })
 }
 
 fn invite_relays(dialog: &Dialog) -> impl Iterator<Item = &PendingRequest> {
@@ -110,33 +111,31 @@ fn invite_relays(dialog: &Dialog) -> impl Iterator<Item = &PendingRequest> {
 
 /// Whether `incoming`, the same dialog in the other copy, ended `round`.
 fn ended(incoming: &Dialog, round: &Unfinished<'_>) -> bool {
-    match round {
-        Unfinished::Open { outbound_cseq, .. } => {
-            incoming.our_cseq >= *outbound_cseq
-                && !incoming
-                    .inbound_pending_requests
-                    .iter()
-                    .any(|p| p.outbound_cseq == *outbound_cseq)
+    let txn = incoming.pending_invite_txn.as_ref();
+    let same = txn.is_some_and(|t| t.branch == round.branch);
+    let later = txn.is_some_and(|t| t.branch != round.branch && t.cseq > round.cseq);
+    match round.stage {
+        Stage::Open { outbound_cseq } => {
+            let relayed = incoming.inbound_pending_requests.iter().any(|p| {
+                p.outbound_cseq == outbound_cseq && p.method.eq_ignore_ascii_case("INVITE")
+            });
+            let refused = txn.is_none() && incoming.our_cseq >= outbound_cseq;
+            !relayed && (same || later || refused)
         }
-        Unfinished::Answered { branch, inbound_cseq, our_cseq } => {
-            let txn = incoming.pending_invite_txn.as_ref();
-            let same = txn.is_some_and(|t| t.branch == *branch);
-            let awaited = same && incoming.awaited_ack_cseq == Some(*inbound_cseq);
+        Stage::Answered => {
+            let awaited = same && incoming.awaited_ack_cseq == Some(round.inbound_cseq);
             let acked = same && incoming.ack_branch.is_some();
-            let next_round =
-                txn.is_some_and(|t| t.branch != *branch) && incoming.our_cseq >= *our_cseq;
-            !awaited && (acked || next_round)
+            !awaited && (acked || later)
         }
     }
 }
 
-impl Unfinished<'_> {
-    fn inbound_cseq(&self) -> i64 {
-        match self {
-            Unfinished::Open { inbound_cseq, .. } | Unfinished::Answered { inbound_cseq, .. } => {
-                *inbound_cseq
-            }
-        }
+/// Whether `ours`, the same dialog in the other copy, reached the round on
+/// the client transaction `branch` sent at `cseq`.
+fn reached(ours: &Dialog, branch: &str, cseq: i64) -> bool {
+    match ours.pending_invite_txn.as_ref() {
+        Some(t) => t.branch == branch || t.cseq > cseq,
+        None => ours.our_cseq >= cseq,
     }
 }
 
@@ -153,7 +152,7 @@ fn rounds_ended(incoming: &Call, held: &Call) -> Vec<RoundAhead> {
                 out.push(RoundAhead {
                     leg_id: held_leg.leg_id.clone(),
                     dialog: d.id(),
-                    inbound_cseq: Some(round.inbound_cseq()),
+                    inbound_cseq: Some(round.inbound_cseq),
                 });
             }
         }
@@ -170,12 +169,11 @@ fn rounds_opened(incoming: &Call, held: &Call) -> Vec<RoundAhead> {
             let Some(ours) = held_leg.dialogs.by_tags(&d.our_tag, &d.peer_tag) else {
                 continue;
             };
-            let holds_it = ours.pending_invite_txn.as_ref().is_some_and(|t| t.branch == txn.branch);
-            if !holds_it && d.our_cseq > ours.our_cseq {
+            if !reached(ours, &txn.branch, txn.cseq) {
                 out.push(RoundAhead {
                     leg_id: incoming_leg.leg_id.clone(),
                     dialog: d.id(),
-                    inbound_cseq: unfinished(d).map(|r| r.inbound_cseq()),
+                    inbound_cseq: unfinished(d).map(|r| r.inbound_cseq),
                 });
             }
         }

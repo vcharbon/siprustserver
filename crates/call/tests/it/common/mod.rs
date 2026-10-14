@@ -265,12 +265,7 @@ pub fn representative_call() -> Call {
         root_span_id: Some("fedcba9876543210".into()),
         sampled: Some(true),
         worker_index: Some(0),
-        topology: Some(CallTopology {
-            pri: "worker-0".into(),
-            bak: "worker-1".into(),
-            gen: 3,
-            bak_gen: 0,
-        }),
+        topology: Some(CallTopology::new("worker-0", "worker-1", 3, 0)),
         emergency: Some(true),
         features: Some(FeatureActivations {
             platform: PlatformActivations {
@@ -380,6 +375,7 @@ fn arb_invite_handle() -> impl Strategy<Value = InviteTxnHandle> {
     (arb_tag(), arb_bytes(48), arb_host_port()).prop_map(
         |(branch, original_invite, destination)| InviteTxnHandle {
             branch,
+            cseq: 1,
             original_invite,
             destination,
         },
@@ -913,7 +909,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         proptest::option::of(any::<i64>()),
         proptest::option::of(
             (arb_tag(), arb_tag(), any::<i64>(), any::<i64>())
-                .prop_map(|(pri, bak, gen, bak_gen)| CallTopology { pri, bak, gen, bak_gen }),
+                .prop_map(|(pri, bak, gen, bak_gen)| CallTopology::new(pri, bak, gen, bak_gen)),
         ),
     );
     let tail = (

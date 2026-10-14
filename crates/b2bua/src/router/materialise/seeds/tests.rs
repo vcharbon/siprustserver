@@ -77,6 +77,7 @@ fn b_handle(branch: &str, cseq: u32) -> InviteTxnHandle {
     );
     InviteTxnHandle {
         branch: branch.into(),
+        cseq: i64::from(cseq),
         original_invite: invite.image().to_vec(),
         destination: HostPort { host: "10.0.0.2".into(), port: 5070 },
     }

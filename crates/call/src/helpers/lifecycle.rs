@@ -25,17 +25,6 @@ pub fn lifecycle_position(call: &Call) -> (u8, u8) {
     (u8::from(answered), ending)
 }
 
-/// Does `incoming` sit BEHIND `held` on either axis, or on a re-INVITE round
-/// ([`round_ahead`])? Then it is a branch off a view its owner left behind —
-/// a pre-answer teardown of a call the other owner answered, a live body for a
-/// call the other owner is ending, a round still unfinished that the other
-/// owner saw end, a round the other owner opened that it never reached —
-/// never a newer version of the same call.
-pub fn lifecycle_regresses(incoming: &Call, held: &Call) -> bool {
-    let (i, h) = (lifecycle_position(incoming), lifecycle_position(held));
-    i.0 < h.0 || i.1 < h.1 || round_ahead(held, incoming)
-}
-
 /// Does `incoming` stand behind `held` as a version of the call one owner
 /// would keep over the other? The answer axis ranks first: **an unanswered
 /// teardown never ends an answered call**, so an answered body is never
@@ -60,20 +49,25 @@ pub enum Progress {
     Lifecycle,
     /// Only re-INVITE rounds: the end of one `held` holds unfinished, or the
     /// opening of one it never reached ([`super::round::merge_rounds`] takes
-    /// them).
+    /// them, dialog by dialog).
     Round,
 }
 
-/// The progress `incoming` carries over `held` — every step `held` made on
-/// BOTH axes and on every round, and at least one more — or `None`.
-/// Progress is a chain, not a rank: a terminal body whose caller was never
-/// answered does not outrank a live answered one.
+/// The progress `incoming` carries over `held`, or `None`. On the answer and
+/// the ending axes progress is a chain, not a rank: `incoming` made every
+/// step `held` made on both, so a terminal body whose caller was never
+/// answered does not outrank a live answered one, and a step further on
+/// either is the call further along — taken whole, so only when `held` holds
+/// no round's progress `incoming` lacks. Alike on both axes, a round
+/// `incoming` stands ahead on, on any dialog, is progress of its own: each
+/// dialog's round has one client transaction, and the rounds `held` stands
+/// ahead on, on other dialogs, stay its own when the rounds fold.
 pub fn lifecycle_progress(incoming: &Call, held: &Call) -> Option<Progress> {
     let (i, h) = (lifecycle_position(incoming), lifecycle_position(held));
-    if lifecycle_regresses(incoming, held) {
+    if i.0 < h.0 || i.1 < h.1 {
         None
     } else if i != h {
-        Some(Progress::Lifecycle)
+        (!round_ahead(held, incoming)).then_some(Progress::Lifecycle)
     } else {
         round_ahead(incoming, held).then_some(Progress::Round)
     }

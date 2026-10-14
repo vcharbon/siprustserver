@@ -452,6 +452,7 @@ pub fn build_b_leg(
 
     let leg_invite_handle = Some(InviteTxnHandle {
         branch: branch.clone(),
+        cseq: i64::from(invite.cseq().seq()),
         original_invite: invite.image().to_vec(),
         destination: call::HostPort { host: wire_dest.0.clone(), port: wire_dest.1 },
     });

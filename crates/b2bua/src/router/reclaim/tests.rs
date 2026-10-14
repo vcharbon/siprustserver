@@ -27,7 +27,7 @@ fn base(p: i64, b: i64) -> Call {
         &sip_txn::IdGen::seeded(1),
         0,
     );
-    call.topology = Some(CallTopology { pri: "w0".into(), bak: "w1".into(), gen: p, bak_gen: b });
+    call.topology = Some(CallTopology::new("w0", "w1", p, b));
     call
 }
 
@@ -155,37 +155,43 @@ fn callers_sequence(call: &Call) -> i64 {
     call.a_leg.dialogs.confirmed().expect("the caller's dialog").our_cseq
 }
 
+/// `call` with its `p` adopted without the primary's body.
+fn adopted(mut call: Call) -> Call {
+    call.topology.as_mut().expect("a replicable call").gen_adopted = true;
+    call
+}
+
 /// A backup that adopted our `p` without the body that carried it (a refused
-/// forward flush, ADR-0031 D3) flushes at our `p` with its `b` advanced, but
-/// its body stands below ours on a dialog sequence: it lacks a request we
-/// sent. The vector clause does not fold it whole.
+/// forward flush, ADR-0031 D3) flushes at our `p` with its `b` advanced: its
+/// body may lack any write we made at that `p`, so the vector clause does not
+/// fold it whole. The same body holding our version folds whole.
 #[test]
-fn the_vector_clause_never_folds_a_body_below_our_dialog_sequence() {
-    let live = sent_to_the_caller(answered(6, 1, CallModelState::Active), 1);
-    let replica = answered(6, 3, CallModelState::Active);
+fn the_vector_clause_never_folds_a_body_whose_p_was_adopted() {
+    let live = answered(6, 1, CallModelState::Active);
+    let replica = adopted(answered(6, 3, CallModelState::Active));
     assert!(!reverse_flush_dominates(&replica, &live), "an adopted p is no newer body");
-    let replica = sent_to_the_caller(answered(6, 3, CallModelState::Active), 2);
-    assert_eq!(reverse_fold(&replica, &live), Some(Fold::Whole), "a body past ours is newer");
+    let replica = answered(6, 3, CallModelState::Active);
+    assert_eq!(reverse_fold(&replica, &live), Some(Fold::Whole), "our version, carried");
 }
 
 /// The same adopted `p` on a body that ends the round we hold open folds the
-/// round alone: our own request, and the sequence it advanced, stay.
+/// round alone: our own writes since the backup branched stay.
 #[test]
 fn an_adopted_counter_over_a_round_we_hold_folds_only_the_round() {
-    let live = sent_to_the_caller(in_round(6, 1, RoundStage::Open), 1);
-    let replica = in_round(6, 3, RoundStage::Answered);
+    let live = in_round(6, 1, RoundStage::Open);
+    let replica = adopted(in_round(6, 3, RoundStage::Answered));
     assert_eq!(reverse_fold(&replica, &live), Some(Fold::Rounds));
 }
 
-/// **A refusal raises the record's dialog sequences.** The backup's write is
-/// refused at the primary (no progress over the live copy), yet the backup
-/// relayed a request to the caller the primary never read: the primary takes
-/// the higher sequence with the backup's `b`, and nothing else, so its next
-/// request to the caller continues past the backup's. At the backup, a
-/// refused write of the primary moves the counter alone: the copy's body
-/// keeps the sequences of the requests it holds.
+/// **A refusal raises the dialog sequences, and nothing else.** The backup's
+/// write is refused at the primary (no progress over the live copy), yet the
+/// backup relayed a request to the caller the primary never read: the primary
+/// takes the higher sequence with the backup's `b`, so its next request to
+/// the caller continues past the backup's. At the backup, a refused write of
+/// the primary's is read the same way, and the `p` it adopts names a version
+/// whose body the copy does not hold.
 #[tokio::test(start_paused = true)]
-async fn a_refusal_raises_the_records_dialog_sequence_and_only_the_records() {
+async fn a_refusal_raises_the_dialog_sequence_and_nothing_else() {
     let n = node("w0").await;
     let ctx = n.core.router_ctx();
     let mut live = answered(6, 1, CallModelState::Active);
@@ -200,6 +206,7 @@ async fn a_refusal_raises_the_records_dialog_sequence_and_only_the_records() {
     assert_eq!(callers_sequence(&after), callers_sequence(&replica), "the backup's request");
     assert_eq!(after.message_count, Some(42), "the record keeps its own content");
     assert_eq!(live_pb(&n, &call_ref), (6, 2));
+    assert!(!after.topology.expect("replicable").gen_adopted, "the record's own p");
 
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
@@ -210,15 +217,24 @@ async fn a_refusal_raises_the_records_dialog_sequence_and_only_the_records() {
     fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
     let after = ctx.state.peek(&call_ref).expect("the copy plays on");
-    assert_eq!(callers_sequence(&after), callers_sequence(&copy), "the copy's own");
+    assert_eq!(callers_sequence(&after), callers_sequence(&primary), "the primary's request");
     assert_eq!(live_pb(&n, &call_ref), (6, 2), "the seen `p` is adopted");
+    assert!(after.topology.expect("replicable").gen_adopted, "without the primary's body");
 }
 
-/// `call` with a confirmed callee leg whose own sequence stands at `our_cseq`.
+/// `call` with a confirmed callee leg whose own sequence stands at `our_cseq`,
+/// its INVITE transaction the leg's initial one.
 fn with_callee(mut call: Call, our_cseq: i64) -> Call {
     let mut leg = call::testkit::dialled_leg("b-1", "callee-tag");
     call::testkit::stage_leg(&mut leg, LegState::Confirmed);
-    leg.dialogs.confirmed_mut().expect("the callee's dialog").our_cseq = our_cseq;
+    let d = leg.dialogs.confirmed_mut().expect("the callee's dialog");
+    d.our_cseq = our_cseq;
+    d.pending_invite_txn = Some(call::InviteTxnHandle {
+        branch: "z9hG4bK-initial".into(),
+        cseq: 1,
+        original_invite: Vec::new(),
+        destination: call::HostPort { host: "staged.invalid".into(), port: 5060 },
+    });
     call.b_legs = vec![leg];
     call
 }
@@ -245,26 +261,28 @@ async fn a_round_fold_raises_the_records_sequence_on_every_dialog() {
     assert_eq!(after.message_count, Some(42), "a round folded alone");
 }
 
-/// **A refusal raises no sequence past a round the record lacks.** The
-/// primary is ending the call, so the backup's write opening a round is
-/// refused (a body less far toward its end makes no progress). The record
-/// takes none of the round, and its sequence on the round's dialog stays
-/// below the round's CSeq: the round still reads as one the record never
-/// reached, so the copy holding its client transaction keeps it.
+/// **A raised sequence is not a round reached.** The primary is ending the
+/// call, so the backup's write opening a round toward the callee is refused
+/// (a body less far toward its end makes no progress). The record takes the
+/// round's sequence, so its BYE toward the callee continues past the
+/// re-INVITE (RFC 3261 §12.2.1.1), and none of the round: the round still
+/// reads as one the record never reached, read from its transaction.
 #[tokio::test(start_paused = true)]
-async fn a_refusal_raises_no_sequence_past_a_round_the_record_lacks() {
+async fn a_refusal_raises_the_sequence_past_a_round_it_never_reaches() {
     let n = node("w0").await;
     let ctx = n.core.router_ctx();
-    let mut live = answered(6, 1, CallModelState::Active);
+    let mut live = with_callee(answered(6, 1, CallModelState::Active), 1);
     live.state = CallModelState::Terminating;
     let call_ref = live.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live.clone(), MaterialiseOrigin::Reclaim));
-    let replica = in_round(4, 2, RoundStage::Open);
+    let mut replica = with_callee(answered(4, 2, CallModelState::Active), 1);
+    stage_reinvite_round(&mut replica.b_legs[0], "z9hG4bK-round", RoundStage::Open);
     let body = MsgpackCodec::new().encode(&replica);
     fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
     let after = ctx.state.peek(&call_ref).expect("the call is still ending");
-    assert_eq!(callers_sequence(&after), callers_sequence(&live), "not past the round");
+    let callee = after.b_legs[0].dialogs.confirmed().expect("the callee's dialog");
+    assert_eq!(callee.our_cseq, 2, "past the round's CSeq");
     assert!(call::helpers::round_opened(&replica, &after), "the round is the copy's alone");
     assert_eq!(live_pb(&n, &call_ref), (6, 2), "the backup's `b` is adopted");
 }
