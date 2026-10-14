@@ -104,6 +104,41 @@ async fn a_round_held_one_way_behind_the_primarys_write_completes() {
     answer_and_end(est, round, at_bob).await;
 }
 
+/// The replication is cut both ways and the copy serves the caller's whole
+/// round while the primary is read dead; then the primary, read alive,
+/// serves the callee's whole round on the caller's dialog, and the cut
+/// heals. Each round is the other node's progress on its own dialog: the
+/// primary's record holds the copy's round, its transaction and its ACK, so a
+/// repeat of the callee's 2xx is re-ACKed from it (RFC 3261 §13.2.2.4).
+#[tokio::test(start_paused = true)]
+async fn a_round_served_at_the_copy_across_the_primarys_own_round_reaches_the_primary() {
+    let mut est = establish("round-crossing-the-primarys-round").await;
+    est.fh.partition(&est.primary_ord, &est.bak_ord);
+    let (mut round, mut at_bob) = open_the_round_at_the_copy(&mut est).await;
+    at_bob.respond(200, "OK").with_sdp(ANSWER).await;
+    round.expect(200).await;
+    est.dialog.ack(None).await;
+    est.bob.receive("ACK").await;
+    est.fh.advance(Duration::from_millis(100)).await;
+    let copys = backup(&est).live_call(&est.call_ref).expect("the copy serves the call");
+    let callee_txn =
+        |c: &call::Call| c.b_legs[0].dialogs.confirmed().and_then(|d| d.pending_invite_txn.clone());
+    let served = callee_txn(&copys).expect("the copy's round");
+    est.proxy.set_health(&est.primary_ord, WorkerHealth::Alive);
+    let mut theirs = est.bob_dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    est.alice.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
+    theirs.expect(200).await;
+    est.bob_dialog.ack(None).await;
+    est.alice.receive("ACK").await;
+    est.fh.heal(&est.primary_ord, &est.bak_ord);
+    est.fh.advance(SETTLE).await;
+
+    let primary = if est.primary_ord == "b1" { &est.w_b1 } else { &est.w_b2 };
+    let record = primary.live_call(&est.call_ref).expect("the primary serves the call");
+    assert_eq!(callee_txn(&record), Some(served), "the primary's record holds the copy's round");
+    caller_hangs_up(&mut est).await;
+}
+
 /// The replication is cut both ways and the copy serves the whole round —
 /// answered, the caller's ACK relayed — while the primary is read dead; then
 /// the primary, read alive, relays the callee's INFO and the cut heals. The

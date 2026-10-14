@@ -1,18 +1,18 @@
 //! **A copy's write carrying a counter it adopted without the body that
-//! carried it.** The proxy misroutes the caller's re-INVITE to the backup
-//! while the primary lives (ADR-0014); the copy relays it and the primary
-//! reads the relay, holding the round open. Then only the copy's writes
-//! toward the primary are held: the primary relays the caller's INFO toward
-//! the callee on its own, and the copy refuses that write and adopts its
-//! counter (ADR-0031 D3), while it relays the callee's INFO toward the caller
-//! and serves the round to its ACK. Once released, the copy's writes name
-//! the primary's counter, but its body lacks the INFO the primary relayed:
-//! the primary takes the round's end from it and keeps its own writes
-//! (ADR-0031, "a round's end folds alone"):
+//! carried it.** The proxy misroutes a request to the backup while the
+//! primary lives (ADR-0014). Only the copy's writes toward the primary are
+//! held: the primary serves the call on its own, and the copy takes the
+//! primary's counter without the primary's body — refusing the primary's
+//! write (ADR-0031 D3), or folding only the primary's re-INVITE round. Once
+//! released, the copy's writes name the primary's counter, but the primary
+//! never takes them whole: it takes only the progress they carry and keeps
+//! its own writes:
 //!
 //! - the dialog sequence the primary's INFO advanced toward the callee
 //!   (RFC 3261 §12.2.1.1);
-//! - the INFO it relays, still awaiting the callee's answer.
+//! - the INFO it relays, still awaiting the callee's answer;
+//! - an UPDATE it saw answered, which stays answered (RFC 3311 §5.2);
+//! - an INFO it relays when the copy took its round alone.
 //!
 //! Every cell ends the call with a BYE and settles to one CDR.
 
@@ -98,5 +98,74 @@ async fn the_info_the_primary_holds_open_outlives_the_copys_adopted_counter() {
     release_the_copy(&mut est).await;
     info_at_bob.respond(200, "OK").await;
     info.expect(200).await;
+    caller_hangs_up(&mut est).await;
+}
+
+/// The primary relays the caller's UPDATE, which both nodes read; then the
+/// copy's writes are held, and it relays the callee's INFO. The callee's 200
+/// to the UPDATE reaches the primary, which closes the relay; the copy refuses
+/// that write and adopts its counter, and relays a second INFO. Once the copy
+/// is released, the UPDATE is still answered at the primary: the caller's
+/// next UPDATE reaches the callee.
+#[tokio::test(start_paused = true)]
+async fn an_update_the_primary_saw_answered_stays_answered_past_the_copys_adopted_counter() {
+    let mut est = establish("adopted-counter-update-answered").await;
+    let (p_ord, b_ord) = (est.primary_ord.clone(), est.bak_ord.clone());
+    let mut update = est.dialog.request(InDialogMethod::Update, None).await;
+    let mut update_at_bob = est.bob.receive("UPDATE").await;
+    est.fh.advance(SETTLE).await;
+    est.fh.stall(&b_ord, &p_ord);
+    est.proxy.set_health(&p_ord, WorkerHealth::Dead);
+    est.fh.advance(Duration::from_millis(200)).await;
+    info_through_the_primary(&est.alice, &mut est.bob_dialog).await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Alive);
+    update_at_bob.respond(200, "OK").await;
+    update.expect(200).await;
+    est.fh.advance(Duration::from_millis(100)).await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Dead);
+    info_through_the_primary(&est.alice, &mut est.bob_dialog).await;
+    est.fh.advance(Duration::from_millis(100)).await;
+    release_the_copy(&mut est).await;
+    est.fh.advance(SETTLE).await;
+
+    let mut next = est.dialog.request(InDialogMethod::Update, None).await;
+    est.bob.receive("UPDATE").await.respond(200, "OK").await;
+    next.expect(200).await;
+    caller_hangs_up(&mut est).await;
+}
+
+/// The copy's writes are held, and it relays the callee's INFO. The primary
+/// relays the caller's INFO, the callee holding its answer, then her
+/// re-INVITE; the copy folds that round alone, which takes the primary's
+/// counter, and relays a second INFO. Once the copy is released, the INFO is
+/// still the primary's to answer: the callee's 200 reaches the caller.
+#[tokio::test(start_paused = true)]
+async fn an_info_the_primary_relays_outlives_a_round_the_copy_folded_alone() {
+    let mut est = establish("adopted-counter-round-fold-info").await;
+    let (p_ord, b_ord) = (est.primary_ord.clone(), est.bak_ord.clone());
+    est.fh.stall(&b_ord, &p_ord);
+    est.proxy.set_health(&p_ord, WorkerHealth::Dead);
+    est.fh.advance(Duration::from_millis(200)).await;
+    info_through_the_primary(&est.alice, &mut est.bob_dialog).await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Alive);
+    est.fh.advance(Duration::from_millis(100)).await;
+    let mut info = est.dialog.request(InDialogMethod::Info, None).await;
+    let mut info_at_bob = est.bob.receive("INFO").await;
+    est.fh.advance(Duration::from_millis(100)).await;
+    let mut round = est.dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    let mut at_bob = est.bob.receive("INVITE").await;
+    round.expect(100).await;
+    est.fh.advance(Duration::from_millis(300)).await;
+    est.proxy.set_health(&p_ord, WorkerHealth::Dead);
+    info_through_the_primary(&est.alice, &mut est.bob_dialog).await;
+    est.fh.advance(Duration::from_millis(100)).await;
+    release_the_copy(&mut est).await;
+
+    info_at_bob.respond(200, "OK").await;
+    info.expect(200).await;
+    at_bob.respond(200, "OK").with_sdp(ANSWER).await;
+    let answer = round.expect(200).await;
+    est.dialog.ack_for(answer.cseq().seq(), None).await;
+    est.bob.receive("ACK").await;
     caller_hangs_up(&mut est).await;
 }
