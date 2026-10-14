@@ -399,7 +399,10 @@ impl Puller {
     /// incarnation it names — rides up only for a call this node serves as a
     /// live takeover copy ([`RouterSink`](crate::repl::RouterSink)), in the scan
     /// and on the tail alike: either way it is a write of the call's primary the
-    /// copy has not seen (ADR-0047 D7). No other `Delete` rides up.
+    /// copy has not seen (ADR-0047 D7). An applied reverse `Delete`, with the
+    /// incarnation it names, rides up for every call: the backup discharged the
+    /// call, and a live copy of it here is dropped (ADR-0047 D8). No other
+    /// `Delete` rides up.
     pub(super) fn signal(
         &self,
         mode: ApplyMode,
@@ -418,7 +421,16 @@ impl Puller {
             }
             return;
         }
-        let PrimaryWrite::Put(body) = write else { return };
+        let body = match write {
+            PrimaryWrite::Put(body) => body,
+            PrimaryWrite::Delete(incarnation) => {
+                if mode != ApplyMode::Forward && outcome == Applied {
+                    let call_ref = call_ref.to_string();
+                    sink.send(ReplCommand::ReverseDeleteApplied { call_ref, incarnation });
+                }
+                return;
+            }
+        };
         if mode == ApplyMode::Forward && !bootstrapped {
             return;
         }

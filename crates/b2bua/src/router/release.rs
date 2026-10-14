@@ -33,6 +33,11 @@ pub(super) enum ReleaseKind {
     /// the primary holds, and a message for one of them reaching this node
     /// afterwards takes the call over afresh.
     StandDown,
+    /// **Discharged by the backup** (ADR-0047 D8): a live copy of this node's
+    /// own call, whose backup's takeover copy ended and discharged it, dropped
+    /// local-only as a stand-down is, with nothing sent and no CDR: the
+    /// backup's discharge is the call's only one.
+    DischargedByBackup,
     /// Orphan reject: the 481 path hydrated NO call — only the lock entry and
     /// the dispatch queue exist. **No** store mutation (a `remove` would
     /// reverse-propagate a spurious delete), **no** timers/txns were armed.
@@ -94,6 +99,13 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
                 // Folded into the departed peer's takeover episode (ADR-0026): a
                 // returning node stands down every copy its peer's sweep made.
                 ctx.state.note_takeover(call_ref, "stood_down");
+            }
+        }
+        ReleaseKind::DischargedByBackup => {
+            if ctx.state.drop_local(call_ref) {
+                ctx.timers.cancel_all(call_ref.to_string()).await;
+                let _ = ctx.txn.relinquish_call(call_ref).await;
+                ctx.dispatcher.release(call_ref, RemovalClass::StandDown);
             }
         }
         ReleaseKind::Orphan => {

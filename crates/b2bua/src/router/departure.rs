@@ -8,7 +8,9 @@
 //! transactions are rebuilt, and an undecided call is answered. A call with
 //! no INVITE transaction to serve is left to the reactive path
 //! (ADR-0014 §1): taking every quiet dialog over at once is the stale-CSeq
-//! storm that rule exists to avoid.
+//! storm that rule exists to avoid. A call a takeover copy here ended and
+//! deferred to the peer, which left without reconciling it, is discharged —
+//! CDR, limiter release, delete — since no node is left to (ADR-0047 D8).
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
@@ -21,6 +23,7 @@ use std::sync::Arc;
 use call::CallModelState;
 
 use super::materialise::{has_invite_to_serve, materialise, Materialised, Origin};
+use super::reclaim::discharge_materialized_terminal;
 use super::undecided::{is_undecided, settle_undecided};
 use super::RouterCtx;
 use crate::store::PartitionRole;
@@ -38,17 +41,19 @@ pub(super) fn take_over_departed(ctx: &Arc<RouterCtx>, ordinal: &str) {
 
 /// What the sweep did with one call.
 enum Swept {
-    /// Nothing in flight, ended, already live here, or gone.
+    /// Nothing in flight, already live here, or gone.
     Left,
     Taken,
     TakenAndSettled,
+    /// Ended here and deferred to the peer: discharged.
+    Discharged,
 }
 
 /// Take over every call of `refs` with an INVITE transaction to serve, one at
 /// a time.
 async fn sweep(ctx: &Arc<RouterCtx>, ordinal: &str, refs: Vec<String>) {
     let scanned = refs.len();
-    let (mut taken, mut settled) = (0usize, 0usize);
+    let (mut taken, mut settled, mut discharged) = (0usize, 0usize, 0usize);
     for (i, call_ref) in refs.iter().enumerate() {
         if i % YIELD_EVERY == YIELD_EVERY - 1 {
             tokio::task::yield_now().await;
@@ -57,6 +62,7 @@ async fn sweep(ctx: &Arc<RouterCtx>, ordinal: &str, refs: Vec<String>) {
             Swept::Left => {}
             Swept::Taken => taken += 1,
             Swept::TakenAndSettled => (taken, settled) = (taken + 1, settled + 1),
+            Swept::Discharged => discharged += 1,
         }
     }
     tracing::info!(
@@ -65,17 +71,26 @@ async fn sweep(ctx: &Arc<RouterCtx>, ordinal: &str, refs: Vec<String>) {
         scanned,
         taken,
         settled,
+        discharged,
         "departed peer's in-flight calls taken over"
     );
 }
 
-/// Take `call_ref` over when its body names an INVITE transaction to serve
-/// ([`has_invite_to_serve`]). The body is
+/// Discharge `call_ref` when its body is ended, else take it over when it
+/// names an INVITE transaction to serve ([`has_invite_to_serve`]). The body is
 /// read once without the lock to leave a quiet call untouched; a call already
 /// live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
     let Ok((call, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
-    if call.state == CallModelState::Terminated || !has_invite_to_serve(&call) {
+    if call.state == CallModelState::Terminated {
+        // A takeover copy ended the call and deferred it to the peer, which
+        // left without reconciling it: no one else discharges it now.
+        let _guard = ctx.state.lock(call_ref).await;
+        let now_ms = ctx.clock.now_ms();
+        discharge_materialized_terminal(ctx, call_ref, call, now_ms, false).await;
+        return Swept::Discharged;
+    }
+    if !has_invite_to_serve(&call) {
         return Swept::Left;
     }
     let guard = ctx.state.lock(call_ref).await;

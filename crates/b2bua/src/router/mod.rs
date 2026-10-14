@@ -12,7 +12,8 @@
 //! the takeover of a departed peer's in-flight calls, `undecided` the end of
 //! a call materialised before its routing decision, `quiesced` the
 //! self-release turn of a takeover copy, `stand_down` the turn that releases a
-//! takeover copy on its primary's write, `reclaim`
+//! takeover copy on its primary's write, `dropped_on_delete` the turn that
+//! drops a live copy of a call its backup discharged, `reclaim`
 //! the replication reclaim/discharge funnels,
 //! `restore_hygiene` the replicated-timer restore seam, `release` the one
 //! per-call teardown executor, `responses` the locally-authored response
@@ -32,6 +33,7 @@ mod departure;
 mod dialog_gate;
 #[cfg(test)]
 mod dialog_gate_tests;
+mod dropped_on_delete;
 mod ingress;
 mod initial_turn;
 mod interpret;
@@ -253,6 +255,11 @@ pub enum ReplCommand {
     /// it serves as a live takeover copy, in a scan or on the tail: handed up so
     /// the copy can stand down on it (`stand_down`, ADR-0047 D7).
     ForwardFlushApplied { call_ref: String, write: PrimaryWrite },
+    /// A backup's delete of one of this node's calls, applied on the reclaim
+    /// stream with the incarnation it names: the backup's takeover copy
+    /// discharged the call, and a live copy of it here is dropped
+    /// (`dropped_on_delete`, ADR-0047 D8).
+    ReverseDeleteApplied { call_ref: String, incarnation: Option<String> },
     /// The peer of this ordinal left the membership set while its flows ran: a
     /// real stop. Its calls this node backs up with an INVITE transaction to
     /// serve are taken over at once (`departure`, ADR-0047). Sent once per stop.
@@ -357,6 +364,9 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
         }
         ReplCommand::ForwardFlushApplied { call_ref, write } => {
             stand_down::offer(ctx, call_ref, write).await
+        }
+        ReplCommand::ReverseDeleteApplied { call_ref, incarnation } => {
+            dropped_on_delete::offer(ctx, call_ref, incarnation).await
         }
         ReplCommand::PeerDeparted(ordinal) => departure::take_over_departed(ctx, &ordinal),
     }

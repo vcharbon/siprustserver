@@ -329,6 +329,32 @@ async fn an_applied_forward_write_rides_up_for_a_live_takeover_copy_alone() {
     assert!(rx.try_recv().is_err(), "no probe, no signal");
 }
 
+/// A backup's delete applied on the reclaim stream, on the tail or in a
+/// scan, rides up with the incarnation it names, for any call: the backup
+/// discharged it. A forward delete, and a reclaim-stream delete the store
+/// refused, ride up as no such notice.
+#[tokio::test]
+async fn an_applied_reverse_delete_rides_up_for_any_call() {
+    use crate::router::PrimaryWrite::Delete;
+    let call = "w0|ended|t";
+    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let p = p.with_repl_sink(tx);
+    for mode in [ApplyMode::Reverse, ApplyMode::Bootstrap] {
+        p.signal(mode, ApplyOutcome::Applied, true, call, Delete(Some("w0|ended|t#1".into())), 0);
+        match rx.try_recv() {
+            Ok(ReplCommand::ReverseDeleteApplied { call_ref, incarnation }) => {
+                assert_eq!(call_ref, call);
+                assert_eq!(incarnation.as_deref(), Some("w0|ended|t#1"));
+            }
+            other => panic!("expected the applied reverse delete ({mode:?}): {other:?}"),
+        }
+    }
+    p.signal(ApplyMode::Forward, ApplyOutcome::Applied, true, call, Delete(None), 0);
+    p.signal(ApplyMode::Reverse, ApplyOutcome::Refused, true, call, Delete(None), 0);
+    assert!(rx.try_recv().is_err(), "nothing else rides up");
+}
+
 /// A connection that plays a fixed script, one frame per `gap_ms`, and
 /// records every frame the puller sends back.
 struct RecordingConn {

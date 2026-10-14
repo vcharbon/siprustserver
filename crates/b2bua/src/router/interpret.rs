@@ -110,10 +110,10 @@ pub(super) async fn process_result(
     // **exactly once** — then self-releases its live copy. It writes **NO** CDR,
     // releases **NO** limiter hold, propagates **NO** delete here (that is the
     // primary's sole authority, so exactly-once holds by construction — no
-    // cross-node idempotency). If the primary never reconciles (crashed for
-    // good, never returning inside the replica TTL), the periodic reap evicts
-    // the retained body, releases its limiter key and counts the CDR LOST — the
-    // accepted double-failure. A copy whose primary has departed (ADR-0047) has
+    // cross-node idempotency). If the primary departs before reconciling, the
+    // departure sweep discharges the retained body; if it neither returns nor
+    // departs, the periodic reap evicts it, releases its limiter key and counts
+    // the CDR LOST. A copy whose primary has already departed (ADR-0047 D8) has
     // no primary to defer to: it discharges the call below, as does a
     // primary-served terminal.
     if result.call.state == CallModelState::Terminated

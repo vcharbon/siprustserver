@@ -440,8 +440,9 @@ stored body; "eager takeover" (removed: it took over every call, quiet ones too)
 
 **Departure sweep** (ADR-0047, `router::departure`): what a backup does when a
 peer leaves the membership set while its flows run — it takes over every call of
-the peer's backup partition that names an INVITE transaction in flight, and no
-other. _Avoid_: "eager takeover" for it.
+the peer's backup partition that names an INVITE transaction in flight, and
+discharges every ended one (ADR-0047 D8); every other call is left. _Avoid_:
+"eager takeover" for it.
 
 **Undecided call** (ADR-0047, `router::undecided`): a live call still waiting on
 its first routing decision — caller unanswered, no decision applied, nothing
@@ -485,7 +486,10 @@ the txn layer emits `CallQuiesced` and the backup **self-releases**: it
 survive, so the call lives on at its reclaiming primary. There is **no** watermark
 handshake and **no** time-based settle; correctness rests on `(p,b)` causality.
 A copy that ends a call whose primary has **departed** does not defer: it
-discharges the call itself — CDR, limiter release, delete (ADR-0047 D8).
+discharges the call itself — CDR, limiter release, delete; the departure sweep
+discharges an ended call deferred to a peer that then departs; and a node of the
+departed ordinal that still holds the call live drops it, with no CDR, on that
+delete (ADR-0047 D8).
 _Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backup".
 
 **Stand-down** (ADR-0047 D7, `router::stand_down`): a takeover copy released on a

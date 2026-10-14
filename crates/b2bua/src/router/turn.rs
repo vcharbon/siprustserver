@@ -43,6 +43,12 @@ impl Runnable for Turn {
                     super::stand_down::stand_down_turn(ctx, call_ref, outcome, payload, body).await;
                     return;
                 }
+                (CallEvent::InternalEvent { call_ref, topic, payload, .. }, _)
+                    if topic == super::dropped_on_delete::TOPIC =>
+                {
+                    super::dropped_on_delete::drop_turn(&self.ctx, call_ref, payload).await;
+                    return;
+                }
                 (CallEvent::Timer { .. }, Some(call_ref))
                     if super::quiesced::shed_if_quiesced(&self.ctx, call_ref).await =>
                 {

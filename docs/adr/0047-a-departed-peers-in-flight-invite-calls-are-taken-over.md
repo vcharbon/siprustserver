@@ -18,7 +18,7 @@ the slice does not apply), `rules/lost_round.rs` and
 `store/adoption.rs` and `repl/store/admission.rs` (an adopted version's write),
 `router/reclaim.rs` (the reverse fold of a copy's ending), `call`'s
 `helpers/lifecycle.rs` (the lifecycle order), `sip-txn`'s `layer/relinquish.rs`,
-`repl/departed.rs` and `router/interpret.rs` (the discharge of a departed primary's call).
+`repl/departed.rs`, `router/interpret.rs` and `router/departure.rs` (the discharge of a departed primary's call), `router/dropped_on_delete.rs` (the drop of a live copy on the backup's delete).
 
 ## Context
 
@@ -220,17 +220,36 @@ guards: the callee answers at the backup while the node is down, or before it is
 routable. In `answer_lost_with_primary_no_answer.rs`, the cell where the ACK reaches
 the reclaimed copy first, a 2xx reaches the backup after the stand-down.
 
-**D8 — A copy whose primary has departed discharges the call it ends.** A takeover
-copy that reaches `Terminated` while the call's primary is departed — this node pulled
-it, then parked it when it left the membership set (D1), and it has not rejoined —
-discharges the call as a primary does: it writes the CDR, releases the limiter key and
-deletes the call, the delete propagating as any write of the copy. There is no primary
-to defer to, and after a scale-down none returns. A copy whose primary is still a
-member, or was never seen, defers as ADR-0020 X3 states. A node that rejoins under the
-departed ordinal finds the call deleted and reclaims nothing of it, so the call has one
-CDR (`router/departure/tests.rs`; `outbound_invite_after_the_departure.rs` and the
-scale-down cell of `undecided_call_settled_on_departure.rs`; the transparent matrix's
-`stay_dead` cells).
+**D8 — A call whose primary has departed is discharged by its backup, once.** A
+primary is departed for a node that pulled it, then parked it when it left the
+membership set (D1), until it rejoins. A takeover copy that reaches `Terminated` while
+the call's primary is departed discharges the call as a primary does: it writes the
+CDR, releases the limiter key and deletes the call, the delete propagating as any
+write of the copy. There is no primary to defer to, and after a scale-down none
+returns. A copy whose primary is still a member, or was never seen, defers as ADR-0020
+X3 states (`router/departure/tests.rs`; `repl/departed_tests.rs` pins which peers have
+departed; `outbound_invite_after_the_departure.rs`, the scale-down cell of
+`undecided_call_settled_on_departure.rs` and the transparent matrix's `stay_dead`
+cells measure the discharge).
+
+The departure sweep (D2) discharges, the same way and once, every ended Element of
+the departed peer: a copy here ended the call and deferred it while the peer was a
+member, and the peer left without reconciling it
+(`deferred_end_of_a_departed_primary.rs`; `limiter_release_by_call.rs`, the departing
+primary cell, counts one release).
+
+A node of the departed ordinal that applies the backup's delete on its reclaim stream
+while it holds the call live — the departed process itself, still running (ADR-0031
+case 3b), or a replacement that reclaimed the call before the backup saw it rejoin —
+drops that live copy local-only: timers cancelled, transactions relinquished, nothing
+sent, no CDR (`router/dropped_on_delete.rs`). Only a delete naming the live call's
+incarnation drops it, and only a backup's delete rides up as the notice; a primary's
+forward delete keeps its D7 meaning (`discharged_call_dropped_by_its_primary.rs`, both
+cells; `router/dropped_on_delete/tests.rs`; `repl/puller/tests.rs`). A node that
+rejoins after the delete finds the call deleted and reclaims nothing of it (the
+transparent matrix's `*__bye_*__kill__reboot*` cells;
+`fault_primitives.rs::crash_stops_every_frame_and_datagram_from_the_node`). Each way
+the call has one CDR.
 
 ## Residuals
 
@@ -250,10 +269,6 @@ scale-down cell of `undecided_call_settled_on_departure.rs`; the transparent mat
   only on the dead node (§17.1.3); the BYE ends its dialog instead
   (`reinvite_round_not_yet_replicated.rs`). Answering it would need the 100 held on
   a synchronous replication, which ADR-0014 rejects.
-- **A callee that sent a 100 alone holds its CANCEL.** A 100 leaves no dialog in the
-  record, so the taken-over INVITE has drawn no provisional here, and its CANCEL
-  waits for the callee's next one (§9.1)
-  (`ringing_call_taken_over_on_departure.rs`, the 100 cell).
 - **A caller answered twice.** When a removed node refuses a call its backup's sweep
   answered too, the caller hears a second 503 on the branch its transaction completed
   on, and does not ACK it (`undecided_call_settled_on_departure.rs`, the
@@ -272,13 +287,11 @@ scale-down cell of `undecided_call_settled_on_departure.rs`; the transparent mat
 - **A retransmission placed as a call of its own.** The departed call it duplicates is
   settled off the wire but still discharged, with a CDR, by the backup (D8)
   (`undecided_call_settled_on_departure.rs`, the retransmission cell).
-- **A copy that deferred to a primary which then departs for good loses the CDR.** A
-  copy that ends a call while its primary is still a member defers (ADR-0020 X3); if
-  that primary leaves before reconciling and never returns, the ended Element is
-  reaped past its TTL, CDR lost (`limiter_release_by_call.rs`, the reclaim-and-reap
-  cell, covers the release).
-- **A rejoin this node has not seen yet.** A node that rejoins under a departed
-  ordinal and reclaims a call before the copy's node sees it in the membership set:
-  the copy still reads the primary departed and discharges the call, and its delete
-  reaches the rejoined node's store but not the live copy it reclaimed, which writes
-  a second CDR when it ends. The window is the membership lag between the two nodes.
+- **A primary that neither returns nor leaves the set loses the CDRs its backup
+  deferred to it.** A copy that ends a call while its primary is a member defers
+  (ADR-0020 X3); with no departure the sweep never runs, and the ended Element is
+  reaped past its TTL, CDR lost (`call_terminate_on_backup.rs`, C4 and C5).
+- **A primary that discharged a deferred end and departed before its delete reached
+  the backup.** The backup's sweep discharges the Element again: two CDRs. The window
+  is one replication poll between the primary's reconcile and its departure; no cell
+  measures it.

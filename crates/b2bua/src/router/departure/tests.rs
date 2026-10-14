@@ -1,6 +1,6 @@
 //! The departure sweep over a wired core: of a departed peer's backup
 //! partition it takes over exactly the calls with an INVITE transaction to
-//! serve, and an
+//! serve and discharges the ended ones, and an
 //! undecided one among them is answered 503 through the caller's INVITE
 //! transaction, or settled with nothing on the wire when that transaction's
 //! branch is already another call's here.
@@ -71,7 +71,7 @@ async fn heard(caller: &dyn UdpEndpoint, within: Duration) -> Vec<String> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_departed_peers_calls_with_an_invite_in_flight_are_taken_over_and_no_other() {
+async fn a_departed_peers_in_flight_calls_are_taken_over_and_its_ended_calls_discharged() {
     let net = SimulatedSignalingNetwork::new(1);
     let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
     let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
@@ -94,7 +94,14 @@ async fn a_departed_peers_calls_with_an_invite_in_flight_are_taken_over_and_no_o
         CallModelState::Terminated,
         "the settled call's end is kept for its primary",
     );
-    assert!(n.cdr.snapshot().is_empty(), "the copy writes no CDR: its primary does");
+    let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|r| r.call_ref).collect();
+    assert_eq!(
+        cdrs,
+        [ended.call_ref.clone()],
+        "the ended call is discharged; the settled copy defers"
+    );
+    let held = n.store.get_call(BAK, "w0", &ended.call_ref).await.unwrap();
+    assert!(held.is_none(), "the discharged call is deleted");
     assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
 }
 

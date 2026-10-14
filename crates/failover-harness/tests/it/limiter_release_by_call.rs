@@ -378,16 +378,15 @@ fn limited_decision(ids: &'static [&'static str]) -> Arc<dyn CallDecisionEngine>
     )
 }
 
-/// A rebooting primary's reclaim and the backup's reap both release one
-/// deferred terminal. The call holds `[x, x, y]`; the primary crashes in place,
-/// the caller's BYE fails over to the backup, which defers the terminal to it,
-/// then its endpoint leaves the backup's membership, so the backup never pulls
-/// the reborn one. The primary reboots inside the replica TTL,
-/// reclaims the deferral and discharges it (one CDR, the call released); its
-/// delete never reaches the backup, whose reap releases the same call once
-/// the TTL lapses. The second release frees nothing: the witnesses are intact.
+/// A deferred terminal of a primary that departs is released once. The call
+/// holds `[x, x, y]`; the primary crashes in place, the caller's BYE fails over
+/// to the backup, which defers the terminal to it; then the primary's endpoint
+/// leaves the set, and the backup's departure sweep discharges the deferral:
+/// one CDR, one release. The primary reboots inside the replica TTL and finds
+/// nothing to reclaim, and nothing releases the call again past the TTL: the
+/// witnesses are intact.
 #[tokio::test(start_paused = true)]
-async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
+async fn a_deferred_terminal_of_a_departing_primary_is_released_once() {
     let mut fh = ha_harness("limiter-release-by-call-reclaim-and-reap");
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -424,14 +423,21 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
     fh.advance(Duration::from_secs(1)).await;
     assert!(backup.metrics().creations_total() > creations_before, "backup served the BYE");
     assert_eq!(rig.holds(), [2, 1, 0], "the backup defers the release to the primary");
-    backup.simulate_peer_removed(&primary_ord);
+    let releases_deferred = rig.store.stats().releases_total;
 
-    // ── inside the TTL: the primary reboots and reclaims the deferral ────
+    // ── the primary departs: the backup's sweep discharges the deferral ──
+    backup.simulate_peer_removed(&primary_ord);
+    fh.advance(Duration::from_secs(1)).await;
+    assert_eq!(rig.holds(), [0, 0, 0], "the sweep released the deferred call");
+    assert_eq!(backup.cdr_records().len(), 1, "and wrote its CDR");
+    let releases_swept = rig.store.stats().releases_total;
+    assert_eq!(releases_swept, releases_deferred + 1, "with one release");
+
+    // ── inside the TTL: the primary reboots and finds nothing to reclaim ─
     let reboot_at = deferred_at + REBOOT_BUDGET.as_millis() as i64 - 40_000;
     while fh.now_ms() < reboot_at {
         fh.advance(Duration::from_secs(10)).await;
     }
-    assert_eq!(rig.holds(), [2, 1, 0], "still deferred right before the reboot");
     let new_addr = primary.reboot().await;
     for _ in 0..40 {
         fh.advance(Duration::from_millis(500)).await;
@@ -443,35 +449,17 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
     proxy.set_address(&primary_ord, new_addr);
     fh.note_worker_rebound(&primary_ord, new_addr);
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
-    let discharged = fh
-        .settle_terminal(async || primary.cdr_records().len() == 1 && rig.holds() == [0, 0, 0])
-        .await;
-    assert!(
-        discharged,
-        "the reclaim discharged the deferral: one CDR, the call released; holds {:?}",
-        rig.holds()
-    );
-    assert!(
-        fh.now_ms() < deferred_at + REBOOT_BUDGET.as_millis() as i64,
-        "the reclaim ran inside the replica TTL",
-    );
+    backup.simulate_peer_added(&primary_ord);
 
-    // ── past the TTL: the backup's reap releases the same call again ─────
-    let releases_before = rig.store.stats().releases_total;
-    let reaped_at = deferred_at + REBOOT_BUDGET.as_millis() as i64 + 90_000;
-    while fh.now_ms() < reaped_at {
+    // ── past the TTL: nothing of the call is released again ──────────────
+    let past_ttl = deferred_at + REBOOT_BUDGET.as_millis() as i64 + 90_000;
+    while fh.now_ms() < past_ttl {
         fh.advance(Duration::from_secs(30)).await;
     }
-    assert_eq!(
-        rig.store.stats().releases_total,
-        releases_before + 1,
-        "the backup's reap sent its release of the call",
-    );
-    assert_eq!(
-        rig.holds(),
-        [0, 0, 0],
-        "the backup's reap released a call already released: the witnesses on x and y are intact",
-    );
+    assert!(primary.cdr_records().is_empty(), "the reborn primary reclaimed nothing");
+    assert_eq!(rig.store.stats().releases_total, releases_swept, "no second release");
+    assert_eq!(backup.metrics().repl_terminal_lost_total(), 0, "no ended call is lost");
+    assert_eq!(rig.holds(), [0, 0, 0], "the witnesses on x and y are intact");
     rig.release_witnesses();
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }

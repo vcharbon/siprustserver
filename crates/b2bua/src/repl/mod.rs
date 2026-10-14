@@ -53,6 +53,9 @@ mod tests;
 mod test_support;
 
 #[cfg(test)]
+mod departed_tests;
+
+#[cfg(test)]
 mod departure_signal_tests;
 
 #[cfg(test)]
