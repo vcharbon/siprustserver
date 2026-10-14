@@ -1,12 +1,16 @@
 //! A pending non-INVITE relay its originator's retransmission supersedes.
 //!
 //! A non-INVITE request reaching the rules found no server transaction on
-//! this node: the node that relayed it, and holds that transaction and the
-//! relay's client transaction, is not this one. The relay's final follows its
-//! Via to that node, a non-INVITE response is never failed over, and the
-//! target does not repeat it on its own (RFC 3261 §17.2.2), so no node can
-//! finish the relay. The record drops it, and the retransmission is relayed
-//! afresh: the target sees the request twice.
+//! this node: the relay the record holds for it was made by another node, or
+//! by this node's former incarnation, which holds that transaction and the
+//! relay's client transaction. The relay's final follows its Via there, a
+//! non-INVITE response is never failed over, and the target does not repeat
+//! it on its own (RFC 3261 §17.2.2), so this node can never answer the
+//! retransmission from that relay. Whether the relaying node still lives is
+//! not known here. The record drops the relay, and the retransmission is
+//! relayed afresh: the target sees the request twice, and while the relaying
+//! node lives (a retransmission the proxy routed here on a brief misreading
+//! of its health) both relays are answered.
 
 use b2bua_sdk::event::CallEvent;
 use call::{Call, PendingRequest};

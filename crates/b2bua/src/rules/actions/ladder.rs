@@ -36,7 +36,7 @@ impl ActionExecutor<'_> {
     /// ([`crate::rules::stated_headers`]) and the transaction layer sends verbatim
     /// — and arm its §13.3.1.4 ladder under `AckOf2xx`, keyed by the To-tag and
     /// CSeq the 2xx itself carries — the two facts the caller's ACK echoes. The
-    /// a-leg INVITE server transaction goes `Completed` on this final, so the
+    /// a-leg INVITE server transaction goes `Accepted` on this final, so the
     /// txn layer neither retransmits the 2xx nor reports the missing ACK: this
     /// ladder is the one that does.
     pub(super) fn retain_a_leg_answer(

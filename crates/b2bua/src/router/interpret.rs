@@ -338,7 +338,7 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
         match (&eff.body, &eff.mode) {
             // A retained emission's repeat (RFC 3261 §13.3.1.4 / §13.2.2.4,
             // RFC 3262 §3): the bytes as they are, past every transaction — the
-            // server txn that sent the original is `Completed` and would drop a
+            // server txn that sent the original is `Accepted` and would drop a
             // second final; the ACK never had one. Counted as it leaves, under
             // the label captured when it was retained.
             (OutboundBody::Datagram(emission), _) => {

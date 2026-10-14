@@ -13,6 +13,11 @@ const SENT_BY: &str = "10.0.0.5:5080";
 /// The caller's in-dialog request of `method`, CSeq `cseq`, top Via `sent_by`
 /// on `branch`.
 fn request(method: &str, cseq: u32, sent_by: &str, branch: &str) -> CallEvent {
+    request_on("acid@alice", method, cseq, sent_by, branch)
+}
+
+/// [`request`] on Call-ID `call_id`.
+fn request_on(call_id: &str, method: &str, cseq: u32, sent_by: &str, branch: &str) -> CallEvent {
     let raw = format!(
         "{method} sip:svc@10.0.0.9 SIP/2.0\r\n\
          Via: SIP/2.0/UDP {sent_by};branch={branch}\r\n\
@@ -20,7 +25,7 @@ fn request(method: &str, cseq: u32, sent_by: &str, branch: &str) -> CallEvent {
          Max-Forwards: 70\r\n\
          From: <sip:alice@10.0.0.1>;tag=atag\r\n\
          To: <sip:bob@10.0.0.9>;tag=svca\r\n\
-         Call-ID: acid@alice\r\n\
+         Call-ID: {call_id}\r\n\
          CSeq: {cseq} {method}\r\n\
          Content-Length: 0\r\n\r\n"
     );
@@ -87,9 +92,9 @@ fn a_copy_of_a_relayed_request_drops_its_relay() {
     assert_eq!(relays_left(&call), [("UPDATE".to_string(), 4)]);
 }
 
-/// A request differing from the snapshot in method, CSeq, branch or sent-by
-/// is another request, and an INVITE is never superseded here: the relay
-/// stays.
+/// A request differing from the snapshot in method, CSeq, branch, sent-by or
+/// Call-ID is another request, and an INVITE is never superseded here: the
+/// relay stays.
 #[test]
 fn another_request_leaves_the_relay() {
     let held = vec![relay("INFO", 3), relay("INVITE", 4)];
@@ -98,6 +103,7 @@ fn another_request_leaves_the_relay() {
         request("INFO", 6, SENT_BY, BRANCH),
         request("INFO", 5, SENT_BY, "z9hG4bK-info-2"),
         request("INFO", 5, "10.0.0.6:5080", BRANCH),
+        request_on("other@alice", "INFO", 5, SENT_BY, BRANCH),
         request("INVITE", 5, SENT_BY, BRANCH),
     ] {
         let call = drop_superseded_relay(call_holding(held.clone()), &event);

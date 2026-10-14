@@ -200,10 +200,11 @@ The trigger is the transaction layer, push-based — the router never polls:
   delete itself.
 
 "Last transaction left the map" — not merely "reached its final response" — is
-deliberate: a **2xx INVITE** server transaction lingers in `Completed` until Timer H
-(the 2xx ACK reuses a *different* branch, so it does not terminate the INVITE txn),
-so self-release naturally fires at Timer H, **after** the ACK has been relayed. A
-non-INVITE clears at Timer J; a failed leg at Timer B/F.
+deliberate: a **2xx INVITE** server transaction lingers in RFC 6026 `Accepted` until
+Timer L (the 2xx ACK takes a *different* branch, so it neither ends nor detaches the
+INVITE txn), so self-release naturally fires at Timer L, **after** the ACK has been
+relayed. A 2xx's Accepted seed (below) holds a takeover copy the same way, up to
+Timer L from the seed. A non-INVITE clears at Timer J; a failed leg at Timer B/F.
 
 ## Why this is safe where the old design was not
 
@@ -392,7 +393,11 @@ INVITE transactions the replicated record names**, in one router module
   its ACK, holding that 2xx: a copy of the INVITE draws the 2xx in the layer and
   never reaches the rules, whose glare check would answer it 491. A transaction
   the copy itself opened before the record was read, with no final, takes the
-  seed's 2xx and sends it once. An answered round awaiting its ACK is an INVITE
+  seed's 2xx and sends it once. Answering a copy with the 2xx is this stack's
+  choice, not RFC 6026's (§8.7 absorbs it silently): the takeover node never sent
+  the 2xx the copy may have missed. The seed holds a takeover copy up to Timer L
+  from the seed, as the 2xx's ACK takes a new branch and never detaches it. An
+  answered round awaiting its ACK is an INVITE
   transaction a live copy serves: the departure sweep takes it over and resumes
   its 2xx ladder (RFC 3261 §13.3.1.4).
 
@@ -428,16 +433,20 @@ there: its target's responses follow the Via of the node that relayed it, so onl
 that node can CANCEL it or take its final, and a client seed elsewhere would run
 out its bound on a round another node finishes.
 
-**A non-INVITE relay no node can finish is superseded.** A non-INVITE request that
-reaches the rules found no server transaction on this node, so the relay the record
-holds for it, if any, was made by another node, or this one's former incarnation:
-the relay's final follows its Via there and a non-INVITE response is never failed
-over (`sip-proxy/src/core/response.rs`), and the target does not repeat it (RFC
-3261 §17.2.2). The record drops that relay — same method, originator CSeq,
-Call-ID, top-Via branch and sent-by — before the rules read the call, and the
-request is relayed afresh, under this node's `relayed_by`. Absorbing the
-retransmission instead would leave its originator to run out Timer F. Residual: the
-target sees the request twice (`superseded_relay.rs`).
+**A non-INVITE relay this node cannot finish is superseded.** A non-INVITE request
+that reaches the rules found no server transaction on this node, so the relay the
+record holds for it, if any, was made by another node, or this one's former
+incarnation: the relay's final follows its Via there and a non-INVITE response is
+never failed over (`sip-proxy/src/core/response.rs`), and the target does not repeat
+it (RFC 3261 §17.2.2). This node cannot tell whether the relaying node lives. The
+record drops that relay — same method, originator CSeq, Call-ID, top-Via branch and
+sent-by — before the rules read the call, and the request is relayed afresh, under
+this node's `relayed_by`. Absorbing the retransmission instead would leave its
+originator to run out Timer F when the relaying node is dead. Residuals: the target
+sees the request twice (`superseded_relay.rs`); and when the relaying node lives —
+the proxy read it dead for a moment and routed a Timer E rung here — both relays are
+answered, the originator absorbs the second final as a retransmission, and two
+UPDATE answers that differ can leave the parties' descriptions apart (RFC 3311).
 
 Pinned by `failover-harness/tests/it/{prack_takeover,inflight_resend,released_copy,
 reinvite_server_side_at_the_takeover,retained_2xx_folded_into_the_record,superseded_relay}.rs`,
