@@ -8,7 +8,7 @@ import * as Timing from "../src/timing.js"
 describe("Timing.format and Timing.parse", () => {
   it("round-trip a line with its optional fields", () => {
     const line: Timing.TimingLine = {
-      phase: "generate3.capture",
+      phase: "generator.capture",
       ms: 1234,
       capture: "capture_a.pcap.gz",
       cases: 3,
@@ -20,16 +20,16 @@ describe("Timing.format and Timing.parse", () => {
 
   it("reads the tagged lines out of a log and skips everything else", () => {
     const log = [
-      "=== generate3 exit 0 ===",
+      "=== generator exit 0 ===",
       "[v3] census: 92 rule(s) covered",
-      Timing.format({ phase: "generate3.load", ms: 50 }),
+      Timing.format({ phase: "generator.load", ms: 50 }),
       "[v3] capture_a.pcap.gz: SUT 10.0.0.1",
       "[timing] {not json",
       "[timing] {\"phase\":\"no-ms\"}",
       `  ${Timing.format({ phase: "cut.mirror", ms: 7, prep: 9 })}`
     ].join("\n")
     expect(Timing.parse(log)).toEqual([
-      { phase: "generate3.load", ms: 50 },
+      { phase: "generator.load", ms: 50 },
       { phase: "cut.mirror", ms: 7, prep: 9 }
     ])
   })

@@ -85,7 +85,7 @@ const numbersOf = (list: string): ReadonlyArray<string> => {
  */
 export const citationsOf = (
   ticket: TicketText,
-  grammar: Resolver.Grammar = Resolver.DEFAULT_GRAMMAR
+  grammar: Resolver.Grammar
 ): ReadonlyArray<Citations.Citation> => {
   const shapes = shapesOf(grammar)
   const found = new Map<string, Citations.Citation>()

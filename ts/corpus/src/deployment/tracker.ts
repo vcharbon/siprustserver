@@ -8,8 +8,9 @@
  * ticket nobody can find rather than hiding it. A tracker that cannot be read
  * answers `missing` for its references and says so on stderr.
  *
- * The default holds no ticket: every reference is missing and no ticket has a
- * text.
+ * The default holds no ticket: every reference is missing, and its texts are
+ * refused rather than read as none, since a pass that keeps what a ticket
+ * cites would read "no text" as "nothing cited" and drop it.
  */
 import type { Registry } from "@sip/store"
 import * as Context from "effect/Context"
@@ -40,12 +41,17 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Tracker") {}
 
-/** The default: no ticket, so every reference is missing. */
+/** The default: no ticket, so every reference is missing and the texts are refused. */
 export const layer = Layer.succeed(
   Service,
   Service.of({
     states: (refs) => Effect.succeed(new Map(refs.map((ref) => [ref, "missing" as const]))),
-    texts: () => Effect.succeed([])
+    texts: () =>
+      Effect.fail(
+        new TrackerUnreadable({
+          detail: "no tracker is composed — substitute Tracker.layerWith to say where the tickets are read"
+        })
+      )
   })
 )
 

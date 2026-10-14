@@ -13,7 +13,8 @@
  * charges it authored, not the ones it relayed from a peer — and the rule hits
  * of a cell that wrote no `rule-hits.json`.
  *
- * The default composes nothing a cell could run under and refuses by name.
+ * The default runs no cell, refusing by name when a sweep reaches for one,
+ * and its readings state nothing.
  */
 import type { CellHits, Confrontation } from "@sip/contracts"
 import { LanePresets, RoutingCompiler, type TestInvocation } from "@sip/driver"
@@ -72,7 +73,7 @@ export const refusing = (detail: string): Layer.Layer<CellServices, CellHostUnre
 
 export interface Interface {
   /** How a crate-test cell is invoked. */
-  readonly tests: TestInvocation
+  readonly tests: Effect.Effect<TestInvocation, CellHostUnready>
   /** The services one sweep's cells run under. */
   readonly services: (request: CellRequest) => Layer.Layer<CellServices, CellHostUnready, Platform>
   /** The closing lines of the audit filed at `audit`; a log that does not read says so in a line. */
@@ -88,15 +89,24 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/CellHost") {}
 
-/** No cell host is composed; the message says how to state one. */
-export class CellHostUnstated extends Schema.TaggedError<CellHostUnstated>()("Corpus.CellHostUnstated", {}) {
-  override get message(): string {
-    return "no cell host is composed — substitute CellHost.layerWith to say what a cell runs under"
-  }
-}
+const UNSTATED = "no cell host is composed — substitute CellHost.layerWith to say what a cell runs under"
 
-/** The default: nothing a cell could run under. */
-export const layer: Layer.Layer<Service, CellHostUnstated> = Layer.effect(Service, Effect.fail(new CellHostUnstated()))
+/**
+ * The default: no cell runs — its services and its crate invocation refuse
+ * when a sweep reaches for them — and the readings state nothing: every
+ * gating charge stands, a cell without its own counts has no rule hit, and no
+ * audit was filed.
+ */
+export const layer = Layer.succeed(
+  Service,
+  Service.of({
+    tests: Effect.fail(new CellHostUnready({ detail: UNSTATED })),
+    services: () => refusing(UNSTATED),
+    auditLines: () => Effect.succeed([]),
+    charges: (_cellDir, findings) => findings.filter((finding) => finding.gating),
+    hitsOf: () => []
+  })
+)
 
 /** A deployment's own cell host. */
 export const layerWith = (host: Interface): Layer.Layer<Service> => Layer.succeed(Service, Service.of(host))

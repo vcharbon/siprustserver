@@ -74,7 +74,7 @@ export interface CutReading {
   /** The enriched flows document every cell of this capture confronts. */
   readonly flows: string
   readonly provenance: Model.Provenance
-  /** The cut CODE this reading came from, as a content hash (`fingerprint.ts`). */
+  /** The cut CODE this reading came from, as a content hash. */
   readonly cutFingerprint: string
   /** Why there is nothing to replay, where the cut broke instead of refusing. */
   readonly broke?: string

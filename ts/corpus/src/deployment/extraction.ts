@@ -52,21 +52,6 @@ export interface Failure {
   readonly size?: number
 }
 
-export interface Interface {
-  /** The kept flows document's file name for `capture`, in its directory. */
-  readonly documentName: (capture: string) => string
-  /**
-   * The report the anonymiser leaves in a capture's directory: `{ capture,
-   * error, cases }`, an empty `cases` with an `error` where it refused.
-   */
-  readonly reportName: string
-  readonly anonymise: (request: AnonymiseRequest) => Effect.Effect<void, AnonymiseFailed>
-  /** The refusal a capture whose extraction failed is recorded under at the cut. */
-  readonly sourceRefusal: (failure: Failure) => ExclusionRecord
-}
-
-export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Extraction") {}
-
 /** No anonymiser is composed; the message says how to state one. */
 export class ExtractionUnstated extends Schema.TaggedError<ExtractionUnstated>()("Corpus.ExtractionUnstated", {}) {
   override get message(): string {
@@ -75,11 +60,31 @@ export class ExtractionUnstated extends Schema.TaggedError<ExtractionUnstated>()
   }
 }
 
-/** The default: no anonymiser, so no capture is extracted. */
-export const layer: Layer.Layer<Service, ExtractionUnstated> = Layer.effect(
-  Service,
-  Effect.fail(new ExtractionUnstated())
-)
+export interface Interface {
+  /** The kept flows document's file name for `capture`, in its directory. */
+  readonly documentName: (capture: string) => Effect.Effect<string, ExtractionUnstated>
+  /**
+   * The report the anonymiser leaves in a capture's directory: `{ capture,
+   * error, cases }`, an empty `cases` with an `error` where it refused.
+   */
+  readonly reportName: Effect.Effect<string, ExtractionUnstated>
+  readonly anonymise: (request: AnonymiseRequest) => Effect.Effect<void, AnonymiseFailed | ExtractionUnstated>
+  /** The refusal a capture whose extraction failed is recorded under at the cut. */
+  readonly sourceRefusal: (failure: Failure) => Effect.Effect<ExclusionRecord, ExtractionUnstated>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Extraction") {}
+
+/** The default: no anonymiser, so no capture is extracted; each member refuses when a phase reaches for it. */
+export const layer = Layer.sync(Service, () => {
+  const unstated = Effect.fail(new ExtractionUnstated())
+  return Service.of({
+    documentName: () => unstated,
+    reportName: unstated,
+    anonymise: () => unstated,
+    sourceRefusal: () => unstated
+  })
+})
 
 /** A deployment's own extraction. */
 export const layerWith = (extraction: Interface): Layer.Layer<Service> =>

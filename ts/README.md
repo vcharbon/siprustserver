@@ -79,8 +79,11 @@ can state is a `@sip/corpus` seam, substituted with `layerWith`:
 Besides them, `@sip/store` `StoreBinding` states its selector spelling,
 capture grammar and migration, and `@sip/cli`'s `CliFacts` what the parser
 needs before any service exists (the default lane, the host env files, the
-help every entry point ends with). Roots, tools, the anonymiser, the cell host
-and a job's entry point refuse by name until stated; the rest state nothing.
+help every entry point ends with). Every default layer builds; roots, tools,
+the anonymiser, the cell host, a job's entry point and the tracker's texts
+refuse by name when a command reaches for them, and the rest state nothing.
+The case-id grammar has one source, the binding: the resolver
+(`StoreBinding.resolver`), the id forms and the citation scan all read it.
 
 ## What a campaign leaves on disk
 

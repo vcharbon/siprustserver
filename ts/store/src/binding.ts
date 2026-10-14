@@ -44,6 +44,11 @@ export const layer = layerWith({
   migrate: Migrator.run
 })
 
+/** The case-id resolver reading the binding's grammar: the one place a reader's capture names come from. */
+export const resolver: Layer.Layer<Resolver.Service, never, Service | SqlClient> = Layer.unwrap(
+  Effect.map(Service, (binding) => Resolver.layerWith(binding.grammar))
+)
+
 /** `text` as a selector in this deployment's spelling, or why it is none. */
 export const parse = (text: string): Effect.Effect<Selector.Selector | { readonly refused: string }, never, Service> =>
   Effect.map(Service, (binding) => Selector.parse(text, binding.spelling))

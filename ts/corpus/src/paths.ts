@@ -17,8 +17,6 @@ import * as path from "node:path"
 export interface Paths {
   /** The artifact store: one directory per capture, the raw artifacts a cut reads. */
   readonly corpus: string
-  /** A directory whose entries seed the universe of captures before the store held a population. */
-  readonly corpusCut: string
   /** The session tree: run bundles, cut logs, the content cache. */
   readonly sessions: string
   /** The census runs a cut declares its must-fail steps from. */

@@ -10,7 +10,8 @@
  * would file its answer under the wrong code. How it is built is the
  * deployment's; the pipeline only asks for the path once it is current.
  *
- * The default knows no tool and refuses each by name.
+ * The default knows no tool and refuses each by name when a phase reaches for
+ * it.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -55,27 +56,37 @@ export interface Interface {
   /** The tool's path once it is current; `watch` hears who holds the build while this waits for it. */
   readonly ready: (tool: Tool, watch?: Watch) => Effect.Effect<string, ToolUnavailable>
   /** The interpreter inside a memory scope of its own (`REPLAY_MEMORY_MAX`): what a cell execs. */
-  readonly boxedInterpreter: string
-  readonly generator: Generator
+  readonly boxedInterpreter: Effect.Effect<string, ToolUnavailable>
+  readonly generator: Effect.Effect<Generator, ToolUnavailable>
   /** The wrapper a measured phase runs under: wall time, peak RSS of its largest process, exit. */
-  readonly measure: string
+  readonly measure: Effect.Effect<string, ToolUnavailable>
   /** Milliseconds this process has spent compiling, waits for another process's build left out. */
   readonly compileMs: Effect.Effect<number>
-  readonly decides: Decides
+  readonly decides: Effect.Effect<Decides, ToolUnavailable>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Tools") {}
 
-/** No tools are composed; the message says how to state them. */
-export class ToolsUnstated extends Schema.TaggedError<ToolsUnstated>()("Corpus.ToolsUnstated", {}) {
-  override get message(): string {
-    return "no tools are composed — substitute Tools.layerWith to say how this deployment builds its extractor, " +
-      "generator and interpreter"
-  }
-}
+const unknown = (tool: string) =>
+  Effect.fail(
+    new ToolUnavailable({
+      tool,
+      detail: "no tools are composed — substitute Tools.layerWith to say how this deployment builds it"
+    })
+  )
 
-/** The default: no tool is known, so nothing is extracted, cut or replayed until a deployment says how. */
-export const layer: Layer.Layer<Service, ToolsUnstated> = Layer.effect(Service, Effect.fail(new ToolsUnstated()))
+/** The default: no tool is known, each refused when a phase reaches for it. */
+export const layer = Layer.succeed(
+  Service,
+  Service.of({
+    ready: (tool) => unknown(tool),
+    boxedInterpreter: unknown("interpreter"),
+    generator: unknown("generator"),
+    measure: unknown("measure"),
+    compileMs: Effect.succeed(0),
+    decides: unknown("decides")
+  })
+)
 
 /** A deployment's own tools. */
 export const layerWith = (tools: Interface): Layer.Layer<Service> => Layer.succeed(Service, Service.of(tools))
