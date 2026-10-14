@@ -8,6 +8,7 @@
  * `StoreBinding`), its case policy (`@sip/pipeline` `CasePolicy`), and, inside
  * its cell host, its lane presets and routing compiler (`@sip/driver`).
  */
+export * as Boxing from "./boxing.js"
 export * as CaseLayout from "./case-layout.js"
 export * as CellHost from "./cell-host.js"
 export * as Extraction from "./extraction.js"

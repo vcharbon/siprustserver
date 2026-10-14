@@ -24,6 +24,9 @@ export { PivotSchemaCli } from "./pivot-schema-cli.js"
 export { PivotSchemaSchedules } from "./pivot-schema-schedules.js"
 export { ReplayCli } from "./replay-cli.js"
 export { SipflowCli } from "./sipflow-cli.js"
+export { Detached } from "./detached.js"
+export { Liveness } from "./liveness.js"
+export { Logged } from "./logged.js"
 export {
   CliFailed,
   CliUnavailable,

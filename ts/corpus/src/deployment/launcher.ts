@@ -43,6 +43,8 @@ export interface Interface {
   readonly entry: (kind: JobKind) => Effect.Effect<ReadonlyArray<string>, LaunchUnstated>
   /** The directory a launched job runs in. */
   readonly cwd: string
+  /** The directory the hooks run in. */
+  readonly hooksCwd: string
   /** The hooks around every job, in the order they run. */
   readonly hooks: Effect.Effect<ReadonlyArray<Hook>>
 }
@@ -54,6 +56,7 @@ export const layer = Layer.sync(Service, () =>
   Service.of({
     entry: (kind) => Effect.fail(new LaunchUnstated({ kind })),
     cwd: process.cwd(),
+    hooksCwd: process.cwd(),
     hooks: Effect.succeed([])
   }))
 

@@ -5,6 +5,7 @@
  * A DB-bound suite whose server does not answer FAILS: importing this module
  * throws, naming the url it tried. `STORE_TEST_SKIP=1` is the one way to skip
  * them instead, stated by whoever runs the suite with no server on purpose.
+ * Other packages' DB-bound suites import it as `@sip/store/test-server`.
  */
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
@@ -42,6 +43,24 @@ if (!served && !skipping) {
 
 /** `database` gone (`Client.dropDatabase`). */
 export const dropDatabase = Client.dropDatabase
+
+/** `effect` run against `database` of the test server. */
+export const on = <A, E>(database: string, effect: Effect.Effect<A, E, SqlClient>): Promise<A> =>
+  Effect.runPromise(effect.pipe(Effect.provide(Client.layerFromUrl(urlFor(database)))))
+
+/** `database` made empty: dropped and created again. */
+export const fresh = (database: string): Promise<void> =>
+  on(
+    "postgres",
+    Effect.gen(function*() {
+      const sql = yield* SqlClient
+      yield* Client.dropDatabase(database)
+      yield* sql.unsafe(`CREATE DATABASE ${database}`)
+    })
+  )
+
+/** `database` gone, off the test server. */
+export const drop = (database: string): Promise<void> => on("postgres", Client.dropDatabase(database))
 
 /** A suite's own database name under this checkout (`Client.scratchDatabase`). */
 export const scratch = (base: string): Promise<string> =>

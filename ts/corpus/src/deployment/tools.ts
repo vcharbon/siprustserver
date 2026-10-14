@@ -55,8 +55,6 @@ export interface Generator {
 export interface Interface {
   /** The tool's path once it is current; `watch` hears who holds the build while this waits for it. */
   readonly ready: (tool: Tool, watch?: Watch) => Effect.Effect<string, ToolUnavailable>
-  /** The interpreter inside a memory scope of its own (`REPLAY_MEMORY_MAX`): what a cell execs. */
-  readonly boxedInterpreter: Effect.Effect<string, ToolUnavailable>
   readonly generator: Effect.Effect<Generator, ToolUnavailable>
   /** The wrapper a measured phase runs under: wall time, peak RSS of its largest process, exit. */
   readonly measure: Effect.Effect<string, ToolUnavailable>
@@ -80,7 +78,6 @@ export const layer = Layer.succeed(
   Service,
   Service.of({
     ready: (tool) => unknown(tool),
-    boxedInterpreter: unknown("interpreter"),
     generator: unknown("generator"),
     measure: unknown("measure"),
     compileMs: Effect.succeed(0),

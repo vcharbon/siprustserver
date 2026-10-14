@@ -13,6 +13,7 @@ import * as Exit from "effect/Exit"
 import * as Layer from "effect/Layer"
 import { describe, expect, it } from "vitest"
 import {
+  Boxing,
   CaseLayout,
   CellHost,
   Extraction,
@@ -25,6 +26,7 @@ import {
 } from "../../src/deployment/index.js"
 
 const defaults = Layer.mergeAll(
+  Boxing.layer,
   CaseLayout.layer,
   CellHost.layer,
   Extraction.layer,
@@ -91,6 +93,13 @@ describe("the seams that state nothing by default", () => {
     expect(layout.rowFile("7")).toBe("7.json")
     expect(layout.callKeyOf({ number: "7", document: { anchor: "a@b" } })).toBeUndefined()
     expect(layout.interpreterVariable).toBeUndefined()
+  })
+
+  it("box nothing: a child runs as it is, on any host, and a cell execs the interpreter itself", async () => {
+    const boxing = await seam(Boxing.Service)
+    expect(boxing.box({ memoryMax: "1G", cpus: 2, command: "gen", args: ["a"] })).toEqual({ command: "gen", args: ["a"] })
+    expect(await Effect.runPromise(boxing.refusal)).toBeNull()
+    expect(await Effect.runPromise(boxing.interpreter)).toBeUndefined()
   })
 
   it("name no environment and no repository", async () => {

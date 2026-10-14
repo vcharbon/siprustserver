@@ -6,6 +6,8 @@
   "description": "The run store: the postgres record of which capture was cut how and ran on which lane, what each call said, and the reads that compare two run sets.",
   "exports": {
     ".": "./src/index.ts",
+    "./test-server": "./test/server.ts",
+    "./test-identity": "./test/identity.ts",
     "./*": "./src/*.ts"
   },
   "types": "./src/index.ts",

@@ -68,6 +68,7 @@ can state is a `@sip/corpus` seam, substituted with `layerWith`:
 | --- | --- |
 | `Roots` | its artifact store, session tree, census runs, verdict registry, pcap roots, lock root |
 | `Tools` | how its extractor, case generator and interpreter are built, and which paths decide a cut |
+| `Boxing` | how a child is capped in memory and CPU, why the host cannot box one now, and the executable a cell boxes its interpreter through |
 | `Extraction` | its anonymiser: how a raw flows document becomes the one the store keeps |
 | `LaneHosting` | what a lane name means to the orchestrator: clock, exclusivity, ceilings, batch process, SUT, preflight |
 | `CaseLayout` | the numbered side rows a case carries for the interpreter's peers |
