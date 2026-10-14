@@ -214,6 +214,37 @@ async fn a_refusal_raises_the_records_dialog_sequence_and_only_the_records() {
     assert_eq!(live_pb(&n, &call_ref), (6, 2), "the seen `p` is adopted");
 }
 
+/// `call` with a confirmed callee leg whose own sequence stands at `our_cseq`.
+fn with_callee(mut call: Call, our_cseq: i64) -> Call {
+    let mut leg = call::testkit::dialled_leg("b-1", "callee-tag");
+    call::testkit::stage_leg(&mut leg, LegState::Confirmed);
+    leg.dialogs.confirmed_mut().expect("the callee's dialog").our_cseq = our_cseq;
+    call.b_legs = vec![leg];
+    call
+}
+
+/// **No fold lowers the record's sequence.** The backup's write ends the
+/// round we hold open and carries a request it sent the callee on its own: the
+/// round folds alone, and the record takes the higher sequence toward the
+/// callee with it, its own content staying.
+#[tokio::test(start_paused = true)]
+async fn a_round_fold_raises_the_records_sequence_on_every_dialog() {
+    let n = node("w0").await;
+    let ctx = n.core.router_ctx();
+    let mut live = with_callee(in_round(6, 1, RoundStage::Open), 3);
+    live.message_count = Some(42);
+    let call_ref = live.call_ref.clone();
+    assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+    let replica = with_callee(in_round(4, 2, RoundStage::Answered), 5);
+    let body = MsgpackCodec::new().encode(&replica);
+    fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
+    sip_clock::testkit::settle().await;
+    let after = ctx.state.peek(&call_ref).expect("the call plays on");
+    let callee = after.b_legs[0].dialogs.confirmed().expect("the callee's dialog");
+    assert_eq!(callee.our_cseq, 5, "the backup's request toward the callee");
+    assert_eq!(after.message_count, Some(42), "a round folded alone");
+}
+
 /// **A refusal raises no sequence past a round the record lacks.** The
 /// primary is ending the call, so the backup's write opening a round is
 /// refused (a body less far toward its end makes no progress). The record
