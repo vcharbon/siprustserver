@@ -18,6 +18,7 @@ use crate::core::{ProxyCore, ProxyCoreBuilder};
 use crate::headers::cookie_params;
 use crate::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use crate::registry::simulated::SimulatedWorkerRegistry;
+use crate::registry::tombstone::DEPARTED_ADDRESS_TTL_MS;
 use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use crate::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use crate::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
@@ -27,6 +28,7 @@ use crate::ProxyMetrics;
 const W1_POD: &str = "10.244.5.8";
 const W2_POD: &str = "10.244.5.9";
 const STRANGER: &str = "10.244.6.66";
+const REPLACEMENT: &str = "10.244.5.10";
 const UAS: &str = "10.244.7.13";
 const PROXY_VIP: &str = "192.0.2.250";
 const CALL_ID: &str = "departed-1@10.244.5.8";
@@ -197,11 +199,60 @@ async fn a_departed_workers_invite_is_recorded_with_its_ordinal_and_an_alive_bac
 
     let w2: SocketAddr = format!("{W2_POD}:5060").parse().unwrap();
     for status in ["180 Ringing", "200 OK"] {
-        let uas = format!("{UAS}:5060").parse().unwrap();
-        f.core.handle_response_from(answer(&fwd, status), uas).await;
+        f.core.handle_response_from(answer(&fwd, status), uas()).await;
         let (dst, _) = f.one_sent();
         assert_eq!(dst, w2, "{status} fails over to the backup");
     }
+}
+
+/// `w1`'s initial INVITE forwarded after `w1` departed, its 180 relayed at
+/// +1 s; then the clock runs past the tombstone's window, as on a long ring.
+/// The forwarded bytes.
+async fn invite_rung_past_the_tombstone(f: &Fixture) -> Vec<u8> {
+    f.registry.remove("w1");
+    let invite = parse(&initial_invite(W1_POD));
+    f.core.handle_request_from(invite, format!("{W1_POD}:5060").parse().unwrap()).await;
+    let (_, fwd) = f.one_sent();
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    f.core.handle_response_from(answer(&fwd, "180 Ringing"), uas()).await;
+    let _ringing = f.one_sent();
+    let window = std::time::Duration::from_millis(DEPARTED_ADDRESS_TTL_MS);
+    tokio::time::advance(window + std::time::Duration::from_secs(7)).await;
+    assert!(
+        f.registry.lookup_by_address(&ProxyAddr::new(W1_POD, 5060)).is_none(),
+        "w1's address is a stranger again"
+    );
+    fwd
+}
+
+fn uas() -> SocketAddr {
+    format!("{UAS}:5060").parse().unwrap()
+}
+
+// The dialog, not the tombstone's window, carries the departed worker's
+// INVITE: a 200 answered after the window lapsed still fails over to the
+// cookie's backup, as do its retransmissions.
+#[tokio::test(start_paused = true)]
+async fn a_200_answered_past_the_tombstone_still_reaches_the_backup() {
+    let f = fixture();
+    let fwd = invite_rung_past_the_tombstone(&f).await;
+    let w2: SocketAddr = format!("{W2_POD}:5060").parse().unwrap();
+    for _ in 0..2 {
+        f.core.handle_response_from(answer(&fwd, "200 OK"), uas()).await;
+        assert_eq!(f.one_sent().0, w2, "the 200 fails over to the backup");
+    }
+}
+
+// Past the window, a worker that holds the departed ordinal at a new address
+// takes the INVITE's 200, as it would inside it.
+#[tokio::test(start_paused = true)]
+async fn a_200_answered_past_the_tombstone_reaches_the_ordinal_at_its_new_address() {
+    let f = fixture();
+    let fwd = invite_rung_past_the_tombstone(&f).await;
+    f.registry.add(WorkerEntry::alive("w1", ProxyAddr::new(REPLACEMENT, 5060)));
+    f.core.handle_response_from(answer(&fwd, "200 OK"), uas()).await;
+    let replacement: SocketAddr = format!("{REPLACEMENT}:5060").parse().unwrap();
+    assert_eq!(f.one_sent().0, replacement);
 }
 
 // An address neither in the worker set nor tombstoned names no worker: no

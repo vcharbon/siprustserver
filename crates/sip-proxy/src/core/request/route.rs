@@ -13,6 +13,7 @@ use sip_message::emergency::is_emergency_request;
 use sip_message::header::{MaxForwards, ProxyRequire, Unsupported, Via};
 use sip_message::{Method, SipMessage};
 
+use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
 use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry};
 use crate::headers::via_with_cookie;
@@ -276,8 +277,19 @@ impl ProxyCore {
             &c.via_worker,
         );
         draft = routed;
-        let via_cookie =
-            c.worker_outbound.then(|| self.via_cookie(msg, req, &c.own_routes)).flatten();
+        // A retransmission carries the Via cookie its first copy carried, so
+        // its bytes repeat the first copy's (§17.1.1.2) whatever moved in the
+        // worker set since; the memo holds it for the retransmission window.
+        let originator = c.via_worker.clone().unwrap_or_else(|| ProxyAddr::from(src));
+        let via_cookie = c
+            .worker_outbound
+            .then(|| {
+                rtx_hit
+                    .as_ref()
+                    .and_then(|found| found.stickiness.clone())
+                    .or_else(|| self.via_cookie(msg, req, &c.own_routes, &originator))
+            })
+            .flatten();
 
         // ── §16.11: the pushed branch is a function of the message ──────────
         // A retransmission of this request, and its CANCEL and non-2xx ACK,
@@ -295,8 +307,8 @@ impl ProxyCore {
             .requesting_rport();
         draft = draft.push_front(via_with_cookie(pushed, via_cookie.as_ref()));
 
-        // Remember the target so a retransmit of THIS request repeats the
-        // forward. Short TTL: retransmits stop at Timer B/F.
+        // Remember the target, and the Via cookie, so a retransmit of THIS
+        // request repeats the forward. Short TTL: retransmits stop at Timer B/F.
         if method != Method::Cancel {
             if let Some(k) = &rtx_key {
                 self.cancel_lru.remember(
@@ -304,7 +316,7 @@ impl ProxyCore {
                     CancelEntry {
                         target: target.clone(),
                         branch: our_branch.clone(),
-                        stickiness: None,
+                        stickiness: via_cookie.clone(),
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );

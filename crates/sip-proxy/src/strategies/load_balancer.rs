@@ -15,8 +15,10 @@
 //!   `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>` (HMAC-SHA256 truncated to 128
 //!   bits, base64url) into `{w_pri,w_bak,e,v,kid,sig}`. A dialog a departed
 //!   worker originates is thus pinned to its ordinal, and its INVITE responses
-//!   and in-dialog requests take `w_bak` until the ordinal rejoins (ADR-0031
-//!   D4). An address neither live nor tombstoned gets no cookie.
+//!   and in-dialog requests take `w_bak` until the ordinal rejoins, for the
+//!   dialog's life: the core carries the cookie on its own Via too, so it
+//!   outlives the tombstone (ADR-0031 D4). An address neither live nor
+//!   tombstoned gets no cookie.
 //! - `decode_stickiness`: verify the MAC, then route over the live registry per
 //!   the matrix below (alive / ACK-CANCEL exemption / fresh-pod guard / draining
 //!   grace / dead-or-not-ready → backup). It resolves the primary by ORDINAL, so

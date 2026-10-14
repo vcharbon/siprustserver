@@ -13,7 +13,8 @@
 //! absorbs the downstream 100 nor generates one of its own. A response is
 //! dropped only when its top Via is not this proxy, when it carries fewer than
 //! two Vias, when it arrives on the external face and its next Via names no
-//! registry worker (ADR-0048), when it answers an INVITE for a Dead worker and
+//! registry worker and its top Via no cookie (ADR-0048), when it answers an
+//! INVITE for a Dead worker, or for a cookie's worker that holds no address, and
 //! no cookie of this proxy names a backup to fail it over to, or when its top
 //! Via cannot be popped and the rest re-rendered.
 //!
@@ -23,6 +24,13 @@
 //! still serves must not take an INVITE response back, so that response follows
 //! the cookie's backup. A non-INVITE response answers a client transaction only
 //! its sender holds (§17.1.2) and follows the Via whatever the sender's health.
+//!
+//! Past that window the cookie carries the dialog, not the address: an INVITE
+//! response whose next Via names no worker, but whose top Via (this proxy's)
+//! carries a cookie that verifies, goes to the cookie's worker at the address
+//! it holds now, else to the cookie's backup, else nowhere. A worker's request
+//! carries the cookie on that Via (`core/request/via_cookie`); a stranger's
+//! carries none, and its response follows the Via.
 
 use sip_message::header::Via;
 use sip_message::types::SipResponse;
@@ -98,13 +106,25 @@ impl ProxyCore {
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         self.registry.rearm_departed(&sent_by);
-        let (mut host, mut port) = match face {
+        let by_via_cookie = if cseq.method() == Method::Invite
+            && self.registry.lookup_by_address(&sent_by).is_none()
+        {
+            self.via_cookie_route(&resp, &hops[0]).await
+        } else {
+            None
+        };
+        let (mut host, mut port) = match (by_via_cookie, face) {
+            (Some(Some(target)), _) => (target.host, target.port),
+            (Some(None), _) => {
+                self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+                return;
+            }
             // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
-            Face::Internal => {
+            (None, Face::Internal) => {
                 let (host, port) = next.response_target();
                 (host.to_string(), port)
             }
-            Face::External => match self.external_response_target(next) {
+            (None, Face::External) => match self.external_response_target(next) {
                 Some(target) => (target.host, target.port),
                 None => {
                     self.metrics.record_external_untrusted(UntrustedClaim::ResponseNotToWorker);
@@ -262,6 +282,30 @@ impl ProxyCore {
         let (host, port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(host, port);
         self.registry.lookup_by_address(&sent_by).is_some().then_some(sent_by)
+    }
+
+    /// Where an INVITE response goes whose sender's address names no worker,
+    /// by the cookie on `ours`, the Via this proxy pushed on the request: the
+    /// worker that sent the request, so the dialog it created, carries the
+    /// response, not the address. `None`: `ours` carries no cookie that
+    /// verifies, and the response is a stranger's. `Some(None)`: the cookie's
+    /// worker holds no address and no backup is usable, so the response goes
+    /// nowhere. Else the cookie's worker at the address it holds now, or the
+    /// cookie's backup.
+    async fn via_cookie_route(&self, resp: &SipResponse, ours: &Via) -> Option<Option<ProxyAddr>> {
+        let msg = SipMessage::Response(resp.clone());
+        let cookie =
+            self.strategy.verified_cookie(&crate::headers::via_cookie_params(ours), &msg)?;
+        let worker = self.strategy.stickiness_primary(&cookie)?;
+        if let Some(moved) =
+            self.registry.resolve(worker).filter(|w| w.health != WorkerHealth::Dead)
+        {
+            return Some(Some(moved.address));
+        }
+        match self.strategy.decode_stickiness(&cookie, &msg).await {
+            DecodeResult::ForwardBackup { target, .. } => Some(Some(target)),
+            _ => Some(None),
+        }
     }
 
     /// The stickiness cookie for reverse-path failover toward `worker`: the

@@ -5,11 +5,10 @@
 //! the survivor rebuilds the INVITE transaction with that CANCEL held on it.
 //! It re-sends the INVITE once, the CANCEL waiting on it (ADR-0043), and the
 //! callee's transaction takes it as a retransmission.
-//! The callee's 100 never reaches the survivor: it carries no Record-Route
-//! (§8.2.6.1), and the proxy's Via on an initial INVITE carries no cookie, so
-//! the front proxy has none to fail it over on and drops it. The callee's 180
-//! brings the Record-Route cookie back, reaches the survivor on it, and
-//! releases the CANCEL (ADR-0043 X1).
+//! The callee's 100 carries no Record-Route (§8.2.6.1), but the proxy's Via
+//! on the INVITE carries the cookie naming the dead node and its backup, so
+//! the front proxy fails the 100 over to the survivor, whose transaction takes
+//! it as the provisional §9.1 waits for and releases the CANCEL (ADR-0043 X1).
 
 use std::time::Duration;
 
@@ -27,7 +26,7 @@ const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
 
 #[tokio::test(start_paused = true)]
-async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_18x_not_its_100() {
+async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_100() {
     let mut fh = FailoverHarness::new("held-cancel-takeover", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -68,16 +67,8 @@ async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_18x_no
     let resent = bob.receive("INVITE").await;
     assert_eq!(resent.request().top_via().branch(), uas.request().top_via().branch());
 
-    // ── bob's 100 dies at the proxy: no Record-Route, no cookie to follow ──
+    // ── bob's 100 fails over on the Via cookie: the CANCEL goes out ─────────
     uas.respond(100, "Trying").await;
-    fh.advance(Duration::from_millis(500)).await;
-    assert!(
-        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
-        "a 100 sent after the kill never reaches the survivor, so the CANCEL stays held",
-    );
-
-    // ── bob rings: the survivor takes the call over and sends the CANCEL ────
-    uas.respond(180, "Ringing").await;
     bob.receive_absorbing("CANCEL", &["INVITE"]).await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;

@@ -139,7 +139,9 @@ pub fn ack_hop_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u
 /// when `target` is one of our workers: a CANCEL whose remembered worker has
 /// died re-resolves through the same `decode_stickiness` ladder every in-dialog
 /// request takes, so it reaches the node holding the call's replica. `None`
-/// for a downstream target and for the retransmission memos.
+/// for a downstream target. In a retransmission memo it is the cookie the
+/// forwarded request carried on this proxy's Via, so a retransmission carries
+/// it again (`core/request/via_cookie`); `None` when that Via carried none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelEntry {
     pub target: ProxyAddr,

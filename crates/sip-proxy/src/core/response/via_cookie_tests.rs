@@ -229,17 +229,30 @@ async fn a_workers_reinvite_and_its_non_2xx_ack_carry_one_via() {
 }
 
 // A worker's initial INVITE states no cookie of its own (its preloaded Route
-// carries none): its Via carries none, so neither do its CANCEL and ACK,
-// whatever any memo holds. Its dialog-creating responses bring the cookie back
-// on the Record-Route this proxy recorded.
+// carries none): its Via carries the cookie minted for the worker, the one its
+// Record-Route carries, and so do its CANCEL (§9.1) and its non-2xx ACK
+// (§17.1.1.3), which carry the same Route.
 #[tokio::test]
-async fn a_workers_initial_invite_carries_no_via_cookie() {
+async fn a_workers_initial_invite_and_its_cancel_and_ack_carry_the_minted_cookie() {
     let f = fixture();
+    let minted = cookie(&f);
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
     let invite = request("INVITE", "z9hG4bKini", &route, "", "1 INVITE");
     f.core.handle_request_from(parse(&invite), w1()).await;
-    let via = top_via(&one_sent(&f).1);
-    assert!(!via.contains("sig=") && !via.contains("w_pri="), "{via}");
+    let (_, fwd) = one_sent(&f);
+    let via = top_via(&fwd);
+    for (name, value) in &minted {
+        assert!(via.contains(&format!(";{name}={value}")), "{name} on the pushed Via: {via}");
+    }
+    let cancel = request("CANCEL", "z9hG4bKini", &route, "", "1 CANCEL");
+    f.core.handle_request_from(parse(&cancel), w1()).await;
+    assert_eq!(top_via(&one_sent(&f).1), via, "the CANCEL's Via is its INVITE's");
+    let refused = answer(&fwd, "487 Request Terminated", ";tag=b", "1 INVITE");
+    f.core.handle_response_from(refused, uas()).await;
+    let _relayed = one_sent(&f);
+    let ack = request("ACK", "z9hG4bKini", &route, ";tag=b", "1 ACK");
+    f.core.handle_request_from(parse(&ack), w1()).await;
+    assert_eq!(top_via(&one_sent(&f).1), via, "the non-2xx ACK's Via is its INVITE's");
 }
 
 /// `w1`'s re-INVITE forwarded, then `w1` dead: the forwarded bytes.
@@ -303,14 +316,17 @@ async fn only_the_cookie_fields_reach_the_via() {
 }
 
 // A cookie on the route set whose signature does not verify for the call is
-// never carried onto the proxy's Via.
+// never carried onto the proxy's Via: the Via carries the cookie minted for
+// the sending worker in its place.
 #[tokio::test]
 async fn a_forged_route_cookie_is_not_carried() {
     let f = fixture();
-    let mut forged = cookie(&f);
+    let minted = cookie(&f);
+    let mut forged = minted.clone();
     forged.insert("w_bak".into(), "w9".into());
     let reinvite = request("INVITE", "z9hG4bKre", &dialog_route(&forged), ";tag=b", "2 INVITE");
     f.core.handle_request_from(parse(&reinvite), w1()).await;
     let via = top_via(&one_sent(&f).1);
-    assert!(!via.contains("sig=") && !via.contains("w_pri="), "{via}");
+    assert!(!via.contains("w_bak=w9"), "{via}");
+    assert!(via.contains(&format!(";sig={}", minted["sig"])), "the minted cookie rides: {via}");
 }

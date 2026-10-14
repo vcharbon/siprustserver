@@ -228,7 +228,9 @@ async fn a_call_ringing_at_its_nodes_departure_ends_at_its_replicated_deadline()
 
 /// A 100 is hop-by-hop and leaves no dialog in the record (§16.7), so the
 /// backup holds the callee's INVITE as one that drew no provisional: the
-/// CANCEL waits for the callee's next provisional (§9.1), and goes out on it.
+/// CANCEL waits for the callee's next provisional (§9.1). The callee's 100 to
+/// the backup's resend fails over to the backup on the cookie of the proxy's
+/// Via, and the CANCEL goes out on it.
 #[tokio::test(start_paused = true)]
 async fn a_call_whose_callee_sent_a_100_alone_ends_at_its_replicated_deadline() {
     let mut p = place("trying-callee-departure", Callee::TryingOnly).await;
@@ -236,16 +238,8 @@ async fn a_call_whose_callee_sent_a_100_alone_ends_at_its_replicated_deadline() 
     ring_until(&p, deadline).await;
     p.fh.advance(Duration::from_millis(600)).await;
     final_at(&mut p, deadline).await;
-    // The callee resends its 100: hop-by-hop, it names no worker the proxy
-    // could fail it over to, so it never reaches the backup.
     resent_invite(&p).await;
     p.at_bob.respond(100, "Trying").await;
-    p.fh.advance(Duration::from_secs(2)).await;
-    assert!(
-        p.bob.try_receive_tolerating("CANCEL", &[]).await.is_none(),
-        "the CANCEL waits for a provisional the record holds (§9.1)",
-    );
-    p.at_bob.respond(180, "Ringing").await;
     p.bob.receive("CANCEL").await.respond(200, "OK").await;
     p.at_bob.respond(487, "Request Terminated").await;
     p.bob.receive("ACK").await;
