@@ -15,8 +15,9 @@
 //!   bob ──200───▶            survivor ──▶ (nothing)  (a RESPONSE is dropped)
 //! ```
 //!
-//! The kill is announced to the peers; the established call has no INVITE in
-//! flight, so the departure sweep leaves it to the BYE (ADR-0047).
+//! The node crashes in place: its endpoint stays in the survivor's
+//! membership, so the survivor defers the call's end to the node's return
+//! (ADR-0020 X3), and the node discharges it on its reclaim.
 //!
 //! Both cells assert the same thing twice over: the survivor does not take the
 //! call over a second time (`repl_takeover_hydrated_total` does not move, and the
@@ -139,12 +140,12 @@ async fn synchronized_call_ref(
     call_ref
 }
 
-/// Abort the node serving the call and tell the cluster, opening the RFC
-/// deviation window the takeover carries.
+/// Abort the node serving the call in place, its endpoint kept in the
+/// survivor's membership, opening the RFC deviation window the takeover
+/// carries.
 async fn kill_serving_node(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
-    survivor: &ReplicatedB2buaSut,
     pri_ord: &str,
     proxy: &ProxySut,
 ) {
@@ -152,7 +153,6 @@ async fn kill_serving_node(
     fh.mark(pri_ord, None, "crash", "serving node down on an established call");
     primary.crash();
     proxy.set_health(pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 }
 
@@ -317,8 +317,8 @@ async fn a_late_request_naming_a_released_takeover_copy_draws_481() {
 
     // ── The serving node dies; the caller hangs up onto the survivor ────────
     {
-        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+        let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, &pri_ord, &proxy).await;
     }
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
@@ -384,8 +384,8 @@ async fn a_late_response_naming_a_released_takeover_copy_is_dropped() {
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 
     {
-        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+        let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, &pri_ord, &proxy).await;
     }
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
@@ -479,8 +479,8 @@ async fn an_info_whose_handler_died_on_the_takeover_copy_draws_481_on_its_retran
     let (mut dialog, mut bob_dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
     {
-        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+        let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, &pri_ord, &proxy).await;
     }
 
     // ── The caller's INFO takes the call over; its handler dies ─────────────
@@ -559,8 +559,8 @@ async fn a_reinvite_whose_handler_died_on_the_takeover_copy_is_answered_481_at_i
     let (mut dialog, mut bob_dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
     {
-        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+        let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, &pri_ord, &proxy).await;
     }
 
     // ── The caller's re-INVITE takes the call over; its handler dies ────────

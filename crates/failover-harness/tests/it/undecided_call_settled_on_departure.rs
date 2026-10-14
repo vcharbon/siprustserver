@@ -9,7 +9,8 @@
 //!   alice ◀──100── proxy ◀── primary
 //!                            ✗ primary killed ✗
 //!   departure announced → backup takes the call over, answers 503 → alice ACKs
-//!   primary restarts, reclaims the ended call: one CDR
+//!   the primary departed: the backup writes the one CDR and deletes the call
+//!   primary restarts: nothing of the call is left to reclaim
 //! ```
 //!
 //! The caller gets a 503 with no Retry-After (its next hop is the proxy, which
@@ -241,8 +242,8 @@ async fn a_retransmission_placed_on_the_survivor_is_not_answered_for_the_departe
 /// The abrupt removal (ADR-0031 case 2): the endpoint leaves the membership
 /// at once while the process lives two more seconds, and a replacement of the
 /// same ordinal comes up beside it. The survivor's departure sweep answers the
-/// caller; the replacement reclaims the ended call and writes its one CDR; the
-/// old process dies before its decision returns. One final, one CDR, one
+/// caller and writes the ended call's one CDR; the old process dies before its
+/// decision returns. One final, one CDR, one
 /// consult.
 #[tokio::test(start_paused = true)]
 async fn an_undecided_call_of_a_node_replaced_at_once_is_answered_once() {
@@ -303,8 +304,8 @@ async fn an_undecided_call_of_a_node_replaced_at_once_is_answered_once() {
 /// removed process refuses the caller 503 on the transaction it holds. The
 /// backup's sweep answered the caller 503 too, so the caller hears two finals
 /// on one branch, the second after its transaction completed (ADR-0047,
-/// residual). Both the removed process and the replacement, which reclaims the
-/// ended call, write a CDR: the dual-owner window of ADR-0031 D3.
+/// residual). Both the removed process and the backup, which ended the call of
+/// a departed primary, write a CDR: the dual-owner window of ADR-0031 D3.
 #[tokio::test(start_paused = true)]
 async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     let mut fh = FailoverHarness::new("undecided-call-abrupt-replacement-decision", &["b1", "b2"]);
@@ -374,8 +375,8 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
 /// write reached the backup: the backup holds the call as born, undecided, and
 /// refuses it 503 on the departure, while the callee the dead node dialled is
 /// CANCELled by no one (ADR-0047, residual). The callee gives up on its own;
-/// its final reaches no node and runs to its Timer H. The node never returns,
-/// so the ended call's CDR is lost with its Element.
+/// its final reaches no node and runs to its Timer H. The node never returns;
+/// the backup writes the ended call's one CDR (ADR-0047 D8).
 #[tokio::test(start_paused = true)]
 async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
     let mut fh = FailoverHarness::new("undecided-call-route-not-replicated", &["b1", "b2"]);
@@ -410,8 +411,8 @@ async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
     fh.advance(Duration::from_secs(budget + 120)).await;
     assert_eq!(rejections_to(&fh, &alice), 1, "the caller's one final is the backup's");
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
-    assert_eq!(survivor.metrics().repl_terminal_lost_total(), 1, "the ended call's CDR is lost");
-    assert_eq!(total_cdrs_for(&[&w_b1, &w_b2], &call_ref), 0, "no CDR is written");
+    assert_eq!(survivor.metrics().repl_terminal_lost_total(), 0, "no ended call is lost");
+    assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
     drop((call, proxy));
@@ -421,8 +422,8 @@ async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
 /// 487 from the node's transaction layer), then the node departs. Its backup
 /// holds the call as born, undecided, and refuses it 503: the caller hears that
 /// final after its 487, on a transaction already completed (ADR-0047,
-/// residual). The restarted node reclaims the ended call: one CDR, full
-/// release.
+/// residual), and writes the ended call's one CDR; the node restarts, and the
+/// call is fully released.
 #[tokio::test(start_paused = true)]
 async fn a_setup_cancelled_during_its_decision_draws_the_backups_503_after_its_487() {
     let mut fh = FailoverHarness::new("undecided-call-cancelled-then-departed", &["b1", "b2"]);
@@ -457,10 +458,10 @@ async fn a_setup_cancelled_during_its_decision_draws_the_backups_503_after_its_4
 }
 
 /// Scale-down: the departed node never returns. Its backup answered the
-/// undecided call and deferred the CDR to a primary that is gone, so the ended
-/// call's Element is reaped past its TTL with its CDR lost (ADR-0020 X3).
+/// undecided call; with no primary to defer to, it writes the call's one CDR
+/// and deletes it (ADR-0047 D8), well inside the replica TTL.
 #[tokio::test(start_paused = true)]
-async fn an_undecided_call_of_a_node_that_never_returns_loses_its_cdr() {
+async fn an_undecided_call_of_a_node_that_never_returns_is_discharged_by_its_backup() {
     let mut fh = FailoverHarness::new("undecided-call-scale-down", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -475,13 +476,19 @@ async fn an_undecided_call_of_a_node_that_never_returns_loses_its_cdr() {
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     call.expect(503).await;
 
-    let budget = b2bua::B2buaConfig::default().reboot_budget_sec as u64;
-    fh.advance(Duration::from_secs(budget + 120)).await;
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
-    assert_eq!(survivor.metrics().repl_terminal_lost_total(), 1, "the ended call's CDR is lost");
-    assert_eq!(total_cdrs_for(&[survivor], &call_ref), 0, "the backup writes none");
-    assert!(survivor.memory_clean(), "nothing of the call is left live");
-    assert!(!survivor.holds_any_trace(&call_ref).await, "nor stored");
+    let released = fh
+        .settle_terminal(async || {
+            survivor.memory_clean() && !survivor.holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(released, "nothing of the call is left live or stored");
+    assert!(
+        fh.now_ms() < b2bua::B2buaConfig::default().reboot_budget_sec * 1000,
+        "released inside the replica TTL, not by its reap"
+    );
+    assert_eq!(survivor.metrics().repl_terminal_lost_total(), 0, "no ended call is lost");
+    assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     drop(proxy);
 }

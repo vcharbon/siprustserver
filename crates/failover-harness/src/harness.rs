@@ -1775,8 +1775,8 @@ impl FailoverHarness {
     /// Like [`settle_terminal`](Self::settle_terminal) but pumps past the deferral's
     /// replica TTL (`reboot_budget`, 600 s) so the Model-Y backup auto-cleanup reap
     /// has fired: a never-reclaimed deferred terminal has its limiter hold released
-    /// and its body evicted only once that TTL expires. The StayDead cells need this
-    /// because NOTHING drains until then. Coarse 30 s steps (the reap cadence is
+    /// and its body evicted only once that TTL expires. A cell whose backup defers
+    /// to a primary that never returns needs this because NOTHING drains until then. Coarse 30 s steps (the reap cadence is
     /// 30 s) to `reboot_budget` + margin; stops as soon as `drained` holds.
     pub async fn settle_lossy_cleanup(&self, mut drained: impl AsyncFnMut() -> bool) -> bool {
         let step = Duration::from_secs(30);

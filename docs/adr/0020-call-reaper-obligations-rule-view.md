@@ -95,7 +95,8 @@ reaper adds no time-based input to HA reconciliation, and a reaped
 termination propagates its delete through the existing terminate-writer, so
 the HA protocol is untouched.
 
-The **acting-backup terminal contract**: a backup **never discharges** a call —
+The **acting-backup terminal contract** (amended by ADR-0047 D8: a copy whose primary
+has departed discharges the call): a backup **never discharges** a call —
 no CDR, no limiter release, no propagated delete — *not even* on an explicit
 BYE/CANCEL. It answers the wire (SIP continuity), records the terminal into the
 `(p,b)` Element, reverse-flushes it with a **short grace TTL as its alive-timer**,

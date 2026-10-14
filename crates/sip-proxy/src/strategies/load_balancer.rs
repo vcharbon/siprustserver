@@ -9,10 +9,14 @@
 //!   Emergency / in-dialog requests bypass the bucket (they still record the
 //!   admit for the `share` signal); an unobserved worker is admitted
 //!   (bootstrap-friendly). Port of TS LoadBalancer.ts:335-348.
-//! - `encode_stickiness`: recover the target's `WorkerId` (= `w_pri`), pick the
-//!   second-best HRW winner among the remaining alive workers (= `w_bak`), and
-//!   sign `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>` (HMAC-SHA256 truncated to 128
-//!   bits, base64url) into `{w_pri,w_bak,e,v,kid,sig}`.
+//! - `encode_stickiness`: recover the target's `WorkerId` (= `w_pri`) by
+//!   address, a departed-address tombstone included, pick the HRW winner among
+//!   the other alive workers (= `w_bak`), and sign
+//!   `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>` (HMAC-SHA256 truncated to 128
+//!   bits, base64url) into `{w_pri,w_bak,e,v,kid,sig}`. A dialog a departed
+//!   worker originates is thus pinned to its ordinal, and its INVITE responses
+//!   and in-dialog requests take `w_bak` until the ordinal rejoins (ADR-0031
+//!   D4). An address neither live nor tombstoned gets no cookie.
 //! - `decode_stickiness`: verify the MAC, then route over the live registry per
 //!   the matrix below (alive / ACK-CANCEL exemption / fresh-pod guard / draining
 //!   grace / dead-or-not-ready → backup). It resolves the primary by ORDINAL, so
@@ -312,8 +316,9 @@ impl RoutingStrategy for LoadBalancerStrategy {
 
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams> {
         let call_id = call_id_of(msg)?;
+        // A departed-address tombstone answers as the ordinal last bound there.
+        let primary = self.registry.lookup_by_address(target)?;
         let snapshot = self.registry.snapshot();
-        let primary = snapshot.iter().find(|w| &w.address == target)?;
         let backup_keys: Vec<WorkerKey> = snapshot
             .iter()
             .filter(|w| w.health == WorkerHealth::Alive && w.id != primary.id)

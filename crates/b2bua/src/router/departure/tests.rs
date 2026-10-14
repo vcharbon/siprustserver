@@ -98,6 +98,32 @@ async fn a_departed_peers_calls_with_an_invite_in_flight_are_taken_over_and_no_o
     assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
 }
 
+/// A call its copy ends while its primary is out of the membership set has no
+/// primary to discharge it: the copy writes the one CDR and deletes the call.
+#[tokio::test(start_paused = true)]
+async fn a_call_ended_while_its_primary_is_departed_is_discharged_by_its_copy() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let undecided = born("departed-primary");
+    put(&n.store, &undecided).await;
+    n.membership.add(topology::Peer::new("w0", "w0"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    n.membership.remove("w0");
+
+    let lines = heard(caller.as_ref(), Duration::from_millis(500)).await;
+    assert_eq!(lines, ["SIP/2.0 503 Service Unavailable"], "the undecided caller's final");
+    let cdrs = n.cdr.snapshot();
+    assert_eq!(cdrs.len(), 1, "the copy writes the call's CDR");
+    assert_eq!(cdrs[0].call_ref, undecided.call_ref);
+    let held = n.store.get_call(BAK, "w0", &undecided.call_ref).await.unwrap();
+    assert!(held.is_none(), "the ended call is deleted");
+    assert!(ctx.state.peek(&undecided.call_ref).is_none(), "no live copy is left");
+    assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_undecided_call_whose_branch_is_another_calls_here_is_settled_off_the_wire() {
     let net = SimulatedSignalingNetwork::new(1);

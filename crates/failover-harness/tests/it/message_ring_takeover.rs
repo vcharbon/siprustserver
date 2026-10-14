@@ -9,8 +9,8 @@
 //!   INVITE → 180 → 200 → ACK   on the primary, replicated to the backup
 //!   primary crashes            the proxy routes in-dialog traffic to the backup
 //!   alice INFO → bob 200       the backup takes the call over: two turns
-//!   alice BYE                  served on the backup, deferred terminal
-//!   primary reboots            reclaims the deferred terminal: one CDR
+//!   alice BYE                  served on the backup, which discharges it
+//!   primary reboots            nothing left to reclaim: one CDR
 //! ```
 
 use std::time::Duration;
@@ -162,7 +162,7 @@ async fn a_takeover_numbers_its_turns_past_the_replicated_ring() {
         "the takeover's two turns continue the replicated count"
     );
 
-    // ── the call ends on the backup; the rebooted primary discharges it ─────
+    // ── the call ends on the backup, which discharges it; the primary reboots ──
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_secs(60)).await;
     reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await;

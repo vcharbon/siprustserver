@@ -19,6 +19,14 @@ use crate::effects::{
     OutboundBody, OutboundTxnMode, SoftBoundedEffect,
 };
 
+/// Whether `call_ref`'s primary is another node that has departed.
+fn primary_departed(ctx: &RouterCtx, call_ref: &str) -> bool {
+    match (&ctx.departed, call::call_ref_primary(call_ref)) {
+        (Some(departed), Some(primary)) => primary != ctx.config.self_ordinal && departed(primary),
+        _ => false,
+    }
+}
+
 /// The budgets this node answers the requests sent off a call's turn by: the
 /// adaptation port's default, the limiter's admit budget, and a
 /// `/call/failure` consult's chain under the decision deadline.
@@ -105,9 +113,13 @@ pub(super) async fn process_result(
     // cross-node idempotency). If the primary never reconciles (crashed for
     // good, never returning inside the replica TTL), the periodic reap evicts
     // the retained body, releases its limiter key and counts the CDR LOST — the
-    // accepted double-failure. A primary-served (non-takeover) terminal falls
-    // through to the normal discharge below.
-    if result.call.state == CallModelState::Terminated && ctx.state.is_takeover(call_ref) {
+    // accepted double-failure. A copy whose primary has departed (ADR-0047) has
+    // no primary to defer to: it discharges the call below, as does a
+    // primary-served terminal.
+    if result.call.state == CallModelState::Terminated
+        && ctx.state.is_takeover(call_ref)
+        && !primary_departed(ctx, call_ref)
+    {
         // Reverse-flush the Terminated body held with the normal replica TTL
         // (`reboot_budget`): a live primary reconciles + forward-deletes it within ~1
         // poll; a rebooting primary still has its full reclaim window to fold and

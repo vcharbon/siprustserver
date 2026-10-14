@@ -379,10 +379,10 @@ fn limited_decision(ids: &'static [&'static str]) -> Arc<dyn CallDecisionEngine>
 }
 
 /// A rebooting primary's reclaim and the backup's reap both release one
-/// deferred terminal. The call holds `[x, x, y]`; the primary crashes and the
-/// caller's BYE fails over to the backup, which defers the terminal to the
-/// crashed primary. The backup has been told the primary left the cluster, so
-/// it never pulls the reborn one. The primary reboots inside the replica TTL,
+/// deferred terminal. The call holds `[x, x, y]`; the primary crashes in place,
+/// the caller's BYE fails over to the backup, which defers the terminal to it,
+/// then its endpoint leaves the backup's membership, so the backup never pulls
+/// the reborn one. The primary reboots inside the replica TTL,
 /// reclaims the deferral and discharges it (one CDR, the call released); its
 /// delete never reaches the backup, whose reap releases the same call once
 /// the TTL lapses. The second release frees nothing: the witnesses are intact.
@@ -411,11 +411,10 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
-    // ── the primary crashes for the backup's whole view of it ────────────
+    // ── the primary crashes in place ─────────────────────────────────────
     accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    backup.simulate_peer_removed(&primary_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     // ── the BYE fails over to the backup, which defers the terminal ──────
@@ -425,6 +424,7 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
     fh.advance(Duration::from_secs(1)).await;
     assert!(backup.metrics().creations_total() > creations_before, "backup served the BYE");
     assert_eq!(rig.holds(), [2, 1, 0], "the backup defers the release to the primary");
+    backup.simulate_peer_removed(&primary_ord);
 
     // ── inside the TTL: the primary reboots and reclaims the deferral ────
     let reboot_at = deferred_at + REBOOT_BUDGET.as_millis() as i64 - 40_000;

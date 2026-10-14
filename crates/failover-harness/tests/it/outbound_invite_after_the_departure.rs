@@ -19,8 +19,9 @@
 //!
 //! The proxy Record-Routes a worker's dialog-creating request with a cookie
 //! naming that worker and a backup; it is what routes the callee's responses
-//! and in-dialog requests once the worker is gone. The callee's 1xx and 2xx
-//! must reach a worker holding the call, the caller takes exactly one final
+//! and in-dialog requests once the worker is gone. The callee's 1xx and 2xx,
+//! sent before any replacement joins, reach the cookie's backup, which holds
+//! the call; the caller takes exactly one final
 //! (the 2xx, RFC 3261 §13.2.2.4), no ring deadline authors a second final on
 //! her ACKed INVITE server transaction (§17.2.1, §13.3.1.4), the callee is
 //! ACKed and takes no CANCEL, and the call settles to one CDR.
@@ -196,14 +197,13 @@ async fn pump_parties(
     }
 }
 
-/// Whether the proxy relayed a callee response starting with `prefix` to a
-/// worker (any address but the two parties'), delivered.
-fn relayed_to_a_worker(fh: &FailoverHarness, prefix: &str) -> bool {
-    let (alice, proxy): (SocketAddr, SocketAddr) =
-        (ALICE.parse().unwrap(), "127.0.0.1:5080".parse().unwrap());
+/// Whether the proxy relayed a callee response starting with `prefix` to the
+/// worker at `to`, delivered.
+fn relayed_to(fh: &FailoverHarness, prefix: &str, to: SocketAddr) -> bool {
+    let proxy: SocketAddr = "127.0.0.1:5080".parse().unwrap();
     hops(fh, prefix, "INVITE")
         .iter()
-        .any(|(from, to, delivered)| *from == proxy && *to != alice && *delivered)
+        .any(|(from, dst, delivered)| *from == proxy && *dst == to && *delivered)
 }
 
 async fn run(name: &str, title: &str, replacement: Replacement) {
@@ -260,8 +260,8 @@ async fn run(name: &str, title: &str, replacement: Replacement) {
     uas.respond(180, "Ringing").await;
     fh.advance(Duration::from_millis(300)).await;
     drain.poll();
-    let ringing_relayed = relayed_to_a_worker(&fh, "SIP/2.0 180");
-    fh.mark("b1", None, "callee 180", &format!("relayed to a worker: {ringing_relayed}"));
+    let ringing_relayed = relayed_to(&fh, "SIP/2.0 180", w_b2.sip_addr());
+    fh.mark("b1", None, "callee 180", &format!("relayed to the backup b2: {ringing_relayed}"));
 
     // ── the drain returns; the endpoint leaves the slice; the process exits ─
     let mut outcome = None;
@@ -289,8 +289,8 @@ async fn run(name: &str, title: &str, replacement: Replacement) {
     let mut answer = Some(CalleeAnswer::answer(uas, fh.now_ms()).await);
     let mut seen = Parties::default();
     pump_parties(&fh, &call, &alice, &bob, fh.now_ms() + 300, &mut seen, &mut answer).await;
-    let answer_relayed = relayed_to_a_worker(&fh, "SIP/2.0 200");
-    fh.mark("b1", None, "callee 200", &format!("relayed to a worker: {answer_relayed}"));
+    let answer_relayed = relayed_to(&fh, "SIP/2.0 200", w_b2.sip_addr());
+    fh.mark("b1", None, "callee 200", &format!("relayed to the backup b2: {answer_relayed}"));
 
     // ── a replacement of the same ordinal joins (rolling update) ────────────
     let mut reborn: Option<ReplicatedB2buaSut> = None;
@@ -406,8 +406,8 @@ async fn run(name: &str, title: &str, replacement: Replacement) {
         "the b-leg INVITE b1 sent after its departure is Record-Routed with a cookie naming \
          b1 and its alive backup b2: got w_pri={w_pri:?} w_bak={w_bak:?}"
     );
-    assert!(ringing_relayed, "the callee's 180 reached a worker");
-    assert!(answer_relayed, "the callee's 200 reached a worker");
+    assert!(ringing_relayed, "the callee's 180 reached the cookie's backup b2");
+    assert!(answer_relayed, "the callee's 200 reached the cookie's backup b2");
     assert_eq!(
         seen.finals_to_alice,
         [200],

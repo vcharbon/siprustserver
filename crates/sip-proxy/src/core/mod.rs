@@ -13,6 +13,8 @@
 
 mod builder;
 #[cfg(test)]
+mod departed_originator_tests;
+#[cfg(test)]
 mod dual_face_tests;
 mod face_pick;
 mod request;

@@ -82,7 +82,7 @@ async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_18x_no
     uas.respond(487, "Request Terminated").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;
 
-    // ── the dead node reboots and reclaims; one CDR, everything released ────
+    // ── the dead node reboots; one CDR, everything released ─────────────────
     fh.advance(Duration::from_secs(60)).await;
     reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
@@ -93,7 +93,7 @@ async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_18x_no
 }
 
 /// Reboot the crashed primary empty at a higher gen + new pod IP and let its
-/// go-active reclaim discharge the terminal the survivor deferred (ADR-0020 X3).
+/// go-active reclaim run.
 async fn reboot_and_reclaim(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,

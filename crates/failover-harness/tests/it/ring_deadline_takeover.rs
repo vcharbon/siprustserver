@@ -130,8 +130,7 @@ async fn kill(
     fh.advance(Duration::from_millis(300)).await;
 }
 
-/// Reboot the killed primary empty and let its reclaim discharge the terminal
-/// the survivor deferred.
+/// Reboot the killed primary empty and let its reclaim run.
 async fn reboot_and_reclaim(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,

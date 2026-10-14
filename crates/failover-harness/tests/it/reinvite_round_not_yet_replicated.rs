@@ -122,7 +122,7 @@ impl LostRound {
         self.fh.advance(Duration::from_millis(500)).await;
     }
 
-    /// The node returns and reclaims the ended call: one CDR, full release.
+    /// The node returns; the ended call has one CDR and is fully released.
     async fn settle(mut self) {
         self.fh.advance(Duration::from_secs(60)).await;
         let (primary, survivor) = split_mut(&self.pri_ord, &mut self.w_b1, &mut self.w_b2);

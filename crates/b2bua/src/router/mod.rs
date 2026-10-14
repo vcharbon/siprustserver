@@ -179,6 +179,9 @@ pub struct RouterCtx {
     /// Self-reported readiness driving the OPTIONS health responder. The
     /// unwired node uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
+    /// Whether a call's primary has departed (ADR-0047). `None` on an unwired
+    /// node: no call there has another primary.
+    pub departed: Option<crate::repl::DepartedProbe>,
     /// Worker-side overload signal stamped on every OPTIONS-200 reply as
     /// `X-Overload: v=1; elu=…; gc=…; adm=…`. The front proxy's ELU-band AIMD
     /// (`sip_proxy::load_observer`) consumes it; the EWMAs advance only while a

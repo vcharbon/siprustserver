@@ -3,7 +3,8 @@
 **Status:** accepted (2026-10-12)
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
-case table and its D3 split rule (the lifecycle order the forward and reverse gates read).
+case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
+ADR-0020 X3 (a copy whose primary departed discharges the call, D8).
 
 **Owner:** `crates/b2bua/src/repl/supervisor.rs` (the departure signal),
 `repl/self_endpoint.rs` (leaving the slice), `router/departure.rs` (the sweep),
@@ -16,7 +17,8 @@ the slice does not apply), `rules/lost_round.rs` and
 `router/stand_down.rs` (the stand-down), `store/takeover.rs` (the takeover marks),
 `store/adoption.rs` and `repl/store/admission.rs` (an adopted version's write),
 `router/reclaim.rs` (the reverse fold of a copy's ending), `call`'s
-`helpers/lifecycle.rs` (the lifecycle order), `sip-txn`'s `layer/relinquish.rs`.
+`helpers/lifecycle.rs` (the lifecycle order), `sip-txn`'s `layer/relinquish.rs`,
+`repl/departed.rs` and `router/interpret.rs` (the discharge of a departed primary's call).
 
 ## Context
 
@@ -94,8 +96,8 @@ attempt, no leg dialled — is refused as a decision the backend could not give
 materialisation rebuilt, with **no Retry-After**: the caller takes it as a 500
 (§21.5.4), and whether to retry is its own or its upstream's call — nothing behind the
 stateless front proxy holds state that a delay would wait out. The decision is never
-asked again, so nothing it causes happens twice. A takeover copy defers the CDR to the
-call's primary (ADR-0020 X3); a reclaim writes it. When the caller's INVITE branch is
+asked again, so nothing it causes happens twice. The copy's primary has departed, so
+the copy writes the CDR (D8). When the caller's INVITE branch is
 already another call's transaction on this node — its retransmission placed here as a
 call of its own — the undecided call ends with nothing on the wire, as the 503 would
 answer that other call; when the transaction layer cannot be asked, nothing is settled
@@ -218,6 +220,18 @@ guards: the callee answers at the backup while the node is down, or before it is
 routable. In `answer_lost_with_primary_no_answer.rs`, the cell where the ACK reaches
 the reclaimed copy first, a 2xx reaches the backup after the stand-down.
 
+**D8 — A copy whose primary has departed discharges the call it ends.** A takeover
+copy that reaches `Terminated` while the call's primary is departed — this node pulled
+it, then parked it when it left the membership set (D1), and it has not rejoined —
+discharges the call as a primary does: it writes the CDR, releases the limiter key and
+deletes the call, the delete propagating as any write of the copy. There is no primary
+to defer to, and after a scale-down none returns. A copy whose primary is still a
+member, or was never seen, defers as ADR-0020 X3 states. A node that rejoins under the
+departed ordinal finds the call deleted and reclaims nothing of it, so the call has one
+CDR (`router/departure/tests.rs`; `outbound_invite_after_the_departure.rs` and the
+scale-down cell of `undecided_call_settled_on_departure.rs`; the transparent matrix's
+`stay_dead` cells).
+
 ## Residuals
 
 - **A death the peers are not told of stays reactive.** A partition or a crash
@@ -247,7 +261,7 @@ the reclaimed copy first, a 2xx reaches the backup after the stand-down.
   the backup holds the call as born and refuses it 503 after the caller's 487 (the
   CANCEL-during-decision cell).
 - **An abrupt removal writes two CDRs.** In ADR-0031 case 2 the removed process and
-  the replacement that reclaims the ended call each discharge it — the dual-owner
+  the backup that ended the call of its departed primary each discharge it — the dual-owner
   window of ADR-0031 D3 (`undecided_call_settled_on_departure.rs`, the
   replacement-decision cell). A decision slower than the process's grace leaves one
   final, one CDR, one consult (the replacement cell).
@@ -256,10 +270,15 @@ the reclaimed copy first, a 2xx reaches the backup after the stand-down.
   backup: the copy CANCELs the callee after its answer and refuses the caller 480
   after its 200, repeated to Timer H (`swept_call_answered_inside_the_lag.rs`).
 - **A retransmission placed as a call of its own.** The departed call it duplicates is
-  settled off the wire but still discharged, with a CDR, by its primary on its return
+  settled off the wire but still discharged, with a CDR, by the backup (D8)
   (`undecided_call_settled_on_departure.rs`, the retransmission cell).
-- **A node that never returns loses the CDRs of the calls its backups ended.** A
-  takeover copy defers its CDR to the call's primary (ADR-0020 X3); after a scale-down
-  the ordinal does not come back and the ended Element is reaped past its TTL, CDR
-  lost — the double-failure residual of ADR-0020, routine here
-  (`undecided_call_settled_on_departure.rs`, the scale-down cell).
+- **A copy that deferred to a primary which then departs for good loses the CDR.** A
+  copy that ends a call while its primary is still a member defers (ADR-0020 X3); if
+  that primary leaves before reconciling and never returns, the ended Element is
+  reaped past its TTL, CDR lost (`limiter_release_by_call.rs`, the reclaim-and-reap
+  cell, covers the release).
+- **A rejoin this node has not seen yet.** A node that rejoins under a departed
+  ordinal and reclaims a call before the copy's node sees it in the membership set:
+  the copy still reads the primary departed and discharges the call, and its delete
+  reaches the rejoined node's store but not the live copy it reclaimed, which writes
+  a second CDR when it ends. The window is the membership lag between the two nodes.

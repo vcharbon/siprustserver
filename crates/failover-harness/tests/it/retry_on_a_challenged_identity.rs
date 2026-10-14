@@ -12,8 +12,8 @@
 //!                                 its body is stored and replicated
 //!   primary crashes               the proxy routes in-dialog traffic to the backup
 //!   alice re-INVITE → 200 → ACK   served by the backup's takeover copy
-//!   alice BYE                     served by the backup, deferred terminal
-//!   primary reboots               reclaims the deferred terminal: one CDR per call
+//!   alice BYE                     served by the backup, which discharges it
+//!   primary reboots               nothing left to reclaim: one CDR per call
 //! ```
 //!
 //! Timing is the axis ([`Retry`]): the retry either reaches the primary after
@@ -203,7 +203,7 @@ async fn a_retry_on_a_challenged_identity(name: &str, retry: Retry) {
     let taken = backup.live_call(&call_ref).expect("the backup serves the taken-over retry");
     assert_eq!(taken.incarnation(), served.incarnation(), "the takeover copy is the retry");
 
-    // ── the call ends on the backup; the rebooted primary discharges it ─────
+    // ── the call ends on the backup, which discharges it; the primary reboots ──
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_secs(60)).await;
     reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await;

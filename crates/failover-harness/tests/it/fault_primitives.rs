@@ -695,8 +695,8 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
 /// **A crash stops every frame and datagram from the node.** After `crash()`
 /// no frame is sent from any address the node owned and no datagram leaves
 /// its SIP address; it serves nothing; the peer sees the node's stream close.
-/// The caller's BYE fails over to the survivor, the node reboots and reclaims
-/// the deferred terminal, and the call ends with one CDR.
+/// The caller's BYE fails over to the survivor, which discharges the call of
+/// the departed node; the node reboots, and the call ends with one CDR.
 #[tokio::test(start_paused = true)]
 async fn crash_stops_every_frame_and_datagram_from_the_node() {
     let name = "fault-crash-stops-everything";
@@ -762,7 +762,7 @@ async fn crash_stops_every_frame_and_datagram_from_the_node() {
         "the survivor saw the dead node's stream close",
     );
 
-    // ── reboot and reclaim: the deferred terminal is discharged once ─────────
+    // ── reboot: the ended call is discharged once ───────────────────────────
     fh.advance(Duration::from_secs(30)).await;
     reboot_and_ready(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     let reboot_seq = last_marker_seq(&fh);

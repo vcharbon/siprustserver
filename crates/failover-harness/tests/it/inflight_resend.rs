@@ -309,8 +309,8 @@ pub(crate) fn round_invites_sent_to(fh: &FailoverHarness, to: SocketAddr, offer:
 }
 
 /// Reboot the crashed primary empty at a higher gen + new pod IP, re-learn its
-/// address, and let its go-active reclaim discharge the terminal the survivor
-/// deferred (ADR-0020 X3).
+/// address, and let its go-active reclaim run: it discharges a terminal the
+/// survivor deferred to it (ADR-0020 X3).
 pub(crate) async fn reboot_and_reclaim(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,

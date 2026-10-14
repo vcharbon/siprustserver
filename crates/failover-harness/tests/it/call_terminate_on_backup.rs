@@ -268,6 +268,15 @@ pub(crate) fn crash_primary(
     backup.simulate_peer_removed(primary_ord);
 }
 
+/// Crash the primary's process with its endpoint kept in the survivor's
+/// membership (a container restart in place): the backup has no departure to
+/// act on, so a call it ends waits for the primary to discharge it
+/// (ADR-0020 X3).
+fn crash_primary_in_place(primary: &mut ReplicatedB2buaSut, primary_ord: &str, proxy: &ProxySut) {
+    primary.crash();
+    proxy.set_health(primary_ord, WorkerHealth::Dead);
+}
+
 // =============================================================================
 // C1 — control: BYE handled by the primary, no fault. Expected GREEN today.
 // =============================================================================
@@ -430,11 +439,8 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
     } = establish("cterm-c4-bye-backup-crashed-staydead").await;
 
     accept_takeover_cseq_overlap(&mut fh);
-    {
-        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
-            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-        crash_primary(primary, backup, &primary_ord, &proxy);
-    }
+    let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -487,11 +493,8 @@ async fn c5_bye_on_backup__primary_crashed__peer_silent__stay_dead() {
     } = establish("cterm-c5-bye-backup-crashed-silent-staydead").await;
 
     accept_takeover_cseq_overlap(&mut fh);
-    {
-        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
-            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-        crash_primary(primary, backup, &primary_ord, &proxy);
-    }
+    let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
 
     let _bye = dialog.bye().await;
@@ -543,11 +546,8 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
     } = establish("cterm-c6-bye-backup-crashed-reboot").await;
 
     accept_takeover_cseq_overlap(&mut fh);
-    {
-        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
-            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-        crash_primary(primary, backup, &primary_ord, &proxy);
-    }
+    let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -631,11 +631,8 @@ async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
     } = establish("cterm-c7-bye-backup-silent-reboot").await;
 
     accept_takeover_cseq_overlap(&mut fh);
-    {
-        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
-            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-        crash_primary(primary, backup, &primary_ord, &proxy);
-    }
+    let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
 
     let _bye = dialog.bye().await;

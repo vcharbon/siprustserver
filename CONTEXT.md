@@ -484,6 +484,8 @@ the txn layer emits `CallQuiesced` and the backup **self-releases**: it
 **Local-only** — no delete propagates; the `bak:` replica + reverse-flushed deltas
 survive, so the call lives on at its reclaiming primary. There is **no** watermark
 handshake and **no** time-based settle; correctness rests on `(p,b)` causality.
+A copy that ends a call whose primary has **departed** does not defer: it
+discharges the call itself — CDR, limiter release, delete (ADR-0047 D8).
 _Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backup".
 
 **Stand-down** (ADR-0047 D7, `router::stand_down`): a takeover copy released on a
@@ -846,7 +848,9 @@ the replication event is the peer **departing** (parked).
 The proxy registry's memory of an address that left the set: resolvable by
 `lookup_by_address` as its last ordinal with health `Dead` for Timer H, keyed by
 address, so a response still arriving from it reverse-fails to the cookie's
-backup; a join at the address clears it. Never affects ordinal resolution.
+backup; a join at the address clears it. Never affects ordinal resolution. A
+dialog-creating request from a tombstoned address is Record-Routed with a cookie
+naming that ordinal and an alive backup (ADR-0031 D4).
 
 ## Call admission set vocabulary
 

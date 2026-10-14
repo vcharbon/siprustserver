@@ -338,6 +338,7 @@ impl B2buaCore {
             // contributed kind registers here via `.with(...)` (ADR-0020 X7).
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
+            departed: supervisor.as_ref().map(crate::repl::departed_probe),
             overload: overload.clone(),
             capacity: capacity.clone(),
             refusals: refusals.clone(),
@@ -346,8 +347,7 @@ impl B2buaCore {
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             late_pracks: Default::default(),
             reentry_tx,
-            // Arc-share the injected port into every per-call `ctx.clone()`,
-            // exactly like `decision`/`limiter`.
+            // Arc-shared into every per-call `ctx.clone()`, like `decision`.
             adaptation_http: adaptation_http.map(Arc::new),
         });
 

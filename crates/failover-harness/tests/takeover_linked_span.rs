@@ -8,11 +8,12 @@
 //! fails here.
 //!
 //! The scenario is a complete callflow: alice ⇄ b2bua ⇄ bob established through
-//! the proxy over a genuine limiter hold, the primary crashes, alice's BYE fails
-//! over to the backup, and the cluster settles to no-trace-anywhere. StayDead
-//! (Model Y, ADR-0020 X3): the crashed primary is the sole CDR authority, so this
-//! call's CDR is the accepted loss and the backup's lossy cleanup is what
-//! releases the limiter and frees the replica.
+//! the proxy over a genuine limiter hold, the primary crashes in place (its
+//! endpoint kept in the backup's membership), alice's BYE fails over to the
+//! backup, and the cluster settles to no-trace-anywhere. StayDead (Model Y,
+//! ADR-0020 X3): the crashed primary is the CDR authority of a call it has not
+//! departed from, so this call's CDR is the accepted loss and the backup's lossy
+//! cleanup is what releases the limiter and frees the replica.
 //!
 //! The trace registry is process-wide (one root span per call per process), so
 //! this file holds exactly ONE test and installs its own gate. It is a test OF
@@ -191,7 +192,6 @@ async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
             if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
         primary.crash();
         proxy.set_health(&primary_ord, WorkerHealth::Dead);
-        backup.simulate_peer_removed(&primary_ord);
         backup.metrics().repl_takeover_hydrated_total()
     };
     fh.advance(Duration::from_millis(300)).await;
