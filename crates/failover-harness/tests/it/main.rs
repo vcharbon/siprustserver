@@ -45,6 +45,7 @@ mod reinvite_2xx_acked_through_the_primary;
 mod reinvite_answer_failover;
 mod reinvite_round_gives_up_after_takeover;
 mod reinvite_round_not_yet_replicated;
+mod reinvite_server_side_at_the_takeover;
 mod reject_final_loss_via_lb;
 mod relay_the_primary_never_read;
 mod released_copy;

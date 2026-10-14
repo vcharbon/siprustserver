@@ -5,7 +5,7 @@ use call::{
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
-use sip_message::header::Uri;
+use sip_message::header::{self, Uri};
 
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
@@ -182,14 +182,28 @@ fn confirmed(leg: &mut Leg) -> &mut Dialog {
     leg.dialogs.confirmed_mut().expect("the confirmed dialog")
 }
 
-fn server_branches(seeds: &[TxnSeed]) -> Vec<(String, bool)> {
+/// The branches of the server seeds still awaiting their final.
+fn server_branches(seeds: &[TxnSeed]) -> Vec<String> {
     seeds
         .iter()
         .filter_map(|s| match s {
-            TxnSeed::ServerInvite { branch, original_request, .. } => {
-                Some((branch.clone(), original_request.is_some()))
+            TxnSeed::ServerInvite { request, .. } => {
+                Some(request.top_via().branch().unwrap_or_default().to_string())
             }
-            TxnSeed::ClientInvite { .. } => None,
+            _ => None,
+        })
+        .collect()
+}
+
+/// The branches of the server seeds Accepted on a retained 2xx.
+fn accepted_branches(seeds: &[TxnSeed]) -> Vec<String> {
+    seeds
+        .iter()
+        .filter_map(|s| match s {
+            TxnSeed::ServerAccepted { response, .. } => {
+                Some(response.top_via().branch().unwrap_or_default().to_string())
+            }
+            _ => None,
         })
         .collect()
 }
@@ -198,10 +212,13 @@ fn server_branches(seeds: &[TxnSeed]) -> Vec<(String, bool)> {
 /// From-tag, To-tag, leg.
 fn server_identity(seed: &TxnSeed) -> Option<(&str, &str, Option<&str>, Option<&str>)> {
     match seed {
-        TxnSeed::ServerInvite { call_id, from_tag, to_tag, leg_id, .. } => {
-            Some((call_id.as_str(), from_tag.as_str(), to_tag.as_deref(), leg_id.as_deref()))
-        }
-        TxnSeed::ClientInvite { .. } => None,
+        TxnSeed::ServerInvite { request, to_tag, leg_id } => Some((
+            request.call_id().as_str(),
+            request.from().tag().unwrap_or_default(),
+            to_tag.as_deref(),
+            leg_id.as_deref(),
+        )),
+        _ => None,
     }
 }
 
@@ -212,7 +229,7 @@ fn client_branches(seeds: &[TxnSeed]) -> Vec<String> {
             TxnSeed::ClientInvite { invite, .. } => {
                 Some(invite.top_via().branch().unwrap_or_default().to_string())
             }
-            TxnSeed::ServerInvite { .. } => None,
+            _ => None,
         })
         .collect()
 }
@@ -232,7 +249,7 @@ fn a_ringing_call_seeds_the_a_leg_server_invite_and_the_b_leg_client_invite_once
     assert!(!names_server_branch(&call, B_BRANCH));
     let seeds = seeds_for(&call);
     assert_eq!(seeds.len(), 2, "{seeds:?}");
-    assert_eq!(server_branches(&seeds), vec![(A_BRANCH.to_string(), true)]);
+    assert_eq!(server_branches(&seeds), vec![A_BRANCH.to_string()]);
     assert_eq!(client_branches(&seeds), vec![B_BRANCH.to_string()]);
     assert_eq!(
         server_identity(&seeds[0]),
@@ -266,17 +283,40 @@ fn an_established_call_seeds_nothing() {
 }
 
 /// A relayed re-INVITE in flight seeds both halves of the round: the
-/// caller's INVITE as a bare server seed on the proxy's branch, and the
-/// re-INVITE toward the callee as a client seed.
+/// caller's INVITE as a server seed on the proxy's branch, rebuilt from the
+/// snapshot as far as a response reads it, and the re-INVITE toward the
+/// callee as a client seed.
 #[test]
 fn a_relayed_reinvite_in_flight_seeds_both_halves_of_the_round() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
     confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
     confirmed(&mut leg).ack_branch = None;
-    confirmed(&mut leg).inbound_pending_requests.push(relayed_reinvite(2, false));
+    let mut pending = relayed_reinvite(2, false);
+    pending.inbound_cseq = 7;
+    pending.source_timestamp = Some("54.2".into());
+    confirmed(&mut leg).inbound_pending_requests.push(pending);
     let call = call_with(LegState::Confirmed, leg);
     let seeds = seeds_for(&call);
-    assert_eq!(server_branches(&seeds), vec![(RELAYED_BRANCH.to_string(), false)]);
+    assert_eq!(server_branches(&seeds), vec![RELAYED_BRANCH.to_string()]);
+    let request = seeds
+        .iter()
+        .find_map(|s| match s {
+            TxnSeed::ServerInvite { request, .. } => Some(request),
+            _ => None,
+        })
+        .expect("the server seed");
+    assert_eq!(request.method(), "INVITE");
+    assert_eq!(request.cseq().seq(), 7, "the originator's own CSeq");
+    assert_eq!(
+        request.raw(header::HeaderName::Via).collect::<Vec<_>>(),
+        [
+            format!("SIP/2.0/UDP 10.0.0.5:5080;branch={RELAYED_BRANCH}"),
+            format!("SIP/2.0/UDP 10.0.0.1:5060;branch={A_BRANCH}-2"),
+        ],
+        "the Via stack it arrived with, in order"
+    );
+    assert_eq!(request.raw(header::HeaderName::Timestamp).collect::<Vec<_>>(), ["54.2"]);
+    assert_eq!(request.request_uri().to_string(), "sip:bob@10.0.0.9", "the To URI");
     assert_eq!(client_branches(&seeds), vec![REINVITE_BRANCH.to_string()]);
     let server = seeds.iter().find_map(server_identity);
     assert_eq!(
@@ -345,8 +385,50 @@ fn an_unreadable_handle_is_skipped() {
     handle.original_invite = b"garbage".to_vec();
     let call = call_with(LegState::Early, b_leg(LegState::Trying, Some(handle)));
     let seeds = seeds_for(&call);
-    assert_eq!(server_branches(&seeds), vec![(A_BRANCH.to_string(), true)]);
+    assert_eq!(server_branches(&seeds), vec![A_BRANCH.to_string()]);
     assert!(client_branches(&seeds).is_empty());
+}
+
+/// A 2xx `leg`'s confirmed dialog retains for a re-INVITE whose top Via
+/// carries `branch`.
+fn retain_reinvite_2xx(leg: &mut Leg, branch: &str) {
+    let ok = format!(
+        "SIP/2.0 200 OK\r\n\
+         Via: SIP/2.0/UDP 10.0.0.5:5080;branch={branch}\r\n\
+         From: <sip:bob@10.0.0.2>;tag=btag\r\n\
+         To: <sip:svc@10.0.0.9>;tag=svc\r\n\
+         Call-ID: bcid@x\r\n\
+         CSeq: 4 INVITE\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let (emission, _) = call::RetainedEmission::paced(
+        ok.into_bytes(),
+        ("10.0.0.5".into(), 5080),
+        sip_retransmit::Class::Final2xx,
+        call::Repeated::response("INVITE", 200),
+    );
+    confirmed(leg).pending_reinvite_2xx =
+        Some(Unacked2xx { dialog_tag: "svc".into(), cseq: 4, emission });
+}
+
+/// A re-INVITE whose 2xx the dialog retains awaiting its ACK seeds an
+/// Accepted server INVITE on the 2xx's branch, attributed to the dialog's
+/// leg; that branch is a server seed an in-dialog INVITE can be a copy of,
+/// and the call has no INVITE in flight.
+#[test]
+fn a_retained_reinvite_2xx_seeds_an_accepted_server_invite() {
+    let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
+    retain_reinvite_2xx(&mut leg, RELAYED_BRANCH);
+    let call = call_with(LegState::Confirmed, leg);
+    let seeds = seeds_for(&call);
+    assert_eq!(accepted_branches(&seeds), vec![RELAYED_BRANCH.to_string()], "{seeds:?}");
+    let leg_id = seeds.iter().find_map(|s| match s {
+        TxnSeed::ServerAccepted { leg_id, .. } => leg_id.as_deref(),
+        _ => None,
+    });
+    assert_eq!(leg_id, Some("b-1"), "the originator's leg holds the dialog");
+    assert!(names_server_branch(&call, RELAYED_BRANCH), "a copy of its INVITE is re-offered");
+    assert!(!super::super::has_invite_in_flight(&call), "an answered round awaits only its ACK");
 }
 
 /// The b-leg client seed's `provisional` flag and the `Reason` lines of the
@@ -362,7 +444,7 @@ fn client_cancel(seeds: &[TxnSeed]) -> (bool, Option<Vec<String>>) {
                     c.raw(header::HeaderName::Reason).map(str::to_string).collect()
                 }),
             )),
-            TxnSeed::ServerInvite { .. } => None,
+            _ => None,
         })
         .expect("a client seed")
 }

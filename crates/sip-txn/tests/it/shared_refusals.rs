@@ -128,13 +128,9 @@ async fn a_seeded_server_invite_is_held() {
         .seed(
             "call-1",
             vec![TxnSeed::ServerInvite {
-                branch: "z9hG4bK-shared".into(),
-                sent_by: peer_sent_by(),
-                call_id: "shared@unit".into(),
-                from_tag: "caller-tag".into(),
+                request: invite(),
                 to_tag: Some("uas-early".into()),
                 leg_id: Some("a".into()),
-                original_request: Some(invite()),
             }],
         )
         .await
@@ -156,13 +152,9 @@ async fn a_seed_clears_a_refusal_of_its_invite() {
         .seed(
             "call-1",
             vec![TxnSeed::ServerInvite {
-                branch: "z9hG4bK-shared".into(),
-                sent_by: peer_sent_by(),
-                call_id: "shared@unit".into(),
-                from_tag: "caller-tag".into(),
+                request: invite(),
                 to_tag: Some("uas-early".into()),
                 leg_id: Some("a".into()),
-                original_request: Some(invite()),
             }],
         )
         .await

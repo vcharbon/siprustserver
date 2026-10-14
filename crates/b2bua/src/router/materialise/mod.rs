@@ -29,9 +29,10 @@
 //!    send instant and arms the ring deadline of an unanswered leg with no ring
 //!    on record from its INVITE;
 //! 5. the residency insert through the store, then `timers.restore`;
-//! 6. **seed** — the in-flight INVITE transactions the record names
-//!    ([`seeds::seeds_for`]) are rebuilt in the transaction layer, on every
-//!    origin, so the layer owns their ACKs and their Timer D / G;
+//! 6. **seed** — the in-flight INVITE transactions the record names, and the
+//!    answered ones whose 2xx it retains ([`seeds::seeds_for`]), are rebuilt
+//!    in the transaction layer, on every origin, so the layer owns their ACKs,
+//!    their Timer D / G / L and the copies of their requests;
 //! 7. takeover only: `mark_takeover` + `watch_self_release`, so the copy is
 //!    shed once the transactions it serves — the seeds among them — clear
 //!    (ADR-0014); the watch is armed after the seeds so it cannot fire on a
@@ -50,6 +51,7 @@
 //! mark and no watch. A call never imported into `pri:{self}` (its only copy is
 //! the peer's `bak:{self}`) is a genuine miss here.
 
+mod relayed_invite;
 mod seeds;
 pub(in crate::router) use seeds::relayed_server_key;
 #[cfg(test)]
@@ -210,8 +212,9 @@ pub(super) async fn materialise(
 /// a seeded client INVITE ACKs the final it was waiting for, a seeded server
 /// INVITE answers the CANCEL 200 + 487. An in-dialog INVITE is re-offered only
 /// when the record names its branch as a relayed INVITE a peer already admitted
-/// ([`seeds::names_server_branch`]: a retransmission the layer's own
-/// transaction absorbs, so the rules never mint a second relay for the round);
+/// or an INVITE whose 2xx it retains ([`seeds::names_server_branch`]: a
+/// retransmission the layer's own transaction absorbs, so the rules never mint
+/// a second relay for the round nor refuse its copy as glare);
 /// any other request, a response a transaction here already took, and any
 /// non-SIP event are the turn's to process. `Matched`: the layer re-emitted
 /// whatever it owes, so this turn ends without running the rules; `Unmatched`
@@ -239,9 +242,10 @@ pub(super) async fn reoffer_trigger(
 }
 
 /// Whether `call` names an INVITE transaction in flight — one a
-/// materialisation would seed ([`seeds::seeds_for`]).
+/// materialisation would seed ([`seeds::seeds_for`]) that awaits its final.
+/// An answered INVITE awaiting only its ACK is not in flight.
 pub(super) fn has_invite_in_flight(call: &Call) -> bool {
-    !seeds::seeds_for(call).is_empty()
+    seeds::seeds_for(call).iter().any(|s| !matches!(s, sip_txn::TxnSeed::ServerAccepted { .. }))
 }
 
 /// The typed miss of the store read, named from the origin's side.

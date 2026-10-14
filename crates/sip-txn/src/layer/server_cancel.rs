@@ -43,14 +43,11 @@ impl Owner {
         // the scan, still on the sent-by, for a peer that didn't preserve the
         // branch).
         let cancel_via = req.top_via();
-        // A CANCEL target holds the INVITE it answers 487 for: a seed rebuilt
-        // without its request absorbs the INVITE's retransmissions only.
         let is_cancel_target = |t: &Transaction| {
             t.kind == TxnKind::Invite
                 && t.call_id == call_id.as_str()
                 && t.from_tag == from_tag
                 && t.state.is_active()
-                && t.original_request.is_some()
         };
         let matched = self.cancelled_invite(cancel_via, is_cancel_target);
 

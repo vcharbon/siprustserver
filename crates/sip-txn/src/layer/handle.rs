@@ -297,10 +297,11 @@ impl TransactionLayer {
     }
 
     /// Rebuild the in-flight INVITE transactions a call materialised from a
-    /// replica names (ADR-0014), each as a `Proceeding` transaction attributed
-    /// to `call_ref` — see [`TxnSeed`] for what each seed becomes. Returns how
-    /// many went in; a seed whose identity already holds a transaction of its
-    /// role is skipped and counted (`txn_seed_skipped`), never displaced.
+    /// replica names (ADR-0014), each attributed to `call_ref` — see
+    /// [`TxnSeed`] for what each seed becomes. Returns how many went in; a
+    /// seed whose identity already holds a transaction of its role is skipped
+    /// and counted (`txn_seed_skipped`), never displaced, save an occupant
+    /// with no final, which takes an Accepted seed's 2xx.
     pub async fn seed(
         &self,
         call_ref: &str,

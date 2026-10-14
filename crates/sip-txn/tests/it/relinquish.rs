@@ -22,13 +22,9 @@ fn seeds(client: &str, server: &str) -> Vec<TxnSeed> {
             cancel: None,
         },
         TxnSeed::ServerInvite {
-            branch: server.to_string(),
-            sent_by: peer_sent_by(),
-            call_id: CALL_ID.to_string(),
-            from_tag: "caller-tag".to_string(),
+            request: request_of(&inbound_request("INVITE", server, CALL_ID, None)),
             to_tag: Some("early-tag".to_string()),
             leg_id: Some("a".to_string()),
-            original_request: Some(request_of(&inbound_request("INVITE", server, CALL_ID, None))),
         },
     ]
 }

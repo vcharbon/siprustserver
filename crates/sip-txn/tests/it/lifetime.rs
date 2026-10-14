@@ -50,20 +50,21 @@ async fn an_unanswered_non_invite_server_transaction_leaves_at_its_backstop() {
     assert_eq!(stack.txn.metrics().sweep_reaped(), 0, "by its own timer");
 }
 
-/// A server INVITE seeded 3 s after the layer started, holding no request to
-/// answer a CANCEL with, and never answered: its backstop runs from the seed.
+/// A server INVITE seeded 3 s after the layer started and never answered:
+/// its backstop runs from the seed.
 #[tokio::test(start_paused = true)]
 async fn a_seeded_server_invite_leaves_at_its_backstop_measured_from_the_seed() {
     let stack = stack().await;
     elapse_ms(3_000).await;
     let seed = TxnSeed::ServerInvite {
-        branch: "z9hG4bK-seeded-unanswered".to_string(),
-        sent_by: peer_sent_by(),
-        call_id: "seeded-unanswered".to_string(),
-        from_tag: "caller-tag".to_string(),
+        request: request_of(&inbound_request(
+            "INVITE",
+            "z9hG4bK-seeded-unanswered",
+            "seeded-unanswered",
+            None,
+        )),
         to_tag: None,
         leg_id: None,
-        original_request: None,
     };
     assert_eq!(stack.txn.seed("w0|seeded-unanswered|atag", vec![seed]).await.unwrap(), 1);
 

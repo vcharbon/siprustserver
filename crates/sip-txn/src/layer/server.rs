@@ -407,9 +407,7 @@ impl Owner {
     /// sent no final with `status` `reason`, through the transaction: under
     /// the To-tag it names, to the address the request came from (or, for a
     /// re-INVITE seeded at a takeover, which recorded none, the top Via's
-    /// response target). A seed holding no request cannot be answered and is
-    /// left to its backstop.
-    /// Counted; returns how many.
+    /// response target). Counted; returns how many.
     pub(super) async fn answer_unanswered_invites_of_call(
         &mut self,
         endpoint: &dyn UdpEndpoint,
