@@ -12,9 +12,15 @@
 import { type Model, Refusals } from "@sip/store"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
+import type * as Path from "effect/Path"
+import { stemOf } from "../paths.js"
 
 /** What the generator records beside the cases when it refuses some of them. */
 export const EXCLUDED = "excluded.json"
+
+/** Where the cut leaves what it refused of `capture` under the session tree. */
+export const excludedFile = (path: Path.Path, sessions: string, capture: string): string =>
+  path.join(sessions, stemOf(capture), capture, EXCLUDED)
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -59,3 +65,7 @@ export const readRefusals = Effect.fn("Excluded.readRefusals")(function*(file: s
   )
   return refusalsOf(records)
 })
+
+/** The distinct reasons the file refused calls under, in file order; none where it holds no record. */
+export const readReasons = (file: string) =>
+  Effect.map(readRefusals(file), (refusals) => [...new Set(refusals.flatMap((refusal) => refusal.reasons))])

@@ -10,7 +10,7 @@
  *   jobs [--limit N]             # the jobs, newest first
  *   runs <selector>              # the runs a selector names, newest first
  *   compare <before> <after>     # what moved; a bare integer is a sweep here
- *   where <capture> [--prep N]   # every artifact of one capture
+ *   where <capture> [--prep N] [--cases]  # every artifact of one capture
  *   case-doc <capture> <case> | <case id> [--prep N] [--print path|flow|ledger]
  *   delta --lane L [--against L]  # green there, red here
  *   rulehits [--limit N]         # count the rule hits of runs never measured
@@ -21,58 +21,24 @@
  *
  * A deployment adds verbs of its own beside these (`command`'s `extra`).
  *
- * Seed and rebuild read nothing but the bundles: every fact the store holds
- * about a run is already in that run's own output, so a lost database costs a
- * command, not evidence. Seed is idempotent by bundle path — re-running it
- * imports only what arrived since.
- *
- * `calls-backfill` fills what the per-call queue reads and older rows lack:
- * for every run the queue reads (of the lane, or of every lane) whose failing
- * rows carry no main error and whose bundle survives, the error columns are
- * re-measured off the bundle — the verdict is never rewritten — and for every
- * capture whose standing cut did not break, the cut's `excluded.json` under
- * the session tree is read into its refusal rows, replacing what stood. A run
- * whose bundle is gone stays unmeasured: a measure nobody took is not a zero;
- * a cut with no record on disk keeps its rows.
- *
- * Import goes capture by capture in run order, because recency IS id order:
- * the latest run of a capture is its highest id. That is why an import never
- * keeps the id a directory name claims — `run11` importing before some other
- * capture's `run3` would make the older run look like the newer one.
- * `bundle_path` stays authoritative for finding the evidence.
+ * The verbs are wiring: what seed and rebuild import is `@sip/corpus`
+ * `BundleImport`, what the backfills measure is `Backfill`, what `where`
+ * reads is `Where`.
  */
-import { CellHost } from "@sip/corpus"
-import * as Content from "@sip/corpus/content/content"
-import { EXCLUDED, readRefusals } from "@sip/corpus/cut/excluded"
+import { excludedFile, readReasons } from "@sip/corpus/cut/excluded"
+import * as Backfill from "@sip/corpus/housekeeping/backfill"
+import * as BundleImport from "@sip/corpus/housekeeping/bundle-import"
 import * as PrepClose from "@sip/corpus/housekeeping/prep-close"
 import * as SweepClose from "@sip/corpus/housekeeping/sweep-close"
 import { listLine as jobLine } from "@sip/corpus/jobs/job-lines"
-import { type Paths, prepDir, stemOf } from "@sip/corpus/paths"
-import { countBundle } from "@sip/corpus/replay/rule-hits"
+import type { Paths } from "@sip/corpus/paths"
 import * as CaseDoc from "@sip/corpus/report/case-doc"
+import * as Where from "@sip/corpus/report/where"
 import { read as readOverlay } from "@sip/corpus/triage-overlay"
 import { captures as universeOf } from "@sip/corpus/universe"
-import {
-  Bundle,
-  Cuts,
-  Delta,
-  Jobs,
-  Measure,
-  Model,
-  Pins,
-  Queue,
-  Refusals,
-  Resolver,
-  RuleHits,
-  Runs,
-  RunSets,
-  StoreBinding,
-  Sweeps
-} from "@sip/store"
-import * as Cause from "effect/Cause"
+import { Delta, Jobs, Model, Pins, Queue, Runs, RunSets, StoreBinding, Sweeps } from "@sip/store"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
-import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Path from "effect/Path"
 import { Argument, Command, Flag } from "effect/unstable/cli"
@@ -88,137 +54,28 @@ const limitFlag = Flag.integer("limit").pipe(
   Flag.withDefault(20)
 )
 
-interface BundleOnDisk {
-  readonly capture: string
-  readonly dir: string
-}
-
-/** The entries of `dir`, none where it does not read. */
-const entriesOf = (fs: FileSystem.FileSystem, dir: string) =>
-  fs.readDirectory(dir).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []))
-
-/** The capture a bundle belongs to: its own case ids say so; the session dir is the fallback. */
-const captureOf = Effect.fn("Store.captureOf")(function*(
-  sessionDir: string,
-  stem: string,
-  caseIds: ReadonlyArray<string>
-) {
-  const { caseId } = Resolver.caseShapes((yield* StoreBinding.Service).grammar)
-  for (const id of caseIds) {
-    const cut = caseId.exec(id)
-    if (cut !== null) return cut[1]!
-  }
-  const fs = yield* FileSystem.FileSystem
-  const listed = (yield* entriesOf(fs, sessionDir)).find((entry) =>
-    entry.startsWith(stem) && entry !== stem && !/^run\d+$/.test(entry)
-  )
-  return listed ?? `${stem}.pcap.gz`
-})
-
-/** Every run bundle under the session tree, capture by capture in run order. */
-const listBundles = Effect.fn("Store.listBundles")(function*(sessions: string) {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const out: Array<BundleOnDisk> = []
-  for (const stem of [...(yield* entriesOf(fs, sessions))].sort()) {
-    const sessionDir = path.join(sessions, stem)
-    const info = yield* fs.stat(sessionDir).pipe(Effect.option)
-    if (Option.isNone(info) || info.value.type !== "Directory") continue
-    const runs = (yield* entriesOf(fs, sessionDir))
-      .map((entry) => ({ entry, n: /^run(\d+)$/.exec(entry)?.[1] }))
-      .filter((r): r is { entry: string; n: string } => r.n !== undefined)
-      .sort((a, b) => Number(a.n) - Number(b.n))
-    for (const { entry } of runs) out.push({ capture: stem, dir: path.join(sessionDir, entry) })
-  }
-  return out as ReadonlyArray<BundleOnDisk>
-})
-
-/** A bundle's own timestamps: its `campaign.json` states when it started, the tree when it ended. */
-const timestamps = Effect.fn("Store.timestamps")(function*(dir: string) {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const rollup = yield* fs.readFileString(path.join(dir, "campaign.json")).pipe(
-    Effect.map((text) => JSON.parse(text) as { ts?: unknown }),
-    Effect.orElseSucceed(() => ({}) as { ts?: unknown })
-  )
-  const info = yield* fs.stat(dir).pipe(Effect.option)
-  const mtime = Option.isSome(info) ? Option.getOrUndefined(info.value.mtime) : undefined
-  return {
-    started: typeof rollup.ts === "string" ? rollup.ts : undefined,
-    finished: mtime?.toISOString()
-  }
-})
-
+/** All bundles no row records yet, imported, and what the import found said. */
 const ingest = Effect.fn("Store.ingest")(function*(paths: Paths, lane: string) {
-  const runs = yield* Runs.Service
-  const host = yield* CellHost.Service
-  const path = yield* Path.Path
-  const known = new Set((yield* runs.allBundles).map((row) => row.bundlePath))
-  const bundles = yield* listBundles(paths.sessions)
-  let imported = 0
-  let skipped = 0
-  for (const bundle of bundles) {
-    if (known.has(bundle.dir)) {
-      skipped += 1
-      continue
-    }
-    const reading = yield* Bundle.read(bundle.dir, { charges: host.charges })
-    const capture = yield* captureOf(
-      path.dirname(bundle.dir),
-      bundle.capture,
-      reading.cases.map((entry) => entry.caseId)
-    )
-    const when = yield* timestamps(bundle.dir)
-    yield* runs.importRun({
-      capture,
-      lane: reading.lane ?? lane,
-      mode: reading.mode ?? "record",
-      status: reading.status,
-      bundlePath: bundle.dir,
-      ...(when.started === undefined ? {} : { startedAt: when.started }),
-      ...(when.finished === undefined ? {} : { finishedAt: when.finished }),
-      cases: reading.cases
-    })
-    imported += 1
-    if (imported % 100 === 0) yield* Console.log(`[store] imported ${imported}…`)
-  }
+  const done = yield* BundleImport.importBundles(paths.sessions, lane)
   yield* Console.log(
-    `[store] ${bundles.length} bundle(s) on disk: imported=${imported} already-recorded=${skipped}`
+    `[store] ${done.onDisk} bundle(s) on disk: imported=${done.imported} already-recorded=${done.alreadyRecorded}`
   )
-  return imported
 })
-
-/** Where the cut leaves what it refused of one capture. */
-const excludedOf = (path: Path.Path, paths: Paths, capture: string): string =>
-  path.join(paths.sessions, stemOf(capture), capture, EXCLUDED)
 
 /**
- * The distinct reason tokens the cut refused a capture under, in file order —
- * the whole content of a `no-cases` row, so the row prints them the way a
- * `skipped` row prints its lane blocks. Empty where the cut left no record.
+ * The distinct reason tokens the cut refused a capture under — the whole
+ * content of a `no-cases` row, so the row prints them the way a `skipped` row
+ * prints its lane blocks. Empty where the cut left no record.
  */
-const refusedUnder = Effect.fn("Store.refusedUnder")(function*(paths: Paths, capture: string) {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const records = yield* fs.readFileString(excludedOf(path, paths, capture)).pipe(
-    Effect.map((text) => JSON.parse(text) as unknown),
-    Effect.orElseSucceed(() => undefined)
-  )
-  if (!Array.isArray(records)) return [] as ReadonlyArray<string>
-  const reasons = records.flatMap((entry: unknown) => {
-    const reason = typeof entry === "object" && entry !== null
-      ? (entry as Record<string, unknown>)["reason"]
-      : undefined
-    return typeof reason === "string" ? [reason] : []
-  })
-  return [...new Set(reasons)] as ReadonlyArray<string>
-})
+const refusedUnder = (path: Path.Path, paths: Paths, capture: string) =>
+  readReasons(excludedFile(path, paths.sessions, capture))
 
 const refusedLine = (reasons: ReadonlyArray<string>): string =>
   reasons.length === 0 ? "  refused: (no record)" : `  refused: ${reasons.join(", ")}`
 
 const status = Effect.fn("Store.status")(function*(paths: Paths, lane: string, limit: number) {
   const runs = yield* Runs.Service
+  const path = yield* Path.Path
   const standings = yield* runs.standings(lane)
   const { registry, tickets } = yield* readOverlay(paths.registry)
   const captures = yield* universeOf(standings.map((one) => one.capture))
@@ -230,7 +87,7 @@ const status = Effect.fn("Store.status")(function*(paths: Paths, lane: string, l
   for (const key of Queue.QUEUE_ORDER) yield* Console.log(`   ${key.padEnd(22)} ${view.totals[key] ?? 0}`)
   yield* Console.log(`   ${"off-queue records".padEnd(22)} ${view.offQueue.length}`)
   for (const row of view.rows.slice(0, limit)) {
-    const refused = row.status !== "no-cases" ? "" : refusedLine(yield* refusedUnder(paths, row.capture))
+    const refused = row.status !== "no-cases" ? "" : refusedLine(yield* refusedUnder(path, paths, row.capture))
     yield* Console.log(
       `${row.capture}  ${row.status}  run${row.runId} ${row.failed}/${row.cases.length} failed` +
         (row.rfcGating === 0 ? "" : `  rfc: ${row.rfcGating} gating`) +
@@ -241,162 +98,54 @@ const status = Effect.fn("Store.status")(function*(paths: Paths, lane: string, l
   }
 })
 
-/** A materialisation, or the one-line reason the store could not answer it. */
-const orSaid = <R>(effect: Effect.Effect<string, unknown, R>) =>
-  effect.pipe(
-    Effect.catchCause((cause) =>
-      Effect.succeed(`unavailable — ${Cause.pretty(cause).split("\n")[0]}`)
-    )
-  )
-
-const said = (label: string, where: string) => Console.log(`  ${label.padEnd(10)} ${where}`)
-
 /**
- * Every artifact of ONE capture, by absolute path: what it was cut from, what
- * the store holds of that cut, and what each lane's standing run left on disk.
- *
- * The cases and the flows document are MATERIALISED on the way past, because a
- * path into a lazily-filled cache is only an answer once the file is there.
+ * Every artifact of ONE capture (`Where`), one line each; a capture nothing
+ * names is said to be unknown, and the cases are counted unless `cases` lists them.
  */
 const where = Effect.fn("Store.where")(function*(
   facts: CliFacts,
   paths: Paths,
   capture: string,
-  prep: number | undefined
+  options: { readonly prep: number | undefined; readonly cases: boolean }
 ) {
-  const cuts = yield* Cuts.Service
-  const runs = yield* Runs.Service
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
+  const read = yield* Where.read(paths, capture, {
+    prep: options.prep,
+    cases: options.cases,
+    cutCommand: (named) => `${facts.invocation("cut")} ${named}`
+  })
   yield* Console.log(capture)
-  if (stemOf(capture) === capture) {
-    yield* Console.log("  ! a bare stem names no capture — pass the pcap file name, extension and all")
+  if (!read.known) {
+    yield* Console.log(
+      "  ! no capture by this name in the artifact store, the cut store or a run — name it in full, " +
+        "as the corpus directory is named"
+    )
   }
-  yield* said("corpus", path.join(paths.corpus, capture))
-
-  const standing = yield* cuts.standing(capture, prep)
-  if (standing === null) {
-    yield* said(
-      "cut",
-      (prep === undefined ? "none" : `none as of prep${prep}`) +
-        ` — \`${facts.invocation("cut")} ${capture}\` records one`
-    )
-  } else {
-    yield* said(
-      "cut",
-      `prep${standing.prepId}  ${standing.cutAt}  ` +
-        (standing.broke !== null ? `BROKE: ${standing.broke}` : `${standing.cases.length} case(s)`)
-    )
-    yield* said("cut log", prepDir(paths.sessions, standing.prepId))
-    if (standing.flowsHash !== null) {
-      yield* said("flows", yield* orSaid(Content.materialiseFlows(paths.sessions, standing.flowsHash)))
-    }
-    for (const entry of standing.cases) {
-      yield* said("case", yield* orSaid(Content.materialise(paths.sessions, entry.caseHash)))
-    }
-  }
-
-  const excluded = excludedOf(path, paths, capture)
-  if (yield* fs.exists(excluded).pipe(Effect.orElseSucceed(() => false))) yield* said("excluded", excluded)
-
-  for (const lane of yield* runs.lanes) {
-    const run = yield* runs.standing(capture, lane.lane)
-    if (run === null) continue
-    yield* said(
-      `run${run.runId}`,
-      `${run.bundlePath}  ${lane.lane}  ${run.status}  ` +
-        `${run.failed}/${run.cases} failed` +
-        (run.rfcGating === 0 ? "" : `  rfc: ${run.rfcGating} gating`) +
-        (run.lastOkRunId === null ? "  (never green)" : `  last-ok run${run.lastOkRunId}`)
-    )
+  for (const entry of read.entries) yield* Console.log(`  ${entry.label.padEnd(10)} ${entry.text}`)
+  if (!options.cases && read.cases > 0) {
+    yield* Console.log(`  ${"cases".padEnd(10)} ${read.cases} case(s) — --cases lists each case directory`)
   }
 })
 
-/**
- * The per-rule counts of every run whose bundle is STILL ON DISK and was never
- * measured — the history the record cannot have, since it starts the day it
- * lands and retention keeps few bundles.
- *
- * A run whose bundle is gone is skipped and stays unmeasured: marking it read
- * would claim a zero nobody took.
- */
+/** The rule hits of runs never measured, counted, and what was found said. */
 const backfillRuleHits = Effect.fn("Store.backfillRuleHits")(function*(limit: number) {
-  const hits = yield* RuleHits.Service
-  const fs = yield* FileSystem.FileSystem
-  const pending = yield* hits.unmeasured(limit)
-  let measured = 0
-  let gone = 0
-  let cells = 0
-  for (const run of pending) {
-    if (!(yield* fs.exists(run.bundlePath).pipe(Effect.orElseSucceed(() => false)))) {
-      gone += 1
-      continue
-    }
-    const counted = yield* countBundle(run.bundlePath, run.lane)
-    if (counted.cells === 0) {
-      gone += 1
-      continue
-    }
-    yield* hits.record(run.id, counted.hits)
-    measured += 1
-    cells += counted.cells
-  }
+  const done = yield* Backfill.ruleHits(limit)
   yield* Console.log(
-    `[store] rule hits: ${measured} run(s) measured over ${cells} cell(s); ` +
-      `${gone} of ${pending.length} unmeasured run(s) have no readable bundle left`
+    `[store] rule hits: ${done.measured} run(s) measured over ${done.cells} cell(s); ` +
+      `${done.gone} of ${done.pending} unmeasured run(s) have no readable bundle left`
   )
 })
 
-/**
- * The per-call measures the queue reads and the rows recorded before them
- * lack: main errors off the surviving bundles, refusals off the session tree's
- * `excluded.json`. A cut whose file holds no record is left as it is — it may
- * simply have refused nothing — and is asked again next time.
- */
+/** The per-call measures the queue lacks, backfilled, and what was found said. */
 const backfillCalls = Effect.fn("Store.backfillCalls")(function*(paths: Paths, lane: string | undefined) {
-  const measure = yield* Measure.Service
-  const refusals = yield* Refusals.Service
-  const host = yield* CellHost.Service
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-
-  const pending = yield* measure.unmeasured(lane)
-  let measured = 0
-  let gone = 0
-  let rows = 0
-  for (const run of pending) {
-    if (!(yield* fs.exists(path.join(run.bundlePath, "campaign.json")).pipe(Effect.orElseSucceed(() => false)))) {
-      gone += 1
-      continue
-    }
-    const reading = yield* Bundle.read(run.bundlePath, { charges: host.charges })
-    if (reading.cases.length === 0) {
-      gone += 1
-      continue
-    }
-    rows += yield* measure.remeasure(run.id, reading.cases)
-    measured += 1
-    if (measured % 200 === 0) yield* Console.log(`[store] measured ${measured}…`)
-  }
+  const done = yield* Backfill.calls(paths, lane)
   yield* Console.log(
-    `[store] main errors: ${measured} run(s) re-measured over ${rows} case row(s); ` +
-      `${gone} of ${pending.length} unmeasured run(s) have no readable bundle left`
+    `[store] main errors: ${done.errors.measured} run(s) re-measured over ${done.errors.rows} case row(s); ` +
+      `${done.errors.gone} of ${done.errors.pending} unmeasured run(s) have no readable bundle left`
   )
-
-  const standing = yield* refusals.standing
-  let recorded = 0
-  let firstTime = 0
-  let refused = 0
-  for (const cut of standing) {
-    const records = yield* readRefusals(excludedOf(path, paths, cut.capture))
-    if (records.length === 0) continue
-    refused += yield* refusals.record(cut.prepId, cut.capture, records)
-    recorded += 1
-    if (cut.rows === 0) firstTime += 1
-  }
+  const { firstTime, recorded, refused, standing } = done.refusals
   yield* Console.log(
     `[store] refusals: ${recorded} capture(s) recorded (${firstTime} for the first time), ` +
-      `${refused} refused call(s); ${standing.length - recorded} of ${standing.length} standing cut(s) ` +
+      `${refused} refused call(s); ${standing - recorded} of ${standing} standing cut(s) ` +
       "have no record on disk"
   )
 })
@@ -521,16 +270,23 @@ export const verbs = <E, R>(facts: CliFacts, rootPaths: Effect.Effect<Paths, E, 
     "where",
     {
       capture: Argument.string("capture").pipe(
-        Argument.withDescription("A pcap file name, extension and all")
+        Argument.withDescription("The capture, named in full as the corpus directory is")
       ),
       prep: IdFlags.flag("prep", "prep").pipe(
         Flag.withDescription("The cut to read the capture as of"),
         Flag.optional
+      ),
+      cases: Flag.boolean("cases").pipe(
+        Flag.withDescription("List every case directory, materialised, rather than count them"),
+        Flag.withDefault(false)
       )
     },
     (input) =>
       Effect.gen(function*() {
-        yield* where(facts, yield* rootPaths, input.capture, Option.getOrUndefined(input.prep))
+        yield* where(facts, yield* rootPaths, input.capture, {
+          prep: Option.getOrUndefined(input.prep),
+          cases: input.cases
+        })
       })
   ).pipe(Command.withDescription("Every artifact of one capture"))
 
