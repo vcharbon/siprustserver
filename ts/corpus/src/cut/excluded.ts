@@ -12,14 +12,14 @@
 import { type Model, Refusals } from "@sip/store"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
-import type * as Path from "effect/Path"
+import * as path from "node:path"
 import { stemOf } from "../paths.js"
 
 /** What the generator records beside the cases when it refuses some of them. */
 export const EXCLUDED = "excluded.json"
 
 /** Where the cut leaves what it refused of `capture` under the session tree. */
-export const excludedFile = (path: Path.Path, sessions: string, capture: string): string =>
+export const excludedFile = (sessions: string, capture: string): string =>
   path.join(sessions, stemOf(capture), capture, EXCLUDED)
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>

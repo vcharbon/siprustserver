@@ -32,11 +32,18 @@ export const lane = (name: string) =>
  * Why this checkout may not drive the work, or `null`: a sweep wider than
  * the captures named, and any work on a real-clock lane, run only where the
  * deployment's {@link CliFacts.environmentRefusal} lets them. `lane` is the
- * lane the work drives, `undefined` for work that drives none (a cut). A lane
- * the deployment does not state is {@link lane}'s refusal, not this one's.
+ * lane the work drives, `undefined` for work that drives none (a cut). A dry
+ * run writes nothing and is let through anywhere. A lane the deployment does
+ * not state is {@link lane}'s refusal, not this one's.
  */
-export const environment = (facts: CliFacts, lane: string | undefined, universe: Selection["universe"]) =>
+export const environment = (
+  facts: CliFacts,
+  lane: string | undefined,
+  universe: Selection["universe"],
+  dryRun: boolean
+) =>
   Effect.gen(function*() {
+    if (dryRun) return null
     if (universe !== "named") {
       const wide = facts.environmentRefusal(`a --${universe} sweep`)
       if (wide !== null) return wide

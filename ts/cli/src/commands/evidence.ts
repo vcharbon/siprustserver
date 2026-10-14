@@ -62,7 +62,7 @@ type Input = TriageInput & { readonly summary: boolean }
 
 const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input) {
   const asked = yield* optionsOf(input)
-  const away = yield* Refusals.environment(facts, asked.lane, asked.selection.universe)
+  const away = yield* Refusals.environment(facts, asked.lane, asked.selection.universe, asked.dryRun)
   if (away !== null) {
     yield* Console.error(`[evidence] refused: ${away}`)
     return 2

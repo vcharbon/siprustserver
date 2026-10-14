@@ -81,7 +81,7 @@ export const calls = Effect.fn("Backfill.calls")(function*(paths: Paths, lane: s
   let firstTime = 0
   let refused = 0
   for (const cut of standing) {
-    const records = yield* readRefusals(excludedFile(path, paths.sessions, cut.capture))
+    const records = yield* readRefusals(excludedFile(paths.sessions, cut.capture))
     if (records.length === 0) continue
     refused += yield* refusals.record(cut.prepId, cut.capture, records)
     recorded += 1

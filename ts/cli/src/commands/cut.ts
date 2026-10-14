@@ -120,7 +120,7 @@ const staleOf = Effect.fn("Cut.stale")(function*(captures: ReadonlyArray<string>
 })
 
 const work = Effect.fn("Cut.work")(function*(facts: CliFacts, input: Input, options: Options, job: number | undefined) {
-  const away = yield* Refusals.environment(facts, undefined, options.selection.universe)
+  const away = yield* Refusals.environment(facts, undefined, options.selection.universe, options.dryRun)
   if (away !== null) {
     yield* Console.error(`[cut] refused: ${away}`)
     return 2

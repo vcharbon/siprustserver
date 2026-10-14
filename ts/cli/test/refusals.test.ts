@@ -70,8 +70,8 @@ describe("the environment refusal", () => {
   /** A deployment whose checkout is not the one wide or real-clock work runs from. */
   const away = { environmentRefusal: (what: string) => `not here: ${what}` } as CliFacts
   const home = { environmentRefusal: (_what: string) => null as string | null } as CliFacts
-  const ask = (facts: CliFacts, lane: string, universe: "named" | "known" | "all" | "standing") =>
-    Effect.runPromise(Refusals.environment(facts, lane, universe).pipe(Effect.provide(hosting)))
+  const ask = (facts: CliFacts, lane: string, universe: "named" | "known" | "all" | "standing", dryRun = false) =>
+    Effect.runPromise(Refusals.environment(facts, lane, universe, dryRun).pipe(Effect.provide(hosting)))
 
   it("refuses a sweep wider than the captures named, and work on a real-clock lane, away from home", async () => {
     expect(await ask(away, "paused", "all")).toBe("not here: a --all sweep")
@@ -84,6 +84,11 @@ describe("the environment refusal", () => {
     expect(await ask(away, "paused", "named")).toBeNull()
     expect(await ask(away, "pased", "named")).toBeNull()
     expect(await ask(home, "wall", "all")).toBeNull()
+  })
+
+  it("lets a dry run through anywhere: it writes nothing", async () => {
+    expect(await ask(away, "paused", "all", true)).toBeNull()
+    expect(await ask(away, "wall", "named", true)).toBeNull()
   })
 })
 

@@ -87,7 +87,7 @@ export const read = Effect.fn("Where.read")(function*(paths: Paths, capture: str
     }
   }
 
-  const excluded = excludedFile(path, paths.sessions, capture)
+  const excluded = excludedFile(paths.sessions, capture)
   if (yield* exists(excluded)) said("excluded", excluded)
 
   let ran = 0

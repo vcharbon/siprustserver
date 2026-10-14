@@ -273,7 +273,7 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     yield* Console.error(`[replay] refused: ${unstated}`)
     return 2
   }
-  const away = yield* Refusals.environment(facts, options.lane, options.selection.universe)
+  const away = yield* Refusals.environment(facts, options.lane, options.selection.universe, options.dryRun)
   if (away !== null) {
     yield* Console.error(`[replay] refused: ${away}`)
     return 2
@@ -440,7 +440,7 @@ const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Inpu
     return 2
   }
   const stated = yield* optionsOf(input)
-  const away = yield* Refusals.environment(facts, stated.lane, stated.selection.universe)
+  const away = yield* Refusals.environment(facts, stated.lane, stated.selection.universe, stated.dryRun)
   if (away !== null) {
     yield* Console.error(`[replay] refused: ${away}`)
     return 2

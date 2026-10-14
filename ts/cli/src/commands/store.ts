@@ -40,7 +40,6 @@ import { Delta, Jobs, Model, Pins, Queue, Runs, RunSets, StoreBinding, Sweeps } 
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
-import * as Path from "effect/Path"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
 import { laneFlag, pathFlags } from "../flags.js"
@@ -67,15 +66,14 @@ const ingest = Effect.fn("Store.ingest")(function*(paths: Paths, lane: string) {
  * content of a `no-cases` row, so the row prints them the way a `skipped` row
  * prints its lane blocks. Empty where the cut left no record.
  */
-const refusedUnder = (path: Path.Path, paths: Paths, capture: string) =>
-  readReasons(excludedFile(path, paths.sessions, capture))
+const refusedUnder = (paths: Paths, capture: string) =>
+  readReasons(excludedFile(paths.sessions, capture))
 
 const refusedLine = (reasons: ReadonlyArray<string>): string =>
   reasons.length === 0 ? "  refused: (no record)" : `  refused: ${reasons.join(", ")}`
 
 const status = Effect.fn("Store.status")(function*(paths: Paths, lane: string, limit: number) {
   const runs = yield* Runs.Service
-  const path = yield* Path.Path
   const standings = yield* runs.standings(lane)
   const { registry, tickets } = yield* readOverlay(paths.registry)
   const captures = yield* universeOf(standings.map((one) => one.capture))
@@ -87,7 +85,7 @@ const status = Effect.fn("Store.status")(function*(paths: Paths, lane: string, l
   for (const key of Queue.QUEUE_ORDER) yield* Console.log(`   ${key.padEnd(22)} ${view.totals[key] ?? 0}`)
   yield* Console.log(`   ${"off-queue records".padEnd(22)} ${view.offQueue.length}`)
   for (const row of view.rows.slice(0, limit)) {
-    const refused = row.status !== "no-cases" ? "" : refusedLine(yield* refusedUnder(path, paths, row.capture))
+    const refused = row.status !== "no-cases" ? "" : refusedLine(yield* refusedUnder(paths, row.capture))
     yield* Console.log(
       `${row.capture}  ${row.status}  run${row.runId} ${row.failed}/${row.cases.length} failed` +
         (row.rfcGating === 0 ? "" : `  rfc: ${row.rfcGating} gating`) +

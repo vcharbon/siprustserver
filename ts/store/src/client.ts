@@ -75,12 +75,9 @@ export const sqlState = (error: SqlError): string | undefined => {
 export const inUse = (error: SqlError): boolean => sqlState(error) === "55006"
 
 /**
- * `database` gone. This role's own sessions on it are ended first, then the
- * database is dropped WITHOUT `FORCE`: a forced drop ends every backend
- * itself and is refused (42501) by any it may not end — an autovacuum worker
- * runs as the bootstrap superuser — while a plain drop signals autovacuum
- * workers to exit on its own. A drop refused as in use is retried for up to
- * five seconds, while an ended session goes away.
+ * `database` gone: this role's sessions on it ended, then a plain drop (never
+ * `FORCE`, which a superuser-owned autovacuum worker refuses with 42501). A drop
+ * still in use (55006) is retried every 250 ms, failing after at most 5 s.
  */
 export const dropDatabase = (database: string): Effect.Effect<void, SqlError, SqlClient> =>
   Effect.flatMap(SqlClient, (sql) =>
