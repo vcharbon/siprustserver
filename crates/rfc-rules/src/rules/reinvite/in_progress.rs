@@ -33,7 +33,9 @@ use super::{branch_msg, OrderedKey, Origins, TxnKey};
 /// riding one — but it IS tracked: it stays outstanding until its own ACK, is
 /// outstanding on each early dialog a To-tagged 1xx names until its final, and
 /// re-keys onto the dialog id the moment its 2xx names one, so an INVITE on an
-/// early dialog or overtaking that ACK still collides.
+/// early dialog or overtaking that ACK still collides. A 2xx on an early dialog
+/// to a later INVITE the capture never showed sent ends the filing there: the
+/// capture lost that hop's final, and an unseen INVITE charges nothing.
 pub struct NoReInviteWhileInviteInProgress;
 
 impl Obligation for NoReInviteWhileInviteInProgress {
@@ -187,7 +189,29 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     // response — the UAC side of the branch.
                     let uac = msg.dst.as_str();
                     let txn = TxnKey { endpoint: uac, call_id: msg.call_id.as_str(), branch };
-                    let Some(dialog) = dialog_of.get(&txn).copied() else { continue };
+                    let Some(dialog) = dialog_of.get(&txn).copied() else {
+                        // A 2xx to an INVITE this capture never saw sent: the
+                        // capture lost that hop's traffic, and the dialog it
+                        // names went on past any earlier INVITE filed there.
+                        if *status < 300 {
+                            let named = OrderedKey {
+                                endpoint: uac,
+                                call_id: msg.call_id.as_str(),
+                                from_tag: msg.from_tag.as_deref().unwrap_or_default(),
+                                to_tag: msg.to_tag.as_deref().unwrap_or_default(),
+                            };
+                            for (earlier, early) in early_of.iter_mut() {
+                                if branch_cseq.get(earlier).is_some_and(|c| *c < msg.cseq)
+                                    && early.remove(&named)
+                                {
+                                    if let Some(in_flight) = in_progress.get_mut(&named) {
+                                        in_flight.remove(earlier.branch);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    };
                     // The final ends every early dialog the INVITE opened; a
                     // 2xx re-keys it onto the dialog it confirms below.
                     for early in early_of.remove(&txn).unwrap_or_default() {

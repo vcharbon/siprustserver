@@ -437,6 +437,39 @@ fn an_invite_on_the_early_dialog_of_an_open_initial_invite_is_violated() {
     .is_empty());
 }
 
+/// The capture lost this hop's 200 to the first INVITE and the next INVITE
+/// itself; the next INVITE's 2xx on the dialog shows the dialog went on, so the
+/// first INVITE charges no later re-INVITE. Where the next INVITE IS on the
+/// wire, it is judged when sent and the first INVITE stays open.
+#[test]
+fn a_2xx_to_an_unseen_later_invite_closes_the_early_dialog_filing() {
+    assert!(hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 1, "at", ""),
+            rsp(2_000, BOB, ALICE, 180, "z9hG4bK-1", 1, "at", "bt", ""),
+            rsp(3_000, BOB, ALICE, 200, "z9hG4bK-2", 2, "at", "bt", ""),
+            req(4_000, ALICE, BOB, "ACK", "z9hG4bK-k2", 2, "at", "bt"),
+            req(5_000, ALICE, BOB, "INVITE", "z9hG4bK-3", 3, "at", "bt"),
+        ],
+    )
+    .is_empty());
+
+    let seen = hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 1, "at", ""),
+            rsp(2_000, BOB, ALICE, 180, "z9hG4bK-1", 1, "at", "bt", ""),
+            req(3_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 2, "at", "bt"),
+            rsp(4_000, BOB, ALICE, 200, "z9hG4bK-2", 2, "at", "bt", ""),
+            req(5_000, ALICE, BOB, "ACK", "z9hG4bK-k2", 2, "at", "bt"),
+            req(6_000, ALICE, BOB, "INVITE", "z9hG4bK-3", 3, "at", "bt"),
+        ],
+    );
+    let cseqs: Vec<u32> = seen.iter().map(|f| f.cseq).collect();
+    assert_eq!(cseqs, [2, 3], "both overtake the first INVITE, still open: {seen:?}");
+}
+
 /// Nothing answered the first at all: the second overtakes a transaction
 /// still in progress.
 #[test]
