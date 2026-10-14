@@ -9,7 +9,8 @@
  * the bundles of its runs; its session directory `<sessions>/<stem>`, or only
  * `<sessions>/<stem>/<capture>` where a capture that stays shares the stem;
  * its artifact directory; the pcaps under `_uploads` its ingest record names;
- * the seed the deployment keeps for it (`Extraction.keptSeed`). A name with a
+ * the seed the deployment keeps for it (`Extraction.keptSeed`); and the job
+ * records and cut logs of the jobs and preps the store drops. A name with a
  * path separator, or starting with `_` or `.`, owns no file: those entries
  * are the stores' own.
  *
@@ -23,7 +24,8 @@ import * as path from "node:path"
 import type * as ContentGc from "../content/content-gc.js"
 import * as Extraction from "../deployment/extraction.js"
 import { uploadsOf } from "../ingest/retire.js"
-import { type Paths, stemOf } from "../paths.js"
+import { jobDir } from "../jobs/job.js"
+import { type Paths, prepDir, stemOf } from "../paths.js"
 import * as Cleanup from "./cleanup.js"
 import { sizeOf } from "./retention.js"
 
@@ -55,6 +57,10 @@ export interface Files {
   readonly artifactDirs: FileSet
   readonly uploads: FileSet
   readonly seeds: FileSet
+  /** The records `<sessions>/_jobs/<id>` of the jobs dropped. */
+  readonly jobLogs: FileSet
+  /** The cut logs `<sessions>/_preps/prep<id>` of the preps dropped. */
+  readonly prepLogs: FileSet
 }
 
 /** A cited case id that names a call of a forgotten capture. */
@@ -208,6 +214,14 @@ export const plan = Effect.fn("Forget.plan")(function*(request: Request) {
   }
   const gone = new Set(known)
   const forgotten = yield* store.plan({ captures: known, citations: request.citations })
+  const jobLogs: Array<string> = []
+  for (const id of forgotten.invocations.jobs) {
+    if (yield* exists(jobDir(sessions, id))) jobLogs.push(jobDir(sessions, id))
+  }
+  const prepLogs: Array<string> = []
+  for (const id of forgotten.invocations.preps) {
+    if (yield* exists(prepDir(sessions, id))) prepLogs.push(prepDir(sessions, id))
+  }
   const removed = new Set(sessionDirs)
   const bundles: Array<string> = []
   let bundlesOnDisk = 0
@@ -225,7 +239,9 @@ export const plan = Effect.fn("Forget.plan")(function*(request: Request) {
       bundles: yield* setOf(bundles),
       artifactDirs: yield* setOf(artifactDirs),
       uploads: yield* setOf(uploads),
-      seeds: yield* setOf(seeds)
+      seeds: yield* setOf(seeds),
+      jobLogs: yield* setOf(jobLogs),
+      prepLogs: yield* setOf(prepLogs)
     },
     bundlesOnDisk,
     citedCases: yield* citedCasesOf(request.citations, gone),
@@ -259,7 +275,14 @@ export const apply = Effect.fn("Forget.apply")(function*(request: ApplyRequest) 
     population: request.population
   })
   const { files } = planned
-  for (const one of [...files.sessionDirs.paths, ...files.bundles.paths, ...files.artifactDirs.paths]) {
+  const dirs = [
+    ...files.sessionDirs.paths,
+    ...files.bundles.paths,
+    ...files.artifactDirs.paths,
+    ...files.jobLogs.paths,
+    ...files.prepLogs.paths
+  ]
+  for (const one of dirs) {
     yield* fs.remove(one, { recursive: true, force: true })
   }
   for (const one of [...files.uploads.paths, ...files.seeds.paths]) yield* fs.remove(one, { force: true })
@@ -281,7 +304,9 @@ export const lines = (one: Plan): ReadonlyArray<string> => {
     ["bundle(s) outside them", files.bundles],
     ["artifact director(ies)", files.artifactDirs],
     ["upload(s)", files.uploads],
-    ["kept seed(s)", files.seeds]
+    ["kept seed(s)", files.seeds],
+    ["job record(s)", files.jobLogs],
+    ["cut log(s)", files.prepLogs]
   ] as const
   const total = sets.reduce((sum, [, set]) => sum + set.bytes, 0)
   const lost = one.citedCases.filter((cited) => !cited.narrowed)
@@ -293,6 +318,8 @@ export const lines = (one: Plan): ReadonlyArray<string> => {
     ...(store.population.length === 0 ? [] : [`[forget] in the population: ${store.population.join(", ")}`]),
     "[forget] rows:",
     ...Forget.TABLES.map((table) => `[forget]   ${table.padEnd(18)} ${store.rows[table]}`),
+    `[forget] mixed, kept: ${store.mixed.jobs} job(s), ${store.mixed.requests} request(s), ` +
+    `${store.mixed.sweeps} sweep(s) naming a capture that stays too`,
     "[forget] files:",
     ...sets.map(([label, set]) => `[forget]   ${String(set.paths.length).padStart(6)} ${label.padEnd(24)} ${mb(set.bytes)}`),
     `[forget]   ${one.bundlesOnDisk} bundle(s) on disk of ${store.runs.length} run(s); ${mb(total)} of file bytes in all`,

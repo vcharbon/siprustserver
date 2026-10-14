@@ -1,7 +1,8 @@
 /**
  * Forgetting captures, store and disk, against a real postgres and a fixture
  * tree of their own: a selection by name and by pattern plans every file it
- * owns and every cited case id it touches, and removes nothing; a confirmed forget drops the rows, then the
+ * owns (job records and cut logs included) and every cited case id it
+ * touches, and removes nothing; a confirmed forget drops the rows, then the
  * files, leaving the captures that stay and a session directory they share
  * untouched, and the cache pass collects what only the forgotten named; a
  * forget whose rows cannot go removes no file. The suite builds and drops its
@@ -21,7 +22,8 @@ import { CONTENT, FLOWS } from "../../src/content/content.js"
 import { Extraction } from "../../src/deployment/index.js"
 import * as Forgetting from "../../src/housekeeping/forget.js"
 import { UPLOADS } from "../../src/ingest/source.js"
-import type { Paths } from "../../src/paths.js"
+import { jobDir } from "../../src/jobs/job.js"
+import { type Paths, prepDir } from "../../src/paths.js"
 import { host as hostOf, pathsOf } from "../cut/host.js"
 
 const SCRATCH = await scratch("corpus_forget_test")
@@ -143,6 +145,10 @@ const ran = (capture: string, stem: string, lane: string) =>
   })
 
 interface Seeded {
+  readonly prep: number
+  readonly recut: number
+  readonly goneJob: number
+  readonly mixedJob: number
   readonly only: string
   readonly shared: string
   readonly goneFlows: string
@@ -200,6 +206,23 @@ const seeded = Effect.gen(function*() {
     cutFingerprint: "cut"
   })
   yield* cuts.finish(prep)
+  // A re-cut of the forgotten capture alone, and a job naming it alone and one naming both: each with its log.
+  const recut = yield* cuts.open(undefined, "cut")
+  yield* cuts.record({
+    prepId: recut,
+    capture: GONE,
+    flows: Model.wholeFlows(bytes(`{"capture":"${GONE}"}`)),
+    cases: [caseOf("only")],
+    refusals: [],
+    cutFingerprint: "cut"
+  })
+  yield* cuts.finish(recut)
+  writeFile(path.join(prepDir(paths.sessions, recut), "manifest.json"), "{}")
+  writeFile(path.join(prepDir(paths.sessions, prep), "manifest.json"), "{}")
+  const jobs = yield* Jobs.Service
+  const goneJob = yield* jobs.create({ kind: "cut", args: { captures: [GONE] }, createdBy: "test" })
+  const mixedJob = yield* jobs.create({ kind: "cut", args: { captures: [GONE, KEPT] }, createdBy: "test" })
+  for (const id of [goneJob, mixedJob]) writeFile(path.join(jobDir(paths.sessions, id), "log"), "done")
   yield* sql`INSERT INTO case_ids (capture, case_id, call_key, origin) VALUES (${RAW}, 'raw-case1', 'raw@x', 'seed')`
   const hashes = Object.fromEntries(gone.cases.map((entry) => [entry.caseId, entry.caseHash]))
   const goneFlows = (yield* cuts.standing(GONE))!.flowsHash!
@@ -217,7 +240,11 @@ const seeded = Effect.gen(function*() {
     gone: [yield* ran(GONE, GONE, "paused"), yield* ran(GONE, GONE, "real")],
     kept: yield* ran(KEPT, KEPT, "paused"),
     sharer: yield* ran(SHARER, "capture-d", "paused"),
-    neighbour: yield* ran(NEIGHBOUR, "capture-d", "paused")
+    neighbour: yield* ran(NEIGHBOUR, "capture-d", "paused"),
+    prep,
+    recut,
+    goneJob,
+    mixedJob
   } satisfies Seeded
 })
 
@@ -270,6 +297,10 @@ describe.skipIf(!served)("Forget", () => {
       expect(plan.files.artifactDirs.paths).toEqual([path.join(paths.corpus, RAW), path.join(paths.corpus, GONE)])
       expect(plan.files.uploads.paths).toEqual([s.upload])
       expect(plan.files.seeds.paths).toEqual([seedFile(GONE)])
+      // The job naming the forgotten capture alone and the re-cut of it alone go with their logs.
+      expect(plan.files.jobLogs.paths).toEqual([jobDir(paths.sessions, s.goneJob)])
+      expect(plan.files.prepLogs.paths).toEqual([prepDir(paths.sessions, s.recut)])
+      expect(plan.store.mixed.jobs).toBe(1)
       for (const set of Object.values(plan.files)) expect(set.bytes).toBeGreaterThan(0)
       expect(plan.refusals).toEqual([])
       expect(Forgetting.lines(plan)).toContain("[forget] nobody.pcap: nothing of it in the store or on disk")
@@ -292,6 +323,8 @@ describe.skipIf(!served)("Forget", () => {
       expect(fs.existsSync(s.neighbour.bundlePath)).toBe(true)
       expect(fs.existsSync(path.join(paths.corpus, KEPT, "ingest.json"))).toBe(true)
       expect(fs.existsSync(seedFile(KEPT))).toBe(true)
+      expect(fs.existsSync(jobDir(paths.sessions, s.mixedJob))).toBe(true)
+      expect(fs.existsSync(prepDir(paths.sessions, s.prep))).toBe(true)
       expect(applied.cache.cases).toEqual([path.join(paths.sessions, CONTENT, s.only)])
       expect(applied.cache.flows).toEqual([path.join(paths.sessions, CONTENT, FLOWS, `${s.goneFlows}.json`)])
       expect(fs.existsSync(path.join(paths.sessions, CONTENT, s.shared))).toBe(true)

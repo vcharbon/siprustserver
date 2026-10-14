@@ -1,8 +1,10 @@
 /**
  * Forgetting captures against a real postgres: every capture name a table
  * keys a row by, a read-only plan whose counts are exactly what the forget
- * then drops, the refusals that remove nothing, and a forget that leaves a
- * kept capture's rows, and the content it shares, untouched. The suite builds
+ * then drops, the jobs, requests, sweeps and preps that name only forgotten
+ * captures dropped and the mixed ones kept, the refusals that remove nothing,
+ * and a forget that leaves a kept capture's rows, and the content it shares,
+ * untouched. The suite builds
  * and drops its own database.
  */
 import * as Effect from "effect/Effect"
@@ -99,10 +101,18 @@ const result = (caseId: string, document: unknown): CaseResult => ({
 
 interface Seeded {
   readonly prep: number
+  readonly recut: number
   readonly kept: number
   readonly cited: number
   readonly pinned: number
+  /** Names a capture kept and one forgotten: kept, mixed; its request too. */
   readonly job: number
+  /** Names the forgotten capture alone. */
+  readonly goneJob: number
+  /** Names no capture. */
+  readonly quietJob: number
+  readonly goneRequest: number
+  readonly goneSweep: number
 }
 
 const seed = Effect.gen(function*() {
@@ -142,7 +152,27 @@ const seed = Effect.gen(function*() {
     refusals: []
   })
   yield* cuts.finish(prep)
-  const run = (capture: string, documents: ReadonlyArray<unknown>) =>
+  // A re-cut of the forgotten capture alone: a prep left with no row.
+  const recut = yield* cuts.open()
+  yield* cuts.record({
+    prepId: recut,
+    capture: GONE,
+    flows: wholeFlows(bytes(`{"capture":"${GONE}"}`)),
+    cases: [caseOf(`${GONE}-case1`, "call-1@b", "shared"), caseOf(`${GONE}-case2`, "call-2@b", "gone-only")],
+    refusals: [{ caseId: `${GONE}-cut3`, reasons: ["refused-why"], callIds: ["call-3@b"], detail: "", callKey: "call-3@b" }]
+  })
+  yield* cuts.finish(recut)
+  const sweep = (selection: string) =>
+    Effect.map(
+      sql<{ id: string }>`
+        INSERT INTO sweeps (lane, universe, captures, concurrency, batch_size, memory_max, finished_at, selection)
+        VALUES ('fake-lane', 'named', 1, 1, 1, '1G', now(), ${selection}) RETURNING id
+      `,
+      (rows) => Number(rows[0]!.id)
+    )
+  const goneSweep = yield* sweep(`${GONE} --case ${GONE}-case1`)
+  const mixedSweep = yield* sweep(`${KEPT} ${GONE}`)
+  const run = (capture: string, documents: ReadonlyArray<unknown>, sweepId?: number) =>
     Effect.gen(function*() {
       const opened = yield* runs.open({
         capture,
@@ -150,7 +180,8 @@ const seed = Effect.gen(function*() {
         mode: "record",
         sessionDir: `/w/${capture}`,
         prepId: prep,
-        identity: CURRENT
+        identity: CURRENT,
+        ...(sweepId === undefined ? {} : { sweepId })
       })
       yield* runs.finish({
         id: opened.id,
@@ -159,22 +190,34 @@ const seed = Effect.gen(function*() {
       })
       return opened.id
     })
-  const kept = yield* run(KEPT, [documentOf("shared"), null])
-  const cited = yield* run(GONE, [documentOf("shared"), documentOf("ran-gone")])
+  const kept = yield* run(KEPT, [documentOf("shared"), null], mixedSweep)
+  const cited = yield* run(GONE, [documentOf("shared"), documentOf("ran-gone")], goneSweep)
   const pinned = yield* run(GONE, [null])
   yield* pins.pin([pinned], "proj/9")
-  const request = Number(
-    (yield* sql<{ id: string }>`
-      INSERT INTO requests (lane, selection, knobs, created_by)
-      VALUES ('fake-lane', '{}'::jsonb, '{}'::jsonb, 'test') RETURNING id
-    `)[0]!.id
-  )
-  const job = Number(
-    (yield* sql<{ id: string }>`
-      INSERT INTO jobs (kind, request_id, args, status, created_by)
-      VALUES ('replay', ${request}, '{}'::jsonb, 'done', 'test') RETURNING id
-    `)[0]!.id
-  )
+  const requestOf = (selection: unknown) =>
+    Effect.map(
+      sql<{ id: string }>`
+        INSERT INTO requests (lane, selection, knobs, created_by)
+        VALUES ('fake-lane', ${JSON.stringify(selection)}::jsonb, '{}'::jsonb, 'test') RETURNING id
+      `,
+      (rows) => Number(rows[0]!.id)
+    )
+  const jobOf = (kind: string, request: number | null, args: unknown) =>
+    Effect.map(
+      sql<{ id: string }>`
+        INSERT INTO jobs (kind, request_id, args, status, created_by)
+        VALUES (${kind}, ${request}, ${JSON.stringify(args)}::jsonb, 'done', 'test') RETURNING id
+      `,
+      (rows) => Number(rows[0]!.id)
+    )
+  const request = yield* requestOf({})
+  const job = yield* jobOf("replay", request, {})
+  const goneRequest = yield* requestOf({ kind: "captures", captures: [GONE], whole: [] })
+  yield* sql`
+    INSERT INTO request_cells (request_id, capture, call_key, origin) VALUES (${goneRequest}, ${GONE}, 'call-2', 'selected')
+  `
+  const goneJob = yield* jobOf("cut", null, { captures: [GONE], mode: "force" })
+  const quietJob = yield* jobOf("cut", null, { all: true, mode: "stale" })
   for (const capture of [KEPT, GONE]) {
     yield* sql`
       INSERT INTO job_cells (job_id, request_id, capture, call_key, outcome)
@@ -209,7 +252,7 @@ const seed = Effect.gen(function*() {
     INSERT INTO cell_summaries (run_id, case_id, capture, lane, passed, verdict, started_at)
     VALUES (424242, ${`${RAW}-case1`}, ${RAW}, 'fake-lane', true, 'ok', now())
   `
-  return { prep, kept, cited, pinned, job } satisfies Seeded
+  return { prep, recut, kept, cited, pinned, job, goneJob, quietJob, goneRequest, goneSweep } satisfies Seeded
 })
 
 /** Every table's row count, as one record. */
@@ -282,24 +325,36 @@ describe.skipIf(!served)("Forget", () => {
     expect(plan.population).toEqual([])
     expect(plan.rows).toMatchObject({
       population: 0,
-      capture_cuts: 1,
-      cut_cases: 2,
-      cut_refusals: 1,
-      cut_refusal_calls: 1,
+      capture_cuts: 2,
+      cut_cases: 4,
+      cut_refusals: 2,
+      cut_refusal_calls: 2,
       runs: 2,
       case_results: 3,
       pins: 1,
       job_cells: 1,
-      request_cells: 1,
-      case_maps: 4,
+      request_cells: 2,
+      case_maps: 7,
       frozen_captures: 2,
       run_summaries: 2,
       cell_summaries: 3,
       cases: 1,
       case_assets: 1,
       case_documents: 2,
-      flows_documents: 1
+      flows_documents: 1,
+      jobs: 1,
+      requests: 1,
+      sweeps: 1,
+      preps: 1
     })
+    // Every capture it names forgotten: dropped. One kept too: kept whole, counted.
+    expect(plan.invocations).toEqual({
+      jobs: [s.goneJob],
+      requests: [s.goneRequest],
+      sweeps: [s.goneSweep],
+      preps: [s.recut]
+    })
+    expect(plan.mixed).toEqual({ jobs: 1, requests: 1, sweeps: 1 })
     expect(plan.runs.map((one) => [one.id, one.capture, one.bundlePath])).toEqual([
       [s.cited, GONE, expect.stringMatching(new RegExp(`^/w/${GONE.replaceAll(".", "\\.")}/run${s.cited}`))],
       [s.pinned, GONE, expect.stringMatching(new RegExp(`^/w/${GONE.replaceAll(".", "\\.")}/run${s.pinned}`))]
@@ -328,6 +383,19 @@ describe.skipIf(!served)("Forget", () => {
     expect(await withStore(keyedBy(KEPT))).toBe(kept)
     expect(await withStore(Effect.flatMap(Cuts.Service, (cuts) => cuts.standing(KEPT)))).toEqual(keptCase)
     expect(await forget((service) => service.names)).toEqual([KEPT])
+    const left = await withStore(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const ids = (rows: ReadonlyArray<{ id: string }>) => rows.map((row) => Number(row.id))
+      return {
+        jobs: ids(yield* sql<{ id: string }>`SELECT id FROM jobs ORDER BY id`),
+        preps: ids(yield* sql<{ id: string }>`SELECT id FROM preps ORDER BY id`),
+        sweeps: ids(yield* sql<{ id: string }>`SELECT id FROM sweeps ORDER BY id`)
+      }
+    }))
+    expect(left.jobs).toEqual([s.job, s.quietJob])
+    expect(left.preps).toEqual([s.prep])
+    expect(left.sweeps).not.toContain(s.goneSweep)
+    expect(left.sweeps).toHaveLength(1)
     const sql = await withStore(Effect.gen(function*() {
       const sql = yield* SqlClient
       return yield* sql<{ pins: number; kept: number }>`
@@ -345,21 +413,23 @@ describe.skipIf(!served)("Forget", () => {
 
   it("refuses, removing nothing: a population capture without leave, no capture at all, a running job", async () => {
     await withStore(seed)
-    const before = await withStore(counts)
     const refused = async (request: Forget.Request) => {
       const exit = await forget((service) => Effect.exit(service.execute(request)))
       expect(Exit.isFailure(exit)).toBe(true)
       return String(Exit.isFailure(exit) ? exit.cause : "")
     }
+    const before = await withStore(counts)
     expect(await refused({ captures: [GONE, OLD] })).toContain(`still in the population, not allowed: ${OLD}`)
     expect(await refused({ captures: [] })).toContain("no capture named")
+    expect(await withStore(counts)).toEqual(before)
     const job = await withStore(Effect.gen(function*() {
       const jobs = yield* Jobs.Service
       const id = yield* jobs.create({ kind: "replay", lane: "fake-lane", args: {}, createdBy: "test" })
       yield* jobs.started(id, { pid: 1 })
       return id
     }))
+    const held = await withStore(counts)
     expect(await refused({ captures: [GONE] })).toContain(`job(s) ${job} running`)
-    expect(await withStore(counts)).toEqual(before)
+    expect(await withStore(counts)).toEqual(held)
   })
 })

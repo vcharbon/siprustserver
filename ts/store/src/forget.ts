@@ -10,8 +10,14 @@
  * and pins; the job and request cells naming it; its case maps, frozen ids,
  * seeded mark, run summaries and cell summaries. Then the content rows no
  * kept row names any more: cases with their assets and ledger rows, case
- * documents, flows documents with their legs. Preps, jobs, requests and
- * sweeps keep their rows: each is an invocation that happened.
+ * documents, flows documents with their legs.
+ *
+ * The INVOCATIONS go with them where they name nothing else: a job, request
+ * or sweep every capture of which is forgotten — the capture names of its
+ * arguments or selection, of its cells, runs and summaries, of its jobs'
+ * — and a prep that held rows of a forgotten capture and holds no other
+ * row. One that also names a capture that stays is kept whole, counted as
+ * mixed.
  *
  * {@link Interface.plan} is read-only. {@link Interface.execute} plans again
  * inside its one transaction and refuses, removing nothing, where
@@ -49,7 +55,11 @@ export const TABLES = [
   "ledger_rows",
   "case_documents",
   "flows_documents",
-  "flows_legs"
+  "flows_legs",
+  "jobs",
+  "requests",
+  "sweeps",
+  "preps"
 ] as const
 
 export type Table = (typeof TABLES)[number]
@@ -87,12 +97,29 @@ export interface Cited {
   readonly citedBy: string
 }
 
+/** The invocations a forget drops, by id, ascending. */
+export interface Invocations {
+  readonly jobs: ReadonlyArray<number>
+  readonly requests: ReadonlyArray<number>
+  readonly sweeps: ReadonlyArray<number>
+  readonly preps: ReadonlyArray<number>
+}
+
+/** The invocations that name a forgotten capture and one that stays: kept whole. */
+export interface Mixed {
+  readonly jobs: number
+  readonly requests: number
+  readonly sweeps: number
+}
+
 export interface Plan {
   /** The captures asked for, sorted, each once. */
   readonly captures: ReadonlyArray<string>
   /** Those of them still in the population. */
   readonly population: ReadonlyArray<string>
   readonly rows: Rows
+  readonly invocations: Invocations
+  readonly mixed: Mixed
   readonly runs: ReadonlyArray<Run>
   readonly pins: ReadonlyArray<Pin>
   readonly cited: ReadonlyArray<Cited>
@@ -171,20 +198,83 @@ export const layer = Layer.effect(
                WHERE document_hash IS NOT NULL AND run_id NOT IN (SELECT id FROM ${sql(fr)})
       `
 
-    const names = Effect.gen(function*() {
-      const rows = yield* sql<{ capture: string }>`
-        SELECT capture FROM population
-        UNION SELECT capture FROM capture_cuts
-        UNION SELECT capture FROM runs
-        UNION SELECT capture FROM job_cells
-        UNION SELECT capture FROM request_cells
-        UNION SELECT capture FROM case_maps
-        UNION SELECT capture FROM case_ids
-        UNION SELECT capture FROM frozen_captures
-        UNION SELECT capture FROM run_summaries
-        UNION SELECT capture FROM cell_summaries
-        ORDER BY capture
+    /** Every capture name a table keys a row by. */
+    const everyName = sql`
+      SELECT capture FROM population
+      UNION SELECT capture FROM capture_cuts
+      UNION SELECT capture FROM runs
+      UNION SELECT capture FROM job_cells
+      UNION SELECT capture FROM request_cells
+      UNION SELECT capture FROM case_maps
+      UNION SELECT capture FROM case_ids
+      UNION SELECT capture FROM frozen_captures
+      UNION SELECT capture FROM run_summaries
+      UNION SELECT capture FROM cell_summaries
+    `
+
+    /**
+     * Each job, request and sweep that names a capture in `f`, with whether
+     * every capture it names is in `f`: `gone`, else mixed. A name counts
+     * where `k` holds it; an argument that names no capture counts nothing.
+     */
+    const invocationsOf = (f: string, k: string) =>
+      sql`
+        WITH job_names AS MATERIALIZED (
+          SELECT j.id, v #>> '{}' AS capture
+          FROM jobs j, jsonb_path_query(j.args, 'strict $.**') v WHERE jsonb_typeof(v) = 'string'
+          UNION SELECT job_id, capture FROM job_cells
+          UNION SELECT job_id, capture FROM runs WHERE job_id IS NOT NULL
+          UNION SELECT job_id, capture FROM run_summaries WHERE job_id IS NOT NULL
+          UNION SELECT job_id, capture FROM cell_summaries WHERE job_id IS NOT NULL
+          UNION SELECT p.job_id, c.capture FROM preps p JOIN capture_cuts c ON c.prep_id = p.id
+                WHERE p.job_id IS NOT NULL
+          UNION SELECT p.job_id, m.capture FROM preps p JOIN case_maps m ON m.prep_id = p.id
+                WHERE p.job_id IS NOT NULL
+        ),
+        named AS (
+          SELECT 'job' AS kind, id, capture FROM job_names
+          UNION SELECT 'request', r.id, v #>> '{}'
+                FROM requests r, jsonb_path_query(r.selection, 'strict $.**') v WHERE jsonb_typeof(v) = 'string'
+          UNION SELECT 'request', request_id, capture FROM request_cells
+          UNION SELECT 'request', request_id, capture FROM job_cells
+          UNION SELECT 'request', j.request_id, n.capture FROM jobs j JOIN job_names n ON n.id = j.id
+                WHERE j.request_id IS NOT NULL
+          UNION SELECT 'sweep', s.id, token
+                FROM sweeps s, regexp_split_to_table(coalesce(s.selection, ''), '[[:space:]]+') token
+          UNION SELECT 'sweep', sweep_id, capture FROM runs WHERE sweep_id IS NOT NULL
+          UNION SELECT 'sweep', sweep_id, capture FROM run_summaries WHERE sweep_id IS NOT NULL
+          UNION SELECT 'sweep', sweep_id, capture FROM cell_summaries WHERE sweep_id IS NOT NULL
+          UNION SELECT 'sweep', j.sweep_id, n.capture FROM jobs j JOIN job_names n ON n.id = j.id
+                WHERE j.sweep_id IS NOT NULL
+        )
+        SELECT kind, id, bool_and(capture IN (SELECT capture FROM ${sql(f)})) AS gone
+        FROM named WHERE capture IN (SELECT capture FROM ${sql(k)})
+        GROUP BY kind, id
+        HAVING bool_or(capture IN (SELECT capture FROM ${sql(f)}))
       `
+
+    /** The preps that hold a row of a capture in `f` and no row of any other. */
+    const prepsOf = (f: string) => {
+      const of = sql`(SELECT capture FROM ${sql(f)})`
+      return sql`
+        SELECT p.id FROM preps p
+        WHERE p.id IN (
+          SELECT prep_id FROM capture_cuts WHERE capture IN ${of}
+          UNION SELECT prep_id FROM case_maps WHERE capture IN ${of}
+          UNION SELECT prep_id FROM runs WHERE capture IN ${of}
+          UNION SELECT prep_id FROM run_summaries WHERE capture IN ${of}
+          UNION SELECT prep_id FROM cell_summaries WHERE capture IN ${of}
+        )
+          AND NOT EXISTS (SELECT 1 FROM capture_cuts x WHERE x.prep_id = p.id AND x.capture NOT IN ${of})
+          AND NOT EXISTS (SELECT 1 FROM case_maps x WHERE x.prep_id = p.id AND x.capture NOT IN ${of})
+          AND NOT EXISTS (SELECT 1 FROM runs x WHERE x.prep_id = p.id AND x.capture NOT IN ${of})
+          AND NOT EXISTS (SELECT 1 FROM run_summaries x WHERE x.prep_id = p.id AND x.capture NOT IN ${of})
+          AND NOT EXISTS (SELECT 1 FROM cell_summaries x WHERE x.prep_id = p.id AND x.capture NOT IN ${of})
+      `
+    }
+
+    const names = Effect.gen(function*() {
+      const rows = yield* sql<{ capture: string }>`SELECT capture FROM (${everyName}) n ORDER BY capture`
       return rows.map((row) => row.capture)
     })
 
@@ -220,8 +310,33 @@ export const layer = Layer.effect(
           (SELECT count(*) FROM gf) AS flows_documents,
           (SELECT count(*) FROM flows_legs WHERE flows_hash IN (SELECT hash FROM gf)) AS flows_legs
       `
+      const touched = yield* sql<{ kind: "job" | "request" | "sweep"; id: string; gone: boolean }>`
+        WITH f AS MATERIALIZED (${named(captures)}),
+        k AS MATERIALIZED (SELECT capture FROM f UNION ${everyName})
+        SELECT kind, id, gone FROM (${invocationsOf("f", "k")}) t
+        ORDER BY kind, id
+      `
+      const preps = yield* sql<{ id: string }>`
+        WITH f AS MATERIALIZED (${named(captures)})
+        SELECT id FROM (${prepsOf("f")}) t
+        ORDER BY id
+      `
+      const gone = (kind: "job" | "request" | "sweep") =>
+        touched.filter((one) => one.kind === kind && one.gone).map((one) => Number(one.id))
+      const mixedOf = (kind: "job" | "request" | "sweep") =>
+        touched.filter((one) => one.kind === kind && !one.gone).length
+      const invocations: Invocations = {
+        jobs: gone("job"),
+        requests: gone("request"),
+        sweeps: gone("sweep"),
+        preps: preps.map((one) => Number(one.id))
+      }
       const row = counted[0]!
-      const rows = Object.fromEntries(TABLES.map((table) => [table, n(row[table])])) as Rows
+      const rows = Object.fromEntries(TABLES.map((table) => [table, n(row[table])])) as Record<Table, number>
+      rows.jobs = invocations.jobs.length
+      rows.requests = invocations.requests.length
+      rows.sweeps = invocations.sweeps.length
+      rows.preps = invocations.preps.length
 
       const population = yield* sql<{ capture: string }>`
         SELECT capture FROM population WHERE capture IN (${named(captures)}) ORDER BY capture
@@ -291,6 +406,8 @@ export const layer = Layer.effect(
         captures,
         population: population.map((one) => one.capture),
         rows,
+        invocations,
+        mixed: { jobs: mixedOf("job"), requests: mixedOf("request"), sweeps: mixedOf("sweep") },
         runs: runs.map((one): Run => ({
           id: Number(one.id),
           capture: one.capture,
@@ -341,6 +458,11 @@ export const layer = Layer.effect(
         yield* sql`DELETE FROM case_documents WHERE hash IN (SELECT hash FROM forget_documents)`
         // The cascade takes flows_legs.
         yield* sql`DELETE FROM flows_documents WHERE hash IN (SELECT hash FROM forget_flows)`
+        const { jobs, requests, sweeps, preps } = planned.invocations
+        if (jobs.length > 0) yield* sql`DELETE FROM jobs WHERE id IN ${sql.in(jobs)}`
+        if (requests.length > 0) yield* sql`DELETE FROM requests WHERE id IN ${sql.in(requests)}`
+        if (sweeps.length > 0) yield* sql`DELETE FROM sweeps WHERE id IN ${sql.in(sweeps)}`
+        if (preps.length > 0) yield* sql`DELETE FROM preps WHERE id IN ${sql.in(preps)}`
         return planned
       }))
     })
