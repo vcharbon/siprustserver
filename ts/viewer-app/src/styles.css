@@ -604,7 +604,7 @@ h3 {
   color: var(--missing);
 }
 
-/* A source fault is the source capture's, information: never the SUT's red. */
+/* A source fault is information: never the SUT's red. */
 .rfc-audit-source {
   border-left-color: var(--extra);
 }

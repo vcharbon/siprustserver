@@ -38,7 +38,8 @@ describe("Bundle.read", () => {
       "case11",
       "case12",
       "case13",
-      "case14"
+      "case14",
+      "case15"
     ])
 
     expect(cells.get("case1")!.mainError).toEqual({
@@ -138,16 +139,15 @@ describe("Bundle.read", () => {
     })
     expect(cells.get("case10")!.bodyFailing).toEqual(2)
 
-    // A cell whose only finding is a scripted party's violation the document
-    // does not state passed: the source fault is information, named apart, and
-    // fails nothing.
+    // A passing cell whose only finding is a scripted party's violation the
+    // document does not state: the source fault is information, named apart,
+    // counted among no failing finding, and no main error.
     const source = {
       rule: "no-200-after-cancel",
       rfc: "RFC 3261 §9.2",
       detail: "uas1: Answered an INVITE it had already taken a CANCEL for with a 200 — " +
         "RFC 3261 §9.2 has the cancelled UAS answer 487"
     }
-    expect(cells.get("case11")!.passed).toBe(true)
     expect(cells.get("case11")!.rfcGating).toEqual(0)
     expect(cells.get("case11")!.mainError).toBeNull()
     expect(cells.get("case11")!.sourceFault).toEqual(source)
@@ -182,6 +182,12 @@ describe("Bundle.read", () => {
       detail: "an-unlisted-rule: header:allow:response:200:OPTIONS"
     })
     expect(cells.get("case14")!.sourceFault).toBeUndefined()
+
+    // A bundle on disk that spells the source fault `harness_fault` reads the
+    // same: the fault beside the death, and the case's source fault.
+    expect(cells.get("case15")!.mainError?.source).toEqual(source)
+    expect(cells.get("case15")!.sourceFault).toEqual(source)
+    expect(cells.get("case15")!.rfcGating).toEqual(0)
   })
 
   it("honours the caller's ruling on the charges, and hands it the cell and the whole audit", async () => {

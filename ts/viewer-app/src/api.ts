@@ -209,6 +209,8 @@ export interface TriageFacets {
   readonly outcomes: readonly TriageFacetCount[]
   /** The features, whatever the outcome; a call counts once under each it carries. */
   readonly features: readonly TriageFacetCount[]
+  /** The source faults' rules, whatever the outcome: information, which no outcome count reads. */
+  readonly sources: readonly TriageFacetCount[]
   /** Distinct captures among the rows the scope, the capture filter and the excludes keep. */
   readonly captures: number
 }
@@ -277,12 +279,15 @@ export interface TriageQuery {
   readonly outcome?: string | undefined
   /** One feature the call's document carries. */
   readonly feature?: string | undefined
+  /** The rule of the source fault a call carries, passed or failed. */
+  readonly source?: string | undefined
   /** The values hidden per group; the key repeats per value on the wire. */
   readonly "not-rule"?: ReadonlyArray<string> | undefined
   readonly "not-expected"?: ReadonlyArray<string> | undefined
   readonly "not-refusal"?: ReadonlyArray<string> | undefined
   readonly "not-outcome"?: ReadonlyArray<string> | undefined
   readonly "not-feature"?: ReadonlyArray<string> | undefined
+  readonly "not-source"?: ReadonlyArray<string> | undefined
   readonly limit?: number | undefined
 }
 
@@ -652,11 +657,13 @@ export type RequestSelection =
     readonly refusal?: string
     readonly outcome?: string
     readonly feature?: string
+    readonly source?: string
     readonly "not-rule"?: readonly string[]
     readonly "not-expected"?: readonly string[]
     readonly "not-refusal"?: readonly string[]
     readonly "not-outcome"?: readonly string[]
     readonly "not-feature"?: readonly string[]
+    readonly "not-source"?: readonly string[]
   }
   | { readonly kind: "captures"; readonly captures: readonly string[] }
   | {
@@ -1052,11 +1059,13 @@ export const api = {
           refusal: query.refusal,
           outcome: query.outcome,
           feature: query.feature,
+          source: query.source,
           "not-rule": query["not-rule"],
           "not-expected": query["not-expected"],
           "not-refusal": query["not-refusal"],
           "not-outcome": query["not-outcome"],
           "not-feature": query["not-feature"],
+          "not-source": query["not-source"],
           limit: query.limit
         })
       }`
@@ -1074,11 +1083,13 @@ export const api = {
           refusal: query.refusal,
           outcome: query.outcome,
           feature: query.feature,
+          source: query.source,
           "not-rule": query["not-rule"],
           "not-expected": query["not-expected"],
           "not-refusal": query["not-refusal"],
           "not-outcome": query["not-outcome"],
-          "not-feature": query["not-feature"]
+          "not-feature": query["not-feature"],
+          "not-source": query["not-source"]
         })
       }`
     ),

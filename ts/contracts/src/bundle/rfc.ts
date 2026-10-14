@@ -8,8 +8,9 @@
  * the cell. A document actor's violation is named as that actor's and never
  * gates: the document's statement of the same violation on the same
  * transaction cancels it (`cancelled_by`, information); unstated, it is a
- * source fault (`source_fault`: the scripted party replays the source
- * capture's endpoint, which broke the RFC), information that fails no cell; on a
+ * source fault (`source_fault`: the replayed party repeats a captured message
+ * where, in this run, the RFC no longer allows it), information that fails no
+ * cell; on a
  * document that never read its captured trace it is `unjudged`, information.
  * An advisory finding is written so a triage session can read it, never
  * counted. `not-audited` is a value of its own, so a lane that recorded nothing
@@ -38,7 +39,7 @@ export const RfcFinding = Schema.Struct({
   cancelled_by: Schema.optionalKey(Schema.String),
   /** The scripted party whose violation the system under test relayed onward, where the document states both: the finding is the SUT's, caused by that party. */
   caused_by: Schema.optionalKey(Schema.String),
-  /** A document actor's hard-gate violation the document does not state: the source capture's endpoint broke the rule the scripted party replays. Information: it fails no cell, and is never the SUT's. */
+  /** A document actor's hard-gate violation the document does not state: the replayed party repeats a captured message where, in this run, the RFC no longer allows it. Information: it fails no cell, and is never the SUT's. */
   source_fault: Schema.optionalKey(Schema.Boolean),
   /** Why a document actor's uncancelled violation is judged neither way: the document never read its captured trace's violations. Information only. */
   unjudged: Schema.optionalKey(Schema.String)

@@ -7,11 +7,11 @@
 //! never fails the cell as the SUT's (§11.1): the document's statement of the
 //! same violation on the same transaction cancels it (written beside it, for
 //! information); one the document does not state is a SOURCE FAULT — the
-//! scripted party replays what the source capture's endpoint did, and that
-//! endpoint broke the RFC — named apart, for information; one a
-//! document that never read its captured trace's violations cannot judge is
-//! `unjudged`, for information. Only the SUT's gating findings fail the cell. An advisory finding is written so a triage
-//! session can read it, never counted. `not-audited` is a value of its own, so
+//! replayed party repeats a captured message where, in this run, the RFC no
+//! longer allows it — named apart, for information; one a document that never
+//! read its captured trace's violations cannot judge is `unjudged`, for
+//! information. Only the SUT's gating findings fail the cell. An advisory
+//! finding is written so a triage session can read it, never counted. `not-audited` is a value of its own, so
 //! a lane that recorded nothing can never be read as a clean audit.
 
 use schemars::JsonSchema;
@@ -64,9 +64,9 @@ pub struct RfcFinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<String>,
     /// `true` ⇒ a document actor's hard-gate violation the document does not
-    /// state: the scripted party replays the source capture's endpoint, which
-    /// broke the rule, and the document never says so. Information: it fails
-    /// no cell, and is never the system under test's.
+    /// state: the replayed party repeats a captured message where, in this
+    /// run, the RFC no longer allows it. Information: it fails no cell, and is
+    /// never the system under test's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub source_fault: bool,
     /// Why a document actor's uncancelled hard-gate violation is judged

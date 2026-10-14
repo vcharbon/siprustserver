@@ -315,8 +315,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     detail: source.length === 0
       ? sutSaid
       : sutPassed
-      ? `a source fault stands as information: a scripted party broke a rule the source capture's endpoint ` +
-        `broke, which the document does not state ${sourceSaid}`
+      ? `a source fault stands as information: the replayed party repeats a captured message where, in this ` +
+        `run, the RFC no longer allows it, and the document does not state it ${sourceSaid}`
       : `${sutSaid}\nbeside it, a source fault ${sourceSaid}`,
     crashed: false,
     stderr: report.stderr,

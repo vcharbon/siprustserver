@@ -403,7 +403,8 @@ const FacetRow = (
     group("expected", "expected", facets.expected),
     group("refusal", "refusals", facets.refusals),
     group("outcome", "outcome", facets.outcomes),
-    group("feature", "features", facets.features)
+    group("feature", "features", facets.features),
+    group("source", "source faults", facets.sources)
   ].filter((one) => one !== null)
   return groups.length === 0 ? null : <div className="facets">{groups}</div>
 }

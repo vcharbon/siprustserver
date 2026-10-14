@@ -18,13 +18,14 @@ import {
 import { href } from "../src/router.ts"
 
 const filter: ChipFilter = {
-  include: { rule: "rport-echo", expected: "", refusal: "", outcome: "refused", feature: "" },
+  include: { rule: "rport-echo", expected: "", refusal: "", outcome: "refused", feature: "", source: "" },
   exclude: {
     rule: [],
     expected: ["200 to INVITE"],
     refusal: ["source-call-incomplete", "source-truncated-at-edge"],
     outcome: [],
-    feature: []
+    feature: [],
+    source: ["no-cancel-after-final"]
   }
 }
 
@@ -43,6 +44,9 @@ describe("the URL", () => {
     expect(params.getAll("not-expected")).toEqual(["200 to INVITE"])
     expect(params.has("not-rule")).toBe(false)
     expect(params.has("not-outcome")).toBe(false)
+    // The source fault is a group of its own: information, filtered like any chip.
+    expect(params.getAll("not-source")).toEqual(["no-cancel-after-final"])
+    expect(readFilter(new URLSearchParams("source=prack-2xx-or-481")).include.source).toBe("prack-2xx-or-481")
   })
 
   it("reads back what it wrote", () => {

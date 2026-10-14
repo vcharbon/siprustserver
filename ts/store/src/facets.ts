@@ -5,8 +5,10 @@
  * page counts here.
  *
  * A query has a SCOPE (which rows are on the queue at all), a capture
- * substring, and five CHIP GROUPS — the rule, the expected message, the
- * refusal, the outcome, the feature. Each takes one INCLUDE (the row must answer to the
+ * substring, and six CHIP GROUPS — the rule, the expected message, the
+ * refusal, the outcome, the feature, the source fault. The source fault is
+ * information beside the outcome: a call answers to its rule passed or failed,
+ * and it moves no outcome count. Each takes one INCLUDE (the row must answer to the
  * value) and any number of EXCLUDES (a row answering to any of them is
  * hidden). The store narrows the page by all of them; the chips are counted
  * over the pool minus the excludes, never the includes, so a chip's count
@@ -33,7 +35,7 @@ export const OUTCOMES = ["refused", "failed", "passed", "skipped"] as const
 export type Outcome = (typeof OUTCOMES)[number]
 
 /** The chip groups: the key an include is named by and an exclusion set is kept under. */
-export const GROUPS = ["rule", "expected", "refusal", "outcome", "feature"] as const
+export const GROUPS = ["rule", "expected", "refusal", "outcome", "feature", "source"] as const
 export type ChipGroup = (typeof GROUPS)[number]
 
 /** Per chip group, the values whose rows are hidden. */
@@ -53,6 +55,8 @@ export interface Query {
   readonly outcome?: Outcome | undefined
   /** One feature the row's document carries (`case_documents.features`). */
   readonly feature?: string | undefined
+  /** The rule of the source fault a case carries (`CallRow.sourceFault`), passed or failed. */
+  readonly source?: string | undefined
   /** The values hidden per chip group; a row answering to any of them is off the queue and out of every count. */
   readonly exclude?: Excludes | undefined
 }
@@ -73,6 +77,8 @@ export interface Group {
   readonly reasons: ReadonlyArray<string>
   /** The features of the case's document; empty for a refused call. */
   readonly features: ReadonlyArray<string>
+  /** The rule of the source fault the case carries; absent where it carries none. */
+  readonly source?: string
   /** Set where the case carries a body row no rule accepts. */
   readonly badBody?: true
   readonly count: number
@@ -99,6 +105,8 @@ export interface Facets {
   readonly outcomes: ReadonlyArray<Count>
   /** The features, independent of the outcome; a call counts once under each it carries. */
   readonly features: ReadonlyArray<Count>
+  /** The source faults' rules, passed or failed: information, which no outcome count reads. */
+  readonly sources: ReadonlyArray<Count>
   /** Distinct captures among the rows the scope, the capture filter and the excludes keep. */
   readonly captures: number
 }
@@ -133,7 +141,8 @@ const valuesOf: Readonly<Record<ChipGroup, (group: Group) => ReadonlyArray<strin
   expected: one((group) => group.expected),
   refusal: (group) => group.reasons,
   outcome: (group) => [group.outcome],
-  feature: (group) => group.features
+  feature: (group) => group.features,
+  source: (group) => (group.source === undefined ? [] : [group.source])
 }
 
 /** Whether any chip group hides the group: one of its values of that chip group is excluded. */
@@ -218,6 +227,7 @@ export const facets = (groups: ReadonlyArray<Group>, query: Query): Chips => {
     expected: chip("expected", one((group) => group.expected)),
     refusals: chip("refusal", valuesOf.refusal),
     outcomes: chip("outcome", valuesOf.outcome, byOutcome),
-    features: chip("feature", valuesOf.feature)
+    features: chip("feature", valuesOf.feature),
+    sources: chip("source", valuesOf.source)
   }
 }

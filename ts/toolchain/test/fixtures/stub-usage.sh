@@ -10,10 +10,13 @@ child=$!
 trap 'kill -TERM "$child" 2>/dev/null' TERM
 wait "$child"
 code=$?
-# A trapped TERM interrupts the first wait; the second reaps the command.
-if kill -0 "$child" 2>/dev/null || [ "$code" -gt 128 ]; then
+# A trapped TERM interrupts a wait while the command still stands (a zombie
+# included): wait again until it is reaped. A command the wait already reaped
+# is gone, and a wait on it would answer 127, never its exit.
+while kill -0 "$child" 2>/dev/null; do
   wait "$child"
-  code=$?
-fi
+  again=$?
+  [ "$again" -eq 127 ] || code=$again
+done
 printf '{"wallMs":5,"maxRssKb":2048,"exit":%d}\n' "$code" > "$out"
 exit "$code"

@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest"
 import type { CallRow } from "../src/calls.js"
 import { facets, type Group, type Query } from "../src/facets.js"
 import type { MainError } from "../src/model.js"
-import { groupsOf, pool } from "../src/memory-queue.js"
+import { groupsOf, pool, queueOf } from "../src/memory-queue.js"
 
 const rfc = (rule: string, cite: string | null): MainError => ({
   kind: "rfc",
@@ -128,7 +128,8 @@ describe("facets", () => {
       ],
       // The outcomes in their own order, only those the population holds.
       features: [],
-      outcomes: [
+      sources: [],
+      outcomes:[
         { value: "refused", count: 2 },
         { value: "failed", count: 8 }
       ]
@@ -158,7 +159,8 @@ describe("facets", () => {
       expected: [],
       refusals: [],
       features: [],
-      outcomes: [{ value: "passed", count: 1 }]
+      sources: [],
+      outcomes:[{ value: "passed", count: 1 }]
     })
     expect(chips({ scope: "refused" }).refusals).toEqual([
       { value: "egress-answer-not-captured", count: 2 },
@@ -267,6 +269,27 @@ describe("facets", () => {
     ])
   })
 
+  it("counts a source fault under its rule, passed or failed, as information, and narrows and hides by it", () => {
+    const sourceFault = { rule: "prack-2xx-or-481", rfc: "RFC 3262 §3", detail: "uas1: answered 481" }
+    const sourced: ReadonlyArray<CallRow> = [
+      row("capture_s.pcap.gz", "case1", { passed: true, sourceFault }),
+      row("capture_s.pcap.gz", "case2", { mainError: { ...died("s3", "BYE"), source: sourceFault }, sourceFault }),
+      row("capture_s.pcap.gz", "case3", { mainError: died("s3", "BYE") })
+    ]
+    expect(chips({ scope: "all" }, sourced).sources).toEqual([{ value: "prack-2xx-or-481", count: 2 }])
+    // Information: the failed count is the SUT's, whatever source fault a call carries.
+    expect(chips({ scope: "all" }, sourced).outcomes).toEqual([
+      { value: "failed", count: 2 },
+      { value: "passed", count: 1 }
+    ])
+    const narrowed = queueOf(sourced, { scope: "all", source: "prack-2xx-or-481" }, 0)
+    expect(narrowed.rows.map((one) => one.caseId)).toEqual(["capture_s.pcap.gz-case1", "capture_s.pcap.gz-case2"])
+    const hidden = queueOf(sourced, { scope: "all", exclude: { source: ["prack-2xx-or-481"] } }, 0)
+    expect(hidden.rows.map((one) => one.caseId)).toEqual(["capture_s.pcap.gz-case3"])
+    expect(chips({ scope: "all", exclude: { source: ["prack-2xx-or-481"] } }, sourced).sources)
+      .toEqual([{ value: "prack-2xx-or-481", count: 2 }])
+  })
+
   it("breaks a tie on the value, so the chip order is stable", () => {
     const tied = chips({ capture: "B231e" })
     expect(tied.rules).toEqual([{ value: "no-200-after-cancel", count: 1, rfc: "RFC 3261 §9.1" }])
@@ -293,7 +316,8 @@ describe("facets", () => {
         { value: "source-call-incomplete", count: 4 }
       ],
       features: [],
-      outcomes: [
+      sources: [],
+      outcomes:[
         { value: "refused", count: 6 },
         { value: "failed", count: 8 }
       ]

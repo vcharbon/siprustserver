@@ -19,7 +19,7 @@
  * refused it off `rule-hits.json`; which of the audit's charges STAND is the caller's ruling
  * (`charges`), asked only where the audit holds a charge, and every gating
  * finding stands where the caller has none. A source fault the audit wrote is
- * read as it stands: it is the source capture's, no ruling answers for it, and
+ * read as it stands: it is never the SUT's, no ruling answers for it, and
  * it fails nothing — it is the case's `sourceFault`, passed or failed, and
  * stands beside a failing case's main error.
  */
@@ -133,9 +133,25 @@ const verdictOf = (raw: Record<string, unknown> | null): Bundle.RunVerdict | nul
   }
 }
 
+/**
+ * The audit as the current contract spells it: a bundle already on disk may
+ * name a source fault `harness_fault`, and reads as `source_fault`. Read-only:
+ * nothing writes the old spelling.
+ */
+const respelled = (rfc: Record<string, unknown>): Record<string, unknown> => ({
+  ...rfc,
+  findings: (rfc["findings"] as ReadonlyArray<unknown>).map((entry) => {
+    const finding = asRecord(entry)
+    if (finding === null || !("harness_fault" in finding)) return entry
+    const { harness_fault: old, ...rest } = finding
+    return old === true ? { ...rest, source_fault: true } : rest
+  })
+})
+
 /** The audit's findings, under the strict contract else read as they stand; none where the cell was not audited. */
-const findingsOf = (rfc: Record<string, unknown> | null): ReadonlyArray<Bundle.RfcFinding> => {
-  if (rfc === null || rfc["status"] !== "audited" || !Array.isArray(rfc["findings"])) return []
+const findingsOf = (stored: Record<string, unknown> | null): ReadonlyArray<Bundle.RfcFinding> => {
+  if (stored === null || stored["status"] !== "audited" || !Array.isArray(stored["findings"])) return []
+  const rfc = respelled(stored)
   try {
     const audit = Bundle.decodeRunRfcAuditSync(rfc)
     return audit.status === "audited" ? audit.findings : []

@@ -183,12 +183,15 @@ export interface QueueParams {
   readonly outcome?: string | undefined
   /** One feature the call's document carries (reroute, 18x mode, transfer, MRF …): the feature chip. */
   readonly feature?: string | undefined
+  /** The rule of the source fault a call carries, passed or failed: the source chip, information. */
+  readonly source?: string | undefined
   /** The values a group hides, one key per value. */
   readonly "not-rule"?: ReadonlyArray<string> | undefined
   readonly "not-expected"?: ReadonlyArray<string> | undefined
   readonly "not-refusal"?: ReadonlyArray<string> | undefined
   readonly "not-outcome"?: ReadonlyArray<string> | undefined
   readonly "not-feature"?: ReadonlyArray<string> | undefined
+  readonly "not-source"?: ReadonlyArray<string> | undefined
   /** Rows to serve; a number as text, because a URL carries text. */
   readonly limit?: string | undefined
 }

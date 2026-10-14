@@ -76,6 +76,8 @@ describe("rfc audit pane", () => {
     expect(html).toContain("rfc-audit-source")
     expect(html).toContain("rfc-badge-source")
     expect(html).toContain("source fault")
+    expect(html).toContain("repeats a captured message where, in this run, the RFC no longer allows it")
+    expect(html).not.toContain("source capture&#x27;s endpoint")
     expect(html).not.toContain("harness")
     expect(html).not.toContain("rfc-audit-gating")
   })

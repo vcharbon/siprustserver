@@ -1,6 +1,7 @@
 /**
  * The chip filter of the triage queue, as the page holds it and as the URL
- * carries it. Five GROUPS — rule, expected, refusal, outcome, feature — each with one
+ * carries it. Six GROUPS — rule, expected, refusal, outcome, feature, source (a
+ * source fault's rule, information beside the outcome) — each with one
  * INCLUDE (the URL key is the group's name) and a set of EXCLUDES (the key
  * `not-<group>`, repeated per value). Pure: the page reads its URL through
  * `readFilter`, writes it through `filterParams`, and a click moves one chip
@@ -9,7 +10,7 @@
 import type { QueueParams } from "./router.ts"
 
 /** The chip groups, in the order the chip row lists them. */
-export const GROUPS = ["rule", "expected", "refusal", "outcome", "feature"] as const
+export const GROUPS = ["rule", "expected", "refusal", "outcome", "feature", "source"] as const
 export type Group = (typeof GROUPS)[number]
 
 export interface ChipFilter {
@@ -25,8 +26,8 @@ export type ChipState = "none" | "include" | "exclude"
 /** The URL key a group's excludes repeat under. */
 export const excludeKey = (group: Group): `not-${Group}` => `not-${group}`
 
-const NONE = { rule: "", expected: "", refusal: "", outcome: "", feature: "" } as const
-const NOTHING = { rule: [], expected: [], refusal: [], outcome: [], feature: [] } as const
+const NONE = { rule: "", expected: "", refusal: "", outcome: "", feature: "", source: "" } as const
+const NOTHING = { rule: [], expected: [], refusal: [], outcome: [], feature: [], source: [] } as const
 
 export const EMPTY: ChipFilter = { include: NONE, exclude: NOTHING }
 
@@ -59,11 +60,13 @@ export const filterParams = (filter: ChipFilter): Pick<QueueParams, Group | `not
   refusal: filter.include.refusal,
   outcome: filter.include.outcome,
   feature: filter.include.feature,
+  source: filter.include.source,
   "not-rule": filter.exclude.rule,
   "not-expected": filter.exclude.expected,
   "not-refusal": filter.exclude.refusal,
   "not-outcome": filter.exclude.outcome,
-  "not-feature": filter.exclude.feature
+  "not-feature": filter.exclude.feature,
+  "not-source": filter.exclude.source
 })
 
 /** One line naming the filter whole, for a cache key. */

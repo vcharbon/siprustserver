@@ -127,6 +127,20 @@ describe.skipIf(!served)("Measure", () => {
       expect((yield* measure.unmeasured(LANE)).map((one) => one.id)).not.toContain(opened.id)
     })))
 
+  it("keeps a stored source fault a re-measure reads none of", () =>
+    withStore(Effect.gen(function*() {
+      const measure = yield* Measure.Service
+      const sql = yield* SqlClient
+      const capture = "capture_kept_source.pcap.gz"
+      const sourceFault = { rule: "no-200-after-cancel", rfc: null, detail: "uas1: answered 200 after the CANCEL" }
+      const opened = yield* run(capture, [caseOf(`${capture}-case1`, { failedStep: "s14", sourceFault })])
+      yield* measure.remeasure(opened.id, [caseOf(`${capture}-case1`, { mainError: DIED })])
+      const rows = yield* sql<{ error_kind: string | null; error_source: unknown }>`
+        SELECT error_kind, error_source FROM case_results WHERE run_id = ${opened.id}
+      `
+      expect(rows).toEqual([{ error_kind: "died", error_source: sourceFault }])
+    })))
+
   it("offers the runs the queue reads: the standing full run and a newer cases run, not an older one", () =>
     withStore(Effect.gen(function*() {
       const measure = yield* Measure.Service

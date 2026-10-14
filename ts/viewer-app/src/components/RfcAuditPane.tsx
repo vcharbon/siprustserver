@@ -7,8 +7,9 @@
  * verdict rather than folded into it, and never dropped.
  *
  * A gating finding is the SUT's, and turns the cell red; a source fault is a
- * scripted party's violation the document does not state — the party replays
- * the source capture's endpoint, which broke the RFC — information that turns
+ * scripted party's violation the document does not state — the replayed party
+ * repeats a captured message where, in this run, the RFC no longer allows it —
+ * information that turns
  * nothing red; a scripted party's finding the document states (the reference
  * shows it) or could not judge is information; an advisory one is a rule the
  * lane records and refuses to fail on; a relayed one is the SUT's, cancelled
@@ -48,7 +49,7 @@ interface Finding {
   readonly offending: number | undefined
   /** This finding is the SUT's, and why the cell is red. */
   readonly gating: boolean
-  /** A scripted party broke a rule the document does not state: the source capture's, information. */
+  /** A scripted party's violation the document does not state: information, never the SUT's. */
   readonly sourceFault: boolean
   /** The rule is recorded and never failed on. */
   readonly advisory: boolean
@@ -101,7 +102,7 @@ const weight = (finding: Finding): { readonly badge: string; readonly tone: stri
     ? {
       badge: "source fault",
       tone: "source",
-      title: "a scripted party broke a rule the document does not state: it replays the source capture's endpoint, which broke the RFC"
+      title: "a scripted party's violation the document does not state: the replayed party repeats a captured message where, in this run, the RFC no longer allows it"
     }
     : finding.causedBy !== undefined
     ? {
@@ -198,7 +199,7 @@ export const RfcAuditPane = ({ rfc }: { rfc: unknown }): JSX.Element | null => {
       <Section
         tone="source"
         title="source fault"
-        lead="a scripted party broke a rule the document does not state: it replays the source capture's endpoint, which broke the RFC. Information, not the SUT's: the cell is judged on the SUT alone."
+        lead="a scripted party's violation the document does not state: the replayed party repeats a captured message where, in this run, the RFC no longer allows it. Information, not the SUT's: the cell is judged on the SUT alone."
         findings={findings.filter((finding) => !finding.gating && finding.sourceFault)}
       />
       <Section

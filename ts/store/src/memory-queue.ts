@@ -41,12 +41,15 @@ const one = (valueOf: (row: CallRow) => string | null) => (row: CallRow): Readon
 
 const badBodyOf = (row: CallRow): boolean => row.kind === "case" && (row.bodyFailing ?? 0) > 0
 
+const sourceOf = (row: CallRow): string | null => (row.kind === "case" ? row.sourceFault?.rule ?? null : null)
+
 const valuesOf = {
   rule: (row: CallRow): ReadonlyArray<string> => rulesOf(ruleOf(row), badBodyOf(row)),
   expected: one(expectedOf),
   refusal: refusalsOf,
   outcome: one(outcomeOf),
-  feature: (row: CallRow): ReadonlyArray<string> => row.features
+  feature: (row: CallRow): ReadonlyArray<string> => row.features,
+  source: one(sourceOf)
 } as const
 
 const excluded = (row: CallRow, exclude: Excludes): boolean =>
@@ -73,7 +76,7 @@ export const pool = (rows: ReadonlyArray<CallRow>, query: Query): ReadonlyArray<
   )
 }
 
-/** The group a row answers under: its outcome and its main error's facets, a refused row's reasons. */
+/** The group a row answers under: its outcome, its main error's facets and its source fault, a refused row's reasons. */
 export const groupOf = (row: CallRow): Omit<Group, "count"> => ({
   kind: row.kind,
   outcome: outcomeOf(row),
@@ -83,6 +86,7 @@ export const groupOf = (row: CallRow): Omit<Group, "count"> => ({
   expected: expectedOf(row),
   reasons: refusalsOf(row),
   features: row.features,
+  ...(row.kind === "case" && row.sourceFault !== undefined ? { source: row.sourceFault.rule } : {}),
   ...(badBodyOf(row) ? { badBody: true as const } : {})
 })
 

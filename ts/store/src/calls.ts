@@ -129,6 +129,7 @@ interface GroupRow {
   readonly expected: string | null
   readonly reasons: ReadonlyArray<string>
   readonly features: ReadonlyArray<string>
+  readonly source: string | null
   readonly bad_body: boolean
   readonly count: number
 }
@@ -191,7 +192,8 @@ export const layer = Layer.effect(
           : sql`NOT (reasons && ${textArray(exclude.refusal)})`,
         exclude.feature === undefined || exclude.feature.length === 0
           ? sql`true`
-          : sql`NOT (features && ${textArray(exclude.feature)})`
+          : sql`NOT (features && ${textArray(exclude.feature)})`,
+        notIn(sql`source`, exclude.source)
       ])
       const included = sql.and([
         blank(query.rule)
@@ -202,7 +204,8 @@ export const layer = Layer.effect(
         blank(query.expected) ? sql`true` : sql`expected = ${query.expected}`,
         blank(query.refusal) ? sql`true` : sql`${query.refusal} = ANY(reasons)`,
         blank(query.outcome) ? sql`true` : sql`outcome = ${query.outcome}`,
-        blank(query.feature) ? sql`true` : sql`${query.feature} = ANY(features)`
+        blank(query.feature) ? sql`true` : sql`${query.feature} = ANY(features)`,
+        blank(query.source) ? sql`true` : sql`source = ${query.source}`
       ])
       return sql<QueueRow>`
         WITH known AS (
@@ -242,7 +245,8 @@ export const layer = Layer.effect(
                    '{}'::text[] AS reasons, coalesce(d.features, '{}'::text[]) AS features, NULL::text AS call_key,
                    c.run_id, c.set_kind, NULL::bigint AS prep_id, c.bundle_path, c.finished_at, c.document_hash,
                    c.passed, c.skipped, c.failed_step, c.rfc_gating, c.error_step, c.error_detail,
-                   c.error_source, c.body_failing, c.body_failing > 0 AS bad_body
+                   c.error_source, c.error_source->>'rule' AS source, c.body_failing,
+                   c.body_failing > 0 AS bad_body
             FROM cases c
             LEFT JOIN case_documents d ON d.hash = c.document_hash
             UNION ALL
@@ -251,7 +255,8 @@ export const layer = Layer.effect(
                    reasons, '{}'::text[], call_key,
                    NULL, NULL, prep_id, NULL, cut_at, NULL,
                    false, NULL, NULL, NULL, NULL, detail,
-                   NULL::jsonb, 0, false
+                   NULL::jsonb, NULL::text, 0,
+                   false
             FROM refused
           ) u
           WHERE ${inScope}
@@ -281,12 +286,13 @@ export const layer = Layer.effect(
           (SELECT coalesce(jsonb_agg(jsonb_build_object(
              'kind', g.kind, 'outcome', g.outcome, 'error_kind', g.error_kind, 'rule', g.rule,
              'rfc', g.rfc, 'expected', g.expected, 'reasons', to_jsonb(g.reasons),
-             'features', to_jsonb(g.features), 'bad_body', g.bad_body, 'count', g.count
+             'features', to_jsonb(g.features), 'source', g.source, 'bad_body', g.bad_body, 'count', g.count
            )), '[]'::jsonb)
            FROM (
-             SELECT kind, outcome, error_kind, rule, rfc, expected, reasons, features, bad_body, count(*)::int AS count
+             SELECT kind, outcome, error_kind, rule, rfc, expected, reasons, features, source, bad_body,
+                    count(*)::int AS count
              FROM pool
-             GROUP BY kind, outcome, error_kind, rule, rfc, expected, reasons, features, bad_body
+             GROUP BY kind, outcome, error_kind, rule, rfc, expected, reasons, features, source, bad_body
            ) g) AS groups,
           (SELECT coalesce(jsonb_agg(jsonb_build_object(
              'kind', s.kind, 'capture', s.capture, 'case_id', s.case_id, 'call_key', s.key,
@@ -332,6 +338,7 @@ export const layer = Layer.effect(
       expected: row.expected,
       reasons: row.reasons,
       features: row.features,
+      ...(row.source === null ? {} : { source: row.source }),
       ...(row.bad_body ? { badBody: true as const } : {}),
       count: Number(row.count)
     })

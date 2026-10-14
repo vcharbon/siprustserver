@@ -25,8 +25,8 @@ export type MainErrorKind = typeof MainErrorKind.Type
 
 /**
  * A scripted party's violation the document does not state, on the earliest
- * offending message: the party replays what the source capture's endpoint
- * did, and that endpoint broke the RFC. `rule` the rule id, `rfc` its
+ * offending message: the replayed party repeats a captured message where, in
+ * this run, the RFC no longer allows it. `rule` the rule id, `rfc` its
  * citation, `detail` led by the party.
  */
 export const SourceFault = Schema.Struct({

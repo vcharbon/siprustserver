@@ -108,10 +108,11 @@ export const CellSummary = Schema.Struct({
    */
   skipped: Schema.optionalKey(LaneVerdict),
   /**
-   * Set when the cell's RFC audit holds a SOURCE FAULT: a scripted party broke
-   * an RFC rule the source capture's endpoint broke, which the document does
-   * not state. Information beside the verdict, passed or failed: it fails no
-   * cell, which `passed` judges on the system under test alone.
+   * Set when the cell's RFC audit holds a SOURCE FAULT: a scripted party's
+   * violation the document does not state — the replayed party repeats a
+   * captured message where, in this run, the RFC no longer allows it.
+   * Information beside the verdict, passed or failed: it fails no cell, which
+   * `passed` judges on the system under test alone.
    */
   sourceFault: Schema.optionalKey(Schema.Literal(true))
 })

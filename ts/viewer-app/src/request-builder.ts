@@ -76,11 +76,13 @@ export const selectionOf = (
         ...(blank(bar.filter.include.refusal) === undefined ? {} : { refusal: bar.filter.include.refusal }),
         ...(blank(bar.filter.include.outcome) === undefined ? {} : { outcome: bar.filter.include.outcome }),
         ...(blank(bar.filter.include.feature) === undefined ? {} : { feature: bar.filter.include.feature }),
+        ...(blank(bar.filter.include.source) === undefined ? {} : { source: bar.filter.include.source }),
         ...(some(bar.filter.exclude.rule) === undefined ? {} : { "not-rule": bar.filter.exclude.rule }),
         ...(some(bar.filter.exclude.expected) === undefined ? {} : { "not-expected": bar.filter.exclude.expected }),
         ...(some(bar.filter.exclude.refusal) === undefined ? {} : { "not-refusal": bar.filter.exclude.refusal }),
         ...(some(bar.filter.exclude.outcome) === undefined ? {} : { "not-outcome": bar.filter.exclude.outcome }),
-        ...(some(bar.filter.exclude.feature) === undefined ? {} : { "not-feature": bar.filter.exclude.feature })
+        ...(some(bar.filter.exclude.feature) === undefined ? {} : { "not-feature": bar.filter.exclude.feature }),
+        ...(some(bar.filter.exclude.source) === undefined ? {} : { "not-source": bar.filter.exclude.source })
       }
     case "ticked":
       if (ticked.length === 0) return "tick a row first"

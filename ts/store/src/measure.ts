@@ -29,7 +29,8 @@ export interface Interface {
   /**
    * Writes the error columns of a run's cases from a fresh reading of its
    * bundle, and nothing else: `passed` and the verdict are what the run said
-   * and stay so. Answers the rows updated.
+   * and stay so, and a stored source fault the reading finds none of stays.
+   * Answers the rows updated.
    */
   readonly remeasure: (runId: number, cases: ReadonlyArray<CaseResult>) => Effect.Effect<number, SqlError>
 }
@@ -70,7 +71,10 @@ export const layer = Layer.effect(
                 error_step = ${error?.step ?? null},
                 error_expected = ${error?.expected ?? null},
                 error_detail = ${error?.detail ?? null},
-                error_source = ${entry.sourceFault === undefined ? null : JSON.stringify(entry.sourceFault)}::jsonb,
+                error_source = coalesce(
+                  ${entry.sourceFault === undefined ? null : JSON.stringify(entry.sourceFault)}::jsonb,
+                  error_source
+                ),
                 body_failing = ${entry.bodyFailing ?? 0}
             WHERE run_id = ${runId} AND case_id = ${entry.caseId}
             RETURNING case_id

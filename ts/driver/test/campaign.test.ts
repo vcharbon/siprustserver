@@ -359,6 +359,7 @@ describe("the post-run RFC audit", () => {
     expect(cell.passed).toBe(true)
     expect(cell.sourceFault).toBe(true)
     expect(detail).toContain("a source fault stands as information")
+    expect(detail).toContain("repeats a captured message where, in this run, the RFC no longer allows it")
     expect(detail).toContain("no-200-after-cancel [127.0.0.1:5060] by uas1")
     expect(detail).not.toContain("the RFC audit failed the cell")
   })

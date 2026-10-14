@@ -81,8 +81,8 @@ describe("the queue's link to its delta sheet", () => {
         scope: "all",
         q: "A101",
         filter: {
-          include: { rule: "", expected: "", refusal: "", outcome: "failed", feature: "prack" },
-          exclude: { rule: ["bad-body"], expected: [], refusal: [], outcome: [], feature: ["mrf", "reroute"] }
+          include: { rule: "", expected: "", refusal: "", outcome: "failed", feature: "prack", source: "" },
+          exclude: { rule: ["bad-body"], expected: [], refusal: [], outcome: [], feature: ["mrf", "reroute"], source: [] }
         }
       }),
       "http://viewer"
