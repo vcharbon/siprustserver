@@ -117,7 +117,7 @@ equivalent message (ADR-0032 X3).
 **Obligation**:
 What discharges a dialog-level ladder, as a key the framework matches on:
 `AckOf2xx` and `AwaitPrack`. The engine cancels the ladder when the matching
-ACK or PRACK arrives; a rule sees only the give-up. A transaction ladder needs
+ACK or PRACK arrives; a rule sees only a 2xx's give-up. A transaction ladder needs
 no obligation — the transaction layer owns its own.
 _Avoid_: "watchdog" for the 2xx pair (it names the timer, not the thing
 owed).

@@ -239,7 +239,7 @@ give-up (RFC 3262 §4).
 Per-turn invariants hold the step to its contract: no `Pending` provisional
 shown to no one at the end of a turn, none on a leg whose INVITE has its final
 or is ending, and a shown ladder `Repeating` exactly while its `AwaitPrack`
-timers are armed.
+rung is armed, with never a give-up.
 
 ## Consequences
 

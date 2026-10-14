@@ -194,6 +194,34 @@ fn a_repeating_ladder_without_its_timers_breaks_the_ladder_invariant() {
 }
 
 #[test]
+fn a_give_up_under_a_shown_provisional_breaks_the_ladder_invariant() {
+    let mut call = call();
+    call.provisionals.push(call::testkit::shown_provisional(
+        "b-1",
+        "b1",
+        1,
+        7,
+        "a1",
+        1,
+        Ladder::Ceased(call::Ceased::Bound),
+        ResponderAck::Pending,
+    ));
+    assert_eq!(
+        shown_ladder_armed_while_repeating(&after(&call)),
+        Ok(()),
+        "ceased at its bound, nothing armed"
+    );
+    let obligation = call::Obligation::AwaitPrack { tag: "a1".into(), rseq: call::RSeq(1) };
+    call::helpers::arm_timer(
+        &mut call,
+        call::TimerKey::obligation(call::TimerType::RepeatGiveUp, obligation),
+        32_000,
+    );
+    let err = shown_ladder_armed_while_repeating(&after(&call)).unwrap_err();
+    assert!(err.contains("give-up armed true"), "{err}");
+}
+
+#[test]
 fn an_early_a_leg_past_a_rejection_breaks_the_ended_dialog_invariant() {
     let mut call = call();
     call.a_leg.invite_final_sent = Some(486);

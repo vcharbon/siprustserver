@@ -42,8 +42,8 @@ pub enum TimerType {
     /// §13.3.1.4) or the un-PRACKed reliable provisional (RFC 3262 §3). The
     /// framework re-sends the retained datagram and re-arms the next rung
     /// itself — no rule sees a rung. Retired with the obligation: by the
-    /// discharging ACK or PRACK, by the give-up, or with the leg, transaction
-    /// or call the emission belonged to.
+    /// discharging ACK or PRACK, by a 2xx's give-up, or with the leg,
+    /// transaction or call the emission belonged to.
     Rung,
     /// The give-up deadline of a 2xx's ladder — the one ladder event a rule
     /// sees: the deployment's ACK deadline (Timer L where it states none).
