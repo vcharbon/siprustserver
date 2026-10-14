@@ -273,6 +273,11 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     yield* Console.error(`[replay] refused: ${unstated}`)
     return 2
   }
+  const away = yield* Refusals.environment(facts, options.lane, options.selection.universe)
+  if (away !== null) {
+    yield* Console.error(`[replay] refused: ${away}`)
+    return 2
+  }
   if (Option.isSome(input.after)) {
     const ahead = yield* restore(awaitJob(input.after.value, Option.getOrUndefined(input.job)))
     if (ahead !== null) yield* Console.log(`[replay] job ${input.after.value} ${ahead}; resolving now`)
@@ -439,7 +444,13 @@ const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Inpu
     yield* Console.error(`[replay] refused: ${unstated}`)
     return 2
   }
-  const asked = yield* workOf(facts, input, yield* optionsOf(input))
+  const stated = yield* optionsOf(input)
+  const away = yield* Refusals.environment(facts, stated.lane, stated.selection.universe)
+  if (away !== null) {
+    yield* Console.error(`[replay] refused: ${away}`)
+    return 2
+  }
+  const asked = yield* workOf(facts, input, stated)
   if (typeof asked === "string") {
     yield* Console.error(asked)
     return 2

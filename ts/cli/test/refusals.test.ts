@@ -54,6 +54,39 @@ describe("the lane refusal", () => {
   })
 })
 
+describe("the environment refusal", () => {
+  const hosting = LaneHosting.layerWith({
+    lanes: ["paused", "wall"],
+    lane: (lane) =>
+      lane === "paused"
+        ? Effect.succeed(LaneHosting.NEUTRAL_LANE)
+        : lane === "wall"
+        ? Effect.succeed({ clock: "real", exclusive: true })
+        : Effect.fail(new LaneHosting.LaneUnstated({ lane, known: ["paused", "wall"] })),
+    standBatch: () => Effect.succeed(undefined),
+    standSut: () => Effect.succeed(undefined),
+    preflight: () => Effect.succeed(null)
+  })
+  /** A deployment whose checkout is not the one wide or real-clock work runs from. */
+  const away = { environmentRefusal: (what: string) => `not here: ${what}` } as CliFacts
+  const home = { environmentRefusal: (_what: string) => null as string | null } as CliFacts
+  const ask = (facts: CliFacts, lane: string, universe: "named" | "known" | "all" | "standing") =>
+    Effect.runPromise(Refusals.environment(facts, lane, universe).pipe(Effect.provide(hosting)))
+
+  it("refuses a sweep wider than the captures named, and work on a real-clock lane, away from home", async () => {
+    expect(await ask(away, "paused", "all")).toBe("not here: a --all sweep")
+    expect(await ask(away, "paused", "known")).toBe("not here: a --known sweep")
+    expect(await ask(away, "paused", "standing")).toBe("not here: a --standing sweep")
+    expect(await ask(away, "wall", "named")).toBe("not here: work on the real-clock lane wall")
+  })
+
+  it("lets named captures on a paused lane run anywhere, and everything run at home", async () => {
+    expect(await ask(away, "paused", "named")).toBeNull()
+    expect(await ask(away, "pased", "named")).toBeNull()
+    expect(await ask(home, "wall", "all")).toBeNull()
+  })
+})
+
 describe("the cut's refusals", () => {
   it("name where the census root is stated when no census run is there", async () => {
     const refused = await run(Refusals.cut(facts, paths()))
