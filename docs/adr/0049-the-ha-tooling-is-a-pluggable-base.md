@@ -230,9 +230,11 @@ made. A run profile joins the two.
    the stream's offered rate, so one budget holds at any cps. A failed setup
    is charged to the first entry that matches it.
 4. **The reason vocabulary.** With a final, `reason` is the first value of its
-   Reason header normalised to `<protocol>;cause=<n>` (`Q.850;cause=34`), or
-   the status code alone (`486`) when it has none; the reason phrase is never
-   matched. Without a final it is one of `timeout` (no final by the setup
+   first Reason header line normalised to `<protocol>;cause=<n>`, the protocol
+   token lowercased (`q.850;cause=34`), or the status code alone (`486`) when
+   that first value does not read, states no decimal cause or names a protocol
+   outside `[a-z0-9.+-]+`; a later value never stands in, and the reason phrase
+   is never matched. Without a final it is one of `timeout` (no final by the setup
    deadline), `transport` (a send or receive failed) or `protocol` (the
    generator stopped the call on a message it could not accept). SIPp and
    loadgen use the same spellings.
@@ -346,7 +348,13 @@ made. A run profile joins the two.
    | `wrong_method`, `unexpected`, `unparseable`, `rfc_audit_fail`, `check_fail` | a `protocol` failure, `ending: failed` (reason `protocol` before answer) if it stopped the call |
    | `transport` | a `transport` failure, `ending: failed` (reason `transport` before answer) |
    | `panic` | a `generator` failure, `ending: failed` |
-   | `rejected` (`key_in_flight`, `key_cooling`, …) | no record: the call was never placed. Counted per stream in a `not_placed` counter; neither an impact nor a generator failure |
+   | `rejected` (`key_in_flight`, `key_cooling`, …), or shed at the in-flight cap | no record: the call was never placed. Counted per stream and shape in a `not_placed` counter; neither an impact nor a generator failure |
+   | a panic outside the scenario's boundary, no INVITE sent, a refused bind | no record: the generator failed the call. Counted per stream and shape in a `generator_failures` counter; the run is `invalid` |
+
+   The facts of a record are sealed when the call's verdict resolves, before
+   the generator tears down a failed call: the teardown's CANCEL and the 487 it
+   draws, a final after the step deadline, or a cleanup BYE change no ending;
+   of the teardown only whether a BYE released the dialog is kept.
 
    A record's `ending` comes from what the caller observed, never from an
    accepted branch's name. loadgen's `near`/`clear` tag and its `POST /chaos`
@@ -358,8 +366,9 @@ made. A run profile joins the two.
    reads that copy, so a verdict can be recomputed after VictoriaLogs
    retention has dropped the run.
 5. **Reconciliation.** For each stream, the records plus the calls not placed
-   equal the delta of the generator's own call counter over the stream's
-   life, read after the drain. A difference is a `record_gap` integrity
+   plus the calls the generator failed equal the delta of the generator's own
+   offered-call counter (every slot of its rate, shed included) over the
+   stream's life, read after the drain. A difference is a `record_gap` integrity
    finding: an exit that writes no record would otherwise hide exactly the
    calls that went wrong.
 6. **The classifier** is one module of the runner,

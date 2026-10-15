@@ -143,7 +143,7 @@
         "required": ["kind", "detail"],
         "properties": {
           "kind": {
-            "description": "`record_gap`: a stream's records differ from its generator's call counter. `incident_failed`: an executable or probe failed or timed out. `stream_died`: a generator exited before its stream was due to stop. `series_stale`: a series the run reads stopped updating. `generator_failure`: a record names a `generator` failure. `leftover_calls`: the system under test held calls before the run started. `window_overlap`: a window opened while another was open.",
+            "description": "`record_gap`: a stream's records, calls not placed and generator failures differ from its generator's offered-call counter. `incident_failed`: an executable or probe failed or timed out. `stream_died`: a generator exited before its stream was due to stop. `series_stale`: a series the run reads stopped updating. `generator_failure`: a record names a `generator` failure, or the generator counted a call it failed without a record. `leftover_calls`: the system under test held calls before the run started. `window_overlap`: a window opened while another was open.",
             "enum": ["record_gap", "incident_failed", "stream_died", "series_stale", "generator_failure", "leftover_calls", "window_overlap"]
           },
           "event": { "type": "string" },

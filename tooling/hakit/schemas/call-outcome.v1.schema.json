@@ -83,7 +83,7 @@
       "maximum": 699
     },
     "reason": {
-      "description": "The failure key. With a final: the first value of its Reason header normalised to `<protocol>;cause=<n>` (`Q.850;cause=34`, `SIP;cause=503`), or the status code alone (`486`) when it has no Reason header; the reason phrase is never used. Without a final: `timeout` (no final before the setup deadline), `transport` (a send or receive failed at the socket) or `protocol` (the generator stopped the call on a message it could not accept). Null on an answered call.",
+      "description": "The failure key. With a final: the first value of its Reason header normalised to `<protocol>;cause=<n>` with the protocol lowercased (`q.850;cause=34`, `sip;cause=503`), or the status code alone (`486`) when it has no readable first value with a cause; the reason phrase is never used. Without a final: `timeout` (no final before the setup deadline), `transport` (a send or receive failed at the socket) or `protocol` (the generator stopped the call on a message it could not accept). Null on an answered call.",
       "anyOf": [
         { "type": "null" },
         { "enum": ["timeout", "transport", "protocol"] },
