@@ -35,7 +35,10 @@ services:
     image: victoriametrics/victoria-logs:v1.40.0
     container_name: victorialogs
     restart: unless-stopped
-    networks: [default, kind]
+    # `sipext` attachment: the SIPp exporter twins ship their call-outcome
+    # records to http://victorialogs:9428 from the generator bridge, as VM
+    # scrapes them there (see victoriametrics above).
+    networks: [default, kind, sipext]
     ports:
       - "9428:9428"
     volumes:
