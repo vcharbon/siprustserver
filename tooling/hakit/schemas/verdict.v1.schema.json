@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "verdict.v1.schema.json",
+  "$comment": "minor 0",
   "title": "verdict.v1",
-  "description": "The `verdict.json` of a run directory: every window with its impact against its budget, the impact outside every window, and the integrity of the measurement. `hakit verdict <run-dir>` recomputes it from the run directory alone. ADR-0049.",
+  "description": "The `verdict.json` of a run directory: every window with its impact against its budget, the in-dialog impact with the windows it may belong to, the impact outside every window, and the integrity of the measurement. `hakit verdict <run-dir>` recomputes it from the run directory alone. ADR-0049.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "run", "profile", "started_at_ms", "ended_at_ms", "status", "streams", "windows", "unattributed", "integrity"],
+  "required": ["schema", "run", "profile", "started_at_ms", "ended_at_ms", "status", "streams", "windows", "in_dialog", "unattributed", "integrity"],
   "properties": {
     "schema": { "const": "verdict.v1" },
     "run": { "type": "string" },
@@ -17,19 +18,27 @@
       "enum": ["pass", "fail", "invalid"]
     },
     "streams": {
-      "description": "Per stream: calls placed, records read, successes.",
+      "description": "Per stream: calls placed, calls never placed, records read, successes.",
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["stream", "shape", "cps", "calls", "records", "success"],
+        "required": ["stream", "shape", "start", "cps", "calls", "not_placed", "records", "success"],
         "properties": {
           "stream": { "type": "string" },
           "shape": { "type": "string" },
-          "cps": { "type": "number" },
+          "start": { "enum": ["run", "incident"] },
+          "cps": {
+            "description": "The offered rate; with `steps`, the rate of the first step.",
+            "type": "number"
+          },
           "calls": {
             "description": "Calls the generator says it placed (its own counter); null when the generator keeps none.",
             "type": ["integer", "null"]
+          },
+          "not_placed": {
+            "description": "Calls the generator refused to place (loadgen `rejected`): no record, no impact.",
+            "type": "integer"
           },
           "records": { "type": "integer" },
           "success": { "type": "integer" }
@@ -41,36 +50,81 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["event", "incidents", "budget", "opened_at_ms", "closed_at_ms", "phases", "impacts", "findings"],
+        "required": ["event", "source", "incidents", "budget", "status", "opened_at_ms", "closed_at_ms", "phases", "impacts", "findings"],
         "properties": {
           "event": {
-            "description": "The event id: its sequence number and incident names.",
+            "description": "The event id: `<seq>-<incident>`, the names joined by `+` for a combined event.",
             "type": "string"
           },
+          "source": { "enum": ["schedule", "manual", "detected"] },
           "incidents": { "type": "array", "items": { "type": "string" } },
           "budget": { "type": "string" },
+          "status": {
+            "description": "`ok`, or `incident_failed` when an executable or probe failed and the window closed at the incident's maximum.",
+            "enum": ["ok", "incident_failed"]
+          },
           "opened_at_ms": { "type": "number" },
           "closed_at_ms": { "type": "number" },
           "phases": {
-            "description": "The instant of each phase the event reached, by phase name.",
-            "type": "object",
-            "additionalProperties": { "type": "number" }
+            "description": "Every phase reached, in order; `step` is the incident it belongs to.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["phase", "at_ms", "step"],
+              "properties": {
+                "phase": { "enum": ["inject", "injected", "heal", "healed", "recovered", "failed"] },
+                "at_ms": { "type": "number" },
+                "step": { "type": "string" }
+              }
+            }
           },
           "facts": {
-            "description": "The JSON objects the incident executables printed, by executable (`inject`, `heal`, `probe`).",
+            "description": "The JSON objects the incident executables printed, by incident, then by executable (`inject`, `heal`, `probe`).",
             "type": "object"
           },
-          "recovery_s": {
-            "description": "Seconds from `healed` until traffic was back to its baseline; null when it never was before the window closed.",
-            "type": ["number", "null"]
+          "recovery": {
+            "description": "Per stream that has a baseline: seconds from `healed` until it was back; null when it never was before the window closed.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stream", "recovery_s"],
+              "properties": {
+                "stream": { "type": "string" },
+                "recovery_s": { "type": ["number", "null"] }
+              }
+            }
           },
           "impacts": {
+            "description": "The budgetable classes charged to this window.",
             "type": "array",
             "items": { "$ref": "#/$defs/impact" }
           },
           "findings": {
             "description": "The number of impacts above their allowance in this window.",
             "type": "integer"
+          }
+        }
+      }
+    },
+    "in_dialog": {
+      "description": "Every impact of the classes that take no budget, each a finding, with the windows whose inject fell inside the call's lifetime before the failure. One with no candidate window is listed in `unattributed` instead.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class", "stream", "call_id", "at_ms", "candidate_windows"],
+        "properties": {
+          "class": { "type": "string" },
+          "stream": { "type": "string" },
+          "call_id": { "type": "string" },
+          "at_ms": { "type": "number" },
+          "detail": { "type": "string" },
+          "candidate_windows": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
           }
         }
       }
@@ -89,8 +143,8 @@
         "required": ["kind", "detail"],
         "properties": {
           "kind": {
-            "description": "`record_gap`: a stream's records differ from its generator's call counter. `incident_failed`: an executable failed or timed out. `stream_died`: a generator exited before the load ended. `series_stale`: a series the run reads stopped updating. `generator_failure`: a record names a `generator` failure. `leftover_calls`: the system under test held calls before the run started.",
-            "enum": ["record_gap", "incident_failed", "stream_died", "series_stale", "generator_failure", "leftover_calls"]
+            "description": "`record_gap`: a stream's records differ from its generator's call counter. `incident_failed`: an executable or probe failed or timed out. `stream_died`: a generator exited before its stream was due to stop. `series_stale`: a series the run reads stopped updating. `generator_failure`: a record names a `generator` failure. `leftover_calls`: the system under test held calls before the run started. `window_overlap`: a window opened while another was open.",
+            "enum": ["record_gap", "incident_failed", "stream_died", "series_stale", "generator_failure", "leftover_calls", "window_overlap"]
           },
           "event": { "type": "string" },
           "stream": { "type": "string" },
@@ -114,7 +168,7 @@
         "code": { "type": "integer" },
         "reason": { "type": "string" },
         "count": {
-          "description": "Calls (or events, for a class counted in events); for `recovery`, seconds.",
+          "description": "Calls, or events for a class counted in events; for `recovery`, the seconds of the slowest stream.",
           "type": "number"
         },
         "seconds": {

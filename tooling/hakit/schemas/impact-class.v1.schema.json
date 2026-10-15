@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "impact-class.v1.schema.json",
+  "$comment": "minor 0",
   "title": "impact-class.v1",
   "description": "A file `classes/<name>.yaml`: an impact class a product adds beside the built-in ones. Its count comes from an executable `classes/<name>.count` that reads the run directory (path in `HAKIT_RUN_DIR`) and prints one JSON array of impacts `{at_ms, stream?, call_id?, detail?}`; the runner attributes each to a window by `at_ms`. ADR-0049.",
   "type": "object",
@@ -11,7 +12,21 @@
     "name": {
       "description": "Equal to the file stem; unique on the search path and distinct from every built-in class.",
       "type": "string",
-      "pattern": "^[a-z][a-z0-9_]*$"
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "not": {
+        "enum": [
+          "setup_failed",
+          "setup_slow",
+          "unexpected_ending",
+          "dialog_request_failed",
+          "call_cut",
+          "call_stranded",
+          "protocol_anomaly",
+          "cdr_mismatch",
+          "recovery",
+          "unattributed"
+        ]
+      }
     },
     "description": { "type": "string" },
     "unit": {

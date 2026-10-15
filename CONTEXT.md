@@ -1268,29 +1268,33 @@ earlier.
 
 **Incident**:
 A named thing that happens to the lab, in `incidents/<name>/`: what it acts
-on, `inject`, `heal` and an optional `probe`. A *fault* incident acts on a
-deployed component; a *load incident* starts a load stream and stops it
-cleanly. An incident never states a tolerance.
+on, `inject`, `heal` and an optional `probe`. A *fault* incident's
+executables act on a deployed component; a *load incident* names a profile
+stream the runner starts at inject and drains at heal. An incident never
+states a tolerance.
 _Avoid_: "chaos event" for the definition (an **event** is one firing of an
 incident in a run); a pass threshold beside the fault.
 
 **Window** (incident window):
-The span an event's impact is charged to: from its `inject` instant to
-`settle_s` after its `recovered` instant. Windows of one run never overlap.
+The span an event's budgetable impact is charged to: from its `inject`
+instant to `settle_s` after its `recovered` instant. Windows of one run never
+overlap. An in-dialog impact names its *candidate windows* instead: those
+whose inject fell inside the call's life before the failure.
 _Avoid_: "gate" (the old per-script check after an event).
 
 **Impact class**:
-What went wrong with a call or a run, derived from outcome records:
-`setup_failed`, `setup_slow`, `dialog_request_failed`, `call_cut`,
-`call_stranded`, `protocol_anomaly`, `cdr_mismatch`, `recovery`,
-`unattributed`, plus the classes a product adds.
+What went wrong with a call or a run, derived from outcome records and the
+treatment catalog: `setup_failed`, `unexpected_ending`, `setup_slow`,
+`dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`,
+`cdr_mismatch`, `recovery`, `unattributed`, plus the classes a product adds.
 _Avoid_: loadgen's result class (`timeout`, `status_503`), which is what the
 generator saw, not what the system under test did.
 
 **Impact budget**:
-What impact one window allows, per class, `setup_failed` keyed by stream ×
-final code × reason. A class or key the budget does not name allows 0; the
-in-dialog classes take no budget at all; impact outside every window is
+What impact one window allows, per class, `setup_failed` and a pre-answer
+`unexpected_ending` keyed by stream × final code × reason. A class or key the
+budget does not name allows 0; the in-dialog classes and an unexpected ending
+after answer take no budget at all; impact outside every window is
 `unattributed` and always a finding.
 _Avoid_: "tolerance" for something an incident or a scenario carries.
 
@@ -1300,13 +1304,14 @@ events and the budget of each event's window.
 _Avoid_: **Load profile** (loadgen's own run spec for one load fleet).
 
 **Load stream**:
-One named flow of calls of one shape at one rate, from one generator; its name
-is the `stream` of its records and the `stream` label of its series.
+One named flow of calls of one shape at one rate, from one generator, for the
+whole run or only inside a load incident's event; its name is the `stream` of
+its records and the `stream` label of its series.
 _Avoid_: "role" (the old SIPp exporter label).
 
 **Call-outcome record**:
-The one record a generator writes per call, on every exit path, stating what
-the caller observed (`call-outcome.v1`). It carries the generator's own class
+The one record a caller-side generator writes per call it placed, on every
+exit path, stating what the caller observed (`call-outcome.v1`). It carries the generator's own class
 only as `producer_verdict`, which the classifier never reads.
 _Avoid_: a generator classifying or excusing its own calls.
 

@@ -1,8 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "budget.v1.schema.json",
+  "$comment": "minor 0",
   "title": "budget.v1",
-  "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly` and `unattributed` take no budget. ADR-0049.",
+  "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "name", "description"],
@@ -15,46 +16,17 @@
     },
     "description": { "type": "string" },
     "setup_failed": {
-      "description": "Allowances for failed setups, each keyed by stream, final code and reason. A failed setup matching no entry is a finding.",
+      "description": "Allowances for failed setups. A failed setup matching no entry is a finding.",
       "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["stream", "code", "reason"],
-        "properties": {
-          "stream": {
-            "description": "A stream name, or `*` for each stream separately.",
-            "type": "string",
-            "pattern": "^([a-z][a-z0-9_]*|\\*)$"
-          },
-          "code": {
-            "description": "The final's status code; 0 is a setup with no final (`no_final`). Never a wildcard.",
-            "type": "integer",
-            "anyOf": [
-              { "const": 0 },
-              { "minimum": 300, "maximum": 699 }
-            ]
-          },
-          "reason": {
-            "description": "The record's `reason`, or `*` for any.",
-            "type": "string",
-            "minLength": 1
-          },
-          "max_calls": { "type": "integer", "minimum": 0 },
-          "max_seconds": {
-            "description": "The allowance in seconds of the stream's offered rate: the count may reach max_seconds × the stream's cps.",
-            "type": "number",
-            "minimum": 0
-          }
-        },
-        "oneOf": [
-          { "required": ["max_calls"] },
-          { "required": ["max_seconds"] }
-        ]
-      }
+      "items": { "$ref": "#/$defs/keyed" }
+    },
+    "unexpected_ending": {
+      "description": "Allowances for pre-answer endings the catalog does not expect for a shape that does not expect an answer either (a reject with another code). After answer an unexpected ending takes no budget: the codes here are never 2xx.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/keyed" }
     },
     "setup_slow": {
-      "description": "Slow setups allowed in the window. `threshold_ms` replaces the profile's `setup_slow_ms` inside the window.",
+      "description": "Slow setups in the window. `threshold_ms` replaces the profile's `setup_slow_ms` inside the window; without an allowance, none may be slow.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -62,10 +34,7 @@
         "max_calls": { "type": "integer", "minimum": 0 },
         "max_seconds": { "type": "number", "minimum": 0 }
       },
-      "oneOf": [
-        { "required": ["max_calls"] },
-        { "required": ["max_seconds"] }
-      ]
+      "not": { "required": ["max_calls", "max_seconds"] }
     },
     "cdr_mismatch": {
       "type": "object",
@@ -76,10 +45,9 @@
       }
     },
     "recovery": {
-      "description": "How long after `healed` traffic may take to come back to its baseline. Absent, it must be back before the window closes.",
+      "description": "How traffic comes back after `healed`. Without `max_s`, it must be back before the window closes.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_s"],
       "properties": {
         "max_s": { "type": "number", "minimum": 0 },
         "tolerance": {
@@ -104,9 +72,25 @@
       }
     },
     "classes": {
-      "description": "Allowances for impact classes a product added on the search path (`classes/`), by class name.",
+      "description": "Allowances for impact classes a product added on the search path (`classes/`), by class name. A built-in class name is refused here.",
       "type": "object",
-      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$",
+        "not": {
+          "enum": [
+            "setup_failed",
+            "setup_slow",
+            "unexpected_ending",
+            "dialog_request_failed",
+            "call_cut",
+            "call_stranded",
+            "protocol_anomaly",
+            "cdr_mismatch",
+            "recovery",
+            "unattributed"
+          ]
+        }
+      },
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
@@ -115,6 +99,43 @@
           "max": { "type": "number", "minimum": 0 }
         }
       }
+    }
+  },
+  "$defs": {
+    "keyed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stream", "code", "reason"],
+      "properties": {
+        "stream": {
+          "description": "A stream name, or `*` for each stream separately.",
+          "type": "string",
+          "pattern": "^([a-z][a-z0-9_]*|\\*)$"
+        },
+        "code": {
+          "description": "The final's status code; 0 for a setup that ended with no final (reason `timeout`, `transport` or `protocol`). Never a wildcard, never 2xx.",
+          "type": "integer",
+          "anyOf": [
+            { "const": 0 },
+            { "minimum": 300, "maximum": 699 }
+          ]
+        },
+        "reason": {
+          "description": "The record's normalised `reason`, or `*` for any.",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_calls": { "type": "integer", "minimum": 0 },
+        "max_seconds": {
+          "description": "The allowance in seconds of the stream's offered rate: the count may reach max_seconds × the stream's cps in the window.",
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "oneOf": [
+        { "required": ["max_calls"] },
+        { "required": ["max_seconds"] }
+      ]
     }
   }
 }

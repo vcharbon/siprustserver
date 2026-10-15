@@ -1,8 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "profile.v1.schema.json",
+  "$comment": "minor 0",
   "title": "profile.v1",
-  "description": "A file `profiles/<name>.yaml`: one run. The load streams, the schedule of incident events, and the budget of each event's window. Impact outside every window is `unattributed`. ADR-0049.",
+  "description": "A file `profiles/<name>.yaml`: one run. The load streams, the schedule of incident events, the budget of each event's window, and the defaults of an event the schedule did not fire. Impact outside every window is `unattributed`. ADR-0049.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "name", "description", "duration_s", "setup_slow_ms", "streams"],
@@ -15,24 +16,24 @@
     },
     "description": { "type": "string" },
     "duration_s": {
-      "description": "Load time from the start of the streams to the start of the drain.",
+      "description": "Load time from the start of the `run` streams to the start of the drain.",
       "type": "number",
       "exclusiveMinimum": 0
     },
     "drain_s": {
-      "description": "After the load stops, how long the runner waits for every generator to finish its calls before it reads the records.",
+      "description": "After the load stops, how long the runner waits for every generator to finish its calls before it reads the records. At least max(`setup_deadline_s`, `ring_s` + `hold_s`) of every stream; the runner refuses a shorter one.",
       "type": "number",
       "minimum": 0,
       "default": 120
     },
     "settle_s": {
-      "description": "The default tail of a window after its `recovered` phase. At least the longest setup deadline of the streams.",
+      "description": "The default tail of a window after its `recovered` instant. At least the longest `setup_deadline_s` of the streams; the runner refuses a shorter one.",
       "type": "number",
       "minimum": 0,
-      "default": 120
+      "default": 60
     },
     "setup_slow_ms": {
-      "description": "A setup (INVITE to its final) longer than this is `setup_slow`, unless a window's budget raises it.",
+      "description": "A setup (INVITE to its first provisional, or to its final when none came) longer than this is `setup_slow`, unless a window's budget raises it.",
       "type": "number",
       "exclusiveMinimum": 0
     },
@@ -76,7 +77,7 @@
       "items": { "$ref": "#/$defs/stream" }
     },
     "schedule": {
-      "description": "The incident events: a cycle repeated from `first_at_s` every `interval_s` until the load ends, or a list of events at fixed times. Absent, the run has no incident and all of it is outside any window.",
+      "description": "The incident events: a cycle repeated from `first_at_s` every `interval_s` until the load ends, or a list of events at fixed times. Absent, the run has no scheduled incident.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -85,7 +86,12 @@
         "cycle": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/event" }
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/event" },
+              { "not": { "required": ["at_s"] } }
+            ]
+          }
         },
         "at": {
           "type": "array",
@@ -102,13 +108,29 @@
         { "required": ["first_at_s", "interval_s", "cycle"], "not": { "required": ["at"] } },
         { "required": ["at"], "not": { "anyOf": [{ "required": ["cycle"] }, { "required": ["first_at_s"] }, { "required": ["interval_s"] }] } }
       ]
+    },
+    "defaults": {
+      "description": "By incident name: the budget, parameters and target of an event the schedule did not fire (`hakit fire`, or one the runner detected). `hakit fire` of an incident without an entry here is refused.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["budget"],
+        "properties": {
+          "budget": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+          "params": { "type": "object" },
+          "target": { "type": "object" },
+          "stream": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+        }
+      }
     }
   },
   "$defs": {
     "stream": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "driver", "shape", "cps"],
+      "required": ["name", "driver", "shape", "cps", "setup_deadline_s"],
       "properties": {
         "name": {
           "description": "The stream name: the `stream` of its records and the `stream` label of its series.",
@@ -118,6 +140,11 @@
         "driver": {
           "description": "The generator. `loadgen` covers a product binary built on the loadgen library; the deploy values name its image.",
           "enum": ["sipp", "loadgen"]
+        },
+        "start": {
+          "description": "`run`: the stream runs for the whole load. `incident`: it runs only between the inject and the heal of the load incident whose event names it.",
+          "enum": ["run", "incident"],
+          "default": "run"
         },
         "shape": {
           "description": "The treatment catalog shape the stream's calls request.",
@@ -142,13 +169,33 @@
             }
           }
         },
+        "setup_deadline_s": {
+          "description": "How long the generator waits for the INVITE's final before it gives up (`ending: timeout`).",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "ring_s": {
+          "description": "How long the callee side rings before it answers, when the generator plays it.",
+          "type": "number",
+          "minimum": 0,
+          "default": 0
+        },
+        "hold_s": {
+          "description": "How long an answered call lasts before the planned teardown.",
+          "type": "number",
+          "minimum": 0,
+          "default": 0
+        },
         "max_concurrent": { "type": "integer", "exclusiveMinimum": 0 },
         "params": {
-          "description": "Driver parameters (hold time, ring time, a SIPp `-key` value).",
+          "description": "Other driver parameters (a SIPp `-key` value, an image).",
           "type": "object",
           "additionalProperties": { "type": ["string", "number", "boolean"] }
         }
-      }
+      },
+      "if": { "properties": { "driver": { "const": "sipp" } } },
+      "then": { "required": ["scenario"] },
+      "else": { "not": { "required": ["scenario"] } }
     },
     "event": {
       "type": "object",
@@ -162,11 +209,16 @@
           "pattern": "^[a-z][a-z0-9_]*$"
         },
         "incidents": {
-          "description": "Several incidents injected together in one window under one budget.",
+          "description": "Several incidents injected together in one window under one budget; at most one of them is a load incident.",
           "type": "array",
           "minItems": 2,
           "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
           "uniqueItems": true
+        },
+        "stream": {
+          "description": "For a load incident: the `start: incident` stream it starts and stops.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "params": {
           "description": "Incident parameters; with `incidents`, keyed by incident name.",
@@ -177,6 +229,11 @@
           "type": "object"
         },
         "duration_s": { "type": "number", "minimum": 0 },
+        "expected_s": {
+          "description": "Overrides the incident's `expected_s` for the overlap check.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
         "settle_s": { "type": "number", "minimum": 0 },
         "budget": {
           "description": "The budget of the event's window, by name.",

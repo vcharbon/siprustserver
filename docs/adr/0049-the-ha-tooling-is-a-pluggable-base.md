@@ -5,16 +5,17 @@
 **Owner:** `tooling/hakit/` (the runner, its schemas in `tooling/hakit/schemas/`,
 its own content in `tooling/hakit/content/`), `deploy/helm/siprust/` and
 `deploy/helm/siprust-observability/` (the charts), `crates/loadgen` (the
-outcome records it writes), `crates/metric-catalogue` and
-`crates/metric-contract` (the catalogue a product extends).
+product-shape seam and the outcome records it writes),
+`crates/metric-catalogue` and `crates/metric-contract` (the catalogue a
+product extends).
 
 ## Context
 
-The endurance and chaos tooling grew as shell around the lab:
+The endurance and chaos tooling grew as shell around the lab.
 `deploy/k8s/chaos.sh` (853 lines) and `endurance.sh` (1637) hold every fault
-primitive, the load streams, the gates and the tolerances in one place, and a
-product that builds on this repository reuses them by sourcing `chaos.sh` and
-overriding functions. Four things went wrong with that shape.
+primitive, the load streams, the gates and the tolerances in one place. The
+only way to extend them is to source `chaos.sh` as a library and override its
+functions. Four things went wrong with that shape.
 
 - **The damage was judged per script, after the fact.** Each event pushes
   `sip_chaos_event{type,phase|result}` and is gated by its own rule (a pass
@@ -22,19 +23,19 @@ overriding functions. Four things went wrong with that shape.
   so a gate cannot tell an expected residual from a defect, and failures
   between events are counted by no gate.
 - **The judge was blind to single calls.** SIPp reports counters only
-  (`deploy/k8s/sipp/exporter/`), so a call a fault stranded, a call left
-  without a BYE when its generator was removed, or a burst of 20 calls under a
-  rate rule could not be attributed to anything. loadgen classes its calls
-  (`crates/loadgen/src/class.rs`) and excuses some of them as `near` a fault
-  (`chaos.rs`), a second acceptance mechanism beside the gates.
+  (`deploy/k8s/sipp/exporter/`). A call a fault stranded, or a handful of
+  failures under a rate rule, cannot be attributed to anything. loadgen
+  classes its calls (`crates/loadgen/src/class.rs`) and excuses some of them
+  as `near` a fault (`chaos.rs`), a second acceptance mechanism beside the
+  gates.
 - **Variants were made by rewriting files.** Scenario variants are separate
-  XML copies, or are patched with `sed` at launch; manifests are rendered by
+  XML copies, or are patched with `sed` at launch. Manifests are rendered by
   `envsubst`, which blanked a shell variable in the proxy's init script. A
-  product forks the manifests and the dashboards it needs to change.
-- **There was no second product in view.** Every seam was cut for the one
-  downstream product that existed, by overriding shell functions. A product
-  that adds media handling, with its own faults and its own impact classes,
-  would have to fork again.
+  consumer forks the manifests and dashboards it needs to change.
+- **Overriding shell functions does not scale to a second downstream
+  product.** A product with its own faults, load shapes and impact classes
+  would be coupled to every function name and global of the base, and would
+  fork what it cannot override.
 
 ## Decision
 
@@ -42,7 +43,8 @@ The HA tooling is one pluggable base: a Python runner that discovers incidents,
 impact budgets, run profiles, scenarios, dashboards, treatment catalogs and
 metric catalogues on a search path, runs a profile against the lab, and judges
 every call by a versioned outcome record. A product plugs in by adding
-directories to the search path. It never forks a file of the base.
+directories to the search path. It never forks a file of the base. Every seam
+is cut for a second product whose code the base does not know.
 
 ### 1. The search path
 
@@ -52,7 +54,7 @@ directories to the search path. It never forks a file of the base.
 
    | directory | holds | schema |
    |---|---|---|
-   | `incidents/<name>/` | `incident.yaml`, executables `inject`, `heal`, optional `probe` | `incident.v1` |
+   | `incidents/<name>/` | `incident.yaml`; for a fault, executables `inject`, `heal`, optional `probe` | `incident.v1` |
    | `budgets/<name>.yaml` | one impact budget | `budget.v1` |
    | `profiles/<name>.yaml` | one run profile | `profile.v1` |
    | `catalogs/<name>.json` | one treatment catalog | `treatment-catalog.v1` |
@@ -68,13 +70,18 @@ directories to the search path. It never forks a file of the base.
    profile name mean different runs depending on `HAKIT_PATH`.
 4. Every file is validated against its schema before anything runs
    (`hakit validate`, and the first step of every other subcommand). A file
-   that fails is refused with the path and the schema error.
+   that fails is refused with the path and the schema error. What a schema
+   cannot express (a parameter default of the declared type where the schema
+   leaves it open, a profile's timing bounds, a stream's shape in a catalog)
+   the runner checks at the same step.
 5. Data is the contract and code is the leaf. Where an incident or a class
    needs logic, its directory carries an executable in any language; the
    runner knows it only through the contract below.
-6. Every schema is versioned in its name (`call-outcome.v1`). Any change to a
-   schema is a new major version file beside the old one. The runner reads
-   the versions it ships and refuses the others.
+6. Every schema is versioned. The major version is in the file and record
+   name (`call-outcome.v1`); a breaking change is a new major file beside the
+   old one, and the runner refuses a major it does not ship. An added optional
+   field is a minor version of the same file (its `$comment`), read by every
+   reader of that major.
 
 ### 2. The incident contract
 
@@ -82,19 +89,20 @@ An incident says what happens and to what. It never says what impact is
 tolerated (§3).
 
 1. **Layout.** `incidents/<name>/incident.yaml` (fields in
-   `incident.v1.schema.json`: `kind` `fault|load`, `target` selector and pick,
-   `params`, `duration_s`, `timeouts`, `requires`) and the executables
-   `inject`, `heal` and, optionally, `probe`.
+   `incident.v1.schema.json`: `kind` `fault|load`, a fault's `target`
+   selector and pick and its `params`, a load incident's `stop`,
+   `duration_s`, `expected_s`, `timeouts`, `requires`). A fault has the
+   executables `inject` and `heal`, and optionally `probe`. A load incident
+   has none but an optional `probe` (§2.8).
 2. **Phases.** For each event the runner records, in order: `inject` (before
-   it runs `inject`), `injected` (`inject` exited 0), `heal` (after
-   `duration_s`, before it runs `heal`), `healed` (`heal` exited 0),
-   `recovered` (`probe` exited 0, or right after `healed` without a probe).
-   An executable that fails or overruns its timeout records `failed` and an
-   `incident_failed` integrity finding. A combined event injects its
+   the inject step), `injected` (it succeeded), `heal` (after `duration_s`,
+   before the heal step), `healed` (it succeeded), `recovered` (`probe`
+   exited 0, or right after `healed` without a probe). A step that fails or
+   overruns its timeout records `failed`. A combined event injects its
    incidents in the listed order and heals them in reverse; each incident
    records its own phases.
 3. **Environment.** Each executable runs with its working directory set to
-   the event directory and receives:
+   its event directory and receives:
 
    | variable | value |
    |---|---|
@@ -115,7 +123,7 @@ tolerated (§3).
    added) is a file in `HAKIT_EVENT_DIR`.
 5. **Exit codes.** 0 done. For `probe`, 75 (`EX_TEMPFAIL`) means not yet: the
    runner calls it again every `probe_interval_s` until `probe_s`. Anything
-   else, or the timeout (the runner kills the process group), fails the event.
+   else, or the timeout (the runner kills the process group), fails the step.
 6. **Heal always runs.** The runner calls `heal` after a failed `inject`, on
    its own interruption, and from `hakit cleanup` for every event a crashed
    run left open. So `heal` is idempotent and correct after a partial
@@ -125,42 +133,82 @@ tolerated (§3).
    loss, TCP reset), a Chaos Mesh resource it creates and deletes, `kubectl`.
    An incident that needs a backend names it in `requires`, and the runner
    refuses the profile before the run if the lab lacks it.
-8. **Load incidents.** An incident of `kind: load` starts a load stream at
-   `inject` and stops it at `heal`. Stopping is clean: the generator stops
-   placing calls, the calls in flight finish their teardown, and only then is
-   the generator removed (SIPp: `SIGUSR1`, then a wait of hold + ring + margin;
-   loadgen: rate 0, then its drain). A load incident never kills its generator
-   with calls in flight. The stream's records carry its own `stream` name, so
-   its impact is budgeted per stream like any other.
+8. **Load incidents.** A load incident points at a profile stream with
+   `start: incident` (the event's `stream`). The runner, never an executable,
+   launches that stream at `inject` and stops it at `heal`, so the stream has
+   its cps for `max_seconds`, its catalog and `load_safe` check, its
+   `verdict.streams` entry and its counter reconciliation like any other.
+   With `stop: drain` (the default) the generator stops placing calls, the
+   calls in flight finish their teardown within the stream's
+   `setup_deadline_s` or `ring_s` + `hold_s`, and only then is the generator
+   removed (SIPp: `SIGUSR1`; loadgen: rate 0, then its drain). With
+   `stop: abandon` the generator is killed with its calls in flight, which
+   leaves those calls to the system under test to reap; the stream writes no
+   record for them and is left out of the reconciliation. A stream that
+   starts with an incident has no pre-inject baseline and so no `recovery`.
 9. **The event series.** At each phase the runner pushes
    `sip_chaos_event{incident,phase,source,run} 1` to VictoriaMetrics with the
    phase instant as its timestamp. `source` is `schedule` (fired by the
-   profile), `manual` (`hakit fire`) or `detected` (an involuntary event the
-   runner saw, such as a generator that died). While a window is open the
-   runner also pushes `sip_chaos_window{incident,run}` at 1 every 10 s and 0
-   when it closes, so a range query at any step sees the window. These series
-   are for display. The verdict reads the run's own `events.jsonl`, which
-   holds the same instants.
+   profile), `manual` (`hakit fire`) or `detected` (an event the runner saw
+   happen, such as a generator that died). While a window is open the runner
+   also pushes `sip_chaos_window{incident,run}` at 1 every 10 s and 0 when it
+   closes, so a range query at any step sees the window. These series are for
+   display. The verdict reads the run's own `events.jsonl`, which holds the
+   same instants.
+10. **The base incidents** in `tooling/hakit/content/incidents/` target pods
+    by label, so a product points each at its own components:
+
+    | incident | kind | what it does | replaces in `chaos.sh` |
+    |---|---|---|---|
+    | `kill_worker` | fault | force-delete one worker pod (grace 0) | `kill_worker` |
+    | `kill_worker_graceful` | fault | delete one worker pod with its grace period | `kill_worker` with `KILL_GRACE` |
+    | `kill_worker_held` | fault | delete one worker and keep it absent for `duration_s`, then let it start once | (new) |
+    | `kill_proxy` | fault | force-delete the front proxy that holds the virtual address | `kill_proxy` |
+    | `pod_kill` | fault | force-delete one pod of any selector | `limiter_kill` |
+    | `pod_restart` | fault | delete one pod of any selector with its grace period | `limiter_restart` |
+    | `pod_freeze` | fault | cgroup-freeze one pod for `duration_s` | `limiter_freeze`, `broker_freeze` |
+    | `net_delay` | fault | netem delay on one pod for `duration_s` | `limiter_slow` |
+    | `net_loss` | fault | netem loss on one pod for `duration_s` | `limiter_netcut` |
+    | `tcp_reset` | fault | reset new TCP connections to one pod's port for `duration_s` | `limiter_reject` |
+    | `cpu_starve` | fault | cap the CPU of one pod (pick `one`) or all (pick `all`) for `duration_s` | `cpu_starve`, `cpu_starve_all` |
+    | `node_stop` | fault | stop the node that hosts a pod of the selector, start it at heal | `infra_node_kill` |
+    | `partition` | fault | cut the network between two selectors for `duration_s` | (new) |
+    | `cut_external_plane` | fault | take the external interface of the virtual-address holder down | `cut_external_plane` |
+    | `spike` | load | a burst stream, drained at heal | `peak` |
+    | `abuse` | load | a stream of an abuse scenario, drained at heal | `abuse_up`, `abuse_down` |
+    | `orphan` | load | a stream abandoned mid-call at heal (`stop: abandon`) | `orphan_kill` |
+
+    `overload_mix` and `overload_all` are combined events
+    (`incidents: [cpu_starve, spike]`), not incidents.
+11. **The spike rule.** A burst of new calls is something the system under
+    test absorbs: the base's spike budget allows no `setup_failed` and no
+    `unexpected_ending` on any stream, only `setup_slow` and `recovery`. An
+    overload refusal (503) is budgeted only for incidents that model
+    catastrophic load: a loop, a flood. A product's budgets follow the same
+    rule.
 
 ### 3. The impact-budget contract
 
 A budget says what impact a window allows. It never says how an incident is
 made. A run profile joins the two.
 
-1. **Impact classes.** The classifier derives these from outcome records (§4),
-   each with an instant:
+1. **Impact classes.** The classifier derives these from outcome records (§4)
+   and the shape's catalog entry (§5), each with an instant. A record is a
+   success when its `ending` is in the shape's `expected` and every catalog
+   leg opened and ended as its leg `expected` says.
 
    | class | from the record | instant | budget |
    |---|---|---|---|
-   | `setup_failed` | an ending before answer that the catalog does not expect for the shape (`rejected` with another code, `no_final`, `abandoned` not expected), keyed by stream × `final_code` (0 for none) × `reason` | `setup_ended_at_ms` | per key |
-   | `setup_slow` | `setup_ended_at_ms − started_at_ms` above the threshold | `setup_ended_at_ms` | count |
+   | `setup_failed` | the shape expects `answered` and the call ended before answer some other way: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0). Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms` | per key |
+   | `unexpected_ending` | any other caller ending not in `expected` (`rejected` with another code, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms` | per key before answer; 0 after answer |
+   | `setup_slow` | from `started_at_ms` to `first_provisional_at_ms` (to `setup_ended_at_ms` when no provisional came) above the threshold; ring time never counts | that instant | count |
    | `dialog_request_failed` | each `failures` entry of kind `dialog_request` | its `at_ms` | 0 |
    | `call_cut` | `ending: cut` | the failure that cut it, else `ended_at_ms` | 0 |
    | `call_stranded` | `ending: stranded` | `ended_at_ms` | 0 |
-   | `protocol_anomaly` | each `failures` entry of kind `protocol` or `transport`; a leg whose ending its catalog leg does not expect | its `at_ms` | 0 |
-   | `cdr_mismatch` | an answered call with no CDR, a CDR with no record, or a CDR whose duration or final differs; joined on `call_id` | `ended_at_ms` | count |
-   | `recovery` | seconds from `healed` until traffic is back to baseline (§3.5) | `healed` | seconds |
-   | `unattributed` | an impact of any class above whose instant is outside every window | its instant | 0, never budgeted |
+   | `protocol_anomaly` | each `failures` entry of kind `protocol` or `transport` | its `at_ms` | 0 |
+   | `cdr_mismatch` | §3.8 | §3.8 | count |
+   | `recovery` | §3.6 | `healed` | seconds |
+   | `unattributed` | an impact of a budgetable class whose instant is outside every window, or an in-dialog impact with no candidate window | its instant | 0, never budgeted |
 
    One record may yield several impacts (a re-INVITE answered 481 is a
    `dialog_request_failed`, and the call it ended is a `call_cut`). A record
@@ -168,89 +216,147 @@ made. A run profile joins the two.
    under test: it is a `generator_failure` integrity finding.
 
 2. **Nothing is accepted by default.** A class or key a budget does not name
-   allows 0. A `setup_failed` code a budget does not name is a finding: the
-   code is never a wildcard, because a new failure code is exactly what a run
-   exists to show. The in-dialog classes (`dialog_request_failed`,
-   `call_cut`, `call_stranded`, `protocol_anomaly`) take no budget at all: an
-   established call is what HA protects. The verdict counts them per window
-   and keeps every record for analysis.
-3. **Keys.** A `setup_failed` entry names `stream` (or `*`, each stream
-   separately), `code`, `reason` (or `*`) and either `max_calls` or
-   `max_seconds`. `max_seconds` is the allowance in seconds of the stream's
-   offered rate, so one budget holds at any cps. A failed setup is charged to
-   the first entry that matches it.
-4. **Windows.** An event's window opens at its `inject` instant and closes
-   `settle_s` after its `recovered` instant. An impact belongs to the window
-   that holds its instant; one outside every window is `unattributed`. The
-   windows of a profile never overlap: `hakit run --dry-run` computes them
-   with every timeout at its maximum and refuses a profile where two could.
-   Incidents that must act together are one event (`incidents: [...]`) with
-   one window and one budget. `settle_s` is at least the longest setup
-   deadline of the streams, so a call stranded at the fault reaches its
-   deadline inside the window.
-5. **Recovery.** The baseline of each stream is its successful-setup rate and
-   its p99 setup time over `baseline_s` before `inject`, read from the
-   generators' series in VictoriaMetrics. Traffic is back when, for `hold_s`
-   in a row, every stream's rate is within `tolerance` below its baseline and
-   its p99 within `tolerance` above. `recovery_s` is the time from `healed`
-   to the start of that span; a budget's `recovery.max_s` caps it, and
-   without one traffic must be back before the window closes.
-6. **Added classes.** A product adds a class with `classes/<name>.yaml` and
-   its executable `classes/<name>.count`, which reads the run directory and
-   prints the impacts with their instants. Attribution and budgets work on it
-   as on a built-in class (`budget.classes.<name>.max`).
-7. **The verdict.** `verdict.json` (`verdict.v1`): per stream the calls, the
-   records and the successes; per window the phases, the facts, every impact
-   with its count, its seconds of offered rate, its allowance and whether it
-   is a finding; the unattributed impact; the integrity findings. `status` is
-   `invalid` when an integrity finding exists, else `fail` when any impact is
-   a finding, else `pass`. A human `summary.md` is rendered from it.
+   allows 0. A `setup_failed` or `unexpected_ending` code a budget does not
+   name is a finding: the code is never a wildcard, because a new failure
+   code is exactly what a run exists to show. The in-dialog classes
+   (`dialog_request_failed`, `call_cut`, `call_stranded`,
+   `protocol_anomaly`) and an `unexpected_ending` after answer take no budget
+   at all, and the budget schema has no place for them: an established call
+   is what HA protects, and a call answered where the treatment should have
+   refused it is a treatment that stopped working.
+3. **Keys.** A `setup_failed` or `unexpected_ending` entry names `stream` (or
+   `*`, each stream separately), `code`, `reason` (or `*`) and either
+   `max_calls` or `max_seconds`. `max_seconds` is the allowance in seconds of
+   the stream's offered rate, so one budget holds at any cps. A failed setup
+   is charged to the first entry that matches it.
+4. **The reason vocabulary.** With a final, `reason` is the first value of its
+   Reason header normalised to `<protocol>;cause=<n>` (`Q.850;cause=34`), or
+   the status code alone (`486`) when it has none; the reason phrase is never
+   matched. Without a final it is one of `timeout` (no final by the setup
+   deadline), `transport` (a send or receive failed) or `protocol` (the
+   generator stopped the call on a message it could not accept). SIPp and
+   loadgen use the same spellings.
+5. **Windows.** An event's window opens at its first `inject` instant and
+   closes `settle_s` after its last `recovered` instant. A budgetable impact
+   belongs to the window that holds its instant; one outside every window is
+   `unattributed`. An in-dialog impact takes no budget, so its attribution is
+   for analysis: its `candidate_windows` are every window whose `inject` fell
+   inside the call's lifetime before the failure, and with none it is
+   `unattributed`. A window whose inject, heal or probe step fails closes at
+   the incident's maximum (every timeout and `duration_s`, plus `settle_s`)
+   with status `incident_failed`, which makes the run `invalid`.
+6. **Recovery** is computed from the records, so a verdict recomputes from the
+   run directory alone. The baseline of a stream is its successful-setup
+   ratio and its p99 setup time (as `setup_slow` measures it) over
+   `baseline_s` before `inject`. Traffic is back when, over `hold_s` in a row,
+   every stream's ratio is within `tolerance` below its baseline and its p99
+   within `tolerance` above. Ratios, not counts, so a rate change from
+   `steps` inside a window is no impact. `recovery_s` is the time from
+   `healed` to the start of that span; a budget's `recovery.max_s` caps it,
+   and without one traffic must be back before the window closes. A stream
+   with no baseline (one that starts with an incident) has no recovery.
+7. **Timing bounds.** `settle_s` is at least the longest `setup_deadline_s`
+   of the streams, so a call stranded at the fault reaches its deadline
+   inside the window; `drain_s` is at least max(`setup_deadline_s`,
+   `ring_s` + `hold_s`) of every stream. The runner refuses a profile that
+   breaks either. The dry-run checks that no two windows overlap using each
+   event's `expected_s` (default `duration_s` + 60) plus `settle_s`; with the
+   defaults (`settle_s` 60) a kill every 3 minutes passes. At run time a
+   window that opens while another is open is a `window_overlap` integrity
+   finding.
+8. **CDR mismatch.** The CDR consumer's output reaches the run directory as
+   `cdrs.jsonl`, one `cdr-observation.v1` line per CDR (call_id, start,
+   answer, end, duration, its unit, disposition). Joined on `call_id` with
+   the records: an answered call with no CDR is charged at its `ended_at_ms`;
+   a CDR with no record at its own `end_ms`; a CDR whose disposition differs
+   from the record's, or whose duration differs from `ended_at_ms` −
+   `answered_at_ms` by more than 1 s plus the CDR's unit, at the record's
+   `ended_at_ms`.
+9. **Events off the schedule.** `hakit fire <incident>` during a run and a
+   `detected` event (named after what was detected, such as `stream_died`)
+   open windows under the same rules, closing at their `recovered` instant or
+   at the incident's maximum. Their budget, parameters and target come from
+   the profile's `defaults` entry for that incident. `hakit fire` without an
+   entry, or while a window is open, is refused; a detected event without an
+   entry opens a window that allows nothing.
+10. **Added classes.** A product adds a class with `classes/<name>.yaml` and
+    its executable `classes/<name>.count`, which reads the run directory and
+    prints the impacts with their instants. Attribution and budgets work on it
+    as on a built-in class (`budget.classes.<name>.max`).
+11. **The verdict.** `verdict.json` (`verdict.v1`): per stream the calls, the
+    calls never placed, the records and the successes; per window its source,
+    status, every phase as `{phase, at_ms, step}`, the facts, each stream's
+    recovery and every budgetable impact with its count, its seconds of
+    offered rate, its allowance and whether it is a finding; the in-dialog
+    impacts with their candidate windows; the unattributed impact; the
+    integrity findings. `status` is `invalid` when an integrity finding
+    exists, else `fail` when any impact is a finding, else `pass`. A human
+    `summary.md` is rendered from it.
 
 ### 4. The call-outcome record
 
-1. **One record per call.** Every generator writes one `call-outcome.v1`
-   record (`tooling/hakit/schemas/call-outcome.v1.schema.json`) when it is
-   done with a call, on every exit path: success, failure, timeout, abort.
-   The record states the caller's facts (`started_at_ms`,
-   `setup_ended_at_ms`, `answered_at_ms`, `ended_at_ms`, `phase_reached`,
-   `final_code`, `reason`, `ending`, `failures`, `legs`) and never a
-   judgement. The generator's own class goes in `producer_verdict`, which the
-   classifier does not read, so the generator cannot excuse a call.
-2. **Producers.** SIPp writes the record with its `<log>` action at every exit
-   label of every scenario, into a file in the stream's stats directory. The
-   exporter twin follows the file, ships each line and counts the records
-   (`stream`, `shape`, `ending`). loadgen writes the same record natively for
-   each call, its result classes mapped by the table below.
-3. **Transport.** A record reaches VictoriaLogs as one line on
-   `/insert/jsonline` with `_stream_fields=run,source,stream` and `_time` set
-   from `ended_at_ms`. VictoriaLogs is the live view. At the end of a run the
-   runner exports the run's records into the run directory, and the verdict
-   reads that copy, so a verdict can be recomputed after VictoriaLogs
-   retention has dropped the run.
-4. **Reconciliation.** For each SIPp stream, the records equal the delta of
-   SIPp's own created-calls counter over the run, read after the drain. A
-   difference is a `record_gap` integrity finding: a scenario exit that writes
-   no record would otherwise hide exactly the calls that went wrong.
-5. **The classifier** is one module of the runner,
-   `tooling/hakit/src/hakit/classify.py`: a pure function of a record and its
-   catalog shape to impacts with instants. Neither generators nor dashboards
-   classify.
-6. **loadgen's classes.** A record's `ending` comes from what the caller
-   observed, never from an accepted branch's name:
+1. **One record per call placed.** Every caller-side generator writes one
+   `call-outcome.v1` record (`tooling/hakit/schemas/call-outcome.v1.schema.json`)
+   when it is done with a call, on every exit path: success, failure,
+   timeout, abort. The record states the caller's facts (`started_at_ms`,
+   `first_provisional_at_ms`, `setup_ended_at_ms`, `answered_at_ms`,
+   `ended_at_ms`, `phase_reached`, `final_code`, `reason`, `ending`,
+   `early_media`, `failures`, `legs`) and never a judgement. The generator's
+   own class goes in `producer_verdict`, which the classifier does not read,
+   so a generator cannot excuse a call.
+2. **SIPp.** The UAC writes the record with its `<log>` action into a file in
+   the stream's stats directory. The exporter twin follows the file, ships
+   each line and counts the records by `stream`, `shape`, `ending`. A SIPp UAS
+   writes no record; it exposes counters only. SIPp ends a call without
+   running any step of the scenario in three cases: the global
+   `-recv_timeout` deletes the call, an exhausted retransmission of a `<send>`
+   without `ontimeout` aborts it, and an unexpected message received while
+   the call is already in its unexpected-message handler aborts it. So every
+   UAC scenario follows these rules:
+   - every `<recv>` has its own `timeout` with an `ontimeout` label, or is on a
+     path that reaches a label that writes the record;
+   - every `<send>` SIPp retransmits has `ontimeout`;
+   - the `_unexp.main` handler accepts any request and any response (a
+     regexp `response` match), writes the record, then ends the call;
+   - every abort path the scenario can reach writes a record before it ends;
+   - `-recv_timeout` is above every timeout of the scenario, a backstop that
+     never fires on a correct scenario.
+
+   A static lint checks these rules on every scenario of the search path, and
+   `hakit validate` runs it.
+3. **loadgen** writes the same record natively for each call it placed,
+   mapped from its result classes:
 
    | loadgen class | record |
    |---|---|
    | `ok` | the observed ending (`answered`, `rejected` with its code, `abandoned`); the branch in `producer_verdict` |
    | `status_<code>` | before answer `rejected` with `final_code`; after answer a `dialog_request` failure with `code` |
-   | `timeout` | before answer `no_final`; after answer a `dialog_request` failure without `code`, or `stranded` on the BYE |
-   | `wrong_method`, `unexpected`, `unparseable`, `rfc_audit_fail`, `check_fail` | a `protocol` failure, `ending: failed` if it stopped the call |
-   | `transport` | a `transport` failure, `ending: failed` |
-   | `rejected`, `panic` | a `generator` failure, `ending: failed` |
+   | `timeout` | before answer `ending: timeout`; after answer a `dialog_request` failure without `code`, or `stranded` on the BYE |
+   | `wrong_method`, `unexpected`, `unparseable`, `rfc_audit_fail`, `check_fail` | a `protocol` failure, `ending: failed` (reason `protocol` before answer) if it stopped the call |
+   | `transport` | a `transport` failure, `ending: failed` (reason `transport` before answer) |
+   | `panic` | a `generator` failure, `ending: failed` |
+   | `rejected` (`key_in_flight`, `key_cooling`, …) | no record: the call was never placed. Counted per stream in a `not_placed` counter; neither an impact nor a generator failure |
 
-   loadgen's `near`/`clear` tag and its `POST /chaos` marker play no part in
-   the verdict: attribution is the window's (§3.4).
+   A record's `ending` comes from what the caller observed, never from an
+   accepted branch's name. loadgen's `near`/`clear` tag and its `POST /chaos`
+   marker play no part in the verdict: attribution is the window's (§3.5).
+4. **Transport.** A record reaches VictoriaLogs as one line on
+   `/insert/jsonline` with `_stream_fields=run,source,stream` and `_time` set
+   from `ended_at_ms`. VictoriaLogs is the live view. At the end of a run the
+   runner exports the run's records into the run directory, and the verdict
+   reads that copy, so a verdict can be recomputed after VictoriaLogs
+   retention has dropped the run.
+5. **Reconciliation.** For each stream, the records plus the calls not placed
+   equal the delta of the generator's own call counter over the stream's
+   life, read after the drain. A difference is a `record_gap` integrity
+   finding: an exit that writes no record would otherwise hide exactly the
+   calls that went wrong.
+6. **The classifier** is one module of the runner,
+   `tooling/hakit/src/hakit/classify.py`: a pure function of a record and its
+   catalog shape to impacts with instants. Neither generators nor dashboards
+   classify.
 
-### 5. The treatment catalog
+### 5. The treatment catalog and the product-shape seam
 
 1. A treatment catalog (`treatment-catalog.v1`) maps each shape id to how a
    caller requests the treatment (`request`: the R-URI user part and header
@@ -269,6 +375,12 @@ made. A run profile joins the two.
    placeholders `${callee_host}` and `${callee_port}`. It is the reference
    implementation. A product with another way of asking (a dialed-number
    plan) exports its own catalog to its search-path entry.
+4. **loadgen's product-shape seam.** loadgen is a library whose entry point
+   takes a shape registry (`ShapeRegistry`); a product binary registers its
+   shapes and adds no wiring of its own. A product shape registers under its
+   catalog shape id: one id is one catalog entry and one registered shape.
+   loadgen lists the ids it registered, and the dry-run refuses a `loadgen`
+   stream whose shape has no registration or no catalog entry.
 
 ### 6. The runner
 
@@ -277,8 +389,8 @@ made. A run profile joins the two.
    validator, pinned). pyright strict and pytest run in the verify gates.
 2. **Subcommands.** `hakit validate`, `hakit up [--profile P]` (the cluster
    and the charts, §7), `hakit run <profile>`, `hakit fire <incident>` (one
-   manual event), `hakit cleanup` (heal every open event), `hakit verdict
-   <run-dir>`. `--dry-run` applies to all of them.
+   manual event in the running run), `hakit cleanup` (heal every open event),
+   `hakit verdict <run-dir>`. `--dry-run` applies to all of them.
 3. **Injected clock and executor.** Every wait goes through a clock and every
    effect (an executable, `kubectl`, `helm`, `docker`, an HTTP push or query)
    through an executor. `--dry-run` runs the whole profile on a fake clock and
@@ -288,19 +400,20 @@ made. A run profile joins the two.
 4. **The run directory.** `$HAKIT_RESULTS/<run>/`, the run id
    `<profile>-<UTC yyyymmddThhmmssZ>`: the resolved profile, `run-meta.json`
    (the tree that ran, the host facts), `events.jsonl`, `events/<event>/`,
-   the exported records, `verdict.json`, `summary.md`. The run id is also the
-   nonce the generators put in their Call-IDs, so two runs never share one.
+   the exported records, `cdrs.jsonl`, `verdict.json`, `summary.md`. The run
+   id is also the nonce the generators put in their Call-IDs, so two runs
+   never share one.
 5. **Before the load.** The runner records the host (free memory, swap, disk,
    load) and refuses the run outside the profile's `preflight` limits; it
    refuses to start while the system under test holds calls (a
    `leftover_calls` finding) or while an event of an earlier run is open.
-6. **During the load.** Every series the verdict reads is checked for
+6. **During the load.** Every series the run reads live is checked for
    freshness; one that stops updating for three scrape intervals is a
    `series_stale` integrity finding with its instant. A generator that exits
-   before the load ends is `stream_died`.
+   before its stream is due to stop is `stream_died`, and a `detected` event.
 7. **The fault primitives stay shell** behind the incident contract. The
-   readers that judge a soak today move into the package as they are, and are
-   wired to the verdict where they overlap.
+   readers that judge a soak today move into the package with their product
+   terms made parameters, and are wired to the verdict where they overlap.
 
 ### 7. Deployment, dashboards and metrics
 
@@ -333,22 +446,25 @@ made. A run profile joins the two.
    catalogue files in the `metric-contract export` JSON format. The name
    checker reads the base's export plus every `metrics/` file of the search
    path. The series the tooling itself pushes (`sip_chaos_event`,
-   `sip_chaos_window`) and the generators' record counters are declared in
-   the base's `content/metrics/`, not allow-listed.
+   `sip_chaos_window`) and the generators' record and not-placed counters are
+   declared in the base's `content/metrics/`, not allow-listed.
 
 ## Considered and rejected
 
-- **Sourcing a shell library and overriding functions.** It is how a product
-  plugs in today, and it couples the product to every function name and
-  global of the base. A second product would inherit the same coupling.
+- **Sourcing a shell library and overriding functions.** It couples a
+  consumer to every function name and global of the base, and a second
+  product would inherit the same coupling.
 - **Plug-in code (Python entry points) instead of directories.** A product
   would have to write Python against the runner's internals for what is data
   in almost every case. Executables cover the remainder in any language.
-- **Tolerances inside the incident.** Today's gates hold their thresholds
-  beside the fault. The same kill then needs a copy per tolerance, and two
-  products cannot share a fault while disagreeing on what it may cost.
+- **Tolerances inside the incident.** The same kill then needs a copy per
+  tolerance, and two products cannot share a fault while disagreeing on what
+  it may cost.
 - **Judging from counters.** Counters cannot place a call in a window or join
   it with a CDR, and a burst of a few calls hides under a rate rule.
+- **An incident executable that starts its own load.** Its stream would have
+  no cps, catalog check, reconciliation or verdict entry; the runner already
+  knows how to start and drain a stream.
 - **A Rust runner.** The runner shells out, waits and parses YAML; the work is
   orchestration. Python with pyright strict and a fake executor gives the
   same refusal of untested paths at a fraction of the build cost, and the
@@ -360,10 +476,11 @@ made. A run profile joins the two.
 
 ## Consequences
 
-- `chaos.sh`, the endurance scripts, `sipext-gen.sh`'s stream launcher where
-  the runner replaces it, the raw manifests and their `envsubst` rendering go
-  once the runner and the charts cover them. No fix lands in the old tooling
-  meanwhile.
+- One cutover deletes the old tooling together once the runner, the charts
+  and the base content cover it: `chaos.sh`, the endurance scripts, the
+  stream launcher of `sipext-gen.sh` where the runner replaces it, the raw
+  manifests and their `envsubst` rendering. The old tooling takes no fix
+  until then.
 - `sip_chaos_event{type,…}` with `result` is replaced by
   `sip_chaos_event{incident,phase,source,run}`; the dashboards' annotation
   queries change with it.
@@ -375,8 +492,7 @@ made. A run profile joins the two.
   injection files); a renderer exists only for attribute-level variants, and
   nothing rewrites a scenario with `sed` or `perl`. The bench reads the same
   scenarios.
-- Every SIPp scenario gains a record at every exit, and the exporter twin
-  gains the record shipping and counter; a scenario without a record on some
-  exit shows as a `record_gap`.
+- Every SIPp UAC scenario gains a record at every exit and passes the lint of
+  §4.2; the exporter twin gains the record shipping and counter.
 - A product's dashboards, metric families, incidents, budgets and profiles
   live in its own repository and reach the base only through `HAKIT_PATH`.

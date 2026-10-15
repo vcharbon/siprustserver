@@ -1,8 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "incident.v1.schema.json",
+  "$comment": "minor 0",
   "title": "incident.v1",
-  "description": "The `incident.yaml` of an incident directory `incidents/<name>/`, beside its executables `inject`, `heal` and optional `probe`. It says what the incident does and to what; it never says what impact is tolerated. ADR-0049.",
+  "description": "The `incident.yaml` of an incident directory `incidents/<name>/`. A fault incident has the executables `inject` and `heal` beside it, and optionally `probe`. A load incident has no `inject` or `heal`: the runner starts and stops the profile stream its event names, and an optional `probe` may follow. It says what the incident does and to what; it never says what impact is tolerated. ADR-0049.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "name", "description", "kind"],
@@ -15,11 +16,11 @@
     },
     "description": { "type": "string" },
     "kind": {
-      "description": "`fault`: acts on a deployed component. `load`: starts a load stream at inject and stops it cleanly at heal.",
+      "description": "`fault`: its executables act on a deployed component. `load`: the runner starts a profile stream at inject and stops it at heal.",
       "enum": ["fault", "load"]
     },
     "target": {
-      "description": "The pods the incident acts on. A run profile event may override it.",
+      "description": "Fault only: the pods the incident acts on. A run profile event may override it.",
       "type": "object",
       "additionalProperties": false,
       "required": ["selector"],
@@ -37,26 +38,27 @@
         }
       }
     },
+    "stop": {
+      "description": "Load only. `drain`: at heal the stream stops placing calls, its calls finish, then its generator is removed. `abandon`: at heal the generator is killed with its calls in flight, which leaves them to the system under test; its calls write no record and the stream is left out of the reconciliation.",
+      "enum": ["drain", "abandon"],
+      "default": "drain"
+    },
     "params": {
-      "description": "The incident's parameters. A parameter without `default` must be set by the run profile event.",
+      "description": "Fault only: the incident's parameters. A parameter without `default` must be set by the run profile event. A default the schema cannot type-check is checked by the runner.",
       "type": "object",
       "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["type", "description"],
-        "properties": {
-          "type": { "enum": ["string", "integer", "number", "boolean"] },
-          "default": { "type": ["string", "integer", "number", "boolean"] },
-          "description": { "type": "string" }
-        }
-      }
+      "additionalProperties": { "$ref": "#/$defs/param" }
     },
     "duration_s": {
       "description": "The default time between `injected` and `heal`. 0 heals at once (a kill whose recovery is the platform's own).",
       "type": "number",
       "minimum": 0,
       "default": 0
+    },
+    "expected_s": {
+      "description": "The usual time from `inject` to `recovered`, used by the dry-run's overlap check. Default `duration_s` + 60.",
+      "type": "number",
+      "exclusiveMinimum": 0
     },
     "timeouts": {
       "type": "object",
@@ -80,6 +82,49 @@
       "uniqueItems": true
     }
   },
-  "if": { "properties": { "kind": { "const": "fault" } } },
-  "then": { "required": ["target"] }
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "fault" } } },
+      "then": { "required": ["target"], "not": { "required": ["stop"] } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "load" } } },
+      "then": {
+        "allOf": [
+          { "not": { "required": ["target"] } },
+          { "not": { "required": ["params"] } }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "description"],
+      "properties": {
+        "type": { "enum": ["string", "integer", "number", "boolean"] },
+        "default": { "type": ["string", "integer", "number", "boolean"] },
+        "description": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "string" } } },
+          "then": { "properties": { "default": { "type": "string" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "integer" } } },
+          "then": { "properties": { "default": { "type": "integer" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "number" } } },
+          "then": { "properties": { "default": { "type": "number" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "boolean" } } },
+          "then": { "properties": { "default": { "type": "boolean" } } }
+        }
+      ]
+    }
+  }
 }
