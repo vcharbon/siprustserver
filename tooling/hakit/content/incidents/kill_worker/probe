@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Recovered when the killed pod is gone and as many pods of the selector are
+# ready as before the kill. Exit 75 while not yet. Facts: the instant the last
+# replacement became ready, as its Ready condition states it.
+set -euo pipefail
+kc=(kubectl --context "$HAKIT_KUBE_CONTEXT" -n "$HAKIT_TARGET_NAMESPACE")
+read -r pod uid before < "$HAKIT_EVENT_DIR/target"
+
+rows="$("${kc[@]}" get pods -l "$HAKIT_TARGET_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.uid}{" "}{.status.conditions[?(@.type=="Ready")].status}{" "}{.status.conditions[?(@.type=="Ready")].lastTransitionTime}{" "}{.metadata.deletionTimestamp}{"\n"}{end}')" || exit 75
+if awk -v u="$uid" '$2 == u { found = 1 } END { exit !found }' <<<"$rows"; then
+  exit 75
+fi
+ready="$(awk 'NF == 4 && $3 == "True"' <<<"$rows")"
+n="$(grep -c . <<<"$ready" || true)"
+if [ "$n" -lt "$before" ]; then
+  exit 75
+fi
+replacement="$(awk -v p="$pod" '$1 == p { print $2 " " $4 }' <<<"$ready")"
+if [ -n "$replacement" ]; then
+  ready_at_ms="$(date -d "${replacement#* }" +%s%3N)"
+  printf '{"replacement_pod":"%s","replacement_uid":"%s","ready_at_ms":%s}\n' "$pod" "${replacement% *}" "$ready_at_ms"
+else
+  printf '{"ready_pods":%d}\n' "$n"
+fi

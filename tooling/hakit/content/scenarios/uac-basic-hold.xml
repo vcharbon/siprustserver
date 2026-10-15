@@ -1,0 +1,568 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  UAC basic call with a hold: INVITE, the final, ACK, hold, BYE. Every exit
+  writes one call-outcome.v1 record with the `<log>` action (one JSON line in
+  the -log_file); the record states what the caller saw and never judges it.
+
+  -inf: field0 the R-URI user part, field1..field4 one header line each (an
+        empty field leaves no line), rendered from the treatment catalog.
+  -key: run, stream, shape (record labels); setup_ms (the setup deadline:
+        no final by then is `ending: timeout`); hold_ms (the hold from the ACK).
+  -cid_str and the From tag carry the run id, so two runs never share one.
+
+  Exits and their record: a 2xx and a BYE answered 2xx (`answered`), a non-2xx
+  final (`rejected`, ACKed), no final by setup_ms (`timeout`, CANCELed when a
+  provisional came), a BYE answered 481 or a BYE from the far end mid-call
+  (`cut`), a BYE with no final (`stranded`), a request the scenario cannot
+  serve (`failed`, the dialog torn down first when answered). Every recv waits
+  at most 4 s or sits on a path that reaches the record; every retransmitted
+  send has ontimeout. An optional recv always names its `next`: without one,
+  SIPp leaves the call on the following recv, which may have no timeout.
+
+  SIPp runs a call one step per loop turn and reads its socket in between: a
+  message landing while the call stands on a nop or a send goes to
+  `_unexp.main`. The waits are therefore recvs whose actions do the work, with
+  one nop per 1 s deadline check; a response landing on that nop is dropped
+  (GenericCounter2) and the call resumes, since the far end retransmits a final
+  until it is acknowledged or its request is retransmitted.
+
+  The INVITE is message 1 of the scenario: the ACK of a non-2xx and the CANCEL
+  take its branch, z9hG4bK-[pid]-[call_number]-1.
+-->
+<scenario name="hakit UAC basic hold with call-outcome records">
+
+  <nop>
+    <action>
+      <assignstr assign_to="r_fp" value="null"/>
+      <assignstr assign_to="r_se" value="null"/>
+      <assignstr assign_to="r_ans" value="null"/>
+      <assignstr assign_to="r_code" value="null"/>
+      <assignstr assign_to="r_reason" value="null"/>
+      <assignstr assign_to="r_phase" value="invited"/>
+      <assignstr assign_to="r_fail" value=""/>
+      <assignstr assign_to="r_sep" value=""/>
+      <assignstr assign_to="r_ending" value="failed"/>
+      <assignstr assign_to="r_verdict" value="unknown"/>
+      <assign assign_to="em_acc" value="0"/>
+      <assignstr assign_to="setup_str" value="[setup_ms]"/>
+      <todouble assign_to="setup_ms" variable="setup_str"/>
+      <assignstr assign_to="hold_str" value="[hold_ms]"/>
+      <todouble assign_to="hold_ms" variable="hold_str"/>
+      <gettimeofday assign_to="t_start,t_start_us"/>
+      <multiply assign_to="t_start" value="1000"/>
+      <divide assign_to="t_start_us" value="1000"/>
+      <add assign_to="t_start" variable="t_start_us"/>
+    </action>
+  </nop>
+
+  <send retrans="500" ontimeout="setup_timeout" next="wait_a">
+    <![CDATA[
+      INVITE sip:[field0]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
+      To: <sip:[field0]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:caller@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      [field1]
+      [field2]
+      [field3]
+      [field4]
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=caller 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <!-- Setup before any provisional: the first 1xx stamps first_provisional_at_ms
+       and moves the wait to the second group. -->
+  <label id="tick_a"/>
+  <nop test="setup_over" next="setup_timeout">
+    <action>
+      <gettimeofday assign_to="el_s,el_us"/>
+      <multiply assign_to="el_s" value="1000"/>
+      <divide assign_to="el_us" value="1000"/>
+      <add assign_to="el_s" variable="el_us"/>
+      <subtract assign_to="el_s" variable="t_start"/>
+      <test assign_to="setup_over" variable="el_s" compare="greater_than_equal" variable2="setup_ms"/>
+    </action>
+  </nop>
+  <label id="wait_a"/>
+  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="1000" ontimeout="tick_a" next="wait_b">
+    <action>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <assignstr assign_to="r_fp" value="[$now_s]"/>
+      <assignstr assign_to="r_phase" value="provisional"/>
+      <assign assign_to="fp_seen" value="1"/>
+      <ereg regexp="m=" search_in="body" assign_to="em_m"/>
+      <strcmp assign_to="em_c" variable="em_m" value=""/>
+      <multiply assign_to="em_c" variable="em_c"/>
+      <add assign_to="em_acc" variable="em_c"/>
+    </action>
+  </recv>
+  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" rrs="true" next="got_answer">
+    <action>
+      <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="fin_all,fin_code"/>
+    </action>
+  </recv>
+  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="got_reject">
+    <action>
+      <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="fin_all,fin_code"/>
+      <ereg regexp="([A-Za-z0-9.+-]+)[[:blank:]]*;.*cause[[:blank:]]*=[[:blank:]]*([0-9]+)" search_in="hdr" header="Reason:" assign_to="rsn_all,rsn_proto,rsn_cause"/>
+    </action>
+  </recv>
+
+  <!-- Setup after a provisional: further 1xx only feed early_media. -->
+  <label id="tick_b"/>
+  <nop test="setup_over" next="setup_timeout">
+    <action>
+      <gettimeofday assign_to="el_s,el_us"/>
+      <multiply assign_to="el_s" value="1000"/>
+      <divide assign_to="el_us" value="1000"/>
+      <add assign_to="el_s" variable="el_us"/>
+      <subtract assign_to="el_s" variable="t_start"/>
+      <test assign_to="setup_over" variable="el_s" compare="greater_than_equal" variable2="setup_ms"/>
+    </action>
+  </nop>
+  <label id="wait_b"/>
+  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="1000" ontimeout="tick_b" next="tick_b">
+    <action>
+      <ereg regexp="m=" search_in="body" assign_to="em_m"/>
+      <strcmp assign_to="em_c" variable="em_m" value=""/>
+      <multiply assign_to="em_c" variable="em_c"/>
+      <add assign_to="em_acc" variable="em_c"/>
+    </action>
+  </recv>
+  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" rrs="true" next="got_answer">
+    <action>
+      <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="fin_all,fin_code"/>
+    </action>
+  </recv>
+  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="got_reject">
+    <action>
+      <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="fin_all,fin_code"/>
+      <ereg regexp="([A-Za-z0-9.+-]+)[[:blank:]]*;.*cause[[:blank:]]*=[[:blank:]]*([0-9]+)" search_in="hdr" header="Reason:" assign_to="rsn_all,rsn_proto,rsn_cause"/>
+    </action>
+  </recv>
+
+  <!-- A non-2xx final: ACK it on the INVITE's branch; the record keys it by
+       its Reason (`<protocol>;cause=<n>`), else by the code alone. -->
+  <label id="got_reject"/>
+  <send>
+    <![CDATA[
+      ACK sip:[field0]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[pid]-[call_number]-1;rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
+      To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+    <action>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <assignstr assign_to="r_se" value="[$now_s]"/>
+      <assignstr assign_to="r_code" value="[$fin_code]"/>
+      <assignstr assign_to="r_reason" value="&quot;[$fin_code]&quot;"/>
+      <assignstr assign_to="r_ending" value="rejected"/>
+      <assignstr assign_to="r_verdict" value="rejected"/>
+    </action>
+  </send>
+  <nop condexec="rsn_all" next="write_record">
+    <action>
+      <assignstr assign_to="r_reason" value="&quot;[$rsn_proto];cause=[$rsn_cause]&quot;"/>
+    </action>
+  </nop>
+  <nop next="write_record"/>
+
+  <!-- No final by the deadline, or no response at all to the INVITE. After a
+       provisional the call is CANCELed (RFC 3261 section 9.1) and the INVITE's
+       final awaited 4 s: a non-2xx is ACKed, a 2xx crossing the CANCEL is
+       ACKed and its dialog torn down. The record keeps the timeout. -->
+  <label id="setup_timeout"/>
+  <nop test="fp_seen" next="cancel">
+    <action>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <assignstr assign_to="r_se" value="[$now_s]"/>
+      <assignstr assign_to="r_reason" value="&quot;timeout&quot;"/>
+      <assignstr assign_to="r_ending" value="timeout"/>
+      <assignstr assign_to="r_verdict" value="setup_timeout"/>
+      <assign assign_to="keep_ending" value="1"/>
+    </action>
+  </nop>
+  <nop next="write_record"/>
+  <label id="cancel"/>
+  <send>
+    <![CDATA[
+      CANCEL sip:[field0]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[pid]-[call_number]-1;rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
+      To: <sip:[field0]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 CANCEL
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="cancel_wait"/>
+  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="4000" ontimeout="write_record" next="cancel_wait"/>
+  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" rrs="true" next="cancel_2xx">
+    <action>
+      <ereg regexp="CANCEL" search_in="hdr" header="CSeq:" assign_to="cseq_cancel"/>
+    </action>
+  </recv>
+  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="cancel_final">
+    <action>
+      <ereg regexp="CANCEL" search_in="hdr" header="CSeq:" assign_to="cseq_cancel"/>
+    </action>
+  </recv>
+  <label id="cancel_2xx"/>
+  <nop test="cseq_cancel" next="cancel_wait"/>
+  <nop next="answer_ack"/>
+  <label id="cancel_final"/>
+  <nop test="cseq_cancel" next="write_record"/>
+  <send next="write_record">
+    <![CDATA[
+      ACK sip:[field0]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[pid]-[call_number]-1;rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
+      To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- Answered: ACK, then hold for hold_ms answering every in-dialog OPTIONS
+       (RFC 3261 section 11) in 1 s steps; a probe never restarts the hold. -->
+  <label id="got_answer"/>
+  <send>
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
+      To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:caller@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+    <action>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <assignstr assign_to="r_se" value="[$now_s]"/>
+      <assignstr assign_to="r_ans" value="[$now_s]"/>
+      <assignstr assign_to="r_code" value="[$fin_code]"/>
+      <assignstr assign_to="r_phase" value="answered"/>
+      <assign assign_to="answered" value="1"/>
+      <gettimeofday assign_to="hold_t0_s,hold_t0_us"/>
+    </action>
+  </send>
+  <label id="hold_left"/>
+  <nop test="hold_over" next="teardown">
+    <action>
+      <gettimeofday assign_to="hold_s,hold_us"/>
+      <subtract assign_to="hold_s" variable="hold_t0_s"/>
+      <multiply assign_to="hold_s" value="1000"/>
+      <subtract assign_to="hold_us" variable="hold_t0_us"/>
+      <divide assign_to="hold_us" value="1000"/>
+      <add assign_to="hold_s" variable="hold_us"/>
+      <test assign_to="hold_over" variable="hold_s" compare="greater_than_equal" variable2="hold_ms"/>
+    </action>
+  </nop>
+  <recv request="OPTIONS" crlf="true" timeout="1000" ontimeout="hold_left"/>
+  <send next="hold_left">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:caller@[local_ip]:[local_port]>
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- A 2xx crossing the CANCEL: ACK it and tear its dialog down. -->
+  <label id="answer_ack"/>
+  <send next="teardown">
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
+      To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:caller@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- The planned teardown, and the teardown of a dialog the call stops. An
+       OPTIONS crossing the BYE is answered once the BYE completes (RFC 3261
+       section 15.1.1). A 481 to the BYE means the call was already cut; any
+       other non-2xx ends the dialog all the same, with the failure recorded. -->
+  <label id="teardown"/>
+  <send retrans="500" ontimeout="bye_no_final">
+    <![CDATA[
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]-[run]
+      To: <sip:[field0]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:caller@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="bye_wait"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="bye_wait">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </recv>
+  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="bye_wait"/>
+  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" next="bye_2xx">
+    <action>
+      <ereg regexp="BYE" search_in="hdr" header="CSeq:" assign_to="cseq_bye"/>
+    </action>
+  </recv>
+  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="bye_failed">
+    <action>
+      <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="bye_all,bye_code"/>
+      <ereg regexp="BYE" search_in="hdr" header="CSeq:" assign_to="cseq_bye"/>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <strcmp assign_to="bye_cmp" variable="bye_code" value="481"/>
+      <test assign_to="bye_481" variable="bye_cmp" compare="equal" value="0"/>
+    </action>
+  </recv>
+
+  <label id="bye_2xx"/>
+  <nop test="cseq_bye" next="bye_ok"/>
+  <nop next="bye_wait"/>
+  <label id="bye_ok"/>
+  <nop condexec="keep_ending" condexec_inverse="true" next="released">
+    <action>
+      <assignstr assign_to="r_ending" value="answered"/>
+      <assignstr assign_to="r_verdict" value="answered"/>
+    </action>
+  </nop>
+  <nop next="released"/>
+
+  <label id="bye_failed"/>
+  <nop test="cseq_bye" next="bye_failed_bye"/>
+  <nop next="bye_wait"/>
+  <label id="bye_failed_bye"/>
+  <nop test="keep_ending" next="released">
+    <action>
+      <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;code&quot;:[$bye_code]}"/>
+      <assignstr assign_to="r_sep" value=","/>
+    </action>
+  </nop>
+  <nop test="bye_481" next="released">
+    <action>
+      <assignstr assign_to="r_ending" value="cut"/>
+      <assignstr assign_to="r_verdict" value="bye_481"/>
+    </action>
+  </nop>
+  <nop next="released">
+    <action>
+      <assignstr assign_to="r_ending" value="answered"/>
+      <assignstr assign_to="r_verdict" value="bye_rejected"/>
+    </action>
+  </nop>
+
+  <!-- The BYE got no final: the teardown never completed. -->
+  <label id="bye_no_final"/>
+  <nop test="keep_ending" next="write_record">
+    <action>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;dialog_request&quot;,&quot;method&quot;:&quot;BYE&quot;,&quot;detail&quot;:&quot;no final&quot;}"/>
+      <assignstr assign_to="r_sep" value=","/>
+    </action>
+  </nop>
+  <nop next="write_record">
+    <action>
+      <assignstr assign_to="r_ending" value="stranded"/>
+      <assignstr assign_to="r_verdict" value="bye_no_final"/>
+    </action>
+  </nop>
+
+  <label id="released"/>
+  <nop condexec="answered">
+    <action>
+      <assignstr assign_to="r_phase" value="released"/>
+    </action>
+  </nop>
+  <send condexec="options_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$opt_via]
+      [$opt_rr]
+      From:[$opt_from]
+      To:[$opt_to]
+      Call-ID: [call_id]
+      CSeq:[$opt_cseq]
+      Contact: <sip:caller@[local_ip]:[local_port]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="write_record"/>
+
+  <!-- Unexpected messages. An OPTIONS is answered and the call resumes the step
+       it stood on; an ACK is dropped; a response is dropped (GenericCounter2).
+       A BYE is answered and ends the call: `cut` after answer, a protocol
+       failure before. Any other request is answered 501 and is a protocol
+       failure: the call ends, its dialog torn down first when answered. -->
+  <label id="_unexp.main"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="unexp_options"/>
+  <recv request="BYE" optional="true" crlf="true" next="unexp_bye"/>
+  <recv request="ACK" optional="true" crlf="true" next="unexp_resume"/>
+  <recv request="[A-Z]" regexp_match="true" optional="true" crlf="true" next="unexp_request">
+    <action>
+      <ereg regexp="^[A-Z]+" search_in="msg" assign_to="ux_req"/>
+    </action>
+  </recv>
+  <recv response="[0-9]" regexp_match="true" counter="2" next="unexp_resume"/>
+
+  <label id="unexp_options"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:caller@[local_ip]:[local_port]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="unexp_resume"/>
+  <nop>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+
+  <label id="unexp_bye"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:caller@[local_ip]:[local_port]>
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+      <assignstr assign_to="ux_what" value="BYE before answer"/>
+    </action>
+  </send>
+  <nop test="answered" next="released">
+    <action>
+      <assignstr assign_to="r_ending" value="cut"/>
+      <assignstr assign_to="r_verdict" value="bye_from_far_end"/>
+    </action>
+  </nop>
+  <nop next="unexp_note"/>
+
+  <label id="unexp_request"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 501 Not Implemented
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+      <assignstr assign_to="ux_what" value="[$ux_req]"/>
+    </action>
+  </send>
+  <label id="unexp_note"/>
+  <nop test="answered" next="teardown">
+    <action>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;detail&quot;:&quot;unexpected [$ux_what]&quot;}"/>
+      <assignstr assign_to="r_sep" value=","/>
+      <assignstr assign_to="r_ending" value="failed"/>
+      <assignstr assign_to="r_verdict" value="unexpected_request"/>
+      <assign assign_to="keep_ending" value="1"/>
+    </action>
+  </nop>
+  <nop next="write_record">
+    <action>
+      <assignstr assign_to="r_reason" value="&quot;protocol&quot;"/>
+      <assignstr assign_to="r_code" value="null"/>
+    </action>
+  </nop>
+
+  <label id="write_record"/>
+  <nop>
+    <action>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <test assign_to="r_em" variable="em_acc" compare="greater_than" value="0"/>
+      <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$now_s],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
+    </action>
+  </nop>
+
+  <Reference variables="opt_via_row,opt_rr_row,fin_all,rsn_all,bye_all,setup_str,hold_str,el_us,now_us,hold_us,t_start_us"/>
+  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
+  <CallLengthRepartition value="100, 1000, 10000, 30000, 60000, 120000"/>
+</scenario>

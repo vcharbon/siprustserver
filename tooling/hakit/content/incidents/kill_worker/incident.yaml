@@ -1,0 +1,18 @@
+schema: incident.v1
+name: kill_worker
+description: >-
+  Force-delete one ready worker pod (grace 0): a crash. The workload re-creates
+  it; the probe waits until as many pods of the selector are ready as before
+  the kill, with the killed pod replaced.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: one
+duration_s: 0
+expected_s: 60
+timeouts:
+  inject_s: 30
+  heal_s: 10
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind]

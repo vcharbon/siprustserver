@@ -1,0 +1,10 @@
+schema: budget.v1
+name: worker-kill
+description: >-
+  A worker crash: about 2 s of the offered rate may end its setup without a
+  final (the calls the dead worker held before its state reached the backup).
+  Every other failed setup is a finding.
+setup_failed:
+  - { stream: "*", code: 0, reason: timeout, max_seconds: 2 }
+setup_slow:
+  max_seconds: 2

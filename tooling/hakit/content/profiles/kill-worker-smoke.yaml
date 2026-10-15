@@ -1,0 +1,27 @@
+schema: profile.v1
+name: kill-worker-smoke
+description: >-
+  A short run of the basic call at a modest rate with a worker crash every
+  150 s: the walking skeleton of the tooling, from the incident to the verdict.
+duration_s: 600
+drain_s: 60
+settle_s: 40
+setup_slow_ms: 1000
+catalogs: [x-api-call]
+preflight:
+  min_free_memory_gib: 4
+  min_free_disk_gib: 10
+streams:
+  - name: basic
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 20
+    setup_deadline_s: 32
+    ring_s: 5
+    hold_s: 20
+schedule:
+  first_at_s: 60
+  interval_s: 150
+  cycle:
+    - { incident: kill_worker, budget: worker-kill }
