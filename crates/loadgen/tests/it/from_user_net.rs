@@ -156,7 +156,7 @@ fn inflight(reporter: &Reporter) -> String {
     reporter
         .render_prometheus()
         .lines()
-        .find(|l| l.starts_with("loadgen_inflight "))
+        .find(|l| l.starts_with("loadgen_inflight{stream=\"main\"} "))
         .unwrap_or("loadgen_inflight <absent>")
         .to_string()
 }
@@ -169,7 +169,7 @@ async fn settle(rig: &Rig, reporter: &Reporter) {
     rig.h.advance(Duration::from_secs(40)).await;
     settle_until(|| rig.b2bua.is_reaped()).await;
     rig.b2bua.assert_fully_reaped();
-    assert_eq!(inflight(reporter), "loadgen_inflight 0", "a call never finished");
+    assert_eq!(inflight(reporter), "loadgen_inflight{stream=\"main\"} 0", "a call never finished");
 }
 
 /// Overlapping calls with distinct calling numbers on ONE shared socket, torn

@@ -281,13 +281,13 @@ done > "$RESULTS/flame-attribution.txt" 2>&1
   echo
   echo '## Result classes (whole run — the loadgen exit dump, after drain)'
   echo
-  echo '| run | scenario | class | count |'
+  echo '| run | shape | class | count |'
   echo '|---|---|---|---|'
   for run in $(seq 1 "$RUNS"); do
     awk -v run="$run" -F'[{}]' '/^loadgen_calls_total\{/ {
         split($2, kv, ","); sc = ""; cl = "";
         for (i in kv) { split(kv[i], p, "="); gsub(/"/, "", p[2]);
-                        if (p[1] == "scenario") sc = p[2]; if (p[1] == "class") cl = p[2] }
+                        if (p[1] == "shape") sc = p[2]; if (p[1] == "class") cl = p[2] }
         n = $3; gsub(/ /, "", n);
         if (n + 0 > 0) printf "| %s | %s | %s | %d |\n", run, sc, cl, n }' \
       "$RESULTS/r${run}_loadgen.log" 2>/dev/null
@@ -302,8 +302,8 @@ done > "$RESULTS/flame-attribution.txt" 2>&1
       /^loadgen_calls_total\{/         { tot += $NF; if ($0 ~ /class="ok"/) ok += $NF }
       /^loadgen_shed_total\{/          { shed += $NF }
       /^loadgen_mux_orphan_total\{/    { orph += $NF }
-      /^loadgen_mux_registry_size /    { reg = $NF }
-      /^loadgen_mux_inbox_drop_total / { drop = $NF }
+      /^loadgen_mux_registry_size\{/   { reg = $NF }
+      /^loadgen_mux_inbox_drop_total\{/ { drop = $NF }
       /^loadgen_ringing_expected_total/{ want = $NF }
       /^loadgen_ringing_received_total/{ got = $NF }
       END { printf "| %s | %d | %d | %.1f%% | %d | %d | %d | %d | %d/%d |\n",

@@ -10,9 +10,13 @@ use sip_message::method::Method;
 
 use crate::mux::{Exchange, OrphanReason};
 
-/// A scenario of the run's mix: none declared here; the reporter writes the
-/// mix's scenarios from the start.
-pub const SCENARIO: Dim = Dim::new("scenario", &[]);
+/// The load stream a generator process runs (`--stream`): every family's
+/// first label.
+pub const STREAM: Dim = Dim::new("stream", &[]);
+/// The stream a series names before the run names one.
+pub const DEFAULT_STREAM: &str = "main";
+/// The treatment catalog shape id of a call.
+pub const SHAPE: Dim = Dim::new("shape", &[]);
 
 /// A call's result class; a wrong status is `status_<code>`, under its own
 /// series. Every accepted branch is `ok`.
@@ -71,161 +75,180 @@ pub const ORPHAN_METHOD: Dim = Dim::new("method", &ORPHAN_METHOD_VALUES);
 
 pub const CALLS: Family = Family::counter(
     "loadgen_calls_total",
-    Labels::Product(&[SCENARIO, CLASS, CHAOS]),
-    "Completed load calls by scenario, result class, and chaos proximity.",
+    Labels::Product(&[STREAM, SHAPE, CLASS, CHAOS]),
+    "Completed load calls by shape, result class, and chaos proximity.",
 )
 .semi_open();
 
 pub const BRANCHES: Family = Family::counter(
     "loadgen_branch_total",
-    Labels::Product(&[SCENARIO, BRANCH]),
-    "Calls classed ok, by scenario and the accepted branch they ended on.",
+    Labels::Product(&[STREAM, SHAPE, BRANCH]),
+    "Calls classed ok, by shape and the accepted branch they ended on.",
 )
 .semi_open();
 
 pub const FAILED_STEPS: Family = Family::counter(
     "loadgen_failed_step_total",
-    Labels::Product(&[SCENARIO, STEP]),
-    "Calls whose scenario failed, by scenario and the step they failed at.",
+    Labels::Product(&[STREAM, SHAPE, STEP]),
+    "Calls whose scenario failed, by shape and the step they failed at.",
 )
 .semi_open();
 
 pub const SHED: Family = Family::counter(
     "loadgen_shed_total",
-    Labels::Product(&[SCENARIO]),
+    Labels::Product(&[STREAM, SHAPE]),
     "Calls dropped at the max-in-flight cap.",
 )
 .semi_open();
 
 pub const INFLIGHT: Family =
-    Family::gauge("loadgen_inflight", Labels::None, "Calls currently in flight.");
+    Family::gauge("loadgen_inflight", Labels::Product(&[STREAM]), "Calls currently in flight.")
+        .semi_open();
 
 pub const STARTED: Family =
-    Family::counter("loadgen_started_total", Labels::None, "Calls started.");
+    Family::counter("loadgen_started_total", Labels::Product(&[STREAM]), "Calls started.")
+        .semi_open();
 
 pub const RINGING_EXPECTED: Family = Family::counter(
     "loadgen_ringing_expected_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Calls that reached the ring→answer step (18x denominator).",
-);
+)
+.semi_open();
 
 pub const RINGING_RECEIVED: Family = Family::counter(
     "loadgen_ringing_received_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Of those, calls whose caller received the 18x ringing provisional.",
-);
+)
+.semi_open();
 
 pub const E2E_LATENCY_SECONDS: Family = Family::histogram(
     "loadgen_e2e_latency_seconds",
-    Labels::Product(&[SCENARIO]),
+    Labels::Product(&[STREAM, SHAPE]),
     "End-to-end call latency.",
 )
 .semi_open();
 
 pub const CHECKPOINT_LATENCY_SECONDS: Family = Family::histogram(
     "loadgen_checkpoint_latency_seconds",
-    Labels::Product(&[SCENARIO, CHECKPOINT]),
+    Labels::Product(&[STREAM, SHAPE, CHECKPOINT]),
     "Named-checkpoint latency.",
 )
 .semi_open();
 
 pub const RTT_SECONDS: Family = Family::histogram(
     "loadgen_rtt_seconds",
-    Labels::Product(&[SCENARIO, EXCHANGE]),
+    Labels::Product(&[STREAM, SHAPE, EXCHANGE]),
     "SIP round trip of one exchange, from the first transmission (no scripted timer inside).",
 )
 .semi_open();
 
 pub const MUX_ORPHAN: Family = Family::counter(
     "loadgen_mux_orphan_total",
-    Labels::Product(&[ORPHAN_REASON, ORPHAN_METHOD]),
+    Labels::Product(&[STREAM, ORPHAN_REASON, ORPHAN_METHOD]),
     "Inbound datagrams that matched no call, by reason and CSeq method.",
 )
 .capped(&MUX_ORPHAN_OVERFLOW, &["method"]);
 
-pub const MUX_REGISTRY_SIZE: Family =
-    Family::gauge("loadgen_mux_registry_size", Labels::None, "Live demux entries (leak canary).");
+pub const MUX_REGISTRY_SIZE: Family = Family::gauge(
+    "loadgen_mux_registry_size",
+    Labels::Product(&[STREAM]),
+    "Live demux entries (leak canary).",
+)
+.semi_open();
 
 pub const MUX_PENDING_EXPIRED: Family = Family::counter(
     "loadgen_mux_pending_expired_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Pending callee legs reaped (never arrived).",
-);
+)
+.semi_open();
 
 pub const MUX_UNCLAIMED: Family = Family::counter(
     "loadgen_mux_unclaimed_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Initial INVITEs on a known call that no pending claim accepted.",
-);
+)
+.semi_open();
 
 pub const MUX_TOKEN_COLLISION: Family = Family::counter(
     "loadgen_mux_token_collision_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Token-slot registration draws refused: token already owned by a concurrent call (up to KEY_DRAWS per call).",
-);
+)
+.semi_open();
 
 pub const MUX_CALLER_KEY_MISMATCH: Family = Family::counter(
     "loadgen_mux_caller_key_mismatch_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Caller INVITEs refused before the wire: From user is not the call key (from-user correlation).",
-);
+)
+.semi_open();
 
 pub const MUX_KEY_COOLING: Family = Family::counter(
     "loadgen_mux_key_cooling_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "From-user draws refused: the key's previous call ended not ok within 64*T1 (up to KEY_DRAWS per call).",
-);
+)
+.semi_open();
 
 pub const MUX_CLAIM_UNFIRED: Family = Family::counter(
     "loadgen_mux_claim_unfired_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Claims released without firing (expected inbound leg never came).",
-);
+)
+.semi_open();
 
 pub const MUX_INBOX_DROP: Family = Family::counter(
     "loadgen_mux_inbox_drop_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Datagrams dropped on a full call inbox.",
-);
+)
+.semi_open();
 
-pub const MUX_DELIVERED: Family =
-    Family::counter("loadgen_mux_delivered_total", Labels::None, "Datagrams demuxed to a call.");
+pub const MUX_DELIVERED: Family = Family::counter(
+    "loadgen_mux_delivered_total",
+    Labels::Product(&[STREAM]),
+    "Datagrams demuxed to a call.",
+)
+.semi_open();
 
 pub const DROP: Family = Family::counter(
     "loadgen_drop_total",
-    Labels::Product(&[Dim::new("dir", &["out", "in"])]),
+    Labels::Product(&[STREAM, Dim::new("dir", &["out", "in"])]),
     "Datagrams dropped by the simulated packet-loss model, by direction.",
-);
+)
+.semi_open();
 
 pub const CHAOS_MARKERS: Family = Family::counter(
     "loadgen_chaos_markers_total",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Chaos markers recorded by the loadgen.",
-);
+)
+.semi_open();
 
 pub const CHAOS_MARKERS_RETAINED: Family = Family::gauge(
     "loadgen_chaos_markers_retained",
-    Labels::Product(&[Dim::new("kind", &[])]),
+    Labels::Product(&[STREAM, Dim::new("kind", &[])]),
     "Chaos markers currently retained, by kind.",
 )
 .semi_open();
 
 pub const TARGET_CPS: Family = Family::gauge(
     "loadgen_target_cps",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Current offered call-rate target (calls/s; 0 = paused).",
-);
+)
+.semi_open();
 
 pub const PROCESS_RESIDENT_MEMORY: Family = Family::gauge(
     "loadgen_process_resident_memory_bytes",
-    Labels::None,
+    Labels::Product(&[STREAM]),
     "Load generator RSS; NaN where /proc does not say.",
-);
+)
+.semi_open();
 
-/// The load stream a generator process runs (`--stream`).
-pub const STREAM: Dim = Dim::new("stream", &[]);
-/// The treatment catalog shape id of a call.
-pub const SHAPE: Dim = Dim::new("shape", &[]);
 /// A call-outcome record's `ending`.
 pub const ENDING: Dim = Dim::new(
     "ending",
@@ -373,15 +396,23 @@ mod tests {
             panic!("{mismatches:#?}\n{text}");
         }
         assert!(text.contains(
-            "loadgen_calls_total{scenario=\"basic_call\",class=\"ok\",chaos=\"clear\"} 0\n"
+            "loadgen_calls_total{stream=\"main\",shape=\"basic_call\",class=\"ok\",chaos=\"clear\"} 0\n"
         ));
         assert!(
-            text.contains("loadgen_e2e_latency_seconds_count{scenario=\"basic_call\"} 0\n"),
+            text.contains(
+                "loadgen_e2e_latency_seconds_count{stream=\"main\",shape=\"basic_call\"} 0\n"
+            ),
             "a declared scenario's call latency is written from the start: {text}"
         );
         assert!(!text.contains("loadgen_e2e_seconds"), "no lifetime quantile gauge: {text}");
         assert!(text.contains(
-            "loadgen_rtt_seconds_count{scenario=\"basic_call\",exchange=\"invite_100\"} 1\n"
+            "loadgen_rtt_seconds_count{stream=\"main\",shape=\"basic_call\",exchange=\"invite_100\"} 1\n"
         ));
+        // Every sample names its stream first (the cap's overflow counter is
+        // the catalogue's own, unlabelled).
+        for line in text.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
+            let unlabelled = line.starts_with("loadgen_mux_orphan_overflow_total ");
+            assert!(unlabelled || line.contains("{stream=\"main\""), "no stream label: {line}");
+        }
     }
 }

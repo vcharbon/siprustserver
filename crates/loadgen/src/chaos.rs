@@ -219,7 +219,7 @@ impl ChaosLog {
     /// Prometheus surface: total markers recorded, and those retained by kind
     /// (bounded by the retained markers), so the dashboard can confirm the
     /// loadgen actually received the chaos flags.
-    pub fn render_prometheus(&self) -> String {
+    pub fn render_prometheus(&self, stream: &str) -> String {
         use crate::catalogue as c;
         let g = self.events.lock().unwrap();
         let mut by_kind: BTreeMap<&str, u64> = BTreeMap::new();
@@ -227,8 +227,9 @@ impl ChaosLog {
             *by_kind.entry(e.kind.as_str()).or_default() += 1;
         }
         let mut out = String::new();
-        c::CHAOS_MARKERS.render_value(&mut out, self.total());
-        c::CHAOS_MARKERS_RETAINED.render_rows(&mut out, by_kind.into_iter().map(|(k, n)| ([k], n)));
+        c::CHAOS_MARKERS.render_rows(&mut out, [([stream], self.total())]);
+        c::CHAOS_MARKERS_RETAINED
+            .render_rows(&mut out, by_kind.into_iter().map(|(k, n)| ([stream, k], n)));
         out
     }
 }

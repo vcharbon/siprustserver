@@ -111,6 +111,8 @@ fn sample_rel(scenario: &str, class: &str, case: &str, chaos: &str, i: usize) ->
 
 #[derive(Default)]
 struct Inner {
+    /// The load stream every series names (`main` until set).
+    stream: Option<String>,
     /// The run's mix, written from the first scrape.
     declared: std::collections::BTreeSet<ScenarioId>,
     counts: BTreeMap<Bucket, u64>,
@@ -364,63 +366,9 @@ impl Reporter {
         g.declared.extend(scenarios);
     }
 
-    /// Render the live `/metrics` text in Prometheus exposition format. Series
-    /// mirror the SIPp exporter's naming so existing dashboards/queries extend.
-    pub fn render_prometheus(&self) -> String {
-        use crate::catalogue as c;
-        let g = self.inner.lock().unwrap();
-        let mut out = String::new();
-        // The case dimension is a report/sample refinement only — the Prometheus
-        // series stay (scenario, class, chaos)-keyed (stable dashboards, bounded
-        // series), so aggregate over case here.
-        let mut calls: BTreeMap<(ScenarioId, String, &str), u64> = BTreeMap::new();
-        for scenario in &g.declared {
-            for class in c::CLASS.values {
-                for chaos in c::CHAOS.values {
-                    calls.insert((scenario, class.to_string(), chaos), 0);
-                }
-            }
-        }
-        for ((scenario, class, _case, chaos), n) in &g.counts {
-            *calls.entry((*scenario, class.clone(), chaos.label())).or_default() += n;
-        }
-        c::CALLS.render_rows(
-            &mut out,
-            calls
-                .into_iter()
-                .map(|((s, class, chaos), n)| ([s.to_string(), class, chaos.to_string()], n)),
-        );
-        c::BRANCHES
-            .render_rows(&mut out, g.branches.iter().map(|((s, branch), n)| ([*s, *branch], *n)));
-        c::FAILED_STEPS.render_rows(
-            &mut out,
-            g.failed_steps.iter().map(|((s, at), n)| ([s.to_string(), at.to_string()], *n)),
-        );
-        let mut shed: BTreeMap<ScenarioId, u64> = g.declared.iter().map(|s| (*s, 0)).collect();
-        shed.extend(g.shed.iter().map(|(s, n)| (*s, *n)));
-        c::SHED.render_rows(&mut out, shed.into_iter().map(|(s, n)| ([s], n)));
-        c::INFLIGHT.render_value(&mut out, self.inflight.load(Ordering::Relaxed));
-        c::STARTED.render_value(&mut out, self.started.load(Ordering::Relaxed));
-        // 18x-delivery gate: a non-PRACK ringing provisional is best-effort, so a
-        // miss is EXPECTED. `received/expected` should stay > 0.99; a systemic 18x
-        // regression drops it well below and IS a bug (unlike one dropped 18x).
-        c::RINGING_EXPECTED.render_value(&mut out, self.ringing_expected.load(Ordering::Relaxed));
-        c::RINGING_RECEIVED.render_value(&mut out, self.ringing_received.load(Ordering::Relaxed));
-        let empty = Hist::call();
-        let mut e2e: BTreeMap<ScenarioId, &Hist> =
-            g.declared.iter().map(|s| (*s, &empty)).collect();
-        e2e.extend(g.e2e.iter().map(|(s, h)| (*s, h)));
-        c::E2E_LATENCY_SECONDS
-            .render_histogram_rows(&mut out, e2e.iter().map(|(s, h)| ([*s], h.histogram_value())));
-        c::CHECKPOINT_LATENCY_SECONDS.render_histogram_rows(
-            &mut out,
-            g.checkpoints.iter().map(|((s, name), h)| ([*s, *name], h.histogram_value())),
-        );
-        c::RTT_SECONDS.render_histogram_rows(
-            &mut out,
-            g.rtt.iter().map(|((s, exchange), h)| ([*s, exchange.label()], h.histogram_value())),
-        );
-        out
+    /// Name the load stream every series carries (`main` until set).
+    pub fn set_stream(&self, stream: &str) {
+        self.inner.lock().unwrap().stream = Some(stream.to_string());
     }
 
     // -- Final on-disk report ----------------------------------------------
@@ -763,6 +711,8 @@ impl Reporter {
         self.inner.lock().unwrap().counts.values().sum()
     }
 }
+
+mod prometheus;
 
 #[cfg(test)]
 mod tests;

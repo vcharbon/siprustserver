@@ -540,8 +540,8 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Completed calls/s by scenario",
-      "description": "Completion rate split by scenario (basic_call / reinvite / long_call / refer).",
+      "title": "Completed calls/s by shape",
+      "description": "Completion rate split by shape (basic_call / reinvite / long_call / refer).",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -554,9 +554,9 @@
       },
       "targets": [
         {
-          "expr": "sum by (scenario)(rate(loadgen_calls_total[1m]))",
+          "expr": "sum by (shape)(rate(loadgen_calls_total[1m]))",
           "refId": "A",
-          "legendFormat": "{{scenario}}"
+          "legendFormat": "{{shape}}"
         }
       ],
       "fieldConfig": {
@@ -593,7 +593,7 @@
       "id": 12,
       "type": "timeseries",
       "title": "SIP round trip by exchange, p50 / p99 (s)",
-      "description": "Windowed quantiles of loadgen_rtt_seconds over every scenario: request first sent \u2192 first 100 / first 18x (INVITE) / final (non-INVITE), and UAS 2xx first sent \u2192 ACK. No scripted timer is inside these exchanges, so they measure the SUT.",
+      "description": "Windowed quantiles of loadgen_rtt_seconds over every shape: request first sent \u2192 first 100 / first 18x (INVITE) / final (non-INVITE), and UAS 2xx first sent \u2192 ACK. No scripted timer is inside these exchanges, so they measure the SUT.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -645,8 +645,8 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "SIP round trip p90 by scenario \u00d7 exchange (s)",
-      "description": "Windowed p90 of loadgen_rtt_seconds per scenario and exchange (1m rate).",
+      "title": "SIP round trip p90 by shape \u00d7 exchange (s)",
+      "description": "Windowed p90 of loadgen_rtt_seconds per shape and exchange (1m rate).",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -659,9 +659,9 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.9, sum by (le, scenario, exchange)(rate(loadgen_rtt_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.9, sum by (le, shape, exchange)(rate(loadgen_rtt_seconds_bucket[1m])))",
           "refId": "A",
-          "legendFormat": "{{scenario}} {{exchange}}"
+          "legendFormat": "{{shape}} {{exchange}}"
         }
       ],
       "fieldConfig": {

@@ -76,7 +76,7 @@ mod tests {
         let prom = reporter.render_prometheus();
         assert!(
             prom.contains(
-                "loadgen_rtt_seconds_count{scenario=\"basic_call\",exchange=\"invite_100\"} 1\n"
+                "loadgen_rtt_seconds_count{stream=\"main\",shape=\"basic_call\",exchange=\"invite_100\"} 1\n"
             ),
             "{prom}"
         );

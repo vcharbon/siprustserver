@@ -149,6 +149,8 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
         // background sampling gate.
         background_record_every,
     }));
+    reporter.set_stream(&args.stream);
+    core.set_stream(&args.stream);
 
     let cfg = DriverCfg {
         cps,
@@ -323,12 +325,13 @@ pub fn metrics_body(
     rate: &RateHandle,
     outcomes: &OutcomeSink,
 ) -> String {
+    let stream = reporter.stream();
     let mut out = reporter.render_prometheus();
     out.push_str(&core.render_prometheus());
-    out.push_str(&chaos.render_prometheus());
-    crate::catalogue::TARGET_CPS.render_value(&mut out, rate.cps());
+    out.push_str(&chaos.render_prometheus(&stream));
+    crate::catalogue::TARGET_CPS.render_rows(&mut out, [([stream.as_str()], rate.cps())]);
     let rss = resident_memory_bytes().map_or("NaN".to_string(), |b| b.to_string());
-    crate::catalogue::PROCESS_RESIDENT_MEMORY.render_value(&mut out, rss);
+    crate::catalogue::PROCESS_RESIDENT_MEMORY.render_rows(&mut out, [([stream.as_str()], rss)]);
     outcomes.render_prometheus(&mut out);
     out
 }

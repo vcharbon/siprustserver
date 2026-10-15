@@ -406,6 +406,12 @@ impl MuxCore {
         self.endpoints.keys().copied().collect()
     }
 
+    /// Name the load stream every mux series carries (`main` until set; set
+    /// once).
+    pub fn set_stream(&self, stream: &str) {
+        self.stats.set_stream(stream);
+    }
+
     pub fn stats(&self) -> &Arc<MuxStats> {
         &self.stats
     }

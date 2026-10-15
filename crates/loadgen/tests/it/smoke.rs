@@ -1144,8 +1144,8 @@ async fn loadgen_post_call_cleanup_no_leak() {
         ("basic_call", "answered"),
     ] {
         assert!(reporter.count(scenario, &ResultClass::Ok) > 0, "no ok {scenario}:\n{prom}");
-        let series = format!("loadgen_branch_total{{scenario=\"{scenario}\",branch=\"{branch}\"}}");
-        assert!(prom.contains(&series), "no {series}:\n{prom}");
+        let series = format!("{{stream=\"main\",shape=\"{scenario}\",branch=\"{branch}\"}}");
+        assert!(prom.contains(&format!("loadgen_branch_total{series}")), "no {series}:\n{prom}");
     }
 
     // Post-call cleanup is COMPLETE across every failure-teardown path.

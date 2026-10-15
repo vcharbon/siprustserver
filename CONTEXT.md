@@ -1224,7 +1224,7 @@ One named way a scenario's call may end and still be a success (`answered`,
 `answered_before_cancel`, `transfer_declined`, or a
 scenario-named predicate over the observed state). A call that tears down and
 settles on one of them is `ScenarioVerdict::Success { branch }`, classed `ok`
-and counted under `loadgen_branch_total{scenario,branch}`. Nothing else is
+and counted under `loadgen_branch_total{stream,shape,branch}`. Nothing else is
 accepted by default. The run, not the scenario, may add `refused_overload`: the
 final its **Load profile** declares as the system under test's overload refusal
 (`overloadReject`, e.g. 503), received by a non-emergency call before it

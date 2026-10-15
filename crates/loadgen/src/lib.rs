@@ -45,7 +45,7 @@
 //!   non-failure class of its own.
 //! - [`mux`] — the multiplexed SIP transport; its `rtt` module times each SIP
 //!   exchange that holds no scripted timer (request → 100 / 18x / final,
-//!   2xx → ACK) into `loadgen_rtt_seconds{scenario,exchange}`.
+//!   2xx → ACK) into `loadgen_rtt_seconds{stream,shape,exchange}`.
 //!
 //! [`Agent`]: scenario_harness::Agent
 

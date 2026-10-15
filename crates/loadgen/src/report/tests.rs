@@ -85,7 +85,7 @@ fn latency_histograms_are_exported_as_prometheus_histograms() {
     assert!(prom.contains("# TYPE loadgen_checkpoint_latency_seconds histogram"), "{prom}");
     assert!(prom.contains("# TYPE loadgen_e2e_latency_seconds histogram"), "{prom}");
     let family = "loadgen_checkpoint_latency_seconds";
-    let labels = "scenario=\"basic_call\",checkpoint=\"time_to_200\"";
+    let labels = "stream=\"main\",shape=\"basic_call\",checkpoint=\"time_to_200\"";
     let buckets: Vec<(f64, u64)> = prom
         .lines()
         .filter_map(|l| l.strip_prefix(&format!("{family}_bucket{{{labels},le=\"")))
@@ -105,7 +105,9 @@ fn latency_histograms_are_exported_as_prometheus_histograms() {
     assert!(prom.contains(&format!("{family}_count{{{labels}}} 3\n")), "{prom}");
     assert!(prom.contains(&format!("{family}_sum{{{labels}}} 900.055\n")), "{prom}");
     assert!(
-        prom.contains("loadgen_e2e_latency_seconds_count{scenario=\"basic_call\"} 3\n"),
+        prom.contains(
+            "loadgen_e2e_latency_seconds_count{stream=\"main\",shape=\"basic_call\"} 3\n"
+        ),
         "{prom}"
     );
 }
@@ -146,15 +148,17 @@ fn a_scrape_holds_no_quantile_gauge_and_counts_branches_and_steps() {
     assert!(!prom.contains("quantile=\""), "{prom}");
     assert!(!prom.contains("expected_reject"), "{prom}");
     assert!(
-        prom.contains("loadgen_branch_total{scenario=\"basic_call\",branch=\"answered\"} 1\n"),
+        prom.contains(
+            "loadgen_branch_total{stream=\"main\",shape=\"basic_call\",branch=\"answered\"} 1\n"
+        ),
         "{prom}"
     );
     assert!(prom.contains(
-        "loadgen_failed_step_total{scenario=\"basic_call\",step=\"alice:bye#1@established\"} 1\n"
+        "loadgen_failed_step_total{stream=\"main\",shape=\"basic_call\",step=\"alice:bye#1@established\"} 1\n"
     ));
 }
 
-/// A SIP round trip renders on `loadgen_rtt_seconds{scenario,exchange}`,
+/// A SIP round trip renders on `loadgen_rtt_seconds{stream,shape,exchange}`,
 /// bounds from 0.1 ms in ×1.25 steps: a 2.5 ms and a 3.5 ms exchange land
 /// in different buckets, and only observed exchanges are written.
 #[test]
@@ -172,7 +176,7 @@ fn round_trips_render_as_a_fine_histogram_per_exchange() {
     );
     let prom = r.render_prometheus();
     assert!(prom.contains("# TYPE loadgen_rtt_seconds histogram"), "{prom}");
-    let labels = "scenario=\"basic_call\",exchange=\"invite_18x\"";
+    let labels = "stream=\"main\",shape=\"basic_call\",exchange=\"invite_18x\"";
     let buckets: Vec<(f64, u64)> = prom
         .lines()
         .filter_map(|l| l.strip_prefix(&format!("loadgen_rtt_seconds_bucket{{{labels},le=\"")))
@@ -196,7 +200,7 @@ fn round_trips_render_as_a_fine_histogram_per_exchange() {
     assert!(prom.contains(&format!("loadgen_rtt_seconds_sum{{{labels}}} 0.006\n")), "{prom}");
     assert!(
         prom.contains(
-            "loadgen_rtt_seconds_count{scenario=\"basic_call\",exchange=\"bye_final\"} 1\n"
+            "loadgen_rtt_seconds_count{stream=\"main\",shape=\"basic_call\",exchange=\"bye_final\"} 1\n"
         ),
         "{prom}"
     );

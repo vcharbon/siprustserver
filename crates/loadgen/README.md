@@ -494,7 +494,7 @@ scraped via the same pod annotations. It is wired in `deploy/k8s`:
 - `deploy/observability/.../dashboards/loadgen.json` — the Grafana panels
   (in-flight summed over every loadgen next to the offered rate and the mean
   call hold, the success ratio over admitted calls next to the 503 refusal
-  ratio, completion rate by class/scenario, SIP round-trip quantiles, RSS +
+  ratio, completion rate by class/shape, SIP round-trip quantiles, RSS +
   leak canaries), aligned to the chaos-window annotations.
 
 Disable it for a SIPp-only run with `LOADGEN_ENABLE=0`. REFER is off by default in
@@ -522,12 +522,13 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   `<who>[:<goal kind>#<goal index>]@<barrier>` (e.g. `alice:bye#1@established`,
   or `settle` for an unmet settle barrier), in a filesystem-safe spelling.
 - **`summary.md`** — the same counts in markdown.
-- **Live:** `curl <metrics-addr>/metrics` during a run for the per-`(scenario,
-  class, chaos)` counters, `loadgen_branch_total{scenario,branch}` (ok calls by
-  the accepted ending they took) and `loadgen_failed_step_total{scenario,step}`
+- **Live:** `curl <metrics-addr>/metrics` during a run (every series names its
+  `--stream` first) for the per-`(stream, shape,
+  class, chaos)` counters, `loadgen_branch_total{stream,shape,branch}` (ok calls by
+  the accepted ending they took) and `loadgen_failed_step_total{stream,shape,step}`
   (failed calls by the step they failed at), the call and checkpoint latency
   histograms, the SIP
-  round trips `loadgen_rtt_seconds{scenario,exchange}` (request first sent →
+  round trips `loadgen_rtt_seconds{stream,shape,exchange}` (request first sent →
   first `100` / first `18x` for INVITE, → final for every other method; a 2xx
   to an INVITE first sent → its ACK; none of them holds a scripted timer), plus
   the `loadgen_mux_orphan_total` /
