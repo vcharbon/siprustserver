@@ -15,7 +15,8 @@
   final (`rejected`, ACKed), no final by setup_ms (`timeout`), a BYE answered
   481 or a BYE from the far end mid-call (`cut`), a BYE with no final
   (`stranded`), a request the scenario cannot serve (`failed`, the dialog torn
-  down first when answered).
+  down first when answered). A non-2xx final for the INVITE after its 2xx
+  changes no ending: it is a protocol failure and the call goes on to its BYE.
 
   After the setup deadline the INVITE is not abandoned (RFC 3261 section 9.1):
   with a provisional it is CANCELed and its final awaited 64*T1; without one,
@@ -668,6 +669,8 @@
   <nop next="unexp_resume"/>
   <nop/>
   <label id="ux_final_inv"/>
+  <nop test="answered" next="ux_final_after_2xx"/>
+  <nop test="dialog" next="ux_final_after_2xx"/>
   <nop test="keep_ending" next="late_final">
     <action>
       <assign assign_to="_unexp.retaddr" value="0"/>
@@ -682,6 +685,25 @@
     </action>
   </nop>
   <nop next="got_reject"/>
+
+  <!-- A non-2xx final for the INVITE after its 2xx: the INVITE transaction
+       ended on the 2xx (RFC 3261 section 17.1.1.2), so the response is let go.
+       The call keeps its ending and its ACK/BYE path; the first such final is
+       a protocol failure of the record. -->
+  <nop/>
+  <label id="ux_final_after_2xx"/>
+  <nop test="late_final_seen" next="unexp_resume"/>
+  <nop next="unexp_resume">
+    <action>
+      <gettimeofday assign_to="now_s,now_us"/>
+      <multiply assign_to="now_s" value="1000"/>
+      <divide assign_to="now_us" value="1000"/>
+      <add assign_to="now_s" variable="now_us"/>
+      <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$ux_code],&quot;detail&quot;:&quot;second final after 2xx&quot;}"/>
+      <assignstr assign_to="r_sep" value=","/>
+      <assign assign_to="late_final_seen" value="1"/>
+    </action>
+  </nop>
 
   <nop/>
   <label id="unexp_options"/>
