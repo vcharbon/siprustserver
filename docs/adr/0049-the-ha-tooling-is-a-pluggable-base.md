@@ -90,14 +90,16 @@ tolerated (§3).
    `duration_s`, before it runs `heal`), `healed` (`heal` exited 0),
    `recovered` (`probe` exited 0, or right after `healed` without a probe).
    An executable that fails or overruns its timeout records `failed` and an
-   `incident_failed` integrity finding.
+   `incident_failed` integrity finding. A combined event injects its
+   incidents in the listed order and heals them in reverse; each incident
+   records its own phases.
 3. **Environment.** Each executable runs with its working directory set to
    the event directory and receives:
 
    | variable | value |
    |---|---|
    | `HAKIT_RUN`, `HAKIT_RUN_DIR` | the run id and its directory |
-   | `HAKIT_EVENT`, `HAKIT_EVENT_DIR` | the event id (`<seq>-<incident>`) and its own directory |
+   | `HAKIT_EVENT`, `HAKIT_EVENT_DIR` | the event id (`<seq>-<incident>`, the names joined by `+` for a combined event) and this incident's directory under it |
    | `HAKIT_INCIDENT` | the incident name |
    | `HAKIT_TARGET_SELECTOR`, `HAKIT_TARGET_NAMESPACE`, `HAKIT_TARGET_PICK` | the target after the profile's override |
    | `HAKIT_KUBE_CONTEXT` | the kube context of the lab |
@@ -158,7 +160,7 @@ made. A run profile joins the two.
    | `protocol_anomaly` | each `failures` entry of kind `protocol` or `transport`; a leg whose ending its catalog leg does not expect | its `at_ms` | 0 |
    | `cdr_mismatch` | an answered call with no CDR, a CDR with no record, or a CDR whose duration or final differs; joined on `call_id` | `ended_at_ms` | count |
    | `recovery` | seconds from `healed` until traffic is back to baseline (§3.5) | `healed` | seconds |
-   | `unattributed` | any impact above outside every window | its instant | 0, never budgeted |
+   | `unattributed` | an impact of any class above whose instant is outside every window | its instant | 0, never budgeted |
 
    One record may yield several impacts (a re-INVITE answered 481 is a
    `dialog_request_failed`, and the call it ended is a `call_cut`). A record
@@ -365,6 +367,10 @@ made. A run profile joins the two.
 - `sip_chaos_event{type,…}` with `result` is replaced by
   `sip_chaos_event{incident,phase,source,run}`; the dashboards' annotation
   queries change with it.
+- The base's SIPp scenarios (`deploy/k8s/sipp/scenarios/`) and Grafana
+  dashboards (`deploy/observability/stack/grafana/dashboards/`) move into
+  `tooling/hakit/content/scenarios/` and `content/dashboards/`, so the base
+  is the first search-path entry like any other.
 - SIPp scenarios are deduplicated with SIPp-native parameters (`-key`, `-d`,
   injection files); a renderer exists only for attribute-level variants, and
   nothing rewrites a scenario with `sed` or `perl`. The bench reads the same
