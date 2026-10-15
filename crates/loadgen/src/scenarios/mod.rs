@@ -7,7 +7,7 @@
 //! unified, open shape registry ([`e2e_model::ShapeRegistry`]): each shape is
 //! declared ONCE as a [`ShapeDescriptor`] — id, load attributes
 //! (needs-charlie / needs-bob2 / emergency), mix weights, and the load-body
-//! factory — and the driver's [`MixEntry`](crate::driver::MixEntry) is built
+//! factory — and the driver's [`MixEntry`](crate::MixEntry) is built
 //! from it (`MixEntry::by_id` / `default_mix` / `abnormal_end_mix`). This module
 //! re-exports the shared pieces so downstream users reach them unchanged.
 //!

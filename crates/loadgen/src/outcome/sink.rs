@@ -214,8 +214,8 @@ impl OutcomeSink {
         self.counts.dropped.render(out);
     }
 
-    /// Write every queued record to the file, give the pusher
-    /// [`CLOSE_BUDGET`] for its backlog, and stop. Later writes are counted
+    /// Write every queued record to the file, give the pusher 3 s
+    /// for its backlog (plus one push attempt), and stop. Later writes are counted
     /// dropped.
     pub fn close(&self) {
         self.counts.close_deadline.lock().unwrap().get_or_insert(Instant::now() + CLOSE_BUDGET);
