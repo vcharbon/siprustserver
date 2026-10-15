@@ -32,6 +32,8 @@
 //!   [`app::Product`] seam: a product names its bin, adds its flags and builds
 //!   the [`ShapeRegistry`] they select, so its load bin is one line (the
 //!   shipped bin passes [`app::Shipped`]).
+//! - [`outcome`] — one `call-outcome.v1` record per call placed, from what
+//!   the call's endpoints saw on the wire.
 //! - [`report`] — bounded-memory counters, latency histograms, sampling gate,
 //!   Prometheus text, on-disk report.
 //! - `call_rtt` — one call's SIP round trips, held by the call and folded
@@ -56,7 +58,9 @@ pub mod class;
 pub mod ctx;
 pub mod driver;
 mod hist;
+mod metrics_server;
 pub mod mux;
+pub mod outcome;
 pub mod rate;
 pub mod report;
 pub mod scenarios;
@@ -68,10 +72,8 @@ pub use catalogue::CATALOGUE;
 pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
-pub use driver::{
-    serve_metrics, serve_metrics_on, CallConfig, CallTuning, Driver, DriverCfg, MixEntry,
-    MuxTransport,
-};
+pub use driver::{CallConfig, CallTuning, Driver, DriverCfg, MixEntry, MuxTransport};
+pub use metrics_server::{serve_metrics, serve_metrics_on};
 pub use mux::{
     labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation, DropDir,
     EndpointSpec, Exchange, LegInfo, LegPicker, MuxCore, Role, RttSink, TargetedDrop,

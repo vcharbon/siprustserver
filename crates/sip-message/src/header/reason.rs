@@ -52,6 +52,15 @@ pub fn q850_cause_alone(reasons: &[Reason]) -> Option<String> {
     Some(format!("{Q850};cause={digits}"))
 }
 
+/// The first of `reasons` as a cause key, `<protocol>;cause=<n>` with the
+/// protocol as written and the cause as a number (`Q.850;cause=34`,
+/// `SIP;cause=503`): every other parameter and value dropped. `None` where
+/// the first value states no decimal cause.
+pub fn cause_key(reasons: &[Reason]) -> Option<String> {
+    let first = reasons.first()?;
+    Some(format!("{};cause={}", first.protocol(), first.cause()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +127,20 @@ mod tests {
         let causeless = readable_reasons([SipStr::owned("Q.850;text=\"x\"")]);
         assert_eq!(q850_cause_alone(&causeless), None, "the leading Q.850 value states none");
         assert_eq!(q850_cause_alone(&[]), None);
+    }
+
+    /// The first value keys the cause, leading zeros dropped; a first value
+    /// with no decimal cause keys nothing, whatever follows.
+    #[test]
+    fn the_first_value_keys_the_cause() {
+        let both =
+            readable_reasons(["SIP;cause=503;text=\"x\"", "Q.850;cause=34"].map(SipStr::owned));
+        assert_eq!(cause_key(&both).as_deref(), Some("SIP;cause=503"));
+        let padded = readable_reasons([SipStr::owned("Q.850 ;cause=034;text=\"y\"")]);
+        assert_eq!(cause_key(&padded).as_deref(), Some("Q.850;cause=34"));
+        let causeless = readable_reasons(["SIP;text=\"z\"", "Q.850;cause=16"].map(SipStr::owned));
+        assert_eq!(cause_key(&causeless), None);
+        assert_eq!(cause_key(&[]), None);
     }
 
     /// A line that does not parse is skipped; the other lines, and every value

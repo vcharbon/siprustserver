@@ -63,7 +63,7 @@ pub use name_addr::NameAddr;
 pub use name_addr_header::NameAddrHeader;
 pub use numeric::NumericHeader;
 pub use params::{ParamValue, Params};
-pub use reason::{q850_cause_alone, readable_reasons, reason_for, Q850};
+pub use reason::{cause_key, q850_cause_alone, readable_reasons, reason_for, Q850};
 pub use restatement::Restatement;
 pub use sent_by::{SentBy, SentByRef};
 pub use token_list::TokenListHeader;

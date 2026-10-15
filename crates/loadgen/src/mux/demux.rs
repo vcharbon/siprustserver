@@ -157,7 +157,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Option<(Vec<u8>, Socke
                 queue: recv.queue.clone(),
                 drop: recv.drop.clone(),
                 txns: recv.txns.clone(),
-                rtt: recv.rtt.clone(),
+                taps: recv.taps.clone(),
                 invites: None,
             }
         };
@@ -193,8 +193,8 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
         tap_discard(mux, d, raw, src, sip_net::RecvDisposition::LossModel);
         return;
     }
-    if let Some(rtt) = &d.rtt {
-        rtt.on_inbound(raw, Instant::now());
+    if let Some(taps) = &d.taps {
+        taps.on_inbound(raw, Instant::now());
     }
     if let Some(invites) = &d.invites {
         invites.on_inbound(raw);

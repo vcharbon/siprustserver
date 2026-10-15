@@ -32,6 +32,7 @@ use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
 use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation, MuxCore};
+use crate::outcome::{CallWire, OutcomeSink, RecordMeta, WireFacts};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
@@ -271,6 +272,8 @@ pub struct Driver {
     /// Optional chaos-marker log: when set, each finished call is classified
     /// near/clear against the injected-fault markers (the chaos correlation).
     chaos: Option<Arc<ChaosLog>>,
+    /// Where each placed call's outcome record goes; `None` = no records.
+    outcomes: Option<Arc<OutcomeSink>>,
 }
 
 /// Process-wide per-call id-seed source: a unique 100k-wide window per call so a
@@ -330,6 +333,7 @@ impl Driver {
             tuning: cfg.tuning,
             overload_reject: cfg.overload_reject,
             chaos: None,
+            outcomes: None,
         }
     }
 
@@ -343,6 +347,13 @@ impl Driver {
     /// injected-fault markers (fed by the `POST /chaos` endpoint).
     pub fn with_chaos(mut self, chaos: Arc<ChaosLog>) -> Self {
         self.chaos = Some(chaos);
+        self
+    }
+
+    /// Write one outcome record per placed call into `sink`, and count the
+    /// calls never placed (shed, or refused before any datagram).
+    pub fn with_outcomes(mut self, sink: Arc<OutcomeSink>) -> Self {
+        self.outcomes = Some(sink);
         self
     }
 
@@ -388,6 +399,9 @@ impl Driver {
                 Ok(p) => p,
                 Err(_) => {
                     self.reporter.inc_shed(entry.id);
+                    if let Some(sink) = &self.outcomes {
+                        sink.not_placed(entry.id, "shed");
+                    }
                     continue;
                 }
             };
@@ -401,6 +415,7 @@ impl Driver {
                 tuning,
                 self.overload_reject,
                 self.chaos.clone(),
+                self.outcomes.clone(),
                 permit,
             ));
         }
@@ -422,8 +437,10 @@ async fn run_one(
     tuning: CallTuning,
     overload_reject: Option<u16>,
     chaos: Option<Arc<ChaosLog>>,
+    outcomes: Option<Arc<OutcomeSink>>,
     _permit: OwnedSemaphorePermit,
 ) {
+    let wire = outcomes.as_ref().map(|_| CallWire::new(transport.clock.clone()));
     reporter.inc_inflight();
     let MixEntry { id, body, case, legs, emergency, challenge_responder, weight: _ } = entry;
 
@@ -453,7 +470,8 @@ async fn run_one(
             match from_user_key(core.from.as_deref()) {
                 Ok(key) => key,
                 Err(reason) => {
-                    return record_unrun(&reporter, &chaos, id, CallOutcome::Rejected(reason))
+                    let outcome = CallOutcome::Rejected(reason);
+                    return record_unrun(&reporter, &chaos, &outcomes, id, outcome);
                 }
             }
         } else {
@@ -474,6 +492,10 @@ async fn run_one(
                 tuning.drop_nth,
             )
             .with_rtt_sink(rtts.sink());
+        let mux_net = match &wire {
+            Some(w) => mux_net.with_wire_tap(w.tap()),
+            None => mux_net,
+        };
         let binder = AgentBinder::mux(
             Arc::new(mux_net),
             transport.clock.clone(),
@@ -487,7 +509,7 @@ async fn run_one(
             }
             Err(e) => match bind_refusal(&e) {
                 CallOutcome::Rejected(_) if draw < draws => continue,
-                outcome => return record_unrun(&reporter, &chaos, id, outcome),
+                outcome => return record_unrun(&reporter, &chaos, &outcomes, id, outcome),
             },
         }
     };
@@ -696,6 +718,9 @@ async fn run_one(
         None
     };
 
+    if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
+        write_outcome(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
+    }
     reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
     rtts.finish();
     reporter.dec_inflight();
@@ -795,9 +820,13 @@ fn bind_refusal(e: &sip_net::BindError) -> CallOutcome {
 fn record_unrun(
     reporter: &Reporter,
     chaos: &Option<Arc<ChaosLog>>,
+    outcomes: &Option<Arc<OutcomeSink>>,
     id: ScenarioId,
     outcome: CallOutcome,
 ) {
+    if let Some(sink) = outcomes {
+        sink.not_placed(id, not_placed_reason(&outcome));
+    }
     let class = ResultClass::from(&outcome);
     let case = outcome.case(None);
     let now = Instant::now();
@@ -842,159 +871,29 @@ fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<Strin
     Some(format!("{detail} [phases: {trail}]"))
 }
 
-/// A minimal HTTP/1.1 server (hand-rolled over `TcpListener` — no hyper
-/// dependency). Routes:
-///
-/// - **`GET /metrics`** (and any other GET) → `render()`, the Prometheus surface.
-/// - **`POST /chaos?type=<kind>&target=<who>[&ts=<ms>]`** (when a [`ChaosLog`] is
-///   attached) → records a fault marker so finished calls get auto-classified
-///   near/clear. With `ts` (Unix epoch ms of the actual kill, supplied by the
-///   chaos driver) the marker is back-dated to the kill instant — robust to
-///   port-forward latency on the flag path; without it it lands at receipt instant.
-/// - **`POST /rate?cps=<float>`** (when a [`RateHandle`] is attached) → re-targets
-///   the offered call rate live (clamped to `>= 0`; `0` pauses new-call admission).
-///   The governor re-anchors its grid on the next slot. Responds with the applied
-///   value.
-/// - **`GET /rate`** → the current target cps.
-/// - **`GET /debug/flamegraph[?seconds=N]`** → on-demand pprof CPU flamegraph
-///   SVG of this process (default 20 s, max 120). The load driver runs the same
-///   shared `sip-message` parse path the SUT tiers do, at a saturated core, so
-///   it is the high-signal vantage for parse/allocation cost. Sampled on a
-///   blocking thread; zero overhead when no capture is in flight.
-///
-/// Runs until the task is cancelled.
-pub async fn serve_metrics(
-    addr: SocketAddr,
-    render: Arc<dyn Fn() -> String + Send + Sync>,
-    chaos: Option<Arc<ChaosLog>>,
-    rate: Option<RateHandle>,
-) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_metrics_on(listener, render, chaos, rate).await
-}
-
-/// [`serve_metrics`] over an already-bound listener. Callers that need the
-/// actual bound address — port-0 binds in tests, where a fixed port can
-/// collide with an unrelated listener — bind first and hand the listener over.
-pub async fn serve_metrics_on(
-    listener: tokio::net::TcpListener,
-    render: Arc<dyn Fn() -> String + Send + Sync>,
-    chaos: Option<Arc<ChaosLog>>,
-    rate: Option<RateHandle>,
-) -> std::io::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    loop {
-        let (mut sock, _) = listener.accept().await?;
-        let render = render.clone();
-        let chaos = chaos.clone();
-        let rate = rate.clone();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 2048];
-            let n = sock.read(&mut buf).await.unwrap_or(0);
-            let (method, path, query) = parse_request_line(&buf[..n]);
-
-            // CPU flamegraph: binary SVG body, so it answers ahead of the
-            // text/plain routes below. Sampled on a blocking thread, leaving the
-            // call-driving async workers to keep offering load.
-            if path == "/debug/flamegraph" {
-                let secs = flamegraph_util::parse_seconds(&format!("?{query}"), 20, 120);
-                let svg =
-                    tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
-                        .await
-                        .unwrap_or_else(|e| Err(format!("join error: {e}")));
-                let (status, ctype, body) = match svg {
-                    Ok(svg) => ("200 OK", "image/svg+xml", svg),
-                    Err(e) => (
-                        "500 Internal Server Error",
-                        "text/plain",
-                        format!("flamegraph failed: {e}\n").into_bytes(),
-                    ),
-                };
-                let head = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = sock.write_all(head.as_bytes()).await;
-                let _ = sock.write_all(&body).await;
-                return;
-            }
-
-            let (status, body) = if method == "POST" && path == "/chaos" {
-                let body = if let Some(log) = &chaos {
-                    let kind = query_get(&query, "type").unwrap_or_else(|| "unknown".to_string());
-                    let target = query_get(&query, "target");
-                    // `ts` (Unix epoch ms, captured by the chaos script at the
-                    // instant of the kill) back-dates the marker so PF latency does
-                    // not shift it; without it we fall back to the receipt instant.
-                    match query_get(&query, "ts").and_then(|s| s.parse::<u64>().ok()) {
-                        Some(ts) => {
-                            log.record_at(kind.clone(), target.clone(), ts);
-                            format!(
-                                "ok: recorded chaos marker type={kind} target={target:?} ts={ts}\n"
-                            )
-                        }
-                        None => {
-                            log.record(kind.clone(), target.clone());
-                            format!("ok: recorded chaos marker type={kind} target={target:?}\n")
-                        }
-                    }
-                } else {
-                    "ok: no chaos log attached\n".to_string()
-                };
-                ("200 OK", body)
-            } else if path == "/rate" {
-                match &rate {
-                    None => ("404 Not Found", "no rate handle attached\n".to_string()),
-                    Some(h) if method == "POST" => match query_get(&query, "cps")
-                        .map(|s| s.parse::<f64>())
-                    {
-                        Some(Ok(cps)) => {
-                            let applied = h.set(cps);
-                            ("200 OK", format!("ok: target cps={applied}\n"))
-                        }
-                        // A missing or malformed `cps` is a client error (never a
-                        // silent no-op that leaves the rate wherever it was).
-                        _ => ("400 Bad Request", "expected POST /rate?cps=<float>\n".to_string()),
-                    },
-                    // GET /rate → the current target.
-                    Some(h) => ("200 OK", format!("{}\n", h.cps())),
-                }
-            } else {
-                ("200 OK", render())
-            };
-
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = sock.write_all(resp.as_bytes()).await;
-        });
+/// Write the record of a call that ran; one that sent no INVITE was never
+/// placed and is counted so.
+fn write_outcome(
+    sink: &OutcomeSink,
+    shape: ScenarioId,
+    wire: &WireFacts,
+    outcome: &CallOutcome,
+    ended_at_ms: i64,
+) {
+    let meta = RecordMeta { run: &sink.run, source: &sink.source, stream: &sink.stream, shape };
+    match crate::outcome::build(&meta, wire, outcome, ended_at_ms) {
+        Some(record) => sink.write(record),
+        None => sink.not_placed(shape, not_placed_reason(outcome)),
     }
 }
 
-/// Parse the first request line into `(METHOD, path, query)`. Best-effort: a
-/// malformed/empty request yields `("", "", "")` and falls through to the render
-/// path. The query is the raw `a=b&c=d` after `?` (empty if none).
-fn parse_request_line(buf: &[u8]) -> (String, String, String) {
-    let text = String::from_utf8_lossy(buf);
-    let line = text.lines().next().unwrap_or("");
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let target = parts.next().unwrap_or("");
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (target.to_string(), String::new()),
-    };
-    (method, path, query)
-}
-
-/// Pull `key`'s value out of a raw `a=b&c=d` query string (no percent-decoding —
-/// the chaos flags carry simple alnum/`-` values: `kill_worker`, `b2bua-worker-1`).
-fn query_get(query: &str, key: &str) -> Option<String> {
-    query.split('&').find_map(|kv| {
-        let (k, v) = kv.split_once('=')?;
-        (k == key && !v.is_empty()).then(|| v.to_string())
-    })
+/// Why a call that never sent its INVITE was not placed.
+fn not_placed_reason(outcome: &CallOutcome) -> &'static str {
+    match outcome {
+        CallOutcome::Rejected(reason) => reason,
+        CallOutcome::Panic(_) => "generator",
+        _ => "no_invite",
+    }
 }
 
 #[cfg(test)]

@@ -37,6 +37,7 @@
 //!   recovering modeled loss.
 //! - `rtt` — per-endpoint SIP round-trip timing (request → 100 / 18x /
 //!   final, 2xx → ACK), on whenever the call's network has an [`RttSink`].
+//! - `taps` — each endpoint's round-trip tracker and the call's [`WireTap`].
 //! - `stats` — process-wide counters + Prometheus rendering.
 //!
 //! # Key lifetime (shared sockets, reused keys)
@@ -67,11 +68,14 @@ mod late_final;
 mod loss;
 mod registry;
 mod retransmit;
+mod routing;
 mod rtt;
 mod stats;
+mod taps;
 
 pub use correlation::Correlation;
-pub use endpoint::{CallRouting, MuxNetwork};
+pub use endpoint::MuxNetwork;
+pub use routing::CallRouting;
 // The data-driven claim rules live in their shared home, `scenario-harness`
 // (like the LegPicker below); the mux consumes them as its claim demux tier.
 pub use loss::{DropDir, TargetedDrop};
@@ -80,12 +84,13 @@ pub use rtt::{Exchange, RttSink};
 pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
+pub use taps::{Dir, Side, WireTap};
 
 use late_final::SentInvites;
 use loss::DropModel;
 use registry::SocketRegistry;
 use retransmit::CallTxns;
-use rtt::RttTracker;
+use taps::Taps;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -142,7 +147,7 @@ pub(in crate::mux) enum Key {
 /// Everything the inbound route path needs to hand a datagram to one call: its
 /// inbox, its loss model (applied above the retransmit engine), its optional
 /// retransmit engine (present iff `--auto-retransmit` is on for the call) and
-/// its optional round-trip tracker (present iff the call has an [`RttSink`]).
+/// its optional taps (present iff the call has an [`RttSink`] or a [`WireTap`]).
 #[derive(Clone)]
 pub(in crate::mux) struct Delivery {
     /// Whether the dialog is a caller's own (its Call-ID minted by the caller).
@@ -150,7 +155,7 @@ pub(in crate::mux) struct Delivery {
     pub(in crate::mux) queue: Arc<PacketQueue>,
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
-    pub(in crate::mux) rtt: Option<Arc<RttTracker>>,
+    pub(in crate::mux) taps: Option<Arc<Taps>>,
     /// A caller dialog's INVITEs still open to a non-2xx final.
     pub(in crate::mux) invites: Option<Arc<SentInvites>>,
 }
@@ -164,7 +169,7 @@ pub(in crate::mux) struct ReceiverEntry {
     pub(in crate::mux) keyset: Arc<Mutex<Vec<Key>>>,
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
-    pub(in crate::mux) rtt: Option<Arc<RttTracker>>,
+    pub(in crate::mux) taps: Option<Arc<Taps>>,
     /// The scenario-declared claim this receiver holds over its inbound
     /// initial INVITE (claim-mode slots only — all receivers of a slot either
     /// carry a claim or none do, enforced at bind).
@@ -450,7 +455,7 @@ impl MuxCore {
         // next declared entry for that addr (so several receivers — and, on a
         // shared-vantage socket, the caller too — can share a socket; the
         // driver binds the agents in declaration order).
-        let mut dispense: HashMap<SocketAddr, Vec<endpoint::BindDecl>> = HashMap::new();
+        let mut dispense: HashMap<SocketAddr, Vec<routing::BindDecl>> = HashMap::new();
         for (addr, decl) in routing.binds {
             dispense.entry(addr).or_default().push(decl);
         }
@@ -467,6 +472,7 @@ impl MuxCore {
             drop_seed: AtomicU64::new(seed | 1),
             drop_nth,
             rtt_sink: None,
+            wire_tap: None,
         }
     }
 }

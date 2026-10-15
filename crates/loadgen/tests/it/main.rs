@@ -9,10 +9,12 @@
 //! `cargo nextest run --workspace -E 'package(=loadgen) & binary(it)' --run-ignored only <module>::`.
 
 mod fake_net;
+mod fake_rig;
 mod from_user_net;
 mod governor;
 mod late_final;
 mod mux_claims;
 mod mux_from_user;
+mod outcome_records;
 mod smoke;
 mod waiver_lane;

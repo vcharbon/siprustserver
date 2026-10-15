@@ -337,6 +337,8 @@ loadgen loadgen_chaos_markers_total counter fixed {}
 loadgen loadgen_chaos_markers_retained gauge semi_open {kind}
 loadgen loadgen_target_cps gauge fixed {}
 loadgen loadgen_process_resident_memory_bytes gauge fixed {}
+loadgen loadgen_outcome_records_total counter semi_open {stream,shape,ending}
+loadgen loadgen_not_placed_total counter semi_open {stream,shape,reason}
 cdr-consumer-runner cdr_consumed_total counter fixed {}
 cdr-consumer-runner cdr_call_duration_ms_total counter fixed {}
 cdr-consumer-runner cdr_parse_errors_total counter fixed {}

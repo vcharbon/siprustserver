@@ -569,6 +569,24 @@ checks, which run on recorded calls only, cover fewer calls: a rare outcome
 may go without its second sample. Lower `--background-record-every`
 (`1` records every call) when the audit's reach matters more than CPU.
 
+### Call-outcome records
+
+Every call placed writes one `call-outcome.v1` record
+(`tooling/hakit/schemas/call-outcome.v1.schema.json`, ADR-0049 §4) when the
+driver is done with it: what the caller saw on the wire (its first INVITE,
+first provisional, final and its Reason cause key, answer, teardown, failed
+in-dialog requests) and how each callee leg loadgen played ended. The result
+class rides in `producer_verdict` only. Records are appended to
+`--records-file` (default `<out-dir>/call-outcomes.jsonl`) and, with
+`--records-url http://host:port`, pushed to VictoriaLogs' `/insert/jsonline`
+(`_stream_fields=run,source,stream`, `_time` = the record's end). `--run`
+and `--stream` name the run and the stream every record carries; `source` is
+the product name. A call never placed (shed at the in-flight cap, or its key
+refused) writes no record and counts in
+`loadgen_not_placed_total{stream,shape,reason}`; records count in
+`loadgen_outcome_records_total{stream,shape,ending}`. `--list-shapes` prints
+the shape ids the product registered and exits.
+
 ---
 
 ## How it relates to the existing tests

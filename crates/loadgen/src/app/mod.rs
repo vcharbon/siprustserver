@@ -10,6 +10,7 @@ use std::time::Duration;
 use sip_clock::Clock;
 
 use crate::case::CaseLoader;
+use crate::outcome::OutcomeSink;
 use crate::{
     serve_metrics, CallConfig, Canaries, ChaosLog, Driver, DriverCfg, EndpointSpec, LoadRunMeta,
     MuxCore, MuxTransport, RateHandle, Reporter, ReporterCfg, Role, ScenarioInputs,
@@ -20,7 +21,7 @@ mod mix;
 pub mod product;
 
 pub use args::Args;
-use args::{base_tuning, correlation, endpoint_config};
+use args::{base_tuning, correlation, endpoint_config, outcome_sink};
 pub use mix::check_from_user_mix;
 use mix::{resolve_mix, Mix};
 pub use product::{command, main, parse_from, NoFlags, Product, RunLayout, Shipped};
@@ -96,6 +97,10 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     let registry = product
         .registry(flags, &RunLayout { endpoint: &endpoint })
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    if args.list_shapes {
+        registry.iter().filter(|d| d.load.is_some()).for_each(|d| println!("{}", d.id));
+        return Ok(());
+    }
     let mut cases = CaseLoader::new(&check_sets, seed);
     let Mix { entries: scenarios, tuning } =
         resolve_mix(&args, &profile, &registry, &inputs, base_tuning, &mut cases);
@@ -175,7 +180,10 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     );
 
     reporter.declare_scenarios(scenarios.iter().map(|entry| entry.id));
-    let driver = Driver::new(cfg, scenarios, reporter.clone(), transport).with_chaos(chaos.clone());
+    let outcomes = Arc::new(outcome_sink(&args, name, clock.now_ms())?);
+    let driver = Driver::new(cfg, scenarios, reporter.clone(), transport)
+        .with_chaos(chaos.clone())
+        .with_outcomes(outcomes.clone());
     // The live rate handle (seeded from `--cps` / the profile): `POST /rate`
     // re-targets it and the governor re-anchors its grid; exported as the
     // `loadgen_target_cps` gauge.
@@ -188,8 +196,10 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     let metrics_core = core.clone();
     let metrics_chaos = chaos.clone();
     let metrics_rate = rate.clone();
+    let metrics_outcomes = outcomes.clone();
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
-        metrics_body(&metrics_reporter, &metrics_core, &metrics_chaos, &metrics_rate)
+        let (r, c, ch) = (&metrics_reporter, &metrics_core, &metrics_chaos);
+        metrics_body(r, c, ch, &metrics_rate, &metrics_outcomes)
     });
     let metrics_addr = args.metrics_addr;
     let server_chaos = chaos.clone();
@@ -261,9 +271,12 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
         let _ = snap.await;
     }
     reporter.finalize_run(&args.out_dir, meta_for(&clock, true), mux_canaries(&core))?;
+    outcomes.close();
     eprintln!(
-        "[{name}] done: {} calls; registry_size={}; report at {}",
+        "[{name}] done: {} calls ({} records, {} not placed); registry_size={}; report at {}",
         reporter.total_calls(),
+        outcomes.records_written(),
+        outcomes.not_placed_total(),
         core.registry_size(),
         args.out_dir.display()
     );
@@ -305,6 +318,7 @@ pub fn metrics_body(
     core: &MuxCore,
     chaos: &ChaosLog,
     rate: &RateHandle,
+    outcomes: &OutcomeSink,
 ) -> String {
     let mut out = reporter.render_prometheus();
     out.push_str(&core.render_prometheus());
@@ -312,6 +326,7 @@ pub fn metrics_body(
     crate::catalogue::TARGET_CPS.render_value(&mut out, rate.cps());
     let rss = resident_memory_bytes().map_or("NaN".to_string(), |b| b.to_string());
     crate::catalogue::PROCESS_RESIDENT_MEMORY.render_value(&mut out, rss);
+    outcomes.render_prometheus(&mut out);
     out
 }
 

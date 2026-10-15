@@ -1,6 +1,7 @@
-//! The per-call face of the mux: [`CallRouting`] (what a scenario declares),
-//! [`MuxNetwork`] (a per-call [`SignalingNetwork`] over the shared core) and
-//! [`MuxEndpoint`] (one leg's endpoint: inbox + shared send socket).
+//! The per-call face of the mux: [`MuxNetwork`] (a per-call
+//! [`SignalingNetwork`] over the shared core, built from a call's
+//! [`CallRouting`](super::CallRouting)) and [`MuxEndpoint`] (one leg's
+//! endpoint: inbox + shared send socket).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -23,77 +24,12 @@ use tokio::time::Instant;
 use super::late_final::SentInvites;
 use super::loss::{DropDir, DropModel, TargetedDrop};
 use super::retransmit::CallTxns;
-use super::rtt::{RttSink, RttTracker};
+use super::routing::BindDecl;
+use super::rtt::RttSink;
+use super::taps::{Taps, WireTap};
 use super::{
     CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
 };
-
-/// One declared bind on a mux endpoint, dispensed in declaration order as the
-/// call's agents call `bind_udp(addr)`.
-#[derive(Clone)]
-pub(super) enum BindDecl {
-    /// A caller (UAC) endpoint — registers its dialog from its first outbound
-    /// request; holds no token-slot receiver. Declared explicitly only on a
-    /// SHARED-vantage socket (caller + pending UAS receivers on one addr).
-    Caller,
-    /// A pending UAS receiver: `label` = the agent name; `claim` = the
-    /// scenario-declared rule that assigns its inbound initial INVITE
-    /// (`None` = legacy count/picker resolution).
-    Uas { label: String, claim: Option<ClaimRule> },
-}
-
-/// The per-call routing a scenario declares before its agents bind: the single
-/// correlation token every leg of the call carries, the binds in **bind
-/// order** per addr (caller and/or UAS receivers — several on one `addr` form
-/// a shared socket), and how a shared socket assigns each arriving leg: a
-/// compiled [`LegPicker`], or per-leg data [`ClaimRule`]s (a scenario built
-/// from capture data at case start) — never both on one socket. The mux never
-/// reads `X-Api-Call` or any URI to route legs — that is the scenario's job,
-/// expressed here and in how it dials the SUT.
-#[derive(Clone, Default)]
-pub struct CallRouting {
-    pub(super) token: String,
-    pub(super) binds: Vec<(SocketAddr, BindDecl)>,
-    pub(super) pickers: HashMap<SocketAddr, LegPicker>,
-}
-
-impl CallRouting {
-    /// Start a routing for a call with correlation token `token`.
-    pub fn new(token: impl Into<String>) -> Self {
-        Self { token: token.into(), binds: Vec::new(), pickers: HashMap::new() }
-    }
-    /// Declare a callee leg: an agent labelled `label` binds on `addr`. Declare
-    /// legs in the order the driver binds the agents (several on one `addr` form
-    /// a shared socket).
-    pub fn leg(mut self, addr: SocketAddr, label: impl Into<String>) -> Self {
-        self.binds.push((addr, BindDecl::Uas { label: label.into(), claim: None }));
-        self
-    }
-    /// Declare a pending-UAS claim: the agent labelled `label` binds on `addr`
-    /// and owns the inbound initial INVITE `rule` selects within this call's
-    /// token scope. Consumed once; an INVITE matching no pending claim is
-    /// counted `unclaimed` (never misdelivered). Same bind-order contract as
-    /// [`leg`](Self::leg); claims and a [`picker`](Self::picker) are mutually
-    /// exclusive per socket, as are claim and non-claim legs.
-    pub fn claim(mut self, addr: SocketAddr, label: impl Into<String>, rule: ClaimRule) -> Self {
-        self.binds.push((addr, BindDecl::Uas { label: label.into(), claim: Some(rule) }));
-        self
-    }
-    /// Declare a caller (UAC) bind on `addr` — needed only when the caller
-    /// SHARES a socket with pending UAS receivers (the pcap mux vantage, where
-    /// the SUT dials new legs back to the ip:port that originated leg A). On
-    /// an addr with any declared bind, EVERY bind must be declared, in bind
-    /// order; an addr with none keeps its endpoint-role default.
-    pub fn caller(mut self, addr: SocketAddr) -> Self {
-        self.binds.push((addr, BindDecl::Caller));
-        self
-    }
-    /// Attach the scenario-owned picker for a socket that carries >1 receiver.
-    pub fn picker(mut self, addr: SocketAddr, picker: LegPicker) -> Self {
-        self.pickers.insert(addr, picker);
-        self
-    }
-}
 
 /// Per-call `SignalingNetwork` over the shared [`MuxCore`].
 pub struct MuxNetwork {
@@ -121,6 +57,8 @@ pub struct MuxNetwork {
     /// Where each bound endpoint's measured SIP round trips go; `None` = not
     /// measured.
     pub(super) rtt_sink: Option<RttSink>,
+    /// The call's wire tap; `None` = not watched.
+    pub(super) wire_tap: Option<WireTap>,
 }
 
 impl MuxNetwork {
@@ -128,6 +66,12 @@ impl MuxNetwork {
     /// into `sink`.
     pub fn with_rtt_sink(mut self, sink: RttSink) -> Self {
         self.rtt_sink = Some(sink);
+        self
+    }
+
+    /// Hand every datagram this network's endpoints send or receive to `tap`.
+    pub fn with_wire_tap(mut self, tap: WireTap) -> Self {
+        self.wire_tap = Some(tap);
         self
     }
 
@@ -202,7 +146,8 @@ impl SignalingNetwork for MuxNetwork {
         let txns = self.retransmit.then(|| {
             Arc::new(CallTxns::new(mux.endpoint.clone(), drop.clone(), mux.stats.clone()))
         });
-        let rtt = self.rtt_sink.clone().map(|sink| Arc::new(RttTracker::new(sink)));
+        let leg = uas.as_ref().map(|(label, _)| label.as_str());
+        let taps = Taps::new(self.rtt_sink.clone(), self.wire_tap.clone(), leg);
 
         if let Some((label, claim)) = uas {
             let claim_mode = claim.is_some();
@@ -285,7 +230,7 @@ impl SignalingNetwork for MuxNetwork {
                 keyset: keyset.clone(),
                 drop: drop.clone(),
                 txns: txns.clone(),
-                rtt: rtt.clone(),
+                taps: taps.clone(),
                 claim,
                 claimed: false,
             });
@@ -307,7 +252,7 @@ impl SignalingNetwork for MuxNetwork {
             queue_max: mux.queue_max,
             drop,
             txns,
-            rtt,
+            taps,
             invites: (role == Role::Caller).then(Default::default),
         }))
     }
@@ -353,9 +298,9 @@ struct MuxEndpoint {
     /// Per-call SIP retransmit engine (present only when `--auto-retransmit` is on
     /// for this call). Records outbound requests/answers and drives their timers.
     txns: Option<Arc<CallTxns>>,
-    /// This endpoint's SIP round-trip tracker (present iff the call has an
-    /// [`RttSink`]), shared with the inbound `route` path.
-    rtt: Option<Arc<RttTracker>>,
+    /// This endpoint's taps (present iff the call has an [`RttSink`] or a
+    /// [`WireTap`]), shared with the inbound `route` path.
+    taps: Option<Arc<Taps>>,
     /// A caller's INVITEs still open to a non-2xx final; handed to the
     /// registry on `Drop` so a late final is still ACKed.
     invites: Option<Arc<SentInvites>>,
@@ -397,7 +342,7 @@ impl UdpEndpoint for MuxEndpoint {
                             queue: self.queue.clone(),
                             drop: self.drop.clone(),
                             txns: self.txns.clone(),
-                            rtt: self.rtt.clone(),
+                            taps: self.taps.clone(),
                             invites: self.invites.clone(),
                         },
                     );
@@ -421,8 +366,8 @@ impl UdpEndpoint for MuxEndpoint {
             invites.on_outbound(buf, dst);
         }
         // A round trip runs from the first transmission attempt, lost or not.
-        if let Some(rtt) = &self.rtt {
-            rtt.on_outbound(buf, Instant::now());
+        if let Some(taps) = &self.taps {
+            taps.on_outbound(buf, Instant::now());
         }
         // Simulated loss: report success (the txn believes it sent) but never put
         // the datagram on the wire — the SUT never sees it, so only auto-retransmit

@@ -222,6 +222,32 @@ pub const PROCESS_RESIDENT_MEMORY: Family = Family::gauge(
     "Load generator RSS; NaN where /proc does not say.",
 );
 
+/// The load stream a generator process runs (`--stream`).
+pub const STREAM: Dim = Dim::new("stream", &[]);
+/// The treatment catalog shape id of a call.
+pub const SHAPE: Dim = Dim::new("shape", &[]);
+/// A call-outcome record's `ending`.
+pub const ENDING: Dim = Dim::new(
+    "ending",
+    &["answered", "rejected", "abandoned", "timeout", "cut", "stranded", "failed"],
+);
+/// Why a call was never placed (its correlation key's refusal).
+pub const NOT_PLACED_REASON: Dim = Dim::new("reason", &[]);
+
+pub const OUTCOME_RECORDS: Family = Family::counter(
+    "loadgen_outcome_records_total",
+    Labels::Product(&[STREAM, SHAPE, ENDING]),
+    "Call-outcome records written, one per call placed, by stream, shape and ending.",
+)
+.semi_open();
+
+pub const NOT_PLACED: Family = Family::counter(
+    "loadgen_not_placed_total",
+    Labels::Product(&[STREAM, SHAPE, NOT_PLACED_REASON]),
+    "Calls refused before any datagram (no record written), by stream, shape and reason.",
+)
+.semi_open();
+
 pub const MUX_ORPHAN_OVERFLOW: Family = Family::counter(
     "loadgen_mux_orphan_overflow_total",
     Labels::None,
@@ -259,6 +285,8 @@ pub const CATALOGUE: Catalogue = Catalogue {
         CHAOS_MARKERS_RETAINED,
         TARGET_CPS,
         PROCESS_RESIDENT_MEMORY,
+        OUTCOME_RECORDS,
+        NOT_PLACED,
     ]],
 };
 
@@ -295,7 +323,13 @@ mod tests {
         reporter.declare_scenarios(["basic_call"]);
         reporter.record_rtts("basic_call", &[(Exchange::Invite100, Duration::from_millis(2))]);
         let chaos = ChaosLog::new(sip_clock::Clock::test_at(0));
-        let text = crate::app::metrics_body(&reporter, &core, &chaos, &RateHandle::new(5.0));
+        let file = std::env::temp_dir().join(format!("loadgen-cat-{}.jsonl", std::process::id()));
+        let outcomes =
+            crate::outcome::OutcomeSink::new("r", "loadgen", "main", &file, None).unwrap();
+        let rate = RateHandle::new(5.0);
+        let text = crate::app::metrics_body(&reporter, &core, &chaos, &rate, &outcomes);
+        outcomes.close();
+        let _ = std::fs::remove_file(&file);
         if let Err(mismatches) = CATALOGUE.check(&text) {
             panic!("{mismatches:#?}\n{text}");
         }

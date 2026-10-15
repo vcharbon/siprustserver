@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use clap::{ArgMatches, Parser};
 use e2e_model::{load_endpoint_config, EndpointConfig, LoadProfile};
 
+use crate::outcome::{LogsTarget, OutcomeSink};
 use crate::{CallTuning, Correlation};
 
 /// The `loadgen` CLI surface. Parse with [`Args::parse_from`] or through a
@@ -119,6 +120,26 @@ pub struct Args {
     /// endpoint (`POST /chaos?type=<kind>&target=<who>`) on.
     #[arg(long, default_value = "0.0.0.0:9300")]
     pub metrics_addr: SocketAddr,
+    /// The run id every call-outcome record names (the runner's run). Default:
+    /// `<bin>-<start epoch ms>`.
+    #[arg(long)]
+    pub run: Option<String>,
+    /// The load stream this process runs: every record's `stream`, the
+    /// `stream` label of the record counters (`[a-z][a-z0-9_]*`).
+    #[arg(long, default_value = "main")]
+    pub stream: String,
+    /// The JSON-lines file the call-outcome records are appended to. Default:
+    /// `<out-dir>/call-outcomes.jsonl`.
+    #[arg(long)]
+    pub records_file: Option<PathBuf>,
+    /// A VictoriaLogs base URL (`http://host:port`) the records are also pushed
+    /// to, on `/insert/jsonline` with `_stream_fields=run,source,stream`.
+    #[arg(long)]
+    pub records_url: Option<String>,
+    /// Print the id of every shape with a load body the registry holds, one
+    /// per line, and exit without placing a call.
+    #[arg(long, default_value_t = false)]
+    pub list_shapes: bool,
     /// Per-phase chaos tolerance (ms): a call is bucketed `chaos="near"` when an
     /// injected fault lands within this of a dialog-state transition (connected/
     /// reinvited/transferred/…) or mid-setup — the "state had no time to propagate,
@@ -321,6 +342,27 @@ pub(super) fn endpoint_config(args: &Args, recv_timeout_ms: u64) -> EndpointConf
         transit_delay_ms: 0,
         egress: args.route_pin_to_uas.then_some(e2e_model::EgressPolicySpec::ApiCallPin),
     }
+}
+
+/// The run's outcome-record sink: `--run` (else `<source>-<started_ms>`),
+/// `--stream`, `--records-file` (else under `--out-dir`), `--records-url`.
+pub(super) fn outcome_sink(
+    args: &Args,
+    source: &str,
+    started_ms: i64,
+) -> std::io::Result<OutcomeSink> {
+    let invalid = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, e);
+    let stream = args.stream.as_str();
+    let well_formed = stream.starts_with(|c: char| c.is_ascii_lowercase())
+        && stream.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !well_formed {
+        return Err(invalid(format!("--stream {stream:?}: expected [a-z][a-z0-9_]*")));
+    }
+    let run = args.run.clone().unwrap_or_else(|| format!("{source}-{started_ms}"));
+    let file =
+        args.records_file.clone().unwrap_or_else(|| args.out_dir.join("call-outcomes.jsonl"));
+    let logs = args.records_url.as_deref().map(LogsTarget::parse).transpose().map_err(invalid)?;
+    OutcomeSink::new(&run, source, stream, &file, logs)
 }
 
 /// The run's [`Correlation`] from `--correlate` and the header knobs.
