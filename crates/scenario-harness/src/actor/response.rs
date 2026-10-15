@@ -216,7 +216,7 @@ pub(super) async fn react_response(
                     // ACK the 2xx then register the confirmed dialog with NO await in
                     // between, so a mid-window cancellation can never leave a
                     // confirmed-but-unregistered dialog (the drop-safety rule).
-                    let mut dialog = inv.ack().await;
+                    let (mut dialog, ack_sent) = inv.ack_reporting(None, &[]).await;
                     // Dialog-formation point: attach this leg's shared CSeq counter
                     // BEFORE the scope-refresh clone, so both share ONE step counter
                     // (ADR-0024 §6 — the teardown BYE never re-consumes an op).
@@ -227,6 +227,7 @@ pub(super) async fn react_response(
                     // RETAIN the establishing INVITE (C1/E3): a LOSING fork's late
                     // 2xx (§13.2.2.4) is ACK+BYE'd on a fork dialog derived from it.
                     st.dialogs.won_invite = Some(inv);
+                    ack_sent?;
                 }
                 InviteResponseFate::Failed { status } => {
                     if absorb_establishing_failure(st, &mut inv, &resp, status, now).await? {
@@ -302,7 +303,7 @@ pub(super) async fn react_response(
                     let mut fork = inv.fork_dialog(&resp);
                     // Our INVITE carried the offer, so the fork's 200 carried
                     // its answer — the ACK is bodyless (§13.2.2.4).
-                    fork.ack_for(resp.cseq().seq(), None).await;
+                    fork.try_ack_for(resp.cseq().seq(), None).await?;
                     let _bye = fork.send_request(InDialogMethod::Bye).try_send().await?;
                     st.obs.record(
                         Observation::RequestSent {
@@ -346,7 +347,7 @@ pub(super) async fn react_response(
                 }
             }
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-                dialog.ack_for(cseq, sdp.as_deref()).await;
+                dialog.try_ack_for(cseq, sdp.as_deref()).await?;
             }
             complete_originated_reinvite(st, cseq, now);
             return Ok(());
@@ -459,7 +460,7 @@ pub(super) async fn react_response(
 /// the `ReInvite` obligation, the `reneg` sub-flow, the completed-cycle count
 /// (an N-cycle script's per-cycle barrier, C6) and the declared feed. ONCE per
 /// CSeq (the `sent_reinvites` guard), so a re-emitted 2xx cannot double-count.
-fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant) {
+pub(super) fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant) {
     if st.sent_reinvites.remove(&cseq) {
         st.sent_reinvite_txns.remove(&cseq);
         st.reinvite_ordinals.remove(&cseq);
@@ -478,43 +479,6 @@ fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant
         st.obs.record(Observation::RenegCompleted { leg: st.role, dialog, cseq }, now);
         st.feed.on_reinvite_ok.stamp(st.ctx);
     }
-}
-
-/// Park until the earliest held ACK is due (or forever if none) — the delayed
-/// automatic's own reactor arm.
-pub(super) async fn wait_held_ack(held: &[HeldAck]) {
-    match held.iter().map(|h| h.at).min() {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-
-/// Fire the earliest held ACK: send it on the confirmed dialog (idempotent,
-/// re-derivable — §13.2.2.4) and complete the bookkeeping the hold deferred.
-pub(super) async fn fire_due_held_ack(st: &mut ActorState<'_>) {
-    let Some(pos) = st.held_acks.iter().enumerate().min_by_key(|(_, h)| h.at).map(|(i, _)| i)
-    else {
-        return;
-    };
-    let held = st.held_acks.swap_remove(pos);
-    send_held_ack(st, held).await;
-}
-
-/// Flush every held ACK NOW, out of schedule: a leg about to originate its
-/// teardown BYE must not leave a 2xx un-ACKed behind it (RFC 3261 §15 — the
-/// renegotiation completes before the dialog ends).
-pub(super) async fn flush_held_acks(st: &mut ActorState<'_>) {
-    while let Some(held) = st.held_acks.pop() {
-        send_held_ack(st, held).await;
-    }
-}
-
-/// Send one held ACK and close its deferred bookkeeping.
-async fn send_held_ack(st: &mut ActorState<'_>, held: HeldAck) {
-    if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-        dialog.ack_for(held.cseq, held.sdp.as_deref()).await;
-    }
-    complete_originated_reinvite(st, held.cseq, Instant::now());
 }
 
 /// Whether a message carries a session description: a non-empty body typed

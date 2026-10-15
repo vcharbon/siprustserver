@@ -560,8 +560,8 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
             // A held ACK-to-2xx (a declared delayed automatic) coming due: send
             // it and complete the bookkeeping the hold deferred — the eventual
             // send is THIS arm's obligation, so no call finishes un-ACKed.
-            _ = super::response::wait_held_ack(&st.held_acks), if !st.held_acks.is_empty() => {
-                super::response::fire_due_held_ack(st).await;
+            _ = super::held_acks::wait_held_ack(&st.held_acks), if !st.held_acks.is_empty() => {
+                super::held_acks::fire_due_held_ack(st).await?;
             }
         }
         // `ledger_closed` keeps a leg with an outstanding acknowledgement (its

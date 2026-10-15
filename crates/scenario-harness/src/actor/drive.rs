@@ -166,7 +166,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                 let stated: Vec<(&str, &str)> =
                     stated.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
                 let cseq = inv.invite_cseq();
-                let _cxl = inv.cancel_stating(&stated).await;
+                let _cxl = inv.try_cancel_stating(&stated).await?;
                 let now = Instant::now();
                 st.obs.record(Observation::CancelSent { leg: st.role }, now);
                 st.obs.record(
@@ -195,7 +195,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
             // answered, a PRACK/UPDATE 200) BEFORE opening the BYE's own
             // obligation — the terminating dialog subsumes them, and the fresh
             // BYE obligation below is still held to the 200.
-            super::response::flush_held_acks(st).await;
+            super::held_acks::flush_held_acks(st).await?;
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog =
@@ -205,7 +205,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                     })?;
                 // Send the BYE; the reactor observes its 200 and closes the
                 // obligation (we do not block on the final here).
-                let _bye = dialog.bye().await;
+                let _bye = dialog.try_bye().await?;
                 let cseq = dialog.local_cseq();
                 (ObligationKey::new(st.role, ObligationKind::Bye, cseq), dialog.clone())
             };
@@ -221,11 +221,11 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                 return Ok(());
             }
             let now = Instant::now();
-            super::response::flush_held_acks(st).await; // see GoalStep::Bye
+            super::held_acks::flush_held_acks(st).await?; // see GoalStep::Bye
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog = st.dialogs.confirmed.as_mut().expect("checked Some above");
-                let _bye = dialog.bye().await;
+                let _bye = dialog.try_bye().await?;
                 let cseq = dialog.local_cseq();
                 (ObligationKey::new(st.role, ObligationKind::Bye, cseq), dialog.clone())
             };
@@ -234,7 +234,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         GoalStep::ByeWith { headers } => {
             let now = Instant::now();
-            super::response::flush_held_acks(st).await; // see GoalStep::Bye
+            super::held_acks::flush_held_acks(st).await?; // see GoalStep::Bye
             discharge_on_teardown(st, now); // see GoalStep::Bye — subsume pending in-dialog acks
             let (key, dialog_clone) = {
                 let dialog =

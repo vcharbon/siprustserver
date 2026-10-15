@@ -119,7 +119,7 @@ pub(super) async fn originate_initial_invite(
     if advertises_100rel {
         st.expected_provisional = 183;
     }
-    let call = builder.send().await;
+    let call = builder.try_send().await?;
     // Bind the new dialog to this actor at its shared endpoint, in the same poll
     // as the send — before the actor yields, so no response can precede it.
     if let Some(ep) = &st.endpoint {
@@ -160,7 +160,7 @@ pub(super) async fn send_request_template(
         // A held ACK is sent BEFORE our own BYE (§15 — the renegotiation
         // completes before the dialog ends), then the hangup subsumes this
         // leg's pending in-dialog acks exactly like the semantic `Bye` goal.
-        super::response::flush_held_acks(st).await;
+        super::held_acks::flush_held_acks(st).await?;
         discharge_on_teardown(st, now);
     }
     let (txn, req, dialog_clone) = if early {
@@ -268,7 +268,7 @@ pub(super) async fn originate_reinvite(st: &mut ActorState<'_>) -> Result<(), St
             who: st.role.to_string(),
             detail: "Reinvite with no confirmed dialog".to_string(),
         })?;
-        let txn = dialog.request(InDialogMethod::Invite, None).await;
+        let txn = dialog.try_request(InDialogMethod::Invite, None).await?;
         let cseq = dialog.local_cseq();
         (ObligationKey::new(st.role, ObligationKind::ReInvite, cseq), dialog.clone(), txn)
     };
@@ -333,7 +333,7 @@ pub(super) async fn ping_options_once(st: &mut ActorState<'_>) -> Result<(), Ste
             who: st.role.to_string(),
             detail: "Options goal with no confirmed dialog".to_string(),
         })?;
-        let opt = dialog.request(InDialogMethod::Options, None).await;
+        let opt = dialog.try_request(InDialogMethod::Options, None).await?;
         (opt, dialog.clone())
     };
     st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid

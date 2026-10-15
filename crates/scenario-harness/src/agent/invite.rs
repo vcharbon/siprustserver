@@ -16,7 +16,7 @@ use sip_message::{
 
 use super::client_invite::ClientInvite;
 use super::party::Party;
-use super::step::unwrap_step;
+use super::step::{unwrap_step, StepError};
 use super::ua::{from_of, media_type, to_of, uri_of};
 use super::Agent;
 
@@ -208,8 +208,15 @@ impl<'a> Invite<'a> {
     }
 
     /// Generate the INVITE (all headers filled in), send it, and return the
-    /// client transaction handle.
+    /// client transaction handle. Panics on a transport failure — use
+    /// [`try_send`](Self::try_send) where a refused send is an outcome.
     pub async fn send(self) -> ClientInvite {
+        unwrap_step(self.try_send().await)
+    }
+
+    /// Fallible [`send`](Self::send): a send the network refuses is
+    /// [`StepError::Transport`].
+    pub async fn try_send(self) -> Result<ClientInvite, StepError> {
         let caller = self.caller;
         let peer = self.peer;
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
@@ -261,7 +268,7 @@ impl<'a> Invite<'a> {
             &self.remote_emits,
         );
         let invite_wire = emitted_wire(&msg, &headers);
-        unwrap_step(caller.try_send_emitted(&msg, &invite_wire, wire_dst).await);
+        caller.try_send_emitted(&msg, &invite_wire, wire_dst).await?;
 
         let dialog = StackDialog {
             call_id,
@@ -273,7 +280,7 @@ impl<'a> Invite<'a> {
             local_cseq: self.cseq.unwrap_or(Party::Caller.first_cseq()),
             route_set: vec![],
         };
-        ClientInvite {
+        Ok(ClientInvite {
             agent: caller.clone(),
             fallback_addr: peer.addr,
             wire_dst,
@@ -282,6 +289,6 @@ impl<'a> Invite<'a> {
             dialog,
             fork_cseq: HashMap::new(),
             delayed_automatic: self.delayed_automatic,
-        }
+        })
     }
 }

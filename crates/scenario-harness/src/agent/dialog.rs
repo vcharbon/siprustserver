@@ -8,8 +8,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use sip_message::generators::{
-    generate_ack_for_2xx, generate_in_dialog_request, GenerateAckFor2xxOpts,
-    GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
+    generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
 };
 use sip_message::header::{HeaderName, HeaderValue, MediaType, RAck};
 use sip_message::{
@@ -25,6 +24,8 @@ use super::client_txn::{
 use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::ua::media_type;
 use super::Agent;
+
+mod fallible;
 
 /// A confirmed dialog. In-dialog requests auto-increment CSeq and route to the
 /// remote target. `Clone` so the load driver can snapshot it into its teardown
@@ -160,7 +161,7 @@ impl Dialog {
 
     /// Send a BYE (CSeq auto-incremented). Returns its client transaction.
     pub async fn bye(&mut self) -> InDialogTxn {
-        self.request(InDialogMethod::Bye, None).await
+        unwrap_step(self.try_bye().await)
     }
 
     /// Best-effort BYE for the load driver's teardown: builds and sends the BYE
@@ -199,36 +200,13 @@ impl Dialog {
     /// ACK carries that is not a session description — an ISUP payload
     /// (RFC 3372/3204) or a `multipart/mixed` of both. `None` sends a bare ACK.
     pub async fn ack_for_with_body(&mut self, invite_cseq: u32, body: Option<(&str, Vec<u8>)>) {
-        self.ack_carrying(invite_cseq, body, &[]).await;
+        unwrap_step(self.try_ack_carrying(invite_cseq, body, &[]).await);
     }
 
     /// [`ack`](Dialog::ack) of a bodiless round with the acknowledging party's
     /// own header lines on the ACK.
     pub async fn ack_stating(&mut self, stated: &[(&str, &str)]) {
-        self.ack_carrying(self.dialog.local_cseq, None, stated).await;
-    }
-
-    async fn ack_carrying(
-        &mut self,
-        invite_cseq: u32,
-        body: Option<(&str, Vec<u8>)>,
-        stated: &[(&str, &str)],
-    ) {
-        let (content_type, bytes) = match body {
-            Some((ct, bytes)) => (Some(media_type(ct)), bytes),
-            None => (None, Vec::new()),
-        };
-        let opts = GenerateAckFor2xxOpts {
-            via: Some(self.agent.via()),
-            cseq: Some(invite_cseq),
-            body: bytes,
-            content_type,
-            extra_headers: super::client_txn::stated_lines(stated),
-            ..Default::default()
-        };
-        let ack = generate_ack_for_2xx(None, &self.dialog, &opts);
-        let dst = next_hop(&self.dialog, self.fallback_addr);
-        self.agent.send(&SipMessage::Request(ack), dst).await;
+        unwrap_step(self.try_ack_carrying(self.dialog.local_cseq, None, stated).await);
     }
 
     /// Send any in-dialog request (re-INVITE, INFO, …); attach an SDP body
@@ -236,11 +214,7 @@ impl Dialog {
     /// builder — same mechanics (CSeq bump, next-hop routing, §17.1.1.3
     /// (re-)INVITE retention on the returned transaction).
     pub async fn request(&mut self, method: InDialogMethod, sdp: Option<&str>) -> InDialogTxn {
-        let mut req = self.send_request(method);
-        if let Some(s) = sdp {
-            req = req.with_sdp(s);
-        }
-        req.send().await
+        unwrap_step(self.try_request(method, sdp).await)
     }
 
     /// Begin an in-dialog request with fine-grained control over RAck (RFC 3262

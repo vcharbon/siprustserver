@@ -196,10 +196,10 @@ async fn a_bye_without_a_final_is_stranded() {
     }
 }
 
-/// A send the fabric refuses from the caller to the SUT stops the call in the
-/// scenario harness's send path, which panics on a send error: refused on the
-/// INVITE, the call is `failed` before answer (reason `protocol`); refused on
-/// the BYE, `failed` after answer; both carry a `generator` failure.
+/// A send the fabric refuses from the caller to the SUT (a peer gone, an ICMP
+/// refusal) is a transport failure, never a generator one: refused on the
+/// INVITE, the call is `failed` before answer with reason `transport`;
+/// refused on the BYE, `failed` after answer with a `transport` failure.
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn a_refused_send_fails_the_call() {
@@ -219,24 +219,17 @@ async fn a_refused_send_fails_the_call() {
         assert_eq!(records.len(), 1, "{records:?}");
         let r = &records[0];
         assert_common(r);
-        assert_eq!(
-            (r["ending"].as_str(), r["producer_verdict"].as_str()),
-            (Some("failed"), Some("panic")),
-            "{r}"
-        );
-        assert!(r["failures"].as_array().unwrap().iter().any(|f| f["kind"] == "generator"), "{r}");
+        let ending = (r["ending"].as_str(), r["producer_verdict"].as_str());
+        assert_eq!(ending, (Some("failed"), Some("transport")), "{r}");
+        let kinds: Vec<&str> =
+            r["failures"].as_array().unwrap().iter().filter_map(|f| f["kind"].as_str()).collect();
+        assert_eq!(kinds, ["transport"], "{r}");
         if answered {
-            assert_eq!(
-                (r["final_code"].as_u64(), r["reason"].clone()),
-                (Some(200), Value::Null),
-                "{r}"
-            );
+            let fin = (r["final_code"].as_u64(), r["reason"].clone());
+            assert_eq!(fin, (Some(200), Value::Null), "{r}");
         } else {
-            assert_eq!(
-                (r["final_code"].clone(), r["reason"].as_str()),
-                (Value::Null, Some("protocol")),
-                "{r}"
-            );
+            let fin = (r["final_code"].clone(), r["reason"].as_str());
+            assert_eq!(fin, (Value::Null, Some("transport")), "{r}");
         }
     }
 }
