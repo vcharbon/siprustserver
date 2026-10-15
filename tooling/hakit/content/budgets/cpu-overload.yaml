@@ -1,0 +1,10 @@
+schema: budget.v1
+name: cpu-overload
+description: >-
+  A worker (or every worker) without the CPU its load needs: the catastrophic
+  overload ADR-0049 §2.11 keeps 503 for. New calls may be refused 503 for about
+  10 s of offered rate and be slow for about 10 s; nothing else may fail.
+setup_failed:
+  - { stream: "*", code: 503, reason: "*", max_seconds: 10 }
+setup_slow:
+  max_seconds: 10

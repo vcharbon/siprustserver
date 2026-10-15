@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Force-delete the target pods (grace 0). Facts: the pods, their uids, the live
+# pods before, the delete instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+hk_pick_targets
+hk_delete_targets 0

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Shift the wall clock (CLOCK_REALTIME) of the target pods' processes by
+# offset_ms: a Chaos Mesh TimeChaos. Monotonic clocks are left alone. Facts:
+# the injected instant, the pods, the offset.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=chaos-mesh.sh
+source "$HAKIT_LIB/chaos-mesh.sh"
+at="$(jq -cn --arg mode "$(hk_cm_mode)" --argjson sel "$(hk_cm_selector "$HAKIT_TARGET_SELECTOR")" \
+  --arg off "${HAKIT_PARAM_OFFSET_MS}ms" \
+  '{apiVersion: "chaos-mesh.org/v1alpha1", kind: "TimeChaos",
+    spec: {mode: $mode, selector: $sel, timeOffset: $off, clockIds: ["CLOCK_REALTIME"]}}' \
+  | hk_cm_apply timechaos "$HAKIT_PARAM_INJECT_WAIT_S")"
+jq -cn --argjson at "$at" --argjson pods "$(hk_cm_pods timechaos)" --argjson off "$HAKIT_PARAM_OFFSET_MS" \
+  '{injected_at_ms: $at, pods: $pods, offset_ms: $off}'

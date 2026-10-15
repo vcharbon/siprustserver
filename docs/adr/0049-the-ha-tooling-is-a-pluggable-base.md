@@ -132,7 +132,14 @@ tolerated (§3).
    primitives of `pod-faults.sh` (node stop, cgroup freeze, netem delay and
    loss, TCP reset), a Chaos Mesh resource it creates and deletes, `kubectl`.
    An incident that needs a backend names it in `requires`, and the runner
-   refuses the profile before the run if the lab lacks it.
+   refuses the profile before the run if the lab lacks it. The base uses
+   Chaos Mesh (`chaos-mesh`, installed on the kind lab by
+   `deploy/helm/kind-lab.sh`) for what the shell primitives cannot do
+   precisely: a partition between selectors, a volume's IO latency, a clock
+   shift. Its resource's `AllInjected` condition is the applied proof and its
+   deletion through Chaos Mesh's finalizer the undone proof. Chaos Mesh
+   refuses host-network pods, so a network fault on the front proxy stays
+   netem; so does a fault restricted to one port (`sip_loss`).
 8. **Load incidents.** A load incident points at a profile stream with
    `start: incident` (the event's `stream`). The runner, never an executable,
    launches that stream at `inject` and stops it at `heal`, so the stream has
@@ -146,6 +153,14 @@ tolerated (§3).
    leaves those calls to the system under test to reap; the stream writes no
    record for them and is left out of the reconciliation. A stream that
    starts with an incident has no pre-inject baseline and so no `recovery`.
+   Each firing is its own generator, its Call-IDs tagged with the event; at
+   heal its records are shipped and its counter read before it is removed,
+   and the stream's entry sums its firings. `healed` is the instant the
+   generator exited, so the window holds the drained calls. A drain that
+   overruns the incident's `heal_s` kills the generator and fails the step;
+   the runner refuses a profile whose stream needs longer to drain than the
+   `heal_s` of the load incident that stops it, and a stream stopped both
+   ways.
 9. **The event series.** At each phase the runner pushes
    `sip_chaos_event{incident,phase,source,run} 1` to VictoriaMetrics with the
    phase instant as its timestamp. `source` is `schedule` (fired by the
@@ -162,7 +177,7 @@ tolerated (§3).
     |---|---|---|---|
     | `kill_worker` | fault | force-delete one worker pod (grace 0) | `kill_worker` |
     | `kill_worker_graceful` | fault | delete one worker pod with its grace period | `kill_worker` with `KILL_GRACE` |
-    | `kill_worker_held` | fault | delete one worker and keep it absent for `duration_s`, then let it start once | (new) |
+    | `kill_worker_held` | fault | delete one worker and keep it absent for `duration_s` (the nodes it may run on tainted NoSchedule), then let it start once | (new) |
     | `kill_proxy` | fault | force-delete the front proxy that holds the virtual address | `kill_proxy` |
     | `pod_kill` | fault | force-delete one pod of any selector | `limiter_kill` |
     | `pod_restart` | fault | delete one pod of any selector with its grace period | `limiter_restart` |
@@ -172,7 +187,10 @@ tolerated (§3).
     | `tcp_reset` | fault | reset new TCP connections to one pod's port for `duration_s` | `limiter_reject` |
     | `cpu_starve` | fault | cap the CPU of one pod (pick `one`) or all (pick `all`) for `duration_s` | `cpu_starve`, `cpu_starve_all` |
     | `node_stop` | fault | stop the node that hosts a pod of the selector, start it at heal | `infra_node_kill` |
-    | `partition` | fault | cut the network between two selectors for `duration_s` | (new) |
+    | `partition` | fault | cut the network between two selectors for `duration_s` (Chaos Mesh); by default the workers among themselves, the replication link | (new) |
+    | `sip_loss` | fault | netem loss, duplication and delay on one pod's SIP datagrams only, for `duration_s` | (new) |
+    | `io_stall` | fault | delay the file operations of one pod's volume for `duration_s` (Chaos Mesh) | (new) |
+    | `clock_skew` | fault | shift one pod's wall clock for `duration_s` (Chaos Mesh) | (new) |
     | `cut_external_plane` | fault | take the external interface of the virtual-address holder down | `cut_external_plane` |
     | `spike` | load | a burst stream, drained at heal | `peak` |
     | `abuse` | load | a stream of an abuse scenario, drained at heal | `abuse_up`, `abuse_down` |

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Recovered when no deleted pod remains and as many pods of the selector are
+# live as before. Exit 75 while not yet.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+hk_probe_replaced

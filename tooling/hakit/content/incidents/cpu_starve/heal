@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Restore each starved container's prior cpu.max and prove it restored; a
+# cgroup gone with its container (a restart) carries no cap. Idempotent.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+facts="{}"
+while read -r pod node dir prev; do
+  if ! docker exec "$node" test -f "$dir/cpu.max" 2>/dev/null; then
+    state=gone
+  else
+    docker exec "$node" sh -c "echo '$prev' > '$dir/cpu.max'"
+    now="$(docker exec "$node" cat "$dir/cpu.max")"
+    [ "$now" = "$prev" ] || hk_die "cpu.max of $pod reads '$now', not the prior '$prev'"
+    state=restored
+  fi
+  facts="$(jq -c --arg p "$pod" --arg s "$state" '. + {($p): $s}' <<<"$facts")"
+done < <(cat "$HAKIT_EVENT_DIR/starved" 2>/dev/null || true)
+jq -cn --argjson f "$facts" --argjson at "$(hk_now_ms)" '{pods: $f, healed_at_ms: $at}'

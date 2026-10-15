@@ -1,0 +1,28 @@
+schema: incident.v1
+name: kill_proxy
+description: >-
+  Force-delete the front proxy holding the virtual address (the VRRP master,
+  found as the pod carrying the address on an interface other than lo). Its
+  peer takes the address over and the workload re-creates the killed pod as a
+  backup. The probe waits for the replacement and for exactly one holder.
+kind: fault
+target:
+  selector: app=sip-front-proxy
+  pick: one
+params:
+  address:
+    type: string
+    default: 192.168.60.250
+    description: The virtual address the callers dial.
+  container:
+    type: string
+    default: keepalived
+    description: The container of the proxy pod through which its addresses are read (it needs `ip`).
+duration_s: 0
+expected_s: 60
+timeouts:
+  inject_s: 30
+  heal_s: 10
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind]

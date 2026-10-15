@@ -6,12 +6,14 @@
 # values (deploy/helm/README.md).
 #
 #   kind-lab.sh up                   cluster + sipext bridge + images, kind-loaded
-#   kind-lab.sh deploy [helm args]   the collectors, the SIPp UAS, the SUT, then
-#                                    the VIP and isolation smokes and the series
-#                                    check; helm args go to the SUT release
-#                                    (e.g. --set worker.replicas=3)
+#   kind-lab.sh deploy [helm args]   the collectors, Chaos Mesh, the SIPp UAS, the
+#                                    SUT, then the VIP and isolation smokes and
+#                                    the series check; helm args go to the SUT
+#                                    release (e.g. --set worker.replicas=3)
+#   kind-lab.sh chaos-mesh           Chaos Mesh alone (chaos-mesh-values-kind.yaml)
 #   kind-lab.sh down                 the cluster and the sipext plane
 #
+# Env: CHAOS_MESH_VERSION=2.8.4 (the pinned chart and images)
 # The host stack (VictoriaMetrics :8428, VictoriaLogs :9428, Grafana :3333) is
 # deploy/observability's docker compose stack, outside the cluster: `deploy`
 # needs it up and never starts it.
@@ -63,6 +65,16 @@ require_host_stack() {
   done
 }
 
+# Chaos Mesh, the backend of the partition, IO and clock incidents, pinned.
+CHAOS_MESH_VERSION="${CHAOS_MESH_VERSION:-2.8.4}"
+chaos_mesh_release() {
+  log "helm upgrade --install chaos-mesh $CHAOS_MESH_VERSION (chaos-mesh)"
+  helm upgrade --install chaos-mesh chaos-mesh --repo https://charts.chaos-mesh.org \
+    --version "$CHAOS_MESH_VERSION" --kube-context "kind-$CLUSTER" -n chaos-mesh --create-namespace \
+    -f "$HELM_DIR/chaos-mesh-values-kind.yaml" --set "images.tag=v$CHAOS_MESH_VERSION" \
+    --wait --timeout "$ROLLOUT_TIMEOUT"
+}
+
 lab_deploy() {
   preflight
   require_infra_node
@@ -70,6 +82,7 @@ lab_deploy() {
   require_host_stack
   helm_release siprust-observability "$HELM_DIR/siprust-observability" "$OBS_NS" \
     --set "clusterName=kind-$CLUSTER"
+  chaos_mesh_release
   # The UAS containers first: the first one is the workers' scripted callee.
   sipp_uas_up
   helm_release siprust "$HELM_DIR/siprust" "$NS" "$@"
@@ -83,6 +96,7 @@ lab_deploy() {
 case "${1:-}" in
   up) up ;;
   deploy) shift; lab_deploy "$@" ;;
+  chaos-mesh) chaos_mesh_release ;;
   down) down ;;
-  *) die "usage: $0 {up|deploy [helm args]|down}" ;;
+  *) die "usage: $0 {up|deploy [helm args]|chaos-mesh|down}" ;;
 esac

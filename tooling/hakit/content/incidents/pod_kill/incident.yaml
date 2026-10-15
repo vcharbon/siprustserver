@@ -1,0 +1,18 @@
+schema: incident.v1
+name: pod_kill
+description: >-
+  Force-delete one pod (pick one) or every pod (pick all) of any selector,
+  grace 0: a crash of a component. Its workload re-creates it; the probe waits
+  until as many pods are live as before.
+kind: fault
+target:
+  selector: app=call-limiter
+  pick: one
+duration_s: 0
+expected_s: 60
+timeouts:
+  inject_s: 30
+  heal_s: 10
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind]

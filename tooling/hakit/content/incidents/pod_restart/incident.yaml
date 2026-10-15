@@ -1,0 +1,23 @@
+schema: incident.v1
+name: pod_restart
+description: >-
+  Delete one pod (pick one) or every pod (pick all) of any selector with its
+  grace period: a graceful restart of a component, which re-starts empty. The
+  probe is pod_kill's.
+kind: fault
+target:
+  selector: app=call-limiter
+  pick: one
+params:
+  grace_s:
+    type: integer
+    default: -1
+    description: The grace period in seconds; -1 is the pod's own terminationGracePeriodSeconds.
+duration_s: 0
+expected_s: 90
+timeouts:
+  inject_s: 30
+  heal_s: 10
+  probe_s: 240
+  probe_interval_s: 2
+requires: [kind]

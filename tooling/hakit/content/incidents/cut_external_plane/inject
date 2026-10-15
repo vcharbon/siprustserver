@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Disconnect the node of the virtual-address holder from the callers' docker
+# network: the caller-facing plane yanked from under the master proxy, whose
+# peer must take the addresses over. The node's address on that network is
+# kept in `cut` for heal. Facts: the holder, its node and address, the instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=vip.sh
+source "$HAKIT_LIB/vip.sh"
+holders="$(hk_vip_holders "$HAKIT_PARAM_ADDRESS" "$HAKIT_PARAM_CONTAINER")"
+[ "$(grep -c . <<<"$holders" || true)" -eq 1 ] || hk_die "expected one holder of $HAKIT_PARAM_ADDRESS, found: ${holders:-none}"
+read -r pod node ifc <<<"$holders"
+ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$HAKIT_PARAM_NETWORK\").IPAddress}}" "$node")"
+[ -n "$ip" ] || hk_die "$node has no address on $HAKIT_PARAM_NETWORK"
+echo "$node $ip" > "$HAKIT_EVENT_DIR/cut"
+at="$(hk_now_ms)"
+docker network disconnect "$HAKIT_PARAM_NETWORK" "$node" >&2
+jq -cn --arg pod "$pod" --arg node "$node" --arg ifc "$ifc" --arg ip "$ip" --argjson at "$at" \
+  '{holder: $pod, node: $node, interface: $ifc, address: $ip, cut_at_ms: $at}'

@@ -91,7 +91,8 @@ the Secret itself and names it in `existingSecret`.
 
 ```bash
 deploy/helm/kind-lab.sh up       # cluster, sipext bridge, host preflight, images kind-loaded (run.sh up)
-deploy/helm/kind-lab.sh deploy   # both releases, SIPp UAS, VIP + isolation smokes, series check
+deploy/helm/kind-lab.sh deploy   # both releases, Chaos Mesh, SIPp UAS, VIP + isolation smokes, series check
+deploy/helm/kind-lab.sh chaos-mesh   # Chaos Mesh alone, pinned, chaos-mesh-values-kind.yaml
 deploy/helm/kind-lab.sh down
 ```
 

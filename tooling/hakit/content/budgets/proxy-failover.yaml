@@ -1,0 +1,11 @@
+schema: budget.v1
+name: proxy-failover
+description: >-
+  The virtual-address holder lost (killed, or its caller-facing interface cut):
+  its peer takes the address over within about 2 s. Calls whose INVITE reached
+  the lost holder may end their setup without a final for about 3 s of offered
+  rate; setups retransmitted across the takeover may be slow for about 5 s.
+setup_failed:
+  - { stream: "*", code: 0, reason: timeout, max_seconds: 3 }
+setup_slow:
+  max_seconds: 5

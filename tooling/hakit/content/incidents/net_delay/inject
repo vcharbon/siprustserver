@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# netem delay on the target pods' eth0 (egress), applied in the pod netns from
+# its node. Facts as pod_freeze's.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+hk_timed_inject netem pf_delay "$HAKIT_PARAM_DELAY_MS"

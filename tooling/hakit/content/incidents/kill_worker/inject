@@ -1,20 +1,7 @@
 #!/usr/bin/env bash
-# Force-delete one ready pod of the target selector (grace 0) and name it.
-# Facts: the pod, its uid, the ready pods before the kill, the kill instant.
-set -euo pipefail
-kc=(kubectl --context "$HAKIT_KUBE_CONTEXT" -n "$HAKIT_TARGET_NAMESPACE")
-
-# name uid ready deletionTimestamp, one pod per line; a pod being deleted has a 4th column.
-mapfile -t ready < <("${kc[@]}" get pods -l "$HAKIT_TARGET_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.uid}{" "}{.status.conditions[?(@.type=="Ready")].status}{" "}{.metadata.deletionTimestamp}{"\n"}{end}' \
-  | awk 'NF == 3 && $3 == "True" { print $1 " " $2 }')
-if [ "${#ready[@]}" -eq 0 ]; then
-  echo "kill_worker: no ready pod matches $HAKIT_TARGET_SELECTOR in $HAKIT_TARGET_NAMESPACE" >&2
-  exit 1
-fi
-pick="$(printf '%s\n' "${ready[@]}" | shuf -n 1)"
-pod="${pick% *}"
-uid="${pick#* }"
-printf '%s %s %s\n' "$pod" "$uid" "${#ready[@]}" > "$HAKIT_EVENT_DIR/target"
-killed_at_ms="$(date +%s%3N)"
-"${kc[@]}" delete pod "$pod" --grace-period=0 --force --wait=false >&2
-printf '{"pod":"%s","uid":"%s","ready_before":%d,"killed_at_ms":%s}\n' "$pod" "$uid" "${#ready[@]}" "$killed_at_ms"
+# Force-delete one ready worker pod (grace 0): a crash. Facts: the pod, its
+# uid, the live pods before, the delete instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+hk_pick_targets
+hk_delete_targets 0

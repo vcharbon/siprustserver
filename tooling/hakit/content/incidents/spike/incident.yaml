@@ -1,0 +1,15 @@
+schema: incident.v1
+name: spike
+description: >-
+  A traffic spike: the event's burst stream (a `start: incident` stream of the
+  profile, typically short calls at a high rate) starts at inject, holds for
+  duration_s and is drained at heal (no new call, the calls in flight end
+  cleanly). The system under test absorbs it: the base's spike budget allows
+  no failed setup on any stream (ADR-0049 §2.11).
+kind: load
+stop: drain
+duration_s: 30
+expected_s: 180
+timeouts:
+  inject_s: 60
+  heal_s: 300

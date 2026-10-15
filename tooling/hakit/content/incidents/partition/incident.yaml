@@ -1,0 +1,25 @@
+schema: incident.v1
+name: partition
+description: >-
+  Partition the target pods (one or all) from the pods of peer_selector, both
+  directions, for duration_s (Chaos Mesh NetworkChaos). The default target is
+  the workers among themselves: the replication link cut, each side vanished
+  from the other. Host-network pods are refused.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: one
+params:
+  peer_selector:
+    type: string
+    default: ""
+    description: The pods cut from the targets; empty is the target selector itself.
+  inject_wait_s:
+    type: integer
+    default: 30
+    description: How long inject waits for Chaos Mesh to report the partition injected.
+duration_s: 60
+timeouts:
+  inject_s: 60
+  heal_s: 120
+requires: [kind, chaos-mesh]

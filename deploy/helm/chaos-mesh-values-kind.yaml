@@ -1,0 +1,19 @@
+# Chaos Mesh on the kind lab: the backend of the base incidents that partition
+# pods, stall a volume's file operations or shift a clock
+# (tooling/hakit/content/incidents/{partition,io_stall,clock_skew}). kind
+# nodes run containerd; the daemon runs on every node, the tainted infra node
+# and the control plane included. One controller, no dashboard, no DNS server:
+# the lab drives Chaos Mesh only through its resources.
+chaosDaemon:
+  runtime: containerd
+  socketPath: /run/containerd/containerd.sock
+  tolerations:
+    - operator: Exists
+controllerManager:
+  replicaCount: 1
+  leaderElection:
+    enabled: false
+dashboard:
+  create: false
+dnsServer:
+  create: false

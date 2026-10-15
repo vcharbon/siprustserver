@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Crash one ready worker and keep it absent: every node the pod's nodeSelector
+# admits is tainted NoSchedule first, so the replacement the workload creates
+# stays Pending until heal lifts the taint. Running pods are not touched by a
+# NoSchedule taint. Facts as kill_worker's, plus the held nodes.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+hk_pick_targets
+read -r pod _ _ < <(hk_targets)
+selector="$(kubectl -n "$NS" get pod "$pod" -o json | jq -r '.spec.nodeSelector // {} | to_entries | map("\(.key)=\(.value)") | join(",")')"
+if [ -n "$selector" ]; then
+  mapfile -t nodes < <(kubectl get nodes -l "$selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+else
+  mapfile -t nodes < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+fi
+[ "${#nodes[@]}" -gt 0 ] || hk_die "no node admits $pod"
+printf '%s\n' "${nodes[@]}" > "$HAKIT_EVENT_DIR/held_nodes"
+kubectl taint nodes "${nodes[@]}" "hakit.io/hold=$HAKIT_RUN:NoSchedule" --overwrite >&2
+deleted="$(hk_delete_targets 0)"
+jq -cn --argjson d "$deleted" --argjson n "$(printf '%s\n' "${nodes[@]}" | jq -Rnc '[inputs]')" '$d + {held_nodes: $n}'

@@ -64,7 +64,7 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
     return Lab(
         kube_context=g("HAKIT_KUBE_CONTEXT", "kind-sip-e2e"),
         namespace=g("HAKIT_NAMESPACE", "sip-test"),
-        capabilities=[c for c in g("HAKIT_LAB_CAPABILITIES", "kind,docker").split(",") if c],
+        capabilities=[c for c in g("HAKIT_LAB_CAPABILITIES", "kind,docker,chaos-mesh").split(",") if c],
         vm_url=g("HAKIT_VM_URL", "http://127.0.0.1:8428"),
         vlogs_url=g("HAKIT_VLOGS_URL", "http://127.0.0.1:9428"),
         vlogs_url_from_generators=g("HAKIT_VLOGS_URL_GENERATORS", "http://victorialogs:9428"),

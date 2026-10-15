@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Start every stopped node and wait until the API server sees it Ready.
+# Idempotent: a running node is only waited on. Facts: per node whether the
+# API server had marked it NotReady (the proof the loss was seen) and when it
+# was Ready again.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+facts="{}"
+while read -r n; do
+  [ -n "$n" ] || continue
+  ready="$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+  pf_node_start "$n" "$HAKIT_PARAM_READY_TIMEOUT_S" || hk_die "$n is not Ready within ${HAKIT_PARAM_READY_TIMEOUT_S}s"
+  facts="$(jq -c --arg n "$n" --argjson nr "$([ "$ready" = True ] && echo false || echo true)" --argjson at "$(hk_now_ms)" \
+    '. + {($n): {not_ready_seen: $nr, ready_at_ms: $at}}' <<<"$facts")"
+done < <(cat "$HAKIT_EVENT_DIR/nodes" 2>/dev/null || true)
+jq -cn --argjson f "$facts" '{nodes: $f}'

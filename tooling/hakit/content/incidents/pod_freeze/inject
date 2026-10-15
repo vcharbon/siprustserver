@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Freeze the target pods (cgroup v2 freeze of the first container): every
+# process stops, its sockets stay open, nothing answers. Facts: the pods, the
+# applied instant, their restart counts before.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+hk_timed_inject frozen pf_freeze

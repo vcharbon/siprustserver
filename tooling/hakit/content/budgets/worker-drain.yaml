@@ -1,0 +1,8 @@
+schema: budget.v1
+name: worker-drain
+description: >-
+  A worker restarted with its grace period: it drains before it exits, so no
+  setup may fail; setups may be slower for about 2 s of offered rate while the
+  proxies move the new calls to its peers.
+setup_slow:
+  max_seconds: 2

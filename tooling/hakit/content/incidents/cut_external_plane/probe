@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Recovered when exactly one live proxy holds the virtual address. Exit 75
+# while not yet. Facts: the holder and whether the address moved.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=vip.sh
+source "$HAKIT_LIB/vip.sh"
+holders="$(hk_vip_holders "$HAKIT_PARAM_ADDRESS" "$HAKIT_PARAM_CONTAINER")"
+[ "$(grep -c . <<<"$holders" || true)" -eq 1 ] || exit "$HK_NOT_YET"
+read -r pod node _ <<<"$holders"
+read -r cut _ < "$HAKIT_EVENT_DIR/cut"
+jq -cn --arg pod "$pod" --arg node "$node" --argjson moved "$([ "$node" != "$cut" ] && echo true || echo false)" \
+  '{holder: $pod, holder_node: $node, moved: $moved}'

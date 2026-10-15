@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Lift the hold: note the replacement that waited (its uid and phase), then
+# remove the hold taint from every node that carries it. Idempotent; correct
+# after a partial inject or none. Facts: the release instant and the waiting
+# replacement.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+pending_uid="" pending_phase=""
+if read -r pod _ _ < <(hk_targets); then
+  row="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.metadata.uid}{" "}{.status.phase}' 2>/dev/null || true)"
+  read -r pending_uid pending_phase <<<"$row" || true
+fi
+mapfile -t tainted < <(kubectl get nodes -o json | jq -r '.items[] | select(any(.spec.taints[]?; .key == "hakit.io/hold")) | .metadata.name')
+if [ "${#tainted[@]}" -gt 0 ]; then
+  kubectl taint nodes "${tainted[@]}" hakit.io/hold:NoSchedule- >&2
+fi
+at="$(hk_now_ms)"
+echo "$at" > "$HAKIT_EVENT_DIR/released_at_ms"
+echo "$pending_uid" > "$HAKIT_EVENT_DIR/pending_uid"
+jq -cn --argjson at "$at" --arg uid "$pending_uid" --arg phase "$pending_phase" \
+  '{released_at_ms: $at, pending_uid: (if $uid == "" then null else $uid end), pending_phase: (if $phase == "" then null else $phase end)}'

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Thaw the target pods and prove them thawed. Facts: per pod its state and the
+# container restarts during the freeze (a liveness verdict).
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+hk_timed_heal frozen pf_thaw

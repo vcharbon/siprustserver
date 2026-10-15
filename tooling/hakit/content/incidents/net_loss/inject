@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# netem loss on the target pods' eth0 (egress; at 100 % the pod is cut off,
+# the kubelet's probes included). Facts as pod_freeze's.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+loss() { pf_netns "$1" tc qdisc replace dev eth0 root netem loss "$2%"; }
+hk_timed_inject netem loss "$HAKIT_PARAM_LOSS_PCT"

@@ -1,0 +1,24 @@
+schema: incident.v1
+name: node_stop
+description: >-
+  Stop the kind node hosting one target pod (pick one) or every target pod
+  (pick all) for duration_s, then start it: the loss of a machine and of every
+  pod on it. Its pods come back on the same node. The probe waits until every
+  pod bound to it is Ready again.
+kind: fault
+target:
+  selector: app=rabbitmq
+  pick: one
+params:
+  ready_timeout_s:
+    type: integer
+    default: 240
+    description: How long heal waits for a restarted node to be Ready.
+duration_s: 120
+expected_s: 240
+timeouts:
+  inject_s: 60
+  heal_s: 300
+  probe_s: 300
+  probe_interval_s: 5
+requires: [kind, docker]

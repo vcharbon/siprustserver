@@ -1,0 +1,14 @@
+schema: incident.v1
+name: orphan
+description: >-
+  Orphaned dialogs: the event's stream places calls for duration_s and is
+  killed at heal with its calls in flight (no BYE, no CANCEL), leaving the
+  system under test to reap them (in-dialog keepalive). Its killed calls
+  write no record and the stream is not reconciled.
+kind: load
+stop: abandon
+duration_s: 20
+expected_s: 90
+timeouts:
+  inject_s: 60
+  heal_s: 120

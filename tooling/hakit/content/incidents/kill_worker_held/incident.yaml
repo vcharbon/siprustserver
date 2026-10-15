@@ -1,0 +1,30 @@
+schema: incident.v1
+name: kill_worker_held
+description: >-
+  Crash one ready worker pod (grace 0) and keep it absent for duration_s: every
+  node its nodeSelector admits is tainted NoSchedule before the kill, so the
+  replacement stays Pending and the surviving workers serve the killed one's
+  calls alone; heal lifts the taint and the replacement starts once. The probe
+  proves one incarnation scheduled after the release and reads kill_worker's
+  restart timings.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: one
+params:
+  proxy_selector:
+    type: string
+    default: app=sip-front-proxy
+    description: The front proxies whose registry join of the replacement is timed; empty skips them.
+  proxy_container:
+    type: string
+    default: sip-front-proxy
+    description: The proxy container whose log holds the registry lines.
+duration_s: 120
+expected_s: 180
+timeouts:
+  inject_s: 30
+  heal_s: 30
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind]

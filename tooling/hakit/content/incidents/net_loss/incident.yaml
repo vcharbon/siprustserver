@@ -1,0 +1,19 @@
+schema: incident.v1
+name: net_loss
+description: >-
+  Drop loss_pct % of the packets the target pods send (netem on eth0) for
+  duration_s; at 100 % a network cut of the component, its probes included.
+kind: fault
+target:
+  selector: app=call-limiter
+  pick: one
+params:
+  loss_pct:
+    type: number
+    default: 100
+    description: The share of packets dropped, in percent.
+duration_s: 60
+timeouts:
+  inject_s: 60
+  heal_s: 60
+requires: [kind, docker]

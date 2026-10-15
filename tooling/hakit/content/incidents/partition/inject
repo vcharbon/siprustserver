@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Cut the network both ways between the target pods (one or all) and the pods
+# of peer_selector (the target selector itself when empty): a Chaos Mesh
+# NetworkChaos partition. Facts: the injected instant and pods.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=chaos-mesh.sh
+source "$HAKIT_LIB/chaos-mesh.sh"
+peer="${HAKIT_PARAM_PEER_SELECTOR:-$HAKIT_TARGET_SELECTOR}"
+hk_cm_refuse_host_network "$HAKIT_TARGET_SELECTOR"
+hk_cm_refuse_host_network "$peer"
+at="$(jq -cn --arg mode "$(hk_cm_mode)" --argjson sel "$(hk_cm_selector "$HAKIT_TARGET_SELECTOR")" \
+  --argjson peer "$(hk_cm_selector "$peer")" \
+  '{apiVersion: "chaos-mesh.org/v1alpha1", kind: "NetworkChaos",
+    spec: {action: "partition", mode: $mode, selector: $sel, direction: "both",
+           target: {mode: "all", selector: $peer}}}' \
+  | hk_cm_apply networkchaos "$HAKIT_PARAM_INJECT_WAIT_S")"
+jq -cn --argjson at "$at" --argjson pods "$(hk_cm_pods networkchaos)" --arg peer "$peer" \
+  '{injected_at_ms: $at, pods: $pods, peer_selector: $peer}'

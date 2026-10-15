@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Stop the kind node (its docker container) hosting a target pod, or every
+# node hosting one (pick all): a machine loss. A control-plane node is never
+# stopped. Facts: the nodes, the pods they held in the namespace, the instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+hk_pick_targets
+mapfile -t nodes < <(hk_targets | awk '{ print $3 }' | sort -u)
+for n in "${nodes[@]}"; do
+  if kubectl get node "$n" -o jsonpath='{.metadata.labels}' | jq -e 'has("node-role.kubernetes.io/control-plane")' >/dev/null; then
+    hk_die "$n is a control-plane node"
+  fi
+done
+printf '%s\n' "${nodes[@]}" > "$HAKIT_EVENT_DIR/nodes"
+held="[]"
+for n in "${nodes[@]}"; do
+  held="$(kubectl -n "$NS" get pods --field-selector "spec.nodeName=$n" -o json | jq -c --argjson h "$held" '$h + [.items[].metadata.name]')"
+done
+at="$(hk_now_ms)"
+for n in "${nodes[@]}"; do pf_node_stop "$n"; done
+jq -cn --argjson n "$(printf '%s\n' "${nodes[@]}" | jq -Rnc '[inputs]')" --argjson p "$held" --argjson at "$at" \
+  '{nodes: $n, pods: $p, stopped_at_ms: $at}'

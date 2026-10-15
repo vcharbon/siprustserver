@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Reset new TCP connections to a port of the target pods (an RST from their
+# netns); the kubelet's probes from the node still pass, so the pod stays
+# Ready. Facts as pod_freeze's.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+hk_timed_inject reject pf_reject_tcp "$HAKIT_PARAM_PORT"

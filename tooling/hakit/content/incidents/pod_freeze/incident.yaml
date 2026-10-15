@@ -1,0 +1,16 @@
+schema: incident.v1
+name: pod_freeze
+description: >-
+  Freeze one pod (pick one) or every pod (pick all) of any selector for
+  duration_s: a hung component whose sockets stay open and answer nothing. A
+  freeze longer than the pod's liveness budget also restarts its container;
+  heal reports such restarts.
+kind: fault
+target:
+  selector: app=call-limiter
+  pick: one
+duration_s: 15
+timeouts:
+  inject_s: 60
+  heal_s: 60
+requires: [kind, docker]

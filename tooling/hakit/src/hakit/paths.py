@@ -9,10 +9,11 @@ from pathlib import Path
 HAKIT_ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS_DIR = HAKIT_ROOT / "schemas"
 BASE_CONTENT = HAKIT_ROOT / "content"
-# tooling/hakit -> the repository root, which holds the shell fault primitives
-# and the SIPp exporter twin.
+# The shell the base incidents source (`HAKIT_LIB`): the fault primitives
+# (`pod-faults.sh`) and the incident helpers (`incident.sh`).
+FAULT_LIB = HAKIT_ROOT / "lib"
+# tooling/hakit -> the repository root, which holds the SIPp exporter twin.
 REPO_ROOT = HAKIT_ROOT.parents[1]
-FAULT_LIB = REPO_ROOT / "deploy" / "k8s" / "lib"
 SIPP_EXPORTER_DIR = REPO_ROOT / "deploy" / "k8s" / "sipp" / "exporter"
 
 

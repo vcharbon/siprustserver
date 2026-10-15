@@ -1,0 +1,14 @@
+schema: incident.v1
+name: abuse
+description: >-
+  An abuse stream: the event's stream runs an abuse scenario (a peer flooding
+  in-dialog requests, retransmitting, or breaking the protocol) for
+  duration_s and is drained at heal. What the abuse costs the legitimate
+  streams is the budget's question.
+kind: load
+stop: drain
+duration_s: 60
+expected_s: 210
+timeouts:
+  inject_s: 60
+  heal_s: 300

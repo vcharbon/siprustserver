@@ -1,0 +1,38 @@
+schema: incident.v1
+name: io_stall
+description: >-
+  Stall the file operations under volume_path of the target pods (one or all)
+  by delay_ms for duration_s (Chaos Mesh IOChaos latency): a store whose disk
+  stops keeping up. It needs a mounted volume, so it targets a component with
+  one (the broker's store by default); a process that only writes to stdout
+  has no file operation to stall.
+kind: fault
+target:
+  selector: app=rabbitmq
+  pick: one
+params:
+  volume_path:
+    type: string
+    default: /var/lib/rabbitmq
+    description: The mount point of the volume whose operations are delayed.
+  delay_ms:
+    type: integer
+    default: 500
+    description: The delay added to each delayed file operation, in milliseconds.
+  percent:
+    type: integer
+    default: 100
+    description: The share of file operations delayed, in percent.
+  container:
+    type: string
+    default: ""
+    description: The container whose operations are delayed; empty is every container mounting the volume.
+  inject_wait_s:
+    type: integer
+    default: 30
+    description: How long inject waits for Chaos Mesh to report the latency injected.
+duration_s: 45
+timeouts:
+  inject_s: 60
+  heal_s: 120
+requires: [kind, chaos-mesh]

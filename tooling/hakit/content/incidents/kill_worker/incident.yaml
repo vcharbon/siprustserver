@@ -3,11 +3,22 @@ name: kill_worker
 description: >-
   Force-delete one ready worker pod (grace 0): a crash. The workload re-creates
   it; the probe waits until as many pods of the selector are ready as before
-  the kill, with the killed pod replaced.
+  the kill, with the killed pod replaced, and reads the restart timings: each
+  survivor's replication peer park, the replacement's start and Ready, each
+  proxy's registry leave and join.
 kind: fault
 target:
   selector: app=b2bua-worker
   pick: one
+params:
+  proxy_selector:
+    type: string
+    default: app=sip-front-proxy
+    description: The front proxies whose registry join of the replacement is timed; empty skips them.
+  proxy_container:
+    type: string
+    default: sip-front-proxy
+    description: The proxy container whose log holds the registry lines.
 duration_s: 0
 expected_s: 60
 timeouts:
