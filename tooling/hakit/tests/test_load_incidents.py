@@ -164,7 +164,8 @@ def test_each_firing_is_its_own_generator_and_the_stream_sums_them(tmp_path: Pat
 
 def test_every_twin_keeps_the_error_entries_worth_reading_for_the_whole_run(tmp_path: Path) -> None:
     _, fake = run(tmp_path, [])
-    twins = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:2] == ["docker", "run"] and "-exporter" in " ".join(c.argv)]
+    runs = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:2] == ["docker", "run"]]
+    twins = [a for a in runs if a[a.index("--name") + 1].endswith("-exporter")]
     assert len(twins) == 2
     for t in twins:
         assert "SIPP_ERROR_KEPT_FILE=/stats/errors.kept.log" in t and f"SIPP_ERROR_KEPT_BYTES={256 << 20}" in t
