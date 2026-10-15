@@ -55,6 +55,10 @@ Env:
                                          second trimmer, for a SIPp run without
                                          -ringbuffer_* (whose rotation would also
                                          rotate the record file); 0 disables it
+  SIPP_ERROR_KEPT_FILE (default "")   -> every error entry but a scenario's own
+                                         receive timer, appended whole; empty
+                                         disables it
+  SIPP_ERROR_KEPT_BYTES (default 0)   -> tail of that file kept on disk; 0 keeps all
   SIPP_RECORD_FILE (default "")       -> the UAC's call-outcome record file;
                                          empty disables record shipping
   SIPP_RECORD_URL (default "")        -> VictoriaLogs base URL the records go to
@@ -76,6 +80,8 @@ PORT = int(os.environ.get("EXPORTER_PORT", "9035"))
 KEEP_BYTES = int(os.environ.get("SIPP_STAT_KEEP_BYTES", str(16 * 1024 * 1024)))
 ERROR_FILE = os.environ.get("SIPP_ERROR_FILE", "/stats/errors.log")
 ERROR_KEEP_BYTES = int(os.environ.get("SIPP_ERROR_KEEP_BYTES", "0"))
+ERROR_KEPT_FILE = os.environ.get("SIPP_ERROR_KEPT_FILE", "")
+ERROR_KEPT_BYTES = int(os.environ.get("SIPP_ERROR_KEPT_BYTES", "0"))
 STREAM = os.environ.get("SIPP_STREAM", "")
 SHAPE = os.environ.get("SIPP_SHAPE", "")
 RECORD_FILE = os.environ.get("SIPP_RECORD_FILE", "")
@@ -289,9 +295,11 @@ def main():
     if KEEP_BYTES > 0:
         TRIMMER = stat_trim.Trimmer(STAT_FILE, KEEP_BYTES).start()
     if ERROR_FILE:
-        FOLLOWER = error_follow.start(ERROR_FILE)
+        FOLLOWER = error_follow.start(ERROR_FILE, keep_path=ERROR_KEPT_FILE or None)
     if ERROR_FILE and ERROR_KEEP_BYTES > 0:
         stat_trim.Trimmer(ERROR_FILE, ERROR_KEEP_BYTES).start()
+    if ERROR_FILE and ERROR_KEPT_FILE and ERROR_KEPT_BYTES > 0:
+        stat_trim.Trimmer(ERROR_KEPT_FILE, ERROR_KEPT_BYTES).start()
     if RECORD_FILE and RECORD_URL:
         SHIPPER = record_ship.start(RECORD_FILE, RECORD_URL, RUN, STREAM, SHAPE)
     srv.serve_forever()

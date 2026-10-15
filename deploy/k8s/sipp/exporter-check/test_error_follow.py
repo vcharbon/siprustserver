@@ -121,6 +121,22 @@ class Follow(unittest.TestCase):
         self.follower.poll()
         self.assertEqual(self.follower.snapshot().entries, 4)
 
+    def test_the_keep_file_holds_every_entry_but_the_scenarios_own_timer(self):
+        keep = os.path.join(self.dir, "errors.kept.log")
+        follower = error_follow.ErrorFollower(self.path, keep_path=keep)
+        retrans = f"{STAMP}Call-Id: c4, timeout on max UDP retrans for message 9, jumping to label 20 \n"
+        abort = abort_entry("c2", "OPTIONS", "SIP/2.0 480 Temporarily Unavailable")
+        self.append(timeout_entry("c1") + abort + timeout_entry("c3"))
+        follower.poll()
+        self.append(retrans[:30])
+        follower.poll()
+        self.append(retrans[30:] + timeout_entry("c5"))
+        follower.poll()
+        follower.close()
+        self.assertEqual(follower.snapshot().entries, 5)
+        with open(keep) as fh:
+            self.assertEqual(fh.read(), abort + retrans)
+
     def test_a_missing_file_counts_nothing_until_it_appears(self):
         self.follower.poll()
         self.assertEqual(self.follower.snapshot().entries, 0)

@@ -30,6 +30,9 @@ class SimulatedLab:
         self.t0 = clock.now_ms()
 
     def rule(self, call: Call) -> ProcResult | HttpResult | str | None:
+        if call.kind == "run" and call.argv[:2] == ["docker", "run"] and "--name" in call.argv:
+            self.drained.discard(call.argv[call.argv.index("--name") + 1])
+            return None
         if call.kind == "run" and call.argv[:2] == ["docker", "kill"]:
             self.drained.add(call.argv[-1])
             return ProcResult(0, "", "")

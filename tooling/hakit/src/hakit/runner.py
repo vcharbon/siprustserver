@@ -1,8 +1,9 @@
 """`hakit run`: one profile against the lab, from preflight to `verdict.json`.
 
-Start the `run` streams, fire the schedule, drain, collect each generator's
-counter and its records, and compute the verdict from the run directory. An
-interruption heals the event in progress and removes the generators.
+Start the `run` streams, fire the schedule (a load incident starts and stops
+its own stream), drain, collect each generator's counter and its records, and
+compute the verdict from the run directory. An interruption heals the event in
+progress and removes the generators.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from .events import KEEPALIVE_MS, EventJournal
 from .executor import Executor
 from .freshness import Freshness
 from .incident_exec import EventRunner
-from .injection import render
 from .jsonval import Json
 from .lab import Lab
 from .model import Incident
@@ -33,13 +33,11 @@ from .preflight import earlier_open_events, host_facts, limit_errors
 from .profile import Profile
 from .schedule import PlannedEvent, plan
 from .schemas import SchemaSet
-from .sipp_driver import SippStream
+from .streams import StreamLoad, StreamSet
 from .summary import render as render_summary
 from .verdict import compute
 from .vlogs import VictoriaLogs
 from .vm import QueryFailed, VictoriaMetrics
-
-SHIP_WAIT_S = 60
 
 
 class RunRefused(Exception):
@@ -68,7 +66,7 @@ def _dump(p: Path, doc: object) -> None:
 
 @dataclass
 class _Live:
-    streams: list[SippStream] = field(default_factory=lambda: [])
+    streams: StreamSet
     died: set[str] = field(default_factory=lambda: set())
     loading: bool = False
     event: tuple[PlannedEvent, list[Incident]] | None = None
@@ -103,13 +101,9 @@ class Runner:
         for s in profile.streams:
             if s.driver != "sipp":
                 errs.append(f"stream {s.name!r}: driver {s.driver!r} is not implemented by this runner")
-            if s.start != "run":
-                errs.append(f"stream {s.name!r}: `start: incident` streams are not implemented by this runner")
         for ev in plan(profile, self.content.incidents):
             for name in ev.spec.incidents:
                 inc = self.content.incidents[name]
-                if inc.kind != "fault":
-                    errs.append(f"incident {name!r}: load incidents are not implemented by this runner")
                 missing = sorted(set(inc.requires) - set(self.lab.capabilities))
                 if missing:
                     errs.append(f"incident {name!r} requires {missing}, which the lab lacks")
@@ -147,13 +141,15 @@ class Runner:
         run_dir.mkdir(parents=True)
         self._write_inputs(run_dir, run, profile, facts, held, started)
         journal = EventJournal(run, run_dir, self.clock, self.vm)
-        live = _Live()
+        streams = StreamSet(run, run_dir, profile, self.content, self.lab, self.executor, self.clock, self.vlogs, started)
+        live = _Live(streams)
         integrity: list[Json] = []
 
         def wait_until(target_ms: int) -> None:
             self._wait(target_ms, journal, live, integrity, run)
 
-        events = EventRunner(run, run_dir, self.lab, self.executor, self.clock, journal, wait_until)
+        load = StreamLoad(streams, self.clock, wait_until)
+        events = EventRunner(run, run_dir, self.lab, self.executor, self.clock, journal, wait_until, load)
         live.off = OffSchedule(
             run_dir, profile, self.content, journal, events, self.clock, lambda: live.load_start_ms, self.say
         )
@@ -161,7 +157,12 @@ class Runner:
         mark_active(run_dir)
         restore = _raise_on_termination()
         try:
-            self._start_streams(run, run_dir, profile, live)
+            err = streams.start_run_streams()
+            if err is not None:
+                raise RunRefused(err)
+            for s in profile.streams:
+                if s.start == "run":
+                    self.say(f"hakit: stream {s.name} up ({s.cps:g} cps, shape {s.shape})")
             load_start = self.clock.now_ms()
             live.load_start_ms = load_start
             live.fresh = self._freshness(run, profile, started)
@@ -177,7 +178,8 @@ class Runner:
                     self.say(f"hakit: event {ev.event_id} failed; see events/{ev.event_id}/")
             wait_until(load_start + int(profile.duration_s * 1000))
             live.loading = False
-            stream_docs = self._drain(profile, live, journal, run, started)
+            streams.drain(self.clock.now_ms() + int(profile.drain_s * 1000), wait_until)
+            stream_docs = streams.docs()
             close = journal.next_close_ms()
             while close is not None:
                 wait_until(close)
@@ -187,14 +189,12 @@ class Runner:
             if in_progress is not None:
                 ev, incs = in_progress
                 events.heal_only(ev, incs)
-            for s in live.streams:
-                s.remove()
+            streams.remove_all()
             raise
         finally:
             restore()
             clear_active(run_dir)
-        for s in live.streams:
-            s.remove()
+        streams.remove_all()
         records, bad = self.vlogs.export(run, started - 3_600_000, self.clock.now_ms() + 3_600_000)
         with (run_dir / "records.jsonl").open("w") as fh:
             fh.writelines(json.dumps(r) + "\n" for r in records)
@@ -254,27 +254,15 @@ class Runner:
         streams = [(s.name, s.cps, max(s.setup_deadline_s, s.ring_s + s.hold_s)) for s in profile.streams if s.start == "run"]
         return Freshness(run, self.vm, self.vlogs, self.clock, streams, self.lab.live_series, started)
 
-    def _start_streams(self, run: str, run_dir: Path, profile: Profile, live: _Live) -> None:
-        for slot, s in enumerate(profile.streams):
-            sdir = run_dir / "streams" / s.name
-            sdir.mkdir(parents=True)
-            shape = self.content.shapes[s.shape]
-            (sdir / "inject.csv").write_text(render(shape, self.content.catalogs[shape.catalog], self.lab.callees))
-            stream = SippStream(run, s, slot, self.content.scenarios[s.scenario or ""], sdir, self.lab, self.executor)
-            live.streams.append(stream)
-            err = stream.start()
-            if err is not None:
-                raise RunRefused(err)
-            self.say(f"hakit: stream {s.name} up ({s.cps:g} cps, shape {s.shape})")
-
     def _wait(self, target_ms: int, journal: EventJournal, live: _Live, integrity: list[Json], run: str) -> None:
         while True:
             journal.tick()
             if live.loading:
-                for s in live.streams:
-                    if s.stream.name not in live.died and not s.running():
+                for s in live.streams.live():
+                    key = f"{s.stream.name}{s.call_id_tag}"
+                    if key not in live.died and not s.running():
                         at = self.clock.now_ms()
-                        live.died.add(s.stream.name)
+                        live.died.add(key)
                         integrity.append(
                             {"kind": "stream_died", "stream": s.stream.name, "at_ms": at, "detail": "generator exited"}
                         )
@@ -293,38 +281,3 @@ class Runner:
                 step = min(step, close - now)
             self.clock.sleep(step / 1000)
 
-    def _drain(self, profile: Profile, live: _Live, journal: EventJournal, run: str, started: int) -> list[Json]:
-        for s in live.streams:
-            s.drain()
-        deadline = self.clock.now_ms() + int(profile.drain_s * 1000)
-        while any(s.running() for s in live.streams) and self.clock.now_ms() < deadline:
-            self._wait(min(deadline, self.clock.now_ms() + 2000), journal, live, [], run)
-        docs: list[Json] = []
-        for s in live.streams:
-            drained = not s.running()
-            if not drained:
-                s.kill()
-            local = s.local_records()
-            ship_deadline = self.clock.now_ms() + SHIP_WAIT_S * 1000
-            shipped = self.vlogs.count(run, s.stream.name, started - 3_600_000, self.clock.now_ms() + 3_600_000)
-            while shipped != local and self.clock.now_ms() < ship_deadline:
-                self.clock.sleep(2)
-                shipped = self.vlogs.count(run, s.stream.name, started - 3_600_000, self.clock.now_ms() + 3_600_000)
-            c = s.counters()
-            docs.append(
-                {
-                    "stream": s.stream.name,
-                    "shape": s.stream.shape,
-                    "start": s.stream.start,
-                    "cps": s.stream.cps,
-                    "call_limit": s.max_concurrent(),
-                    "calls": c.calls_created,
-                    "not_placed": 0,
-                    "reconciled": True,
-                    "drained": drained,
-                    "exit_code": s.exit_code(),
-                    "local_records": local,
-                    "shipped_records": shipped,
-                }
-            )
-        return docs

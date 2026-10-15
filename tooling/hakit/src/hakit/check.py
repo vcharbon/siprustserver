@@ -51,6 +51,13 @@ def _event_errors(where: str, ev: EventSpec, profile: Profile, content: Content)
         s = profile.stream(ev.stream or "")
         if s is None or s.start != "incident":
             errs.append(f"{where}: load incident {loads[0].name!r} needs `stream` naming a `start: incident` stream")
+        elif loads[0].stop == "drain" and _teardown_s(s) > loads[0].timeouts.heal_s:
+            errs.append(
+                f"{where}: stream {s.name!r} needs up to {_teardown_s(s):g} s to drain, above the "
+                f"heal_s {loads[0].timeouts.heal_s:g} of {loads[0].name!r}"
+            )
+    elif ev.stream is not None and len(incs) == len(ev.incidents):
+        errs.append(f"{where}: `stream` {ev.stream!r} is set but the event fires no load incident")
     combined = len(ev.incidents) > 1
     for inc in incs:
         params = as_obj(ev.params.get(inc.name, {})) if combined else ev.params
@@ -97,6 +104,22 @@ def _hold_errors(where: str, ev: EventSpec, profile: Profile, content: Content) 
     return out
 
 
+def _stop_mix_errors(where: str, events: list[EventSpec], content: Content) -> list[str]:
+    """One `start: incident` stream is stopped one way: its reconciliation
+    depends on it (an abandoned stream is not reconciled)."""
+    modes: dict[str, set[str]] = {}
+    for ev in events:
+        for name in ev.incidents:
+            inc = content.incidents.get(name)
+            if inc is not None and inc.kind == "load" and ev.stream is not None:
+                modes.setdefault(ev.stream, set()).add(inc.stop)
+    return [
+        f"{where}: stream {s!r} is stopped both by drain and by abandon; give each its own stream"
+        for s, m in sorted(modes.items())
+        if len(m) > 1
+    ]
+
+
 def profile_errors(profile: Profile, content: Content) -> list[str]:
     where = f"profile {profile.name!r}"
     errs: list[str] = []
@@ -120,6 +143,7 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
         errs.append(f"{where}: drain_s {profile.drain_s:g} is below the longest stream teardown {teardown:g}")
     sched = profile.schedule
     events = [] if sched is None else sched.cycle + sched.at
+    errs.extend(_stop_mix_errors(where, events, content))
     for i, ev in enumerate(events):
         ew = f"{where} event {i + 1} ({ev.label})"
         errs.extend(_event_errors(ew, ev, profile, content))

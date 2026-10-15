@@ -29,6 +29,7 @@ from .runner import Runner, RunRefused
 from .schedule import PlannedEvent, plan, plan_event
 from .schemas import SchemaSet
 from .jsonl import read_jsonl
+from .streams import RemoveLoad
 from .vm import VictoriaMetrics
 from .events import EventJournal
 
@@ -103,7 +104,7 @@ def cmd_cleanup(content: Content, env: Mapping[str, str], run_dirs: Sequence[Pat
         run = d.name
         profile = parse_profile(as_obj(json.loads((d / "profile.json").read_text())))
         journal = EventJournal(run, d, clock, VictoriaMetrics(executor, lab.vm_url))
-        stepper = EventRunner(run, d, lab, executor, clock, journal, lambda _t: None)
+        stepper = EventRunner(run, d, lab, executor, clock, journal, lambda _t: None, RemoveLoad(executor, run))
         for ev in plan(profile, content.incidents) + manual_events(profile, content, ids):
             if ev.event_id in ids:
                 bad = stepper.heal_only(ev, [content.incidents[n] for n in ev.spec.incidents])

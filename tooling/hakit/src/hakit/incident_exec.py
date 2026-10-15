@@ -1,10 +1,12 @@
-"""One fault event through the incident contract (ADR-0049 §2.2 to §2.6).
+"""One event through the incident contract (ADR-0049 §2.2 to §2.6, §2.8).
 
 Phases in order: `inject`, `injected`, then after the hold `heal`, `healed`,
 then `recovered` once `probe` exits 0 (at once without a probe). A step that
 fails or overruns its timeout records `failed`. Incidents inject in the listed
 order and heal in reverse; heal runs for every incident whose inject was
-attempted, whatever happened after it.
+attempted, whatever happened after it. A fault's inject and heal are its
+executables; a load incident's are the start and the stop of its stream,
+which the runner owns (`LoadSteps`).
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .clock import Clock
 from .events import EventJournal
@@ -26,6 +29,15 @@ from .schedule import PlannedEvent
 PROBE_NOT_YET = 75
 
 type Waiter = Callable[[int], None]
+
+
+class LoadSteps(Protocol):
+    """The inject and heal of a load incident: start and stop the profile stream
+    its event names. Each returns whether the step succeeded and its facts."""
+
+    def start(self, inc: Incident, ev: PlannedEvent) -> tuple[bool, Json]: ...
+
+    def stop(self, inc: Incident, ev: PlannedEvent, interrupted: bool) -> tuple[bool, Json]: ...
 
 
 @dataclass
@@ -55,7 +67,8 @@ def _target(inc: Incident, ev: PlannedEvent, lab: Lab) -> tuple[str, str, str]:
     return selector, namespace, pick
 
 
-def _fmt(v: Scalar) -> str:
+def fmt_param(v: Scalar) -> str:
+    """A parameter as its `HAKIT_PARAM_*` variable spells it."""
     if isinstance(v, bool):
         return "true" if v else "false"
     return f"{v:g}" if isinstance(v, float) else str(v)
@@ -71,6 +84,7 @@ class EventRunner:
         clock: Clock,
         journal: EventJournal,
         wait_until: Waiter,
+        load: LoadSteps,
     ) -> None:
         self.run = run
         self.run_dir = run_dir
@@ -79,6 +93,7 @@ class EventRunner:
         self.clock = clock
         self.journal = journal
         self.wait_until = wait_until
+        self.load = load
 
     def env(self, inc: Incident, ev: PlannedEvent, event_dir: Path) -> dict[str, str]:
         selector, namespace, pick = _target(inc, ev, self.lab)
@@ -92,12 +107,12 @@ class EventRunner:
             "HAKIT_TARGET_NAMESPACE": namespace,
             "HAKIT_TARGET_PICK": pick,
             "HAKIT_KUBE_CONTEXT": self.lab.kube_context,
-            "HAKIT_DURATION_S": _fmt(ev.duration_s),
+            "HAKIT_DURATION_S": fmt_param(ev.duration_s),
             "HAKIT_LIB": str(FAULT_LIB),
             "HAKIT_VM_IMPORT": self.lab.vm_import_url,
         }
         for k, v in _params(inc, ev).items():
-            env[f"HAKIT_PARAM_{k.upper()}"] = _fmt(v)
+            env[f"HAKIT_PARAM_{k.upper()}"] = fmt_param(v)
         return env
 
     def step(self, inc: Incident, ev: PlannedEvent, step: str, timeout_s: float) -> tuple[int, Json | None]:
@@ -122,7 +137,16 @@ class EventRunner:
                 fh.write(f"\nhakit: stdout is not one JSON object: {out[:200]!r}\n")
             return -1, None
 
-    def _simple(self, inc: Incident, ev: PlannedEvent, step: str, done: str, timeout_s: float) -> bool:
+    def _simple(
+        self, inc: Incident, ev: PlannedEvent, step: str, done: str, timeout_s: float, interrupted: bool = False
+    ) -> bool:
+        if inc.kind == "load":
+            ok, load_facts = (
+                self.load.start(inc, ev) if step == "inject" else self.load.stop(inc, ev, interrupted)
+            )
+            self.journal.facts(ev.event_id, inc.name, step, load_facts)
+            self.journal.phase(ev.event_id, inc.name, done if ok else "failed")
+            return ok
         rc, facts = self.step(inc, ev, step, timeout_s)
         if facts is not None:
             self.journal.facts(ev.event_id, inc.name, step, facts)
@@ -183,6 +207,6 @@ class EventRunner:
         failed: list[str] = []
         for inc in reversed(incs):
             self.journal.phase(ev.event_id, inc.name, "heal")
-            if not self._simple(inc, ev, "heal", "healed", inc.timeouts.heal_s):
+            if not self._simple(inc, ev, "heal", "healed", inc.timeouts.heal_s, interrupted=True):
                 failed.append(inc.name)
         return failed

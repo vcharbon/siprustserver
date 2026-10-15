@@ -26,6 +26,10 @@ TXN_BOUND_S = 32
 # logs a line there, and the file is not rotated, since -ringbuffer_* would
 # rotate the record file too.
 ERROR_KEEP_BYTES = 16 * 1024 * 1024
+# Every error entry but the scenario's own receive timer, kept whole for the
+# run (the tail above holds minutes at a high rate), bounded by this tail.
+ERROR_KEPT_FILE = "/stats/errors.kept.log"
+ERROR_KEPT_BYTES = 256 * 1024 * 1024
 # Margin of the global `-recv_timeout` above every timeout of the scenario.
 RECV_BACKSTOP_MARGIN_S = 60
 
@@ -74,8 +78,13 @@ class SippStream:
         stream_dir: Path,
         lab: Lab,
         executor: Executor,
+        call_id_tag: str = "",
     ) -> None:
+        """`call_id_tag` follows the run id in every Call-ID: two generators of
+        one stream in one run (two firings of a load incident) each carry their
+        own, so no Call-ID repeats."""
         self.run = run
+        self.call_id_tag = call_id_tag
         self.stream = stream
         self.slot = slot
         self.scenario = scenario
@@ -127,7 +136,7 @@ class SippStream:
             "setup_ms",
             str(int(s.setup_deadline_s * 1000)),
             "-cid_str",
-            f"%u-%p-{self.run}@%s",
+            f"%u-%p-{self.run}{self.call_id_tag}@%s",
             "-i",
             self.lab.sipp_ip(self.slot),
             "-p",
@@ -170,6 +179,7 @@ class SippStream:
             + ["-e", f"SIPP_STREAM={self.stream.name}", "-e", f"SIPP_SHAPE={self.stream.shape}"]
             + ["-e", "SIPP_RECORD_FILE=/stats/records.jsonl", "-e", f"SIPP_RUN={self.run}"]
             + ["-e", f"SIPP_ERROR_KEEP_BYTES={ERROR_KEEP_BYTES}"]
+            + ["-e", f"SIPP_ERROR_KEPT_FILE={ERROR_KEPT_FILE}", "-e", f"SIPP_ERROR_KEPT_BYTES={ERROR_KEPT_BYTES}"]
             + ["-e", f"SIPP_RECORD_URL={self.lab.vlogs_url_from_generators}"]
             + [self.lab.sipp_image, "python3", "/exporter/sipp_stat_exporter.py"],
             timeout_s=60,
