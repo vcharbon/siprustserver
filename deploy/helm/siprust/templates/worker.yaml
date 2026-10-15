@@ -55,15 +55,12 @@ spec:
       labels:
         {{- include "siprust.podLabels" (dict "app" "b2bua-worker" "extra" $w.podLabels) | nindent 8 }}
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9091"
-        {{- with $w.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "siprust.podAnnotations" (dict "base" (dict "prometheus.io/scrape" "true" "prometheus.io/port" "9091") "extra" $w.podAnnotations) | nindent 8 }}
     spec:
       serviceAccountName: b2bua-worker
       {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.scheduling" $w | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- with include "siprust.podSecurity" $w | trim }}{{ . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: {{ int $w.terminationGracePeriodSeconds }}
       {{- with $w.extraInitContainers }}
       initContainers:
@@ -85,7 +82,7 @@ spec:
             # 0.0.0.0 is not routable.
             - name: POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
-            {{- with include "siprust.envMap" $env | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with $w.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -93,6 +90,9 @@ spec:
             - { name: sip, containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9091, protocol: TCP }
             - { name: repl, containerPort: {{ int $w.replication.port }}, protocol: TCP }
+            {{- with $w.extraPorts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           readinessProbe:
             httpGet: { path: /ready, port: 9091 }
             initialDelaySeconds: 1

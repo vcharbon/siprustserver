@@ -29,12 +29,7 @@ spec:
       labels:
         {{- include "siprust.podLabels" (dict "app" "cdr-consumer" "extra" $c.podLabels) | nindent 8 }}
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9093"
-        prometheus.io/path: "/metrics"
-        {{- with $c.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "siprust.podAnnotations" (dict "base" (dict "prometheus.io/scrape" "true" "prometheus.io/port" "9093" "prometheus.io/path" "/metrics") "extra" $c.podAnnotations) | nindent 8 }}
     spec:
       {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.scheduling" $c | trim }}{{ . | nindent 6 }}{{- end }}
@@ -46,7 +41,7 @@ spec:
           args: {{ toJson . }}
           {{- end }}
           env:
-            {{- with include "siprust.envMap" $env | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with $c.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -7,10 +7,10 @@ workers fail open meanwhile, so it is a single point of failure of the limiter
 function only. Inert until a decision returns `call_limiter` entries.
 */}}
 {{- $l := .Values.callLimiter }}
-{{- $env := dict
-  "LIMITER_LISTEN" "0.0.0.0:8080"
-  "LIMITER_LEASE_SECONDS" (toString (int $l.leaseSeconds))
-}}
+{{- $env := dict "LIMITER_LISTEN" "0.0.0.0:8080" }}
+{{- if not (kindIs "invalid" $l.leaseSeconds) }}
+{{- $_ := set $env "LIMITER_LEASE_SECONDS" (toString (int $l.leaseSeconds)) }}
+{{- end }}
 {{- include "siprust.overlayEnv" (dict "into" $env "from" $l.env) }}
 apiVersion: apps/v1
 kind: Deployment
@@ -29,12 +29,7 @@ spec:
       labels:
         {{- include "siprust.podLabels" (dict "app" "call-limiter" "extra" $l.podLabels) | nindent 8 }}
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
-        prometheus.io/path: "/metrics"
-        {{- with $l.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "siprust.podAnnotations" (dict "base" (dict "prometheus.io/scrape" "true" "prometheus.io/port" "8080" "prometheus.io/path" "/metrics") "extra" $l.podAnnotations) | nindent 8 }}
     spec:
       {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.scheduling" $l | trim }}{{ . | nindent 6 }}{{- end }}
@@ -50,7 +45,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           env:
-            {{- with include "siprust.envMap" $env | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with $l.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -58,16 +58,13 @@ spec:
       labels:
         {{- include "siprust.podLabels" (dict "app" "sip-front-proxy" "extra" $p.podLabels) | nindent 8 }}
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        checksum/keepalived: {{ tpl (.Files.Get "files/keepalived.conf") . | sha256sum }}
-        {{- with $p.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- $base := dict "prometheus.io/scrape" "true" "prometheus.io/port" "9090" "checksum/keepalived" (tpl (.Files.Get "files/keepalived.conf") . | sha256sum) }}
+        {{- include "siprust.podAnnotations" (dict "base" $base "extra" $p.podAnnotations) | nindent 8 }}
     spec:
       serviceAccountName: sip-front-proxy
       {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.scheduling" $p | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- with include "siprust.podSecurity" $p | trim }}{{ . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: {{ int $p.terminationGracePeriodSeconds }}
       # keepalived answers ARP for the VIPs on the node's interfaces, and reads
       # the proxy's /healthz over the shared host network.
@@ -88,6 +85,7 @@ spec:
           env:
             - { name: PROXY_VIP, value: {{ $vip | quote }} }
             - { name: EXTERNAL_VIP, value: {{ $extVip | quote }} }
+            - { name: EXTRA_VIPS, value: {{ include "siprust.extraVips" . | quote }} }
             - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
           securityContext:
             privileged: true
@@ -109,7 +107,7 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: kid } }
             - name: PROXY_HMAC_KEY
               valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: key } }
-            {{- with include "siprust.envMap" $env | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with $p.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -117,6 +115,9 @@ spec:
           ports:
             - { name: sip, containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9090, protocol: TCP }
+            {{- with $p.extraPorts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           # Ready on >=1 routable worker (ADR-0012 D4), never on VRRP mastership,
           # so the warm backup stays Ready. Liveness: process up and every recv
           # shard turning (ADR-0046 D4); an idle shard is never stalled.
@@ -146,7 +147,7 @@ spec:
           lifecycle:
             preStop:
               exec: { command: ["/bin/sh", "-c", "pkill keepalived; sleep 1"] }
-          {{- with $p.keepalivedResources }}
+          {{- with $p.keepalived.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}

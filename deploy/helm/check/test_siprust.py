@@ -4,7 +4,7 @@ import subprocess
 import unittest
 
 from charts import (SIPRUST, Doc, container, env, find, kind_values, names, pod_spec, render,
-                    render_error, secret_key_bytes, workloads)
+                    render_error, workloads)
 
 KIND = kind_values(SIPRUST)
 SHELL_VAR = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
@@ -30,8 +30,9 @@ class ShellScripts(unittest.TestCase):
         assigned = {a or b for a, b in SHELL_ASSIGNED.findall(script)}
         unset = read - assigned - set(env(c))
         self.assertEqual(unset, set(), f"{name} reads variables nothing sets")
-        for value in env(c).values():
-            self.assertNotEqual(value, "", f"{name} gets an empty env value")
+        for var, value in env(c).items():
+            if var != "EXTRA_VIPS":
+                self.assertNotEqual(value, "", f"{name} gets an empty {var}")
 
     def test_vip_loopback_bounds_every_neighbour_queue(self) -> None:
         proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
@@ -87,7 +88,7 @@ class Network(unittest.TestCase):
         def checksum(*args: str) -> str:
             proxy = find(render(SIPRUST, *KIND, *args), "Deployment", "sip-front-proxy")
             return str(proxy["spec"]["template"]["metadata"]["annotations"]["checksum/keepalived"])
-        self.assertNotEqual(checksum(), checksum("--set", "proxy.virtualRouterId=52"))
+        self.assertNotEqual(checksum(), checksum("--set", "proxy.keepalived.virtualRouterId=52"))
 
 
 class ProxyKnobs(unittest.TestCase):
@@ -108,21 +109,6 @@ class ProxyKnobs(unittest.TestCase):
 
     def test_a_shard_count_out_of_range_is_refused(self) -> None:
         self.assertIn("recvShards", render_error(SIPRUST, *KIND, "--set", "proxy.recvShards=0"))
-
-
-class CookieKey(unittest.TestCase):
-    def test_the_chart_keeps_one_32_byte_key(self) -> None:
-        secret = find(render(SIPRUST, *KIND), "Secret", "sip-front-proxy-hmac")
-        self.assertEqual(secret["metadata"]["annotations"]["helm.sh/resource-policy"], "keep")
-        self.assertEqual(len(secret_key_bytes(secret)), 32)
-
-    def test_an_existing_secret_is_read_and_none_is_made(self) -> None:
-        docs = render(SIPRUST, *KIND, "--set", "proxy.hmac.existingSecret=edge-cookie")
-        self.assertNotIn(("Secret", "sip-front-proxy-hmac"), names(docs))
-        c = container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
-        refs = {e["name"]: e["valueFrom"]["secretKeyRef"]["name"]
-                for e in c["env"] if "valueFrom" in e and "secretKeyRef" in e["valueFrom"]}
-        self.assertEqual(refs, {"PROXY_HMAC_KID": "edge-cookie", "PROXY_HMAC_KEY": "edge-cookie"})
 
 
 class Backends(unittest.TestCase):
@@ -167,6 +153,47 @@ class Backends(unittest.TestCase):
         w = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
         self.assertEqual(w["LIMITER_URL"], "call-limiter.lab-b.svc.cluster.local:8080")
         self.assertEqual({d["metadata"]["namespace"] for d in docs}, {"lab-b"})
+
+
+class GenericDefaults(unittest.TestCase):
+    """Without the kind values a product inherits the runners' own defaults and
+    any node: the chart sets only the env it derives from its values."""
+
+    NETWORK = ["--set", "network.proxyVip=10.0.255.250", "--set", "network.internalInterface=ens3",
+               "--set", "network.externalVip=203.0.113.250", "--set", "network.externalInterface=ens4",
+               "--set", "network.internalCidrs=10.0.0.0/16"]
+    DERIVED = {
+        "b2bua-worker": {"B2BUA_LISTEN", "B2BUA_ADVERTISE", "B2BUA_ORDINAL", "B2BUA_METRICS",
+                         "B2BUA_REPL", "B2BUA_REPL_LISTEN", "B2BUA_REPL_PORT", "B2BUA_REPL_SERVICE",
+                         "B2BUA_OUTBOUND_PROXY", "B2BUA_REQUIRE_OUTBOUND_PROXY", "LIMITER_URL",
+                         "B2BUA_CDR_RABBITMQ_URL", "B2BUA_CDR_RABBITMQ_QUEUE",
+                         "B2BUA_CDR_RABBITMQ_MAX_LEN", "OTEL_EXPORTER_OTLP_ENDPOINT",
+                         "SIP_TRACE_HEADER"},
+        "sip-front-proxy": {"PROXY_LISTEN", "PROXY_ADVERTISE", "PROXY_LISTEN_EXT",
+                            "PROXY_ADVERTISE_EXT", "PROXY_FACE_INT_CIDRS", "PROXY_METRICS",
+                            "PROXY_WORKER_SERVICE", "PROXY_WORKER_PORT",
+                            "OTEL_EXPORTER_OTLP_ENDPOINT", "SIP_TRACE_HEADER"},
+        "call-limiter": {"LIMITER_LISTEN"},
+        "cdr-consumer": {"CDR_AMQP_URL", "CDR_QUEUE", "CDR_QUEUE_MAX_LEN", "CDR_METRICS_LISTEN",
+                         "CDR_PAYLOAD"},
+    }
+
+    def test_only_derived_env_and_no_node_placement(self) -> None:
+        docs = render(SIPRUST, *self.NETWORK)
+        for w in workloads(docs):
+            spec = pod_spec(w)
+            name = w["metadata"]["name"]
+            self.assertNotIn("nodeSelector", spec, name)
+            self.assertNotIn("tolerations", spec, name)
+            if name in self.DERIVED:
+                self.assertEqual(set(env(container(w, name))), self.DERIVED[name], name)
+
+    def test_workers_spread_softly_by_default_and_hard_on_the_lab(self) -> None:
+        def spread(*args: str) -> list[str]:
+            w = find(render(SIPRUST, *args), "StatefulSet", "b2bua-worker")
+            return [c["whenUnsatisfiable"] for c in pod_spec(w)["topologySpreadConstraints"]]
+        self.assertEqual(spread(*self.NETWORK), ["ScheduleAnyway"])
+        self.assertEqual(spread(*KIND), ["DoNotSchedule"])
 
 
 class Workloads(unittest.TestCase):

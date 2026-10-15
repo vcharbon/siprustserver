@@ -7,77 +7,158 @@
     "image": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "tag", "pullPolicy"],
+      "required": [
+        "repository",
+        "tag",
+        "pullPolicy"
+      ],
       "properties": {
-        "repository": { "type": "string", "minLength": 1 },
-        "tag": { "type": "string", "minLength": 1 },
-        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
       }
     },
     "resources": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "requests": { "type": "object" },
-        "limits": { "type": "object" }
+        "requests": {
+          "type": "object"
+        },
+        "limits": {
+          "type": "object"
+        }
       }
     },
-    "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    }
   },
   "properties": {
-    "global": { "type": "object" },
+    "enabled": {
+      "type": "boolean"
+    },
+    "global": {
+      "type": "object"
+    },
     "hostStack": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "address": { "type": "string" },
-        "metricsPort": { "$ref": "#/definitions/port" },
-        "logsPort": { "$ref": "#/definitions/port" }
+        "address": {
+          "type": "string"
+        },
+        "metricsPort": {
+          "$ref": "#/definitions/port"
+        },
+        "logsPort": {
+          "$ref": "#/definitions/port"
+        }
       }
     },
-    "clusterName": { "type": "string" },
-    "imagePullSecrets": { "type": "array", "items": { "type": "object" } },
+    "clusterName": {
+      "type": "string"
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
     "vmagent": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" },
-        "scrapeInterval": { "type": "string", "pattern": "^[0-9]+(ms|s|m)$" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "scrapeInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m)$"
+        },
         "extraScrapeConfigs": {
           "type": "array",
-          "items": { "type": "object", "required": ["job_name"] }
+          "items": {
+            "type": "object",
+            "required": [
+              "job_name"
+            ]
+          }
         },
-        "resources": { "$ref": "#/definitions/resources" }
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     },
     "kubeStateMetrics": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" },
-        "resources": { "$ref": "#/definitions/resources" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     },
     "nodeExporter": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" },
-        "port": { "$ref": "#/definitions/port" },
-        "resources": { "$ref": "#/definitions/resources" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "port": {
+          "$ref": "#/definitions/port"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     },
     "logShipping": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" },
-        "excludePaths": { "type": "array", "items": { "type": "string" } },
-        "resources": { "$ref": "#/definitions/resources" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "excludePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     }
   }

@@ -39,16 +39,49 @@ imagePullPolicy: {{ .Values.keepalivedImage.pullPolicy }}
 {{- end }}
 
 {{/*
-Plain env entries of a name -> value map, sorted by name; a null value is
-left out. Takes the map.
+Plain env entries of a name -> value map, sorted by name, each value through
+`tpl` so it may name the release; a null value is left out. Takes
+(dict "root" $ "env" <map>).
 */}}
 {{- define "siprust.envMap" -}}
-{{- range $name := keys . | sortAlpha }}
-{{- $value := get $ $name }}
+{{- $root := .root }}
+{{- range $name := keys .env | sortAlpha }}
+{{- $value := get $.env $name }}
 {{- if not (kindIs "invalid" $value) }}
 - name: {{ $name }}
-  value: {{ $value | toString | quote }}
+  value: {{ tpl ($value | toString) $root | quote }}
 {{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Pod annotations: the chart's own (the prometheus.io scrape target), the
+component's podAnnotations over them key by key. Takes (dict "base" <map>
+"extra" <podAnnotations>).
+*/}}
+{{- define "siprust.podAnnotations" -}}
+{{- $all := deepCopy .base }}
+{{- range $k, $v := .extra }}
+{{- $_ := set $all $k $v }}
+{{- end }}
+{{- toYaml $all }}
+{{- end }}
+
+{{/*
+Pod-level settings of the worker and the proxy: priorityClassName and the pod
+securityContext with its sysctls. Takes the component values.
+*/}}
+{{- define "siprust.podSecurity" -}}
+{{- with .priorityClassName }}
+priorityClassName: {{ . }}
+{{- end }}
+{{- $sc := deepCopy (.podSecurityContext | default dict) }}
+{{- with .sysctls }}
+{{- $_ := set $sc "sysctls" . }}
+{{- end }}
+{{- with $sc }}
+securityContext:
+  {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end }}
 
@@ -115,4 +148,13 @@ A network value the proxy and masq-exempt require, named in the error. Takes
 {{- define "siprust.net" -}}
 {{- $v := index .root.Values.network .key }}
 {{- required (printf "network.%s is required by the proxy and masq-exempt" .key) $v }}
+{{- end }}
+
+{{/* The addresses of proxy.keepalived.extraVirtualIps, space-separated. */}}
+{{- define "siprust.extraVips" -}}
+{{- $out := list }}
+{{- range .Values.proxy.keepalived.extraVirtualIps }}
+{{- $out = append $out .address }}
+{{- end }}
+{{- join " " $out }}
 {{- end }}

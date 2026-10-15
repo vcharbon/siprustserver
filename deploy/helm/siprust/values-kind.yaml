@@ -1,8 +1,9 @@
-# The kind lab: deploy/k8s/cluster.yaml's nodes (tier=edge|app|infra) on the
-# docker bridges deploy/k8s/lib/net-env.sh lays out with its defaults: the
-# internal kind bridge 172.20.0.0/16 (eth0 on a node, gateway = the host) and
-# the no-NAT external bridge 192.168.60.0/24 the edge nodes join as eth1.
-# The helm check asserts these values agree with net-env.sh's defaults.
+# The kind lab: deploy/k8s/cluster.yaml's nodes (tier=edge|app|infra, infra
+# tainted) on the docker bridges deploy/k8s/lib/net-env.sh lays out with its
+# defaults: the internal kind bridge 172.20.0.0/16 (eth0 on a node, gateway =
+# the host) and the no-NAT external bridge 192.168.60.0/24 the edge nodes join
+# as eth1. The helm check asserts these values agree with net-env.sh's
+# defaults, and that the lab renders what deploy/k8s/manifests renders.
 #
 #   helm upgrade --install siprust deploy/helm/siprust -n sip-test \
 #     --create-namespace -f deploy/helm/siprust/values-kind.yaml [--set ...]
@@ -28,12 +29,69 @@ worker:
   # The lab is the HA lab: worker kills fail over to the survivor.
   replication:
     enabled: true
+  nodeSelector: { tier: app }
+  # One worker per app node: a node fault takes one worker, and a primary
+  # and its backup share no CPU.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector: { matchLabels: { app: b2bua-worker } }
+  env:
+    # b-leg destination allow-list: a non-IP callee host matching no suffix is
+    # refused 503 before any DNS lookup; the lab's callees are IP literals.
+    WORKER_ALLOWED_TARGET_SUFFIXES: ".svc.cluster.local"
+    # The loadgen's correlation id rides from the a-leg onto every b-leg.
+    B2BUA_RELAY_HEADERS: "X-Loadgen-Id"
+    # Signalling socket buffers (ADR-0033); the host preflight raises
+    # net.core.wmem_max / rmem_max to match.
+    B2BUA_UDP_SNDBUF: "4194304"
+    B2BUA_UDP_RCVBUF: "4194304"
+    # The keepalive interval bounds the backup reaper (1.5x) and the reboot
+    # budget (0.5x) of the HA fail-back (ADR-0011 X11); the 120 s answer grace
+    # rides out a load burst's response shedding.
+    B2BUA_KEEPALIVE_SEC: "300"
+    B2BUA_KEEPALIVE_TIMEOUT_SEC: "120"
+    LIMITER_REFRESH_SECONDS: "40"
+    LIMITER_TIMEOUT_MS: "150"
+    LIMITER_RELEASE_TIMEOUT_MS: "2000"
+    # Every call runs the limiter chain under a cap it never reaches.
+    B2BUA_STRESS_LIMITER_ID: "global-stress"
+    B2BUA_STRESS_LIMITER_LIMIT: "999999"
+    B2BUA_DRAIN_GRACE_MS: "5000"
+    B2BUA_DRAIN_MIN_MS: "1000"
+    B2BUA_DRAIN_RELEASE_FLUSH_MS: "3000"
+    # Heap profiling for /debug/heap at jemalloc's default interval (ADR-0038).
+    _RJEM_MALLOC_CONF: "prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/tmp/jeprof/auto"
 
-# The chaos tooling's limiter network cut runs `tc netem` inside the pod.
+proxy:
+  nodeSelector: { tier: edge }
+  env:
+    PROXY_UDP_SNDBUF: "4194304"
+    PROXY_UDP_RCVBUF: "4194304"
+    # Freed pages go back to the host within a second.
+    _RJEM_MALLOC_CONF: "dirty_decay_ms:1000,muzzy_decay_ms:1000"
+
+# The shared dependencies sit alone on the tainted infra node. The chaos
+# tooling's limiter network cut runs `tc netem` inside the limiter pod.
 callLimiter:
+  leaseSeconds: 120
   securityContext:
     capabilities:
       add: ["NET_ADMIN"]
+  nodeSelector: { tier: infra }
+  tolerations:
+    - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
+
+cdr:
+  rabbitmq:
+    nodeSelector: { tier: infra }
+    tolerations:
+      - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
+  consumer:
+    nodeSelector: { tier: infra }
+    tolerations:
+      - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
 
 masqExempt:
   enabled: true

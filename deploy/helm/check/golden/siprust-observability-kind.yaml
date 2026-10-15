@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/name: fluent-bit
     app.kubernetes.io/part-of: siprust-observability
     helm.sh/chart: siprust-observability-0.1.0
-  name: fluent-bit
+  name: observability-fluent-bit
 rules:
 - apiGroups:
   - ''
@@ -30,7 +30,7 @@ metadata:
     app.kubernetes.io/name: kube-state-metrics
     app.kubernetes.io/part-of: siprust-observability
     helm.sh/chart: siprust-observability-0.1.0
-  name: kube-state-metrics
+  name: observability-kube-state-metrics
 rules:
 - apiGroups:
   - ''
@@ -141,7 +141,7 @@ metadata:
     app.kubernetes.io/name: vmagent
     app.kubernetes.io/part-of: siprust-observability
     helm.sh/chart: siprust-observability-0.1.0
-  name: vmagent
+  name: observability-vmagent
 rules:
 - apiGroups:
   - ''
@@ -188,11 +188,11 @@ metadata:
     app.kubernetes.io/name: fluent-bit
     app.kubernetes.io/part-of: siprust-observability
     helm.sh/chart: siprust-observability-0.1.0
-  name: fluent-bit
+  name: observability-fluent-bit
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: fluent-bit
+  name: observability-fluent-bit
 subjects:
 - kind: ServiceAccount
   name: fluent-bit
@@ -208,11 +208,11 @@ metadata:
     app.kubernetes.io/name: kube-state-metrics
     app.kubernetes.io/part-of: siprust-observability
     helm.sh/chart: siprust-observability-0.1.0
-  name: kube-state-metrics
+  name: observability-kube-state-metrics
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kube-state-metrics
+  name: observability-kube-state-metrics
 subjects:
 - kind: ServiceAccount
   name: kube-state-metrics
@@ -228,11 +228,11 @@ metadata:
     app.kubernetes.io/name: vmagent
     app.kubernetes.io/part-of: siprust-observability
     helm.sh/chart: siprust-observability-0.1.0
-  name: vmagent
+  name: observability-vmagent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: vmagent
+  name: observability-vmagent
 subjects:
 - kind: ServiceAccount
   name: vmagent

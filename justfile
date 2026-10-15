@@ -131,7 +131,8 @@ image tag='siprustserver:dev':
 
 # The helm charts (deploy/helm): lint, the render contracts, the extension
 # points through a downstream chart, the kind values against net-env.sh and
-# the golden renders (needs `helm` and PyYAML, a few seconds).
+# the old manifests, and the golden renders (needs `helm`, `envsubst` and
+# PyYAML, a few seconds).
 helm-check:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/helm/check
 

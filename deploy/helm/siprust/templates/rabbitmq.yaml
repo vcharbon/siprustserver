@@ -24,12 +24,7 @@ spec:
       labels:
         app: rabbitmq
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "15692"
-        prometheus.io/path: "/metrics"
-        {{- with $r.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "siprust.podAnnotations" (dict "base" (dict "prometheus.io/scrape" "true" "prometheus.io/port" "15692" "prometheus.io/path" "/metrics") "extra" $r.podAnnotations) | nindent 8 }}
     spec:
       {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.scheduling" $r | trim }}{{ . | nindent 6 }}{{- end }}

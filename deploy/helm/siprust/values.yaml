@@ -6,9 +6,16 @@
 # selects pods by: one release per namespace. A downstream chart that depends
 # on this one replaces a runner through `image` + `command`, adds env through
 # `env` (by name) and `extraEnv`, and adds sidecars through `extraContainers` /
-# `extraVolumes` / `extraVolumeMounts`. Env values are strings. A null in
+# `extraVolumes` / `extraVolumeMounts`. Env values are strings, rendered
+# through `tpl` (a value may name `{{ .Release.Namespace }}`). A null in
 # user-supplied values (-f, --set) removes a default env; Helm keeps a default
 # a parent chart's own values.yaml sets to null, so a parent overrides it.
+#
+# The defaults here leave every runner knob at the runner's own default and
+# schedule on any node; the kind lab's settings are values-kind.yaml.
+
+# Read by a parent chart's `condition: siprust.enabled` only.
+enabled: true
 
 # Default image of every runner (worker, proxy, call limiter, CDR consumer);
 # a component's own `image` overrides it key by key.
@@ -76,55 +83,36 @@ worker:
   # Env by name over the env the chart derives (pod identity, listen and
   # advertise, metrics, outbound proxy, replication, limiter URL, CDR sink,
   # tracing): a name here overrides a derived one.
-  env:
-    # b-leg destination allow-list: a non-IP callee host matching no suffix is
-    # refused 503 before any DNS lookup. `*` disables the gate.
-    WORKER_ALLOWED_TARGET_SUFFIXES: ".svc.cluster.local"
-    # Headers copied from the a-leg INVITE onto every originated b-leg INVITE.
-    B2BUA_RELAY_HEADERS: "X-Loadgen-Id"
-    # Signalling socket buffers (ADR-0033), clamped at the host's
-    # net.core.wmem_max / rmem_max.
-    B2BUA_UDP_SNDBUF: "4194304"
-    B2BUA_UDP_RCVBUF: "4194304"
-    # In-dialog OPTIONS keepalive interval and its answer grace. The interval
-    # bounds the backup reaper (1.5x) and the reboot budget (0.5x) of the HA
-    # fail-back (ADR-0011 X11); the grace rides out a burst's shedding.
-    B2BUA_KEEPALIVE_SEC: "300"
-    B2BUA_KEEPALIVE_TIMEOUT_SEC: "120"
-    # Limiter lease refresh cadence, admit timeout and release budget.
-    LIMITER_REFRESH_SECONDS: "40"
-    LIMITER_TIMEOUT_MS: "150"
-    LIMITER_RELEASE_TIMEOUT_MS: "2000"
-    # A limiter entry the scripted backend attaches to every call, cap never
-    # reached, so every call runs the admit/release/refresh chain. Empty ID
-    # disables it.
-    B2BUA_STRESS_LIMITER_ID: "global-stress"
-    B2BUA_STRESS_LIMITER_LIMIT: "999999"
-    # Drain on SIGTERM: grace, earliest exit once every backup applied its
-    # head (ADR-0031 D2), release flush bound. terminationGracePeriodSeconds
-    # stays above grace + flush.
-    B2BUA_DRAIN_GRACE_MS: "5000"
-    B2BUA_DRAIN_MIN_MS: "1000"
-    B2BUA_DRAIN_RELEASE_FLUSH_MS: "3000"
-    # Heap profiling for /debug/heap at jemalloc's default interval (ADR-0038).
-    _RJEM_MALLOC_CONF: "prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/tmp/jeprof/auto"
+  env: {}
   # EnvVar entries appended after `env` (valueFrom and the like).
   extraEnv: []
+  # Container ports added to the worker container.
+  extraPorts: []
   extraVolumeMounts: []
   extraVolumes: []
   # Sidecar containers of the worker pod.
   extraContainers: []
   extraInitContainers: []
+  # Over the chart's prometheus.io annotations, key by key.
   podAnnotations: {}
   podLabels: {}
+  podSecurityContext: {}
+  # Namespaced sysctls of the pod (spec.securityContext.sysctls).
+  sysctls: []
+  priorityClassName: ""
   terminationGracePeriodSeconds: 30
   resources:
     requests: { cpu: "250m", memory: "128Mi" }
     limits: { memory: "2Gi" }
-  nodeSelector: { tier: app }
+  nodeSelector: {}
   tolerations: []
   affinity: {}
-  topologySpreadConstraints: []
+  # A primary and its backup on different nodes when the nodes allow it.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector: { matchLabels: { app: b2bua-worker } }
 
 proxy:
   enabled: true
@@ -142,35 +130,46 @@ proxy:
     cpsSize: null
   # The stickiness-cookie signing key both proxies share (ADR-0046), keys
   # `kid` and `key`. Empty `existingSecret`: the chart keeps one Secret
-  # (sip-front-proxy-hmac) whose key is drawn once and reused by every
-  # upgrade; changing it 403s the in-dialog requests of calls in progress.
+  # (sip-front-proxy-hmac) whose key is drawn on the first install and read
+  # back by every upgrade; changing it 403s the in-dialog requests of calls in
+  # progress. `kid` applies to that first draw only.
   hmac:
     existingSecret: ""
     kid: k1
   # Per-neighbour bound of the unresolved ARP queue in the proxy node's
   # network namespace (ADR-0033), set by the vip-loopback init container.
   unresQlenBytes: 16384
-  # VRRP virtual router id of the VIP pair.
-  virtualRouterId: 51
-  env:
-    # Signalling socket buffers (ADR-0033), far above what one unresolved
-    # neighbour can pin; clamped at the host's wmem_max / rmem_max.
-    PROXY_UDP_SNDBUF: "4194304"
-    PROXY_UDP_RCVBUF: "4194304"
-    _RJEM_MALLOC_CONF: "dirty_decay_ms:1000,muzzy_decay_ms:1000"
+  keepalived:
+    # VRRP virtual router id of the VIP pair.
+    virtualRouterId: 51
+    # More addresses the VRRP pair floats with the two VIPs, each
+    # `{address, interface}` (e.g. a media relay's public address). Each goes
+    # on lo like the VIPs and, with masq-exempt on, out of the masquerade.
+    extraVirtualIps: []
+    # More health checks, each `{name, script}` and optional `interval`,
+    # `timeout`, `fall`, `rise`, `weight` (default 1, 1, 3, 2, -50); every one
+    # weighs on the same priority as the proxy's /healthz check.
+    extraTrackScripts: []
+    resources: {}
+  env: {}
   extraEnv: []
+  extraPorts: []
   extraVolumeMounts: []
   extraVolumes: []
+  # Sidecar containers of the proxy pod, on the node's network (hostNetwork):
+  # the place of a component on the external plane, such as a media relay.
   extraContainers: []
   extraInitContainers: []
   podAnnotations: {}
   podLabels: {}
+  podSecurityContext: {}
+  sysctls: []
+  priorityClassName: ""
   terminationGracePeriodSeconds: 30
   resources:
     requests: { cpu: "500m", memory: "64Mi" }
     limits: { memory: "512Mi" }
-  keepalivedResources: {}
-  nodeSelector: { tier: edge }
+  nodeSelector: {}
   tolerations: []
 
 callLimiter:
@@ -178,8 +177,9 @@ callLimiter:
   image: {}
   command: ["/usr/local/bin/call-limiter-runner"]
   args: []
-  # The lease every admit and refresh answer states (ADR-0040).
-  leaseSeconds: 120
+  # LIMITER_LEASE_SECONDS, the lease every admit and refresh answer states
+  # (ADR-0040). Null keeps the runner default.
+  leaseSeconds: null
   env: {}
   extraEnv: []
   extraVolumeMounts: []
@@ -191,16 +191,16 @@ callLimiter:
   resources:
     requests: { cpu: "100m", memory: "32Mi" }
     limits: { memory: "256Mi" }
-  nodeSelector: { tier: infra }
-  tolerations:
-    - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
+  nodeSelector: {}
+  tolerations: []
 
 # The CDR transport: one record per terminated call, worker -> RabbitMQ ->
-# consumer. One queue declaration bound shared by producer and consumer.
+# consumer.
 cdr:
   enabled: true
   queue: cdr
-  # x-max-length (drop-head) of the queue, declared alike by both sides.
+  # x-max-length (drop-head) of the queue. Producer and consumer declare the
+  # queue with the same arguments, so the chart states it for both.
   maxLength: 100000
   rabbitmq:
     image:
@@ -215,9 +215,8 @@ cdr:
     resources:
       requests: { cpu: "200m", memory: "256Mi" }
       limits: { memory: "1Gi" }
-    nodeSelector: { tier: infra }
-    tolerations:
-      - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
+    nodeSelector: {}
+    tolerations: []
   consumer:
     enabled: true
     image: {}
@@ -236,12 +235,11 @@ cdr:
     resources:
       requests: { cpu: "50m", memory: "32Mi" }
       limits: { memory: "128Mi" }
-    nodeSelector: { tier: infra }
-    tolerations:
-      - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
+    nodeSelector: {}
+    tolerations: []
 
 # kindnetd's KIND-MASQ-AGENT chain masquerades everything outside the pod
-# CIDR; this DaemonSet keeps both VIPs and the external subnet out of it and
+# CIDR; this DaemonSet keeps the VIPs and the external subnet out of it and
 # drops a packet for the internal VIP arriving on the external interface
 # (ADR-0048). kind clusters only.
 masqExempt:

@@ -31,10 +31,10 @@ data:
     \ 5\n    garp_master_refresh 10\n    garp_master_refresh_repeat 2\n    virtual_ipaddress\
     \ {\n        172.20.255.250 dev eth0\n        192.168.60.250 dev eth1\n    }\n\
     \    track_interface {\n        eth1\n    }\n    track_script {\n        chk_proxy_health\n\
-    \    }\n    # Both VIPs stay on lo at all times, so either pod binds them and\
-    \ sources\n    # its egress from them.\n    notify_master \"/bin/sh -c 'ip addr\
-    \ add 172.20.255.250/32 dev lo 2>/dev/null; ip addr add 192.168.60.250/32 dev\
-    \ lo 2>/dev/null; true'\"\n    notify_backup \"/bin/sh -c 'ip addr add 172.20.255.250/32\
+    \    }\n    # Every floating address stays on lo at all times, so either pod binds\
+    \ it\n    # and sources its egress from it.\n    notify_master \"/bin/sh -c 'ip\
+    \ addr add 172.20.255.250/32 dev lo 2>/dev/null; ip addr add 192.168.60.250/32\
+    \ dev lo 2>/dev/null; true'\"\n    notify_backup \"/bin/sh -c 'ip addr add 172.20.255.250/32\
     \ dev lo 2>/dev/null; ip addr add 192.168.60.250/32 dev lo 2>/dev/null; true'\"\
     \n    notify_fault  \"/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null;\
     \ ip addr add 192.168.60.250/32 dev lo 2>/dev/null; true'\"\n}\n"
@@ -74,31 +74,34 @@ spec:
       containers:
       - args:
         - "#!/bin/sh\n# The masq-exempt DaemonSet's loop, on every node's network\
-          \ namespace\n# (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTERNAL_SUBNET,\n\
-          # EXTERNAL_INTERFACE and PERIOD from its env; the chart never rewrites this\
-          \ text.\n#\n# kindnetd's KIND-MASQ-AGENT chain (nat POSTROUTING) exempts\
-          \ only the pod CIDR.\n# The SIP plane keeps real addresses: worker -> internal\
-          \ VIP would be SNAT'd to\n# a node IP with its source port remapped, and\
-          \ the VIP-sourced replies would no\n# longer match the peer's conntrack\
-          \ tuple; the external plane is never\n# masqueraded either. One RETURN rule\
-          \ per identity and direction at position 1,\n# re-asserted every PERIOD\
-          \ seconds so a kindnetd reconcile wipes them for one\n# period at most.\n\
-          #\n# One filter rule rides the same loop: a packet for the internal VIP\
-          \ arriving\n# on the external interface is dropped. The proxy trusts whatever\
-          \ reaches its\n# internal socket (ADR-0048), and an edge node holds both\
-          \ VIPs.\necho \"masq-exempt: asserting KIND-MASQ-AGENT RETURN rules for\
-          \ $PROXY_VIP, $EXTERNAL_VIP, $EXTERNAL_SUBNET and the $EXTERNAL_INTERFACE\
-          \ -> $PROXY_VIP DROP (period ${PERIOD}s)\"\nwhile true; do\n  iptables -C\
-          \ INPUT -i \"$EXTERNAL_INTERFACE\" -d \"$PROXY_VIP/32\" -j DROP 2>/dev/null\
-          \ \\\n    || { iptables -I INPUT 1 -i \"$EXTERNAL_INTERFACE\" -d \"$PROXY_VIP/32\"\
-          \ -j DROP && echo \"masq-exempt: inserted INPUT -i $EXTERNAL_INTERFACE -d\
-          \ $PROXY_VIP/32 DROP\"; }\n  if iptables -t nat -nL KIND-MASQ-AGENT >/dev/null\
-          \ 2>&1; then\n    for rule in \"-s $PROXY_VIP/32\" \"-d $PROXY_VIP/32\"\
-          \ \"-s $EXTERNAL_VIP/32\" \"-d $EXTERNAL_SUBNET\"; do\n      # shellcheck\
-          \ disable=SC2086 # $rule is two words by design\n      iptables -t nat -C\
-          \ KIND-MASQ-AGENT $rule -j RETURN 2>/dev/null \\\n        || { iptables\
-          \ -t nat -I KIND-MASQ-AGENT 1 $rule -j RETURN && echo \"masq-exempt: inserted\
-          \ $rule RETURN\"; }\n    done\n  fi\n  sleep \"$PERIOD\"\ndone\n"
+          \ namespace\n# (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTRA_VIPS\
+          \ (space-separated,\n# may be empty), EXTERNAL_SUBNET, EXTERNAL_INTERFACE\
+          \ and PERIOD from its env;\n# the chart never rewrites this text.\n#\n#\
+          \ kindnetd's KIND-MASQ-AGENT chain (nat POSTROUTING) exempts only the pod\
+          \ CIDR.\n# The SIP plane keeps real addresses: worker -> internal VIP would\
+          \ be SNAT'd to\n# a node IP with its source port remapped, and the VIP-sourced\
+          \ replies would no\n# longer match the peer's conntrack tuple; the external\
+          \ plane is never\n# masqueraded either. One RETURN rule per identity and\
+          \ direction at position 1,\n# re-asserted every PERIOD seconds so a kindnetd\
+          \ reconcile wipes them for one\n# period at most.\n#\n# One filter rule\
+          \ rides the same loop: a packet for the internal VIP arriving\n# on the\
+          \ external interface is dropped. The proxy trusts whatever reaches its\n\
+          # internal socket (ADR-0048), and an edge node holds both VIPs.\n# One RETURN\
+          \ rule in KIND-MASQ-AGENT: $1 is -s or -d, $2 the address.\nexempt() {\n\
+          \  iptables -t nat -C KIND-MASQ-AGENT \"$1\" \"$2\" -j RETURN 2>/dev/null\
+          \ \\\n    || { iptables -t nat -I KIND-MASQ-AGENT 1 \"$1\" \"$2\" -j RETURN\
+          \ && echo \"masq-exempt: inserted $1 $2 RETURN\"; }\n}\necho \"masq-exempt:\
+          \ asserting KIND-MASQ-AGENT RETURN rules for $PROXY_VIP, $EXTERNAL_VIP $EXTRA_VIPS,\
+          \ $EXTERNAL_SUBNET and the $EXTERNAL_INTERFACE -> $PROXY_VIP DROP (period\
+          \ ${PERIOD}s)\"\nwhile true; do\n  iptables -C INPUT -i \"$EXTERNAL_INTERFACE\"\
+          \ -d \"$PROXY_VIP/32\" -j DROP 2>/dev/null \\\n    || { iptables -I INPUT\
+          \ 1 -i \"$EXTERNAL_INTERFACE\" -d \"$PROXY_VIP/32\" -j DROP && echo \"masq-exempt:\
+          \ inserted INPUT -i $EXTERNAL_INTERFACE -d $PROXY_VIP/32 DROP\"; }\n  if\
+          \ iptables -t nat -nL KIND-MASQ-AGENT >/dev/null 2>&1; then\n    exempt\
+          \ -s \"$PROXY_VIP/32\"\n    exempt -d \"$PROXY_VIP/32\"\n    exempt -s \"\
+          $EXTERNAL_VIP/32\"\n    exempt -d \"$EXTERNAL_SUBNET\"\n    for vip in $EXTRA_VIPS;\
+          \ do\n      exempt -s \"$vip/32\"\n      exempt -d \"$vip/32\"\n    done\n\
+          \  fi\n  sleep \"$PERIOD\"\ndone\n"
         command:
         - /bin/sh
         - -c
@@ -107,6 +110,8 @@ spec:
           value: 172.20.255.250
         - name: EXTERNAL_VIP
           value: 192.168.60.250
+        - name: EXTRA_VIPS
+          value: ''
         - name: EXTERNAL_SUBNET
           value: 192.168.60.0/24
         - name: EXTERNAL_INTERFACE
@@ -383,7 +388,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/keepalived: 91c2c14621e75d8a05fb87b9d5b43648ebdaf4bdd03dbcc5271a6a22ce09a0e0
+        checksum/keepalived: 203cd9b2155700566efdd73335a5820709512bb9ea0b1cb8d1bb14ab24d1e533
         prometheus.io/port: '9090'
         prometheus.io/scrape: 'true'
       labels:
@@ -501,25 +506,25 @@ spec:
       initContainers:
       - args:
         - "#!/bin/sh\n# The proxy pod's init container, on the node's network namespace\n\
-          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP and UNRES_QLEN_BYTES from\
-          \ its\n# env; the chart never rewrites this text.\n#\n# Both VIPs go on\
-          \ lo before the proxy starts, so its bind(VIP:port) on each\n# face succeeds\
-          \ on the VRRP backup too. Strict ARP: with the VIPs on lo of both\n# nodes,\
-          \ only the interface owning an address answers ARP for it.\n#\n# A next\
-          \ hop the kernel cannot resolve holds every datagram sent to it on the\n\
-          # neighbour's unresolved queue, charged to the sending socket, for the whole\n\
-          # ARP cycle (ADR-0033). The default bound equals a default socket send buffer;\n\
-          # UNRES_QLEN_BYTES bounds it per neighbour on every interface. net.core.wmem_max\n\
-          # is the host's and read-only here (the host preflight raises it).\nset\
-          \ -e\nip addr add \"$PROXY_VIP/32\" dev lo 2>/dev/null || ip addr show dev\
-          \ lo | grep -q \"$PROXY_VIP/32\"\nip addr add \"$EXTERNAL_VIP/32\" dev lo\
-          \ 2>/dev/null || ip addr show dev lo | grep -q \"$EXTERNAL_VIP/32\"\necho\
-          \ 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\necho 2 > /proc/sys/net/ipv4/conf/all/arp_announce\n\
+          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTRA_VIPS (space-separated,\n\
+          # may be empty) and UNRES_QLEN_BYTES from its env; the chart never rewrites\n\
+          # this text.\n#\n# Every floating address goes on lo before the proxy and\
+          \ its sidecars start,\n# so a bind(VIP:port) succeeds on the VRRP backup\
+          \ too. Strict ARP: with the\n# VIPs on lo of both nodes, only the interface\
+          \ owning an address answers ARP\n# for it.\n#\n# A next hop the kernel cannot\
+          \ resolve holds every datagram sent to it on the\n# neighbour's unresolved\
+          \ queue, charged to the sending socket, for the whole\n# ARP cycle (ADR-0033).\
+          \ The default bound equals a default socket send buffer;\n# UNRES_QLEN_BYTES\
+          \ bounds it per neighbour on every interface. net.core.wmem_max\n# is the\
+          \ host's and read-only here (the host preflight raises it).\nset -e\nfor\
+          \ vip in $PROXY_VIP $EXTERNAL_VIP $EXTRA_VIPS; do\n  ip addr add \"$vip/32\"\
+          \ dev lo 2>/dev/null || ip addr show dev lo | grep -q \"$vip/32\"\ndone\n\
+          echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\necho 2 > /proc/sys/net/ipv4/conf/all/arp_announce\n\
           echo 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore\necho 2 > /proc/sys/net/ipv4/conf/lo/arp_announce\n\
           for f in /proc/sys/net/ipv4/neigh/*/unres_qlen_bytes; do\n  echo \"$UNRES_QLEN_BYTES\"\
           \ > \"$f\" || echo \"vip-loopback: WARN could not set $f\"\ndone\necho \"\
-          vip-loopback: $PROXY_VIP/32 + $EXTERNAL_VIP/32 + strict-ARP + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES\
-          \ ready\"\n"
+          vip-loopback: $PROXY_VIP $EXTERNAL_VIP $EXTRA_VIPS on lo + strict-ARP +\
+          \ neigh unres_qlen_bytes=$UNRES_QLEN_BYTES ready\"\n"
         command:
         - /bin/sh
         - -c
@@ -528,6 +533,8 @@ spec:
           value: 172.20.255.250
         - name: EXTERNAL_VIP
           value: 192.168.60.250
+        - name: EXTRA_VIPS
+          value: ''
         - name: UNRES_QLEN_BYTES
           value: '16384'
         image: siprustserver-keepalived:dev
@@ -922,3 +929,10 @@ spec:
         tier: app
       serviceAccountName: b2bua-worker
       terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app: b2bua-worker
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule

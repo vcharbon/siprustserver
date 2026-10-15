@@ -1,9 +1,10 @@
 """The siprust chart as a dependency of a downstream product chart: the
-extension points a product uses (its own worker runner, a media relay sidecar,
-env by name, per-component sizing) reach the render through the parent's
-values. A default env is removed by a null in user-supplied values (-f,
---set); Helm keeps a subchart default a parent chart's own values.yaml sets
-to null, so there a product overrides it."""
+extension points a product uses (its own worker runner, a media relay beside
+the proxy on the external plane, env by name, per-component sizing, the
+dependency's condition) reach the render through the parent's values. A null
+in user-supplied values (-f, --set) removes an env the parent sets; Helm keeps
+a subchart default a parent chart's own values.yaml sets to null, so there a
+product overrides it."""
 import shutil
 import tempfile
 import unittest
@@ -20,85 +21,102 @@ PRODUCT_VALUES: dict[str, Any] = {
         "worker": {
             "image": {"repository": "product-worker", "tag": "1.2.3"},
             "command": ["/usr/local/bin/product-runner"],
-            "env": {
-                "DECISION_URL": "http://decisions:8081",
-                "B2BUA_STRESS_LIMITER_ID": "",
-                "B2BUA_KEEPALIVE_SEC": "600",
-            },
+            "env": {"DECISION_URL": "http://decisions:8081", "B2BUA_KEEPALIVE_SEC": "600",
+                    "B2BUA_STRESS_LIMITER_ID": ""},
             "extraEnv": [{"name": "NODE_NAME",
                           "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}],
-            "extraContainers": [{
-                "name": "media-relay",
-                "image": "media-relay:0.1",
-                "ports": [{"name": "rtp", "containerPort": 30000, "protocol": "UDP"}],
-                "volumeMounts": [{"name": "relay-state", "mountPath": "/var/lib/relay"}],
-            }],
-            "extraVolumes": [{"name": "relay-state", "emptyDir": {}}],
             "resources": {"requests": {"cpu": "1"}, "limits": {"memory": "3Gi"}},
         },
         "proxy": {
             "recvShards": 4,
             "selfGate": {"cpsRate": 1000, "cpsSize": 500},
             "resources": {"requests": {"cpu": "2", "memory": "64Mi"}},
+            "keepalived": {
+                "extraVirtualIps": [{"address": "192.168.60.240", "interface": "eth1"}],
+                "extraTrackScripts": [{"name": "chk_relay", "script": "/usr/bin/relay-ok"}],
+            },
+            "extraContainers": [{
+                "name": "media-relay",
+                "image": "media-relay:0.1",
+                "args": ["--listen", "192.168.60.240"],
+                "ports": [{"name": "rtp", "containerPort": 30000, "protocol": "UDP"}],
+                "volumeMounts": [{"name": "relay-state", "mountPath": "/var/lib/relay"}],
+            }],
+            "extraVolumes": [{"name": "relay-state", "emptyDir": {}}],
         },
         "cdr": {"enabled": False},
     },
 }
-LAB_VALUES = {"siprust": {"worker": {"env": {"B2BUA_STRESS_LIMITER_LIMIT": None}}}}
+LAB_VALUES = {"siprust": {"worker": {"env": {"B2BUA_KEEPALIVE_SEC": None}}}}
 
 
 class DownstreamChart(unittest.TestCase):
+    chart = Path()
+    root = Path()
     docs: list[Doc] = []
 
     @classmethod
     def setUpClass(cls) -> None:
-        root = Path(tempfile.mkdtemp(prefix="helm-downstream-"))
-        cls.addClassCleanup(shutil.rmtree, root)
-        chart = root / "product"
-        chart.mkdir()
-        (chart / "Chart.yaml").write_text(yaml.safe_dump({
+        cls.root = Path(tempfile.mkdtemp(prefix="helm-downstream-"))
+        cls.addClassCleanup(shutil.rmtree, cls.root)
+        cls.chart = cls.root / "product"
+        cls.chart.mkdir()
+        (cls.chart / "Chart.yaml").write_text(yaml.safe_dump({
             "apiVersion": "v2", "name": "product", "version": "0.1.0",
             "dependencies": [{"name": "siprust", "version": "0.1.0",
-                              "repository": f"file://{SIPRUST}"}],
+                              "repository": f"file://{SIPRUST}",
+                              "condition": "siprust.enabled"}],
         }))
-        (chart / "values.yaml").write_text(yaml.safe_dump(PRODUCT_VALUES))
-        built = helm("dependency", "build", str(chart))
+        (cls.chart / "values.yaml").write_text(yaml.safe_dump(PRODUCT_VALUES))
+        built = helm("dependency", "build", str(cls.chart))
         if built.returncode != 0:
             raise AssertionError(f"helm dependency build failed:\n{built.stderr}")
-        (root / "lab.yaml").write_text(yaml.safe_dump(LAB_VALUES))
-        out = helm("template", "product", str(chart), "-n", "product-lab",
-                   "-f", str(root / "lab.yaml"))
+        (cls.root / "lab.yaml").write_text(yaml.safe_dump(LAB_VALUES))
+        cls.docs = cls.render("-f", str(cls.root / "lab.yaml"))
+
+    @classmethod
+    def render(cls, *args: str) -> list[Doc]:
+        out = helm("template", "product", str(cls.chart), "-n", "product-lab", *args)
         if out.returncode != 0:
             raise AssertionError(f"helm template product failed:\n{out.stderr}")
-        cls.docs = [d for d in yaml.safe_load_all(out.stdout) if d]
+        return [d for d in yaml.safe_load_all(out.stdout) if d]
 
     def worker(self) -> Doc:
         return find(self.docs, "StatefulSet", "b2bua-worker")
+
+    def proxy(self) -> Doc:
+        return find(self.docs, "Deployment", "sip-front-proxy")
 
     def test_the_product_runs_its_own_worker_runner(self) -> None:
         c = container(self.worker(), "b2bua-worker")
         self.assertEqual(c["image"], "product-worker:1.2.3")
         self.assertEqual(c["imagePullPolicy"], "IfNotPresent")
         self.assertEqual(c["command"], ["/usr/local/bin/product-runner"])
+        self.assertEqual(c["resources"],
+                         {"requests": {"cpu": "1", "memory": "128Mi"}, "limits": {"memory": "3Gi"}})
 
-    def test_env_by_name_adds_overrides_and_removes(self) -> None:
+    def test_env_by_name_adds_and_a_user_null_removes(self) -> None:
         c = container(self.worker(), "b2bua-worker")
         e = env(c)
         self.assertEqual(e["DECISION_URL"], "http://decisions:8081")
-        self.assertEqual(e["B2BUA_KEEPALIVE_SEC"], "600")
         self.assertEqual(e["B2BUA_STRESS_LIMITER_ID"], "")
-        self.assertNotIn("B2BUA_STRESS_LIMITER_LIMIT", e)
+        self.assertNotIn("B2BUA_KEEPALIVE_SEC", e)
         self.assertEqual(c["env"][-1]["name"], "NODE_NAME")
 
-    def test_a_media_relay_sidecar_rides_the_worker_pod(self) -> None:
-        spec = pod_spec(self.worker())
-        self.assertEqual([c["name"] for c in spec["containers"]], ["b2bua-worker", "media-relay"])
-        self.assertEqual(spec["volumes"], [{"name": "relay-state", "emptyDir": {}}])
-        self.assertEqual(container(self.worker(), "b2bua-worker")["resources"],
-                         {"requests": {"cpu": "1", "memory": "128Mi"}, "limits": {"memory": "3Gi"}})
+    def test_a_media_relay_rides_the_proxy_pod_on_its_own_floating_address(self) -> None:
+        spec = pod_spec(self.proxy())
+        self.assertEqual([c["name"] for c in spec["containers"]],
+                         ["sip-front-proxy", "keepalived", "media-relay"])
+        self.assertIn({"name": "relay-state", "emptyDir": {}}, spec["volumes"])
+        self.assertTrue(spec["hostNetwork"])
+        self.assertEqual(env(container(self.proxy(), "vip-loopback"))["EXTRA_VIPS"],
+                         "192.168.60.240")
+        conf = find(self.docs, "ConfigMap", "sip-front-proxy-keepalived")["data"]["keepalived.conf"]
+        self.assertIn("192.168.60.240 dev eth1", conf)
+        self.assertIn("vrrp_script chk_relay {", conf)
 
     def test_the_proxy_is_sized_for_the_product(self) -> None:
-        c = container(find(self.docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
+        c = container(self.proxy(), "sip-front-proxy")
         e = env(c)
         self.assertEqual((e["PROXY_RECV_SHARDS"], e["PROXY_SELF_GATE_CPS_RATE"],
                           e["PROXY_SELF_GATE_CPS_SIZE"]), ("4", "1000", "500"))
@@ -108,6 +126,9 @@ class DownstreamChart(unittest.TestCase):
         self.assertNotIn(("Deployment", "rabbitmq"), names(self.docs))
         self.assertTrue(all(d["metadata"].get("namespace", "product-lab") == "product-lab"
                             for d in self.docs))
+
+    def test_the_dependency_condition_drops_the_whole_chart(self) -> None:
+        self.assertEqual(self.render("--set", "siprust.enabled=false"), [])
 
 
 if __name__ == "__main__":

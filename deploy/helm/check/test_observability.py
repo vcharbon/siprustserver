@@ -5,15 +5,44 @@ import yaml
 
 from charts import OBSERVABILITY, container, find, kind_values, names, render, render_error
 
-KIND = kind_values(OBSERVABILITY)
+KIND = [*kind_values(OBSERVABILITY), "--set", "clusterName=kind-sip-e2e"]
 COLLECTORS = {("Deployment", "vmagent"), ("Deployment", "kube-state-metrics"),
               ("DaemonSet", "node-exporter"), ("DaemonSet", "fluent-bit")}
 
 
 class Collectors(unittest.TestCase):
-    def test_every_collector_is_on_by_default(self) -> None:
-        self.assertLessEqual(COLLECTORS, names(render(OBSERVABILITY, *KIND,
-                                                      namespace="observability")))
+    def test_every_collector_is_on_by_default_with_its_key_settings(self) -> None:
+        docs = render(OBSERVABILITY, *KIND, namespace="observability")
+        self.assertLessEqual(COLLECTORS, names(docs))
+        vmagent = container(find(docs, "Deployment", "vmagent"), "vmagent")
+        self.assertIn("-remoteWrite.url=http://172.20.0.1:8428/api/v1/write", vmagent["args"])
+        self.assertIn("-promscrape.config=/config/vmagent.yaml", vmagent["args"])
+        self.assertEqual(find(docs, "Deployment", "vmagent")["spec"]["template"]["spec"]
+                         ["serviceAccountName"], "vmagent")
+        ksm = find(docs, "Deployment", "kube-state-metrics")
+        self.assertEqual(ksm["spec"]["template"]["metadata"]["annotations"],
+                         {"prometheus.io/scrape": "true", "prometheus.io/port": "8080"})
+        self.assertEqual(container(ksm, "kube-state-metrics")["image"],
+                         "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0")
+        node = find(docs, "DaemonSet", "node-exporter")
+        spec = node["spec"]["template"]["spec"]
+        self.assertTrue(spec["hostNetwork"] and spec["hostPID"])
+        self.assertEqual(spec["tolerations"], [{"operator": "Exists"}])
+        self.assertEqual(container(node, "node-exporter")["ports"][0]["hostPort"], 9100)
+        logs = find(docs, "DaemonSet", "fluent-bit")
+        self.assertEqual(logs["spec"]["template"]["spec"]["tolerations"], [{"operator": "Exists"}])
+        conf = find(docs, "ConfigMap", "fluent-bit-config")["data"]["fluent-bit.conf"]
+        self.assertRegex(conf, r"Host\s+172\.20\.0\.1\n\s+Port\s+9428\n")
+        self.assertIn("Path              /var/log/containers/*.log", conf)
+
+    def test_cluster_scoped_objects_carry_the_release_namespace(self) -> None:
+        docs = render(OBSERVABILITY, *KIND, namespace="obs-b")
+        scoped = sorted(d["metadata"]["name"] for d in docs
+                        if d["kind"] in ("ClusterRole", "ClusterRoleBinding"))
+        self.assertEqual(scoped, sorted(2 * ["obs-b-vmagent", "obs-b-kube-state-metrics",
+                                             "obs-b-fluent-bit"]))
+        for binding in (d for d in docs if d["kind"] == "ClusterRoleBinding"):
+            self.assertEqual(binding["roleRef"]["name"], binding["metadata"]["name"])
 
     def test_each_collector_turns_off_alone(self) -> None:
         for key, obj in (("vmagent", ("Deployment", "vmagent")),

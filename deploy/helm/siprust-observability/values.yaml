@@ -1,6 +1,11 @@
 # Values of the siprust-observability chart: the in-cluster collectors. The
 # stores and Grafana live outside the cluster (deploy/observability/stack), so
 # their history survives a cluster teardown. Every collector is on by default.
+# The cluster-scoped objects (ClusterRole, ClusterRoleBinding) carry the
+# release namespace as a prefix, so two releases in two namespaces coexist.
+
+# Read by a parent chart's `condition: siprust-observability.enabled` only.
+enabled: true
 
 # Where VictoriaMetrics and VictoriaLogs listen, as the pods reach them.
 # Required.

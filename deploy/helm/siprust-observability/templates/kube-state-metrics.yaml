@@ -11,7 +11,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kube-state-metrics
+  name: {{ .Release.Namespace }}-kube-state-metrics
   labels:
     {{- include "obs.labels" (dict "root" $ "app" "kube-state-metrics") | nindent 4 }}
 rules:
@@ -52,13 +52,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kube-state-metrics
+  name: {{ .Release.Namespace }}-kube-state-metrics
   labels:
     {{- include "obs.labels" (dict "root" $ "app" "kube-state-metrics") | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kube-state-metrics
+  name: {{ .Release.Namespace }}-kube-state-metrics
 subjects:
   - kind: ServiceAccount
     name: kube-state-metrics

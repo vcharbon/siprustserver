@@ -18,7 +18,8 @@ from charts import (GOLDEN, OBSERVABILITY, SIPRUST, canonical, container, env, f
 class Lint(unittest.TestCase):
     def test_both_charts_lint_clean_with_the_kind_values(self) -> None:
         for chart in (SIPRUST, OBSERVABILITY):
-            out = helm("lint", "--strict", str(chart), *kind_values(chart))
+            out = helm("lint", "--strict", str(chart), *kind_values(chart),
+                       "--set", "clusterName=kind-sip-e2e" if chart == OBSERVABILITY else "enabled=true")
             self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_the_sut_chart_lints_without_a_proxy(self) -> None:
@@ -49,13 +50,13 @@ class NetEnvAgreement(unittest.TestCase):
     def test_the_worker_gets_the_lab_trace_settings(self) -> None:
         w = find(render(SIPRUST, *kind_values(SIPRUST)), "StatefulSet", "b2bua-worker")
         e = env(container(w, "b2bua-worker"))
-        self.assertEqual(e["SIP_TRACE_HEADER"], "1")
-        self.assertTrue(e["OTEL_EXPORTER_OTLP_ENDPOINT"].startswith("http://"))
+        self.assertEqual((e["SIP_TRACE_HEADER"], e["OTEL_EXPORTER_OTLP_ENDPOINT"]),
+                         ("1", "http://172.20.0.1:10428/insert/opentelemetry"))
 
 
 class Golden(unittest.TestCase):
-    def check(self, chart: Path, namespace: str) -> None:
-        got = canonical(render(chart, *kind_values(chart), namespace=namespace))
+    def check(self, chart: Path, namespace: str, *args: str) -> None:
+        got = canonical(render(chart, *kind_values(chart), *args, namespace=namespace))
         path = GOLDEN / f"{chart.name}-kind.yaml"
         if os.environ.get("HELM_GOLDEN_UPDATE") == "1":
             path.parent.mkdir(exist_ok=True)
@@ -72,7 +73,7 @@ class Golden(unittest.TestCase):
         self.check(SIPRUST, "sip-test")
 
     def test_the_collectors_render(self) -> None:
-        self.check(OBSERVABILITY, "observability")
+        self.check(OBSERVABILITY, "observability", "--set", "clusterName=kind-sip-e2e")
 
 
 if __name__ == "__main__":

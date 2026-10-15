@@ -26,6 +26,16 @@ export OBS_ENABLE=0
 # shellcheck source-path=SCRIPTDIR source=../k8s/run.sh
 source "$HELM_DIR/../k8s/run.sh"
 
+# run.sh's up() preflight without envsubst: the chart path renders no manifest
+# through it.
+preflight() {
+  local t
+  for t in kind kubectl docker helm; do command -v "$t" >/dev/null || die "missing tool: $t"; done
+  [ -f "$CLUSTER_CONFIG" ] || die "cluster.yaml missing"
+  [ -f "$SIPP_DIR/Dockerfile" ] || die "sipp/Dockerfile missing (vendored sipp build context)"
+  [ -d "$SCENARIOS" ] || die "sipp/scenarios/ missing (vendored sipp scenarios)"
+}
+
 helm_release() { # <release> <chart dir> <namespace> [helm args]
   local release="$1" chart="$2" ns="$3"; shift 3
   log "helm upgrade --install $release ($ns)"
@@ -54,11 +64,12 @@ require_host_stack() {
 }
 
 lab_deploy() {
-  command -v helm >/dev/null || die "missing tool: helm"
+  preflight
   require_infra_node
   require_no_raw_deploy
   require_host_stack
-  helm_release siprust-observability "$HELM_DIR/siprust-observability" "$OBS_NS"
+  helm_release siprust-observability "$HELM_DIR/siprust-observability" "$OBS_NS" \
+    --set "clusterName=kind-$CLUSTER"
   # The UAS containers first: the first one is the workers' scripted callee.
   sipp_uas_up
   helm_release siprust "$HELM_DIR/siprust" "$NS" "$@"
