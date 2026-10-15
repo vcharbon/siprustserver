@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "treatment-catalog.v1.schema.json",
+  "title": "treatment-catalog.v1",
+  "description": "The call treatments a system under test offers, by shape id: how a caller requests each one, the callee-side legs it opens, and the endings that count as success. Read by the runner, the SIPp injection-file renderer, loadgen and the classifier. ADR-0049.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "name", "shapes"],
+  "properties": {
+    "schema": { "const": "treatment-catalog.v1" },
+    "name": {
+      "description": "The catalog name, unique on the search path; a run profile names catalogs by it.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "description": { "type": "string" },
+    "placeholders": {
+      "description": "The placeholders `${name}` the request values of this catalog use, each with what the consumer fills in. A consumer refuses a catalog naming a placeholder it does not fill.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "shapes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/shape" }
+    }
+  },
+  "$defs": {
+    "shape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shape", "description", "request", "expected", "load_safe"],
+      "properties": {
+        "shape": {
+          "description": "The shape id: unique across every catalog on the search path. It is the record's `shape` and the `shape` label of every series.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "description": { "type": "string" },
+        "request": {
+          "description": "What the caller's initial INVITE carries to request the treatment. Values may hold `${name}` placeholders.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ruri_user": {
+              "description": "The Request-URI and To user part.",
+              "type": "string"
+            },
+            "headers": {
+              "description": "Header fields added to the INVITE, in order.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "value"],
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[A-Za-z0-9!%'*+.^_`|~-]+$" },
+                  "value": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "legs": {
+          "description": "The callee-side legs the treatment opens toward the generator, in the order they are opened, and how a generator playing them tells them apart.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/leg" },
+          "default": []
+        },
+        "expected": {
+          "description": "The caller endings that count as success; any other ending is an impact.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/ending" }
+        },
+        "load_safe": {
+          "description": "The shape keeps its expected endings under sustained load (no timer of the treatment races the generator's own timing). A run profile refuses a stream on a shape that is not.",
+          "type": "boolean"
+        }
+      }
+    },
+    "leg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "ruri_prefixes", "expected"],
+      "properties": {
+        "role": {
+          "description": "The leg's name in the record's `legs`.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "ruri_prefixes": {
+          "description": "Request-URI user-part prefixes that select this leg on the generator's callee socket; the longest match wins.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected": {
+          "description": "The leg endings that count as success. A primary route the treatment fails over from expects `rejected` with its code.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/ending" }
+        }
+      }
+    },
+    "ending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ending"],
+      "properties": {
+        "ending": { "enum": ["answered", "rejected", "abandoned"] },
+        "code": {
+          "description": "The final's status code; required for `rejected`.",
+          "type": "integer",
+          "minimum": 300,
+          "maximum": 699
+        },
+        "early_media": {
+          "description": "For `rejected`: whether early media must precede the final. Absent, either.",
+          "type": "boolean"
+        }
+      },
+      "if": { "properties": { "ending": { "const": "rejected" } } },
+      "then": { "required": ["code"] }
+    }
+  }
+}

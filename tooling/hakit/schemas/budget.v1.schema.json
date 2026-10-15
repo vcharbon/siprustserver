@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "budget.v1.schema.json",
+  "title": "budget.v1",
+  "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly` and `unattributed` take no budget. ADR-0049.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "name", "description"],
+  "properties": {
+    "schema": { "const": "budget.v1" },
+    "name": {
+      "description": "Equal to the file stem; unique on the search path.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "description": { "type": "string" },
+    "setup_failed": {
+      "description": "Allowances for failed setups, each keyed by stream, final code and reason. A failed setup matching no entry is a finding.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stream", "code", "reason"],
+        "properties": {
+          "stream": {
+            "description": "A stream name, or `*` for each stream separately.",
+            "type": "string",
+            "pattern": "^([a-z][a-z0-9_]*|\\*)$"
+          },
+          "code": {
+            "description": "The final's status code; 0 is a setup with no final (`no_final`). Never a wildcard.",
+            "type": "integer",
+            "anyOf": [
+              { "const": 0 },
+              { "minimum": 300, "maximum": 699 }
+            ]
+          },
+          "reason": {
+            "description": "The record's `reason`, or `*` for any.",
+            "type": "string",
+            "minLength": 1
+          },
+          "max_calls": { "type": "integer", "minimum": 0 },
+          "max_seconds": {
+            "description": "The allowance in seconds of the stream's offered rate: the count may reach max_seconds × the stream's cps.",
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          { "required": ["max_calls"] },
+          { "required": ["max_seconds"] }
+        ]
+      }
+    },
+    "setup_slow": {
+      "description": "Slow setups allowed in the window. `threshold_ms` replaces the profile's `setup_slow_ms` inside the window.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "threshold_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "max_calls": { "type": "integer", "minimum": 0 },
+        "max_seconds": { "type": "number", "minimum": 0 }
+      },
+      "oneOf": [
+        { "required": ["max_calls"] },
+        { "required": ["max_seconds"] }
+      ]
+    },
+    "cdr_mismatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_calls"],
+      "properties": {
+        "max_calls": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "recovery": {
+      "description": "How long after `healed` traffic may take to come back to its baseline. Absent, it must be back before the window closes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_s"],
+      "properties": {
+        "max_s": { "type": "number", "minimum": 0 },
+        "tolerance": {
+          "description": "The relative distance from the baseline that counts as back.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.1
+        },
+        "baseline_s": {
+          "description": "The length of the baseline, ending at `inject`.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 60
+        },
+        "hold_s": {
+          "description": "How long traffic must stay within tolerance to count as back.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 10
+        }
+      }
+    },
+    "classes": {
+      "description": "Allowances for impact classes a product added on the search path (`classes/`), by class name.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["max"],
+        "properties": {
+          "max": { "type": "number", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

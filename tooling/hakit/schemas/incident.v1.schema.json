@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "incident.v1.schema.json",
+  "title": "incident.v1",
+  "description": "The `incident.yaml` of an incident directory `incidents/<name>/`, beside its executables `inject`, `heal` and optional `probe`. It says what the incident does and to what; it never says what impact is tolerated. ADR-0049.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "name", "description", "kind"],
+  "properties": {
+    "schema": { "const": "incident.v1" },
+    "name": {
+      "description": "Equal to the directory name; unique on the search path. The `incident` label of `sip_chaos_event`.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "description": { "type": "string" },
+    "kind": {
+      "description": "`fault`: acts on a deployed component. `load`: starts a load stream at inject and stops it cleanly at heal.",
+      "enum": ["fault", "load"]
+    },
+    "target": {
+      "description": "The pods the incident acts on. A run profile event may override it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector"],
+      "properties": {
+        "selector": {
+          "description": "A Kubernetes label selector.",
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": { "type": "string", "minLength": 1 },
+        "pick": {
+          "description": "`one`: the executable picks one live pod of the selector (and names it on stdout). `all`: every pod of the selector.",
+          "enum": ["one", "all"],
+          "default": "one"
+        }
+      }
+    },
+    "params": {
+      "description": "The incident's parameters. A parameter without `default` must be set by the run profile event.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "description"],
+        "properties": {
+          "type": { "enum": ["string", "integer", "number", "boolean"] },
+          "default": { "type": ["string", "integer", "number", "boolean"] },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "duration_s": {
+      "description": "The default time between `injected` and `heal`. 0 heals at once (a kill whose recovery is the platform's own).",
+      "type": "number",
+      "minimum": 0,
+      "default": 0
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inject_s": { "type": "number", "exclusiveMinimum": 0, "default": 60 },
+        "heal_s": { "type": "number", "exclusiveMinimum": 0, "default": 120 },
+        "probe_s": {
+          "description": "How long after `healed` the probe may keep answering not-yet before the event fails.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 300
+        },
+        "probe_interval_s": { "type": "number", "exclusiveMinimum": 0, "default": 2 }
+      }
+    },
+    "requires": {
+      "description": "Capabilities the incident needs from the lab (`kind`, `docker`, `chaos-mesh`, …). The runner refuses a profile whose lab lacks one, before the run starts.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+      "uniqueItems": true
+    }
+  },
+  "if": { "properties": { "kind": { "const": "fault" } } },
+  "then": { "required": ["target"] }
+}

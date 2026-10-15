@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "verdict.v1.schema.json",
+  "title": "verdict.v1",
+  "description": "The `verdict.json` of a run directory: every window with its impact against its budget, the impact outside every window, and the integrity of the measurement. `hakit verdict <run-dir>` recomputes it from the run directory alone. ADR-0049.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run", "profile", "started_at_ms", "ended_at_ms", "status", "streams", "windows", "unattributed", "integrity"],
+  "properties": {
+    "schema": { "const": "verdict.v1" },
+    "run": { "type": "string" },
+    "profile": { "type": "string" },
+    "started_at_ms": { "type": "number" },
+    "ended_at_ms": { "type": "number" },
+    "status": {
+      "description": "`invalid` when an integrity finding exists (the run measured nothing trustworthy); else `fail` when any impact is a finding; else `pass`.",
+      "enum": ["pass", "fail", "invalid"]
+    },
+    "streams": {
+      "description": "Per stream: calls placed, records read, successes.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stream", "shape", "cps", "calls", "records", "success"],
+        "properties": {
+          "stream": { "type": "string" },
+          "shape": { "type": "string" },
+          "cps": { "type": "number" },
+          "calls": {
+            "description": "Calls the generator says it placed (its own counter); null when the generator keeps none.",
+            "type": ["integer", "null"]
+          },
+          "records": { "type": "integer" },
+          "success": { "type": "integer" }
+        }
+      }
+    },
+    "windows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event", "incidents", "budget", "opened_at_ms", "closed_at_ms", "phases", "impacts", "findings"],
+        "properties": {
+          "event": {
+            "description": "The event id: its sequence number and incident names.",
+            "type": "string"
+          },
+          "incidents": { "type": "array", "items": { "type": "string" } },
+          "budget": { "type": "string" },
+          "opened_at_ms": { "type": "number" },
+          "closed_at_ms": { "type": "number" },
+          "phases": {
+            "description": "The instant of each phase the event reached, by phase name.",
+            "type": "object",
+            "additionalProperties": { "type": "number" }
+          },
+          "facts": {
+            "description": "The JSON objects the incident executables printed, by executable (`inject`, `heal`, `probe`).",
+            "type": "object"
+          },
+          "recovery_s": {
+            "description": "Seconds from `healed` until traffic was back to its baseline; null when it never was before the window closed.",
+            "type": ["number", "null"]
+          },
+          "impacts": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/impact" }
+          },
+          "findings": {
+            "description": "The number of impacts above their allowance in this window.",
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "unattributed": {
+      "description": "Impact outside every window, by class and key. Every entry is a finding.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/impact" }
+    },
+    "integrity": {
+      "description": "Why the measurement itself is in doubt.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "detail"],
+        "properties": {
+          "kind": {
+            "description": "`record_gap`: a stream's records differ from its generator's call counter. `incident_failed`: an executable failed or timed out. `stream_died`: a generator exited before the load ended. `series_stale`: a series the run reads stopped updating. `generator_failure`: a record names a `generator` failure. `leftover_calls`: the system under test held calls before the run started.",
+            "enum": ["record_gap", "incident_failed", "stream_died", "series_stale", "generator_failure", "leftover_calls"]
+          },
+          "event": { "type": "string" },
+          "stream": { "type": "string" },
+          "at_ms": { "type": "number" },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "count", "allowed", "finding"],
+      "properties": {
+        "class": {
+          "description": "A built-in impact class or one a product added on the search path.",
+          "type": "string"
+        },
+        "stream": { "type": "string" },
+        "code": { "type": "integer" },
+        "reason": { "type": "string" },
+        "count": {
+          "description": "Calls (or events, for a class counted in events); for `recovery`, seconds.",
+          "type": "number"
+        },
+        "seconds": {
+          "description": "The count in seconds of the stream's offered rate, when the impact has a stream.",
+          "type": "number"
+        },
+        "allowed": {
+          "description": "The allowance the budget gives this key, in the unit of `count`.",
+          "type": "number"
+        },
+        "finding": { "type": "boolean" },
+        "call_ids": {
+          "description": "The Call-IDs of the calls counted, up to 50.",
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 50
+        }
+      }
+    }
+  }
+}

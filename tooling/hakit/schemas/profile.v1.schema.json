@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "profile.v1.schema.json",
+  "title": "profile.v1",
+  "description": "A file `profiles/<name>.yaml`: one run. The load streams, the schedule of incident events, and the budget of each event's window. Impact outside every window is `unattributed`. ADR-0049.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "name", "description", "duration_s", "setup_slow_ms", "streams"],
+  "properties": {
+    "schema": { "const": "profile.v1" },
+    "name": {
+      "description": "Equal to the file stem; unique on the search path. The first part of the run id.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "description": { "type": "string" },
+    "duration_s": {
+      "description": "Load time from the start of the streams to the start of the drain.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "drain_s": {
+      "description": "After the load stops, how long the runner waits for every generator to finish its calls before it reads the records.",
+      "type": "number",
+      "minimum": 0,
+      "default": 120
+    },
+    "settle_s": {
+      "description": "The default tail of a window after its `recovered` phase. At least the longest setup deadline of the streams.",
+      "type": "number",
+      "minimum": 0,
+      "default": 120
+    },
+    "setup_slow_ms": {
+      "description": "A setup (INVITE to its final) longer than this is `setup_slow`, unless a window's budget raises it.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "catalogs": {
+      "description": "The treatment catalogs the streams' shapes come from, by catalog name.",
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "deploy": {
+      "description": "What `hakit up` deploys for this profile.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "values": {
+          "description": "Helm values files, relative to the profile file.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "set": {
+          "description": "Helm `--set` pairs, applied after the values files.",
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        }
+      }
+    },
+    "preflight": {
+      "description": "Host limits checked before the run starts; a host outside them refuses the run. The measured values are kept in the run directory either way.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min_free_memory_gib": { "type": "number", "minimum": 0 },
+        "max_swap_used_gib": { "type": "number", "minimum": 0 },
+        "min_free_disk_gib": { "type": "number", "minimum": 0 },
+        "max_load_per_cpu": { "type": "number", "minimum": 0 }
+      }
+    },
+    "streams": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/stream" }
+    },
+    "schedule": {
+      "description": "The incident events: a cycle repeated from `first_at_s` every `interval_s` until the load ends, or a list of events at fixed times. Absent, the run has no incident and all of it is outside any window.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "first_at_s": { "type": "number", "minimum": 0 },
+        "interval_s": { "type": "number", "exclusiveMinimum": 0 },
+        "cycle": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/event" }
+        },
+        "at": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/event" },
+              { "required": ["at_s"] }
+            ]
+          }
+        }
+      },
+      "oneOf": [
+        { "required": ["first_at_s", "interval_s", "cycle"], "not": { "required": ["at"] } },
+        { "required": ["at"], "not": { "anyOf": [{ "required": ["cycle"] }, { "required": ["first_at_s"] }, { "required": ["interval_s"] }] } }
+      ]
+    }
+  },
+  "$defs": {
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "driver", "shape", "cps"],
+      "properties": {
+        "name": {
+          "description": "The stream name: the `stream` of its records and the `stream` label of its series.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "driver": {
+          "description": "The generator. `loadgen` covers a product binary built on the loadgen library; the deploy values name its image.",
+          "enum": ["sipp", "loadgen"]
+        },
+        "shape": {
+          "description": "The treatment catalog shape the stream's calls request.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "scenario": {
+          "description": "For `sipp`: the scenario file on the search path's `scenarios/`.",
+          "type": "string"
+        },
+        "cps": { "type": "number", "exclusiveMinimum": 0 },
+        "steps": {
+          "description": "Rate changes during the run (a capacity ramp): from `at_s` on, the stream offers `cps`.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["at_s", "cps"],
+            "properties": {
+              "at_s": { "type": "number", "minimum": 0 },
+              "cps": { "type": "number", "minimum": 0 }
+            }
+          }
+        },
+        "max_concurrent": { "type": "integer", "exclusiveMinimum": 0 },
+        "params": {
+          "description": "Driver parameters (hold time, ring time, a SIPp `-key` value).",
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["budget"],
+      "properties": {
+        "at_s": { "type": "number", "minimum": 0 },
+        "incident": {
+          "description": "One incident by name.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "incidents": {
+          "description": "Several incidents injected together in one window under one budget.",
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "uniqueItems": true
+        },
+        "params": {
+          "description": "Incident parameters; with `incidents`, keyed by incident name.",
+          "type": "object"
+        },
+        "target": {
+          "description": "Overrides the incident's target; with `incidents`, keyed by incident name.",
+          "type": "object"
+        },
+        "duration_s": { "type": "number", "minimum": 0 },
+        "settle_s": { "type": "number", "minimum": 0 },
+        "budget": {
+          "description": "The budget of the event's window, by name.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        }
+      },
+      "oneOf": [
+        { "required": ["incident"], "not": { "required": ["incidents"] } },
+        { "required": ["incidents"], "not": { "required": ["incident"] } }
+      ]
+    }
+  }
+}

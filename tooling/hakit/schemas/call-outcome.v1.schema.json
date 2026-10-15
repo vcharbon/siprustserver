@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "call-outcome.v1.schema.json",
+  "title": "call-outcome.v1",
+  "description": "One record per call a load generator placed, written once when the generator is done with the call, whatever path it took. It states what the caller observed; it never judges it. The classifier compares it with the treatment catalog. Times are Unix epoch milliseconds. ADR-0049.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run",
+    "source",
+    "stream",
+    "shape",
+    "call_id",
+    "started_at_ms",
+    "ended_at_ms",
+    "phase_reached",
+    "ending"
+  ],
+  "properties": {
+    "schema": { "const": "call-outcome.v1" },
+    "run": {
+      "description": "The run id the runner gave the generator.",
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "description": "The producer: `sipp`, `loadgen`, or a product's generator name.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "stream": {
+      "description": "The load stream the call belongs to, as the run profile names it. The same value is the `stream` label of the generator's series.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "shape": {
+      "description": "The treatment catalog shape id the call requested.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "call_id": {
+      "description": "The Call-ID of the caller's INVITE as sent.",
+      "type": "string",
+      "minLength": 1
+    },
+    "started_at_ms": {
+      "description": "When the caller's first INVITE left the generator.",
+      "type": "number"
+    },
+    "setup_ended_at_ms": {
+      "description": "When the INVITE's final response arrived, or when the generator's setup deadline passed with none. Null only when the generator stopped before either (ending `failed`).",
+      "type": ["number", "null"]
+    },
+    "answered_at_ms": {
+      "description": "When the 2xx to the INVITE arrived. Null when the call was never answered.",
+      "type": ["number", "null"]
+    },
+    "ended_at_ms": {
+      "description": "When the generator finished with the call and wrote this record.",
+      "type": "number"
+    },
+    "phase_reached": {
+      "description": "The furthest point of the call: `invited` (no response), `provisional` (1xx), `answered` (2xx and ACK), `released` (the teardown completed).",
+      "enum": ["invited", "provisional", "answered", "released"]
+    },
+    "early_media": {
+      "description": "A reliable or unreliable 18x with a session description arrived before the final.",
+      "type": "boolean",
+      "default": false
+    },
+    "final_code": {
+      "description": "The status code of the INVITE's final response. Null when none arrived.",
+      "type": ["integer", "null"],
+      "minimum": 200,
+      "maximum": 699
+    },
+    "reason": {
+      "description": "The protocol and cause of the final's Reason header (`Q.850;cause=34`), its reason phrase when it has none, or the generator's token for a failure without a final (`timeout`, `transport`). Null on a clean ending.",
+      "type": ["string", "null"]
+    },
+    "ending": {
+      "description": "How the call ended, from the caller's facts alone: `answered` (answered, then released by the planned teardown), `rejected` (a non-2xx final), `abandoned` (the caller CANCELed by design and got the 487), `no_final` (no final by the setup deadline), `cut` (answered, then ended before the planned teardown: a BYE the caller did not expect, or a 481 to an in-dialog request or to the BYE), `stranded` (answered, and the teardown never completed: the BYE got no final), `failed` (the generator stopped the call on a protocol, transport or generator error; see `failures`).",
+      "enum": ["answered", "rejected", "abandoned", "no_final", "cut", "stranded", "failed"]
+    },
+    "failures": {
+      "description": "Every failure the generator saw on the call, in order, each with its instant.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/failure" },
+      "default": []
+    },
+    "legs": {
+      "description": "The callee-side legs a generator playing both sides saw, by the role the treatment catalog names. Absent when the generator plays the caller only.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/leg" }
+    },
+    "producer_verdict": {
+      "description": "The generator's own class of the call (a SIPp exit label, a loadgen result class or accepted branch), kept for analysis. The classifier never reads it.",
+      "type": ["string", "null"]
+    },
+    "ext": {
+      "description": "Product fields, under the product's own key. Upstream readers ignore it; a product's impact class may read it.",
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at_ms", "kind"],
+      "properties": {
+        "at_ms": {
+          "description": "When the failure was seen: the response or message that failed, or the deadline that passed.",
+          "type": "number"
+        },
+        "kind": {
+          "description": "`dialog_request`: an in-dialog request (re-INVITE, UPDATE, INFO, OPTIONS, REFER, NOTIFY, PRACK, BYE) got a non-2xx final or none. `protocol`: an unexpected or malformed message, or an RFC check finding. `transport`: a send or receive error at the socket. `generator`: the generator itself failed (a panic, a refused correlation key); not a system-under-test impact.",
+          "enum": ["dialog_request", "protocol", "transport", "generator"]
+        },
+        "method": {
+          "description": "The request method concerned, when there is one.",
+          "type": "string"
+        },
+        "code": {
+          "description": "The status code received, when there is one.",
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 699
+        },
+        "detail": {
+          "description": "A short bounded text: the RFC rule id, the step that failed, the message received.",
+          "type": "string"
+        }
+      }
+    },
+    "leg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "ending"],
+      "properties": {
+        "role": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "ending": {
+          "description": "How the leg ended, from the callee side, in the caller's `ending` vocabulary. `rejected` is a non-2xx final the leg sent.",
+          "enum": ["answered", "rejected", "abandoned", "no_final", "cut", "stranded", "failed"]
+        },
+        "final_code": {
+          "type": ["integer", "null"],
+          "minimum": 200,
+          "maximum": 699
+        }
+      }
+    }
+  }
+}
