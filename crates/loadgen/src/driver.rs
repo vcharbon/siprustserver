@@ -20,23 +20,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use e2e_model::{LegSpec, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
+use e2e_model::LegSpec;
 use futures::FutureExt;
 use scenario_harness::{Agent, AgentBinder, EgressPolicy, WaiverScope};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::call_rtt::CallRtts;
-use crate::case::LoadCase;
 use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
+use crate::mix_entry::{LoadBody, MixEntry};
 use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation, MuxCore};
 use crate::outcome::{CallWire, OutcomeSink, RecordMeta, WireFacts};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
-use scenario_harness::actor::{ActorScenario, ScenarioVerdict};
+use scenario_harness::actor::ScenarioVerdict;
 
 /// The mux transport the driver binds calls on.
 pub struct MuxTransport {
@@ -121,134 +121,6 @@ pub struct DriverCfg {
     /// `refused_overload` branch ([`CallEnv::overload_reject`]). `None`
     /// accepts no undeclared refusal.
     pub overload_reject: Option<u16>,
-}
-
-/// A load shape's per-call body: the declarative actor [`Scenario`] the runner
-/// drives. `run_one` invokes it at the single body-invocation site.
-#[derive(Clone)]
-enum LoadBody {
-    Actor(Scenario),
-}
-
-/// One scenario mix entry: the shape's **report/metrics id** + load attributes
-/// (from its [`ShapeDescriptor`] — the shape's ONE declaration), the load body,
-/// its pick weight, and an optional attached Test case
-/// (`--scenario name=w,case=<path.json>` / the global `--case`) whose binding
-/// pool drives per-call identities and dwells.
-///
-/// Build from the unified registry ([`MixEntry::by_id`] /
-/// [`MixEntry::default_mix`] / [`MixEntry::abnormal_end_mix`]); plain
-/// `(scenario, weight)` tuples still convert for hand-rolled test bodies
-/// (attributes default off, id from the body).
-#[derive(Clone)]
-pub struct MixEntry {
-    /// The report/metrics id — the DESCRIPTOR's id (may differ from the body's
-    /// intrinsic `id()` when one body serves several shapes, e.g. `basic_call_em`).
-    pub id: crate::scenarios::ScenarioId,
-    /// The load body — a declarative actor [`Scenario`] the runner drives.
-    /// `run_one` invokes it at the single body-invocation site; everything after
-    /// (teardown, classification, sampling) is shared.
-    body: LoadBody,
-    pub weight: f64,
-    pub case: Option<Arc<LoadCase>>,
-    /// The callee legs bound for this shape's calls
-    /// ([`ShapeDescriptor::callee_legs`]): each leg's agent-name **role** plus
-    /// the R-URI user-part **prefixes** that demux it on the shared UAS
-    /// socket, in the load-bearing bind order.
-    pub legs: &'static [LegSpec],
-    /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
-    pub emergency: bool,
-    /// **Deferred-by-design auth adapter** (see
-    /// `scenario_harness::realcall::auth`). `None` (the default) = no RFC 3261
-    /// §22.2 retry; a `401`/`407` classifies as `status_401`/`status_407`. Set it
-    /// (via [`MixEntry::with_challenge_responder`]) to point the fleet at a
-    /// challenging registrar/proxy once digest lands — no CLI flag mints one yet.
-    pub challenge_responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
-}
-
-impl From<(Arc<dyn ActorScenario>, f64)> for MixEntry {
-    fn from((scenario, weight): (Arc<dyn ActorScenario>, f64)) -> Self {
-        MixEntry {
-            id: scenario.id(),
-            body: LoadBody::Actor(scenario),
-            weight,
-            case: None,
-            legs: LegSpec::historic(false, false),
-            emergency: false,
-            challenge_responder: None,
-        }
-    }
-}
-
-impl MixEntry {
-    /// Build a mix entry from a shape's descriptor (minting its load body from
-    /// the per-run `inputs`). `None` when the shape has no load body
-    /// (functional-only).
-    pub fn from_shape(
-        shape: &ShapeDescriptor,
-        inputs: &ScenarioInputs,
-        weight: f64,
-    ) -> Option<Self> {
-        // The declarative actor scenario (functional-only shapes have none → None).
-        let body = LoadBody::Actor(shape.load_scenario(inputs)?);
-        Some(MixEntry {
-            id: shape.id,
-            body,
-            weight,
-            case: None,
-            legs: shape.callee_legs(),
-            emergency: shape.emergency,
-            challenge_responder: None,
-        })
-    }
-
-    /// Resolve a shape by id in the registry (the CLI's `--scenario name=weight`).
-    /// `None` for an unknown id or a functional-only shape.
-    pub fn by_id(
-        registry: &ShapeRegistry,
-        id: &str,
-        inputs: &ScenarioInputs,
-        weight: f64,
-    ) -> Option<Self> {
-        registry.get(id).and_then(|d| Self::from_shape(d, inputs, weight))
-    }
-
-    /// The shipped DEFAULT mix (every shape with a `default_weight`,
-    /// basic-heavy like real traffic).
-    pub fn default_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
-        registry
-            .default_mix()
-            .into_iter()
-            .filter_map(|d| Self::from_shape(d, inputs, d.default_weight.unwrap_or(1.0)))
-            .collect()
-    }
-
-    /// The abnormal-end mix (one shape per post-call-cleanup teardown path, each
-    /// ending on its own accepted branch), for the no-leak cleanup-coverage
-    /// test.
-    pub fn abnormal_end_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
-        registry
-            .abnormal_end_mix()
-            .into_iter()
-            .filter_map(|d| Self::from_shape(d, inputs, d.abnormal_end_weight.unwrap_or(1.0)))
-            .collect()
-    }
-
-    /// Attach a Test case (binding pool → per-call identities + dwells).
-    pub fn with_case(mut self, case: Option<Arc<LoadCase>>) -> Self {
-        self.case = case;
-        self
-    }
-
-    /// Attach the deferred-by-design auth adapter (see the field docs). The load
-    /// driver folds it into every call's `CallEnv`; the default is `None`.
-    pub fn with_challenge_responder(
-        mut self,
-        responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
-    ) -> Self {
-        self.challenge_responder = responder;
-        self
-    }
 }
 
 /// Offers calls at the live CPS target, one task per call picked from the
@@ -395,6 +267,9 @@ impl Driver {
 
         while governor.next_slot().await.is_some() {
             let entry = self.pick(&mut rng).clone();
+            if let Some(sink) = &self.outcomes {
+                sink.offered(entry.id);
+            }
             let permit = match self.sem.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
@@ -406,7 +281,8 @@ impl Driver {
                 }
             };
             let tuning = self.tuning_for(entry.id);
-            tokio::spawn(run_one(
+            let (id, reporter, outcomes) = (entry.id, self.reporter.clone(), self.outcomes.clone());
+            let call = run_one(
                 entry,
                 self.reporter.clone(),
                 self.transport.clone(),
@@ -417,7 +293,19 @@ impl Driver {
                 self.chaos.clone(),
                 self.outcomes.clone(),
                 permit,
-            ));
+            );
+            // A panic outside the scenario's own boundary (checks, sample
+            // rendering, the bookkeeping) still closes the call's in-flight
+            // count and is counted as a generator failure: the call wrote no
+            // record.
+            tokio::spawn(async move {
+                if AssertUnwindSafe(call).catch_unwind().await.is_err() {
+                    reporter.dec_inflight();
+                    if let Some(sink) = outcomes {
+                        sink.generator_failure(id, "panic");
+                    }
+                }
+            });
         }
 
         // Drain: acquiring every permit blocks until all in-flight calls release.
@@ -526,6 +414,10 @@ async fn run_one(
     let ctx = CallCtx::new();
     if record {
         ctx.enable_anchor_collection();
+    }
+    if let Some(wire) = &wire {
+        let wire = wire.clone();
+        ctx.on_resolved(move || wire.seal());
     }
 
     let env = CallEnv {
@@ -718,11 +610,11 @@ async fn run_one(
         None
     };
 
+    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
+    rtts.finish();
     if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
         write_outcome(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
     }
-    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
-    rtts.finish();
     reporter.dec_inflight();
 }
 
@@ -825,7 +717,10 @@ fn record_unrun(
     outcome: CallOutcome,
 ) {
     if let Some(sink) = outcomes {
-        sink.not_placed(id, not_placed_reason(&outcome));
+        match &outcome {
+            CallOutcome::Rejected(reason) => sink.not_placed(id, reason),
+            _ => sink.generator_failure(id, "bind_refused"),
+        }
     }
     let class = ResultClass::from(&outcome);
     let case = outcome.case(None);
@@ -871,8 +766,8 @@ fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<Strin
     Some(format!("{detail} [phases: {trail}]"))
 }
 
-/// Write the record of a call that ran; one that sent no INVITE was never
-/// placed and is counted so.
+/// Write the record of a call that ran; a call whose scenario sent no INVITE
+/// wrote none, a generator failure.
 fn write_outcome(
     sink: &OutcomeSink,
     shape: ScenarioId,
@@ -883,18 +778,6 @@ fn write_outcome(
     let meta = RecordMeta { run: &sink.run, source: &sink.source, stream: &sink.stream, shape };
     match crate::outcome::build(&meta, wire, outcome, ended_at_ms) {
         Some(record) => sink.write(record),
-        None => sink.not_placed(shape, not_placed_reason(outcome)),
+        None => sink.generator_failure(shape, "no_invite"),
     }
 }
-
-/// Why a call that never sent its INVITE was not placed.
-fn not_placed_reason(outcome: &CallOutcome) -> &'static str {
-    match outcome {
-        CallOutcome::Rejected(reason) => reason,
-        CallOutcome::Panic(_) => "generator",
-        _ => "no_invite",
-    }
-}
-
-#[cfg(test)]
-mod load_body_tests;

@@ -248,6 +248,41 @@ pub const NOT_PLACED: Family = Family::counter(
 )
 .semi_open();
 
+pub const CALLS_OFFERED: Family = Family::counter(
+    "loadgen_calls_offered_total",
+    Labels::Product(&[STREAM, SHAPE]),
+    "Calls the rate offered, by stream and shape: placed, not placed or failed by the generator.",
+)
+.semi_open();
+
+/// Why the generator failed a call it offered.
+pub const GENERATOR_FAILURE_REASON: Dim = Dim::new("reason", &[]);
+
+pub const GENERATOR_FAILURES: Family = Family::counter(
+    "loadgen_generator_failures_total",
+    Labels::Product(&[STREAM, SHAPE, GENERATOR_FAILURE_REASON]),
+    "Calls the generator itself failed (no record written), by stream, shape and reason.",
+)
+.semi_open();
+
+/// Where a record was lost: `writer` (never written anywhere: the writer's
+/// queue was full or closed), `push` (in the file, not in the log store).
+pub const DROP_STAGE: Dim = Dim::new("stage", &["writer", "push"]);
+
+pub const RECORDS_PUSH_FAILED: Family = Family::counter(
+    "loadgen_outcome_records_push_failed_total",
+    Labels::Product(&[STREAM]),
+    "Pushes of a batch of call-outcome records to the log store that failed (each attempt).",
+)
+.semi_open();
+
+pub const RECORDS_DROPPED: Family = Family::counter(
+    "loadgen_outcome_records_dropped_total",
+    Labels::Product(&[STREAM, DROP_STAGE]),
+    "Call-outcome records lost, by stream and where: never written, or not in the log store.",
+)
+.semi_open();
+
 pub const MUX_ORPHAN_OVERFLOW: Family = Family::counter(
     "loadgen_mux_orphan_overflow_total",
     Labels::None,
@@ -287,6 +322,10 @@ pub const CATALOGUE: Catalogue = Catalogue {
         PROCESS_RESIDENT_MEMORY,
         OUTCOME_RECORDS,
         NOT_PLACED,
+        CALLS_OFFERED,
+        GENERATOR_FAILURES,
+        RECORDS_PUSH_FAILED,
+        RECORDS_DROPPED,
     ]],
 };
 

@@ -11,11 +11,13 @@
 use crate::actor::ScenarioVerdict;
 
 pub mod auth;
+mod ctx;
 mod env;
 mod scope;
 
 pub use auth::{Challenge, ChallengeResponder};
-pub use env::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp, InvitePlan};
+pub use ctx::CallCtx;
+pub use env::{CallEnv, CoreIdentity, CorrelationStamp, InvitePlan};
 pub use scope::CallScope;
 
 /// Stable scenario name — the Prometheus `scenario` label and report dir name.

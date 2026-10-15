@@ -56,10 +56,10 @@ fn doc(id: &str, legs: &[(&str, &[&str])]) -> Doc {
 
 #[test]
 fn a_runtime_source_registers_beside_the_compiled_shapes() {
-    let docs = Documents(vec![doc("doc_reroute", &[("bob", &["100"]), ("bob2", &["200"])])]);
+    let docs = Documents(vec![doc("doc_failover_route", &[("bob", &["100"]), ("bob2", &["200"])])]);
     let mut reg = ShapeRegistry::with_defaults();
     reg.register_source(&docs).expect("a fresh id registers");
-    let d = reg.get("doc_reroute").expect("registered");
+    let d = reg.get("doc_failover_route").expect("registered");
     assert_eq!(d.callee_legs().len(), 2);
     assert_eq!(d.callee_legs()[1].ruri_prefixes, &["200"]);
     assert!(reg.get("basic_call").is_some(), "the compiled shapes stay");

@@ -1,12 +1,18 @@
 //! What one call's endpoints saw on the wire, as the facts its outcome record
 //! states: fed by the call's [`WireTap`], every datagram its caller and its
 //! callee legs sent or had delivered.
+//!
+//! The facts are sealed when the call's verdict resolves ([`CallWire::seal`]):
+//! what the generator's own teardown of a failed call draws afterwards (a
+//! CANCEL and its 487, a late final, a cleanup BYE) is not the call's
+//! outcome. Of the teardown, the facts keep only whether a BYE released the
+//! dialog.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use sip_clock::Clock;
-use sip_message::header::{cause_key, readable_reasons};
+use sip_message::header::cause_key;
 use sip_message::sip_str::SipStr;
 use sip_message::sniff::{
     call_id, content_type_is, cseq_method_token, cseq_number, has_body, header_values, is_response,
@@ -15,13 +21,13 @@ use sip_message::sniff::{
 
 use crate::mux::{Dir, Side, WireTap};
 
-/// One failure the wire showed: an in-dialog request the caller sent that drew
-/// a non-2xx final.
+/// One failed in-dialog request the caller sent: its non-2xx final, or no
+/// final at all (`code: None`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireFailure {
     pub at_ms: i64,
     pub method: String,
-    pub code: u16,
+    pub code: Option<u16>,
 }
 
 /// What one callee leg did with the INVITE that opened it.
@@ -47,11 +53,11 @@ pub struct WireFacts {
     pub setup_ended_at_ms: Option<i64>,
     pub answered_at_ms: Option<i64>,
     pub final_code: Option<u16>,
-    /// The final's cause key (`<protocol>;cause=<n>`), when its Reason header
-    /// states one.
+    /// The final's cause key (`<protocol>;cause=<n>`), when the first value
+    /// of its Reason header states one.
     pub final_cause: Option<String>,
     pub early_media: bool,
-    /// The caller sent a CANCEL.
+    /// The caller sent a CANCEL before the verdict resolved.
     pub cancelled: bool,
     /// The caller's BYE and the final it drew (`Some(None)`: sent, no final).
     pub bye: Option<Option<u16>>,
@@ -59,14 +65,41 @@ pub struct WireFacts {
     pub bye_received: Option<Option<u16>>,
     /// An in-dialog request or the BYE drew a 481: the dialog was gone.
     pub saw_481: bool,
+    /// In-dialog requests answered with a non-2xx final.
     pub failures: Vec<WireFailure>,
     pub legs: Vec<LegFacts>,
-    /// The caller's in-dialog requests awaiting a final, by CSeq number.
-    pub(crate) pending: HashMap<u32, String>,
+    /// The caller's in-dialog requests awaiting a final, by CSeq number: their
+    /// method and when they were first sent.
+    pub(crate) pending: HashMap<u32, (String, i64)>,
+    /// The verdict resolved: the facts no longer change.
+    pub(crate) sealed: bool,
+    /// After the verdict, the generator's teardown BYE drew a 2xx.
+    pub teardown_released: bool,
 }
 
-/// A call's wire observer: hand [`tap`](Self::tap) to its mux network, read
+impl WireFacts {
+    /// The caller's in-dialog requests other than the BYE that never drew a
+    /// final, as failures without a code, in the order they were sent.
+    pub fn unanswered(&self) -> Vec<WireFailure> {
+        let mut left: Vec<WireFailure> = self
+            .pending
+            .values()
+            .filter(|(method, _)| method != "BYE")
+            .map(|(method, at_ms)| WireFailure {
+                at_ms: *at_ms,
+                method: method.clone(),
+                code: None,
+            })
+            .collect();
+        left.sort_by_key(|f| f.at_ms);
+        left
+    }
+}
+
+/// A call's wire observer: hand [`tap`](Self::tap) to its mux network,
+/// [`seal`](Self::seal) it when the verdict resolves, read
 /// [`facts`](Self::facts) when the call is done.
+#[derive(Clone)]
 pub struct CallWire {
     clock: Clock,
     facts: Arc<Mutex<WireFacts>>,
@@ -90,6 +123,11 @@ impl CallWire {
         })
     }
 
+    /// The call's verdict resolved: freeze the setup facts.
+    pub fn seal(&self) {
+        self.facts.lock().unwrap().sealed = true;
+    }
+
     /// The facts seen so far.
     pub fn facts(&self) -> WireFacts {
         self.facts.lock().unwrap().clone()
@@ -106,13 +144,15 @@ impl WireFacts {
         let (Some(method), Some(cseq)) = (cseq_method_token(raw), cseq_number(raw)) else {
             return;
         };
+        if self.sealed {
+            // Only whether the teardown released the dialog.
+            let bye_ok =
+                method == "BYE" && resp_status(raw).is_some_and(|c| (200..300).contains(&c));
+            self.teardown_released |= bye_ok;
+            return;
+        }
         match (dir, is_response(raw)) {
-            (Dir::Out, false) => {
-                if self.started_at_ms.is_none() && method == "INVITE" {
-                    self.call_id = call_id(raw);
-                }
-                self.caller_sent(&method, cseq, now);
-            }
+            (Dir::Out, false) => self.caller_sent(&method, cseq, raw, now),
             (Dir::In, true) => {
                 let Some(code) = resp_status(raw) else { return };
                 let setup = method == "INVITE"
@@ -137,22 +177,38 @@ impl WireFacts {
         }
     }
 
-    fn caller_sent(&mut self, method: &str, cseq: u32, now: i64) {
+    fn caller_sent(&mut self, method: &str, cseq: u32, raw: &[u8], now: i64) {
+        let initial = method == "INVITE" && to_tag(raw).is_empty();
         match method {
             "INVITE" if self.started_at_ms.is_none() => {
+                self.call_id = call_id(raw);
                 self.started_at_ms = Some(now);
                 self.invite_cseq = Some(cseq);
             }
             "INVITE" if self.invite_cseq == Some(cseq) => {}
+            // A new initial INVITE on the call's Call-ID (a 401/407/422 retry)
+            // is the setup again.
+            "INVITE" if initial && call_id(raw) == self.call_id => self.restart_setup(cseq),
             "ACK" => {}
             "CANCEL" => self.cancelled = true,
             _ => {
                 if method == "BYE" {
                     self.bye.get_or_insert(None);
                 }
-                self.pending.entry(cseq).or_insert_with(|| method.to_string());
+                self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
             }
         }
+    }
+
+    /// Forget the previous attempt's setup facts; the call's start stays.
+    fn restart_setup(&mut self, cseq: u32) {
+        self.invite_cseq = Some(cseq);
+        self.first_provisional_at_ms = None;
+        self.setup_ended_at_ms = None;
+        self.answered_at_ms = None;
+        self.final_code = None;
+        self.final_cause = None;
+        self.early_media = false;
     }
 
     fn setup_response(&mut self, code: u16, raw: &[u8], now: i64) {
@@ -169,23 +225,26 @@ impl WireFacts {
         if code < 300 {
             self.answered_at_ms = Some(now);
         } else {
-            let lines = header_values(raw, "Reason").into_iter().map(SipStr::from);
-            self.final_cause = cause_key(&readable_reasons(lines));
+            self.final_cause =
+                cause_key(header_values(raw, "Reason").into_iter().map(SipStr::from));
         }
     }
 
     fn in_dialog_final(&mut self, cseq: u32, code: u16, now: i64) {
-        let Some(method) = self.pending.remove(&cseq) else { return };
+        let Some((method, _)) = self.pending.remove(&cseq) else { return };
         if method == "BYE" {
             self.bye = Some(Some(code));
         }
         self.saw_481 |= code == 481;
         if code >= 300 {
-            self.failures.push(WireFailure { at_ms: now, method, code });
+            self.failures.push(WireFailure { at_ms: now, method, code: Some(code) });
         }
     }
 
     fn on_leg(&mut self, role: &str, dir: Dir, raw: &[u8]) {
+        if self.sealed {
+            return;
+        }
         let opened = self.legs.iter().position(|l| l.role == role);
         match (dir, is_response(raw), opened) {
             (Dir::In, false, None) => {

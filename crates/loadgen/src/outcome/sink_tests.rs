@@ -118,3 +118,42 @@ fn a_silent_endpoint_does_not_hold_the_close() {
     assert!(held < Duration::from_secs(4), "the close waited {held:?}");
     assert_eq!(lines, 1);
 }
+
+/// Thousands of records queued for an endpoint that accepts and never
+/// answers: `close` returns within its bound, every record still reaches the
+/// file, and each record the log store never got is counted dropped, with the
+/// failed pushes counted.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_blackholed_endpoint_drops_and_counts_within_the_close_bound() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = LogsTarget::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let dir = scratch("blackhole");
+    let file = dir.join("r.jsonl");
+    let sink = OutcomeSink::new("r1", "loadgen", "main", &file, Some(target)).unwrap();
+    for i in 0..5000 {
+        sink.write(json!({ "shape": "basic_call", "ending": "answered", "ended_at_ms": i }));
+    }
+    let started = std::time::Instant::now();
+    sink.close();
+    let held = started.elapsed();
+    let lines = std::fs::read_to_string(&file).unwrap().lines().count();
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(held < Duration::from_secs(10), "the close waited {held:?}");
+    assert_eq!(lines, 5000, "every record reaches the file");
+    let mut text = String::new();
+    sink.render_prometheus(&mut text);
+    assert!(
+        text.contains(
+            "loadgen_outcome_records_dropped_total{stream=\"main\",stage=\"push\"} 5000\n"
+        ),
+        "{text}"
+    );
+    let failed: u64 = text
+        .lines()
+        .find_map(|l| l.strip_prefix("loadgen_outcome_records_push_failed_total{stream=\"main\"} "))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(failed >= 1, "{text}");
+}

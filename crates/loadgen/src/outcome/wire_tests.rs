@@ -63,15 +63,15 @@ async fn the_setup_facts_are_read_from_the_caller_side() {
     assert_eq!(f.first_provisional_at_ms, Some(1_010));
     assert!(f.early_media);
     assert_eq!((f.setup_ended_at_ms, f.final_code), (Some(1_030), Some(486)));
-    assert_eq!(f.final_cause.as_deref(), Some("Q.850;cause=17"));
+    assert_eq!(f.final_cause.as_deref(), Some("q.850;cause=17"));
     assert_eq!(f.answered_at_ms, None);
 }
 
 /// An in-dialog request answered non-2xx is a failure with its method and
 /// code; a 481 marks the dialog gone; the BYE's final is kept.
-#[test]
+#[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
-fn in_dialog_finals_are_failures_and_the_bye_is_kept() {
+async fn in_dialog_finals_are_failures_and_the_bye_is_kept() {
     let wire = CallWire::new(Clock::test_at(0));
     let f = feed(
         &wire,
@@ -86,16 +86,19 @@ fn in_dialog_finals_are_failures_and_the_bye_is_kept() {
         ],
     );
     assert_eq!(f.answered_at_ms, Some(0));
-    assert_eq!(f.failures, vec![WireFailure { at_ms: 0, method: "INVITE".into(), code: 481 }]);
+    assert_eq!(
+        f.failures,
+        vec![WireFailure { at_ms: 0, method: "INVITE".into(), code: Some(481) }]
+    );
     assert!(f.saw_481);
     assert_eq!(f.bye, Some(Some(200)));
 }
 
 /// A callee leg opens on its initial INVITE and keeps its first final; its
 /// early media and a CANCEL it received are kept.
-#[test]
+#[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
-fn each_leg_keeps_its_first_final() {
+async fn each_leg_keeps_its_first_final() {
     let wire = CallWire::new(Clock::test_at(0));
     let f = feed(
         &wire,
@@ -120,4 +123,50 @@ fn each_leg_keeps_its_first_final() {
     assert_eq!((f.legs[0].role.as_str(), f.legs[0].final_code), ("primary", Some(486)));
     assert_eq!((f.legs[1].role.as_str(), f.legs[1].final_code), ("alt", Some(487)));
     assert!(f.legs[1].cancelled);
+}
+
+/// Once the verdict resolved, the teardown's CANCEL, the 487 it draws and a
+/// leg's late final change no setup fact; the BYE is still followed.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn sealed_setup_facts_ignore_the_teardown() {
+    let wire = CallWire::new(Clock::test_at(0));
+    let tap = wire.tap();
+    tap(Side::Caller, Dir::Out, &msg("INVITE sip:b@h SIP/2.0", "c3", "1 INVITE", "", ""));
+    tap(Side::Caller, Dir::In, &msg("SIP/2.0 100 Trying", "c3", "1 INVITE", "", ""));
+    tap(Side::Leg("callee"), Dir::In, &msg("INVITE sip:q@h SIP/2.0", "b3", "1 INVITE", "", ""));
+    wire.seal();
+    tap(Side::Caller, Dir::Out, &msg("CANCEL sip:b@h SIP/2.0", "c3", "1 CANCEL", "", ""));
+    tap(Side::Caller, Dir::In, &msg("SIP/2.0 487 Terminated", "c3", "1 INVITE", "t1", ""));
+    tap(Side::Leg("callee"), Dir::Out, &msg("SIP/2.0 487 Terminated", "b3", "1 INVITE", "q1", ""));
+    let f = wire.facts();
+    assert!(!f.cancelled, "the teardown's CANCEL is not the caller's");
+    assert_eq!((f.final_code, f.setup_ended_at_ms), (None, None));
+    assert_eq!(f.legs[0].final_code, None);
+}
+
+/// A new initial INVITE on the call's Call-ID (a 407 retry) is the setup
+/// again: the retried call answered and torn down reads `answered`.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_challenged_invite_retried_restarts_the_setup() {
+    let wire = CallWire::new(Clock::test_at(0));
+    let f = feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c4", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 407 Auth", "c4", "1 INVITE", "p1", "")),
+            (Side::Caller, Dir::Out, msg("ACK sip:b@h SIP/2.0", "c4", "1 ACK", "p1", "")),
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c4", "2 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c4", "2 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("ACK sip:b@h SIP/2.0", "c4", "2 ACK", "t1", "")),
+            (Side::Caller, Dir::Out, msg("BYE sip:b@h SIP/2.0", "c4", "3 BYE", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c4", "3 BYE", "t1", "")),
+        ],
+    );
+    let meta = crate::outcome::RecordMeta { run: "r", source: "s", stream: "m", shape: "x" };
+    let ok = crate::CallOutcome::Ok { branch: "answered" };
+    let r = crate::outcome::build(&meta, &f, &ok, 1).unwrap();
+    assert_eq!((r["ending"].as_str(), r["final_code"].as_u64()), (Some("answered"), Some(200)));
+    assert_eq!(r["failures"], serde_json::json!([]));
 }

@@ -59,6 +59,7 @@ pub mod ctx;
 pub mod driver;
 mod hist;
 mod metrics_server;
+mod mix_entry;
 pub mod mux;
 pub mod outcome;
 pub mod rate;
@@ -72,8 +73,9 @@ pub use catalogue::CATALOGUE;
 pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
-pub use driver::{CallConfig, CallTuning, Driver, DriverCfg, MixEntry, MuxTransport};
+pub use driver::{CallConfig, CallTuning, Driver, DriverCfg, MuxTransport};
 pub use metrics_server::{serve_metrics, serve_metrics_on};
+pub use mix_entry::MixEntry;
 pub use mux::{
     labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation, DropDir,
     EndpointSpec, Exchange, LegInfo, LegPicker, MuxCore, Role, RttSink, TargetedDrop,

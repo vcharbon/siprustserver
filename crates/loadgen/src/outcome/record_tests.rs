@@ -85,15 +85,17 @@ fn a_non_2xx_final_is_rejected_or_abandoned() {
         got: 503,
         reason: "x".into(),
     });
-    let r = record(&rejected(503, Some("SIP;cause=503")), &wrong);
+    let r = record(&rejected(503, Some("sip;cause=503")), &wrong);
     assert_eq!(
         (r["ending"].clone(), r["reason"].clone()),
-        (json!("rejected"), json!("SIP;cause=503"))
+        (json!("rejected"), json!("sip;cause=503"))
     );
     assert_eq!(r["producer_verdict"], "status_503");
     assert_eq!(r["phase_reached"], "provisional");
     let r = record(&WireFacts { cancelled: true, ..rejected(487, None) }, &ok());
-    assert_eq!(r["ending"], "abandoned");
+    assert_eq!((r["ending"].clone(), r["reason"].clone()), (json!("abandoned"), json!("487")));
+    let r = record(&WireFacts { cancelled: true, ..rejected(487, Some("q.850;cause=16")) }, &ok());
+    assert_eq!(r["reason"], "q.850;cause=16", "abandoned reads the Reason like any final");
 }
 
 /// No final: a wait that passed is `timeout` at the record's end; a transport
@@ -122,7 +124,7 @@ fn without_a_final_the_result_names_the_ending() {
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn after_answer_the_dialog_facts_name_the_ending() {
-    let failed = WireFailure { at_ms: 2_000, method: "INVITE".into(), code: 481 };
+    let failed = WireFailure { at_ms: 2_000, method: "INVITE".into(), code: Some(481) };
     let cut =
         WireFacts { saw_481: true, failures: vec![failed], bye: Some(Some(200)), ..answered() };
     let wrong = step(StepError::WrongStatus {
@@ -180,4 +182,56 @@ fn each_leg_reads_its_ending() {
 fn a_call_never_placed_has_no_record() {
     assert!(build(&META, &placed(), &CallOutcome::Rejected("key_in_flight"), 1).is_none());
     assert!(build(&META, &WireFacts::default(), &CallOutcome::Panic("p".into()), 1).is_none());
+}
+
+/// Every in-dialog request (the BYE aside) left without a final when the call
+/// ended is a `dialog_request` failure with its method and no code.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn an_unanswered_in_dialog_request_is_a_failure_without_a_code() {
+    let mut wire = WireFacts { bye: Some(Some(200)), ..answered() };
+    wire.pending.insert(2, ("INVITE".into(), 3_000));
+    wire.pending.insert(3, ("BYE".into(), 3_500));
+    let r = record(&wire, &timeout());
+    assert_eq!(
+        r["failures"],
+        json!([{ "at_ms": 9_000, "kind": "dialog_request", "method": "INVITE" }])
+    );
+}
+
+/// After answer, `stranded` is a BYE without a final and nothing else: a
+/// released dialog after a timed-out request is `answered`, one never
+/// released `failed`.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn stranded_is_only_a_bye_without_a_final() {
+    let r = record(&WireFacts { bye: Some(None), ..answered() }, &timeout());
+    assert_eq!(r["ending"], "stranded");
+    let r = record(&WireFacts { bye: Some(Some(200)), ..answered() }, &timeout());
+    assert_eq!(
+        (r["ending"].clone(), r["phase_reached"].clone()),
+        (json!("answered"), json!("released"))
+    );
+    let r = record(&answered(), &timeout());
+    assert_eq!(r["ending"], "failed");
+}
+
+/// A protocol or transport stop after answer is `failed`, even when the
+/// teardown's BYE drew its 200; an accepted branch is `answered` even with a
+/// 481 (a crossing BYE).
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_protocol_stop_after_answer_is_failed_whatever_the_teardown() {
+    let released = WireFacts { bye: Some(Some(200)), ..answered() };
+    let unexpected = step(StepError::UnexpectedKind { who: "alice".into(), detail: "x".into() });
+    assert_eq!(record(&released, &unexpected)["ending"], "failed");
+    let transport = step(StepError::Transport { who: "alice".into(), detail: "x".into() });
+    assert_eq!(record(&released, &transport)["ending"], "failed");
+    let crossing = WireFacts {
+        saw_481: true,
+        bye: Some(Some(481)),
+        bye_received: Some(Some(200)),
+        ..answered()
+    };
+    assert_eq!(record(&crossing, &ok())["ending"], "answered");
 }

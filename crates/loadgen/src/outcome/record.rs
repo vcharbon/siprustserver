@@ -107,75 +107,24 @@ pub fn build(
         return None;
     }
     let stop = stop_of(outcome);
-    let mut failures: Vec<Value> = wire
-        .failures
-        .iter()
-        .map(|f| {
-            let mut v = failure(f.at_ms, "dialog_request", None);
-            v["method"] = json!(f.method);
-            v["code"] = json!(f.code);
-            v
-        })
-        .collect();
+    let mut failures = dialog_failures(wire, ended_at_ms);
     failures.extend(result_failures(outcome, ended_at_ms, stop));
-    let answered = wire.answered_at_ms.is_some();
     let mut setup_ended = wire.setup_ended_at_ms;
-    let (ending, reason, phase) = if !answered {
-        let phase = if wire.first_provisional_at_ms.is_some() { "provisional" } else { "invited" };
-        match wire.final_code {
-            Some(487) if wire.cancelled => ("abandoned", Some("487".to_string()), phase),
-            Some(code) => {
-                let reason = wire.final_cause.clone().unwrap_or_else(|| code.to_string());
-                ("rejected", Some(reason), phase)
-            }
-            None => match stop {
-                Stop::Transport => ("failed", Some("transport".to_string()), phase),
-                Stop::Protocol | Stop::Generator => ("failed", Some("protocol".to_string()), phase),
-                // No final by the time the caller stopped waiting.
-                Stop::Ok | Stop::Timeout | Stop::Flagged => {
-                    setup_ended = Some(ended_at_ms);
-                    ("timeout", Some("timeout".to_string()), phase)
-                }
-            },
+    let (ending, reason, phase) = if wire.answered_at_ms.is_none() {
+        let (ending, reason) = ending_before_answer(wire, stop);
+        if ending == "timeout" {
+            // No final by the time the caller stopped waiting.
+            setup_ended = Some(ended_at_ms);
         }
+        let phase = if wire.first_provisional_at_ms.is_some() { "provisional" } else { "invited" };
+        (ending, Some(reason), phase)
     } else {
-        let released = matches!(wire.bye, Some(Some(c)) if c < 300)
-            || matches!(wire.bye_received, Some(Some(c)) if c < 300);
-        let ending = if stop == Stop::Generator {
-            "failed"
-        } else if wire.saw_481 || (wire.bye_received.is_some() && stop != Stop::Ok) {
-            "cut"
-        } else if stop == Stop::Ok || (released && stop != Stop::Timeout) {
-            "answered"
-        } else if matches!(stop, Stop::Transport | Stop::Protocol) && !released {
-            "failed"
-        } else {
-            "stranded"
-        };
-        let phase = if ending == "answered" || released { "released" } else { "answered" };
-        (ending, None, phase)
+        let (ending, released) = ending_after_answer(wire, stop);
+        if ending == "failed" && matches!(stop, Stop::Timeout | Stop::Flagged) {
+            failures.push(failure(ended_at_ms, "protocol", Some("never released".into())));
+        }
+        (ending, None, if released { "released" } else { "answered" })
     };
-    if ending == "stranded" && stop == Stop::Timeout && wire.bye.is_none() {
-        failures.push(failure(ended_at_ms, "dialog_request", Some("no final".to_string())));
-    }
-    let legs: Vec<Value> = wire
-        .legs
-        .iter()
-        .map(|l| {
-            let ending = match l.final_code {
-                Some(c) if c < 300 => "answered",
-                Some(487) if l.cancelled => "abandoned",
-                Some(_) => "rejected",
-                None => "timeout",
-            };
-            json!({
-                "role": l.role,
-                "ending": ending,
-                "final_code": l.final_code,
-                "early_media": l.early_media,
-            })
-        })
-        .collect();
     let verdict = match outcome {
         CallOutcome::Ok { branch } => format!("ok:{branch}"),
         other => ResultClass::from(other).label(),
@@ -198,9 +147,85 @@ pub fn build(
         "reason": reason,
         "ending": ending,
         "failures": failures,
-        "legs": legs,
+        "legs": legs(wire),
         "producer_verdict": verdict,
     }))
+}
+
+/// The caller's failed in-dialog requests: each one answered non-2xx, then
+/// each one (the BYE aside) still unanswered when the call ended.
+fn dialog_failures(wire: &WireFacts, ended_at_ms: i64) -> Vec<Value> {
+    let answered = wire.failures.iter().map(|f| (f, f.at_ms));
+    let unanswered = wire.unanswered();
+    let left = unanswered.iter().map(|f| (f, ended_at_ms));
+    answered
+        .chain(left)
+        .map(|(f, at_ms)| {
+            let mut v = failure(at_ms, "dialog_request", None);
+            v["method"] = json!(f.method);
+            if let Some(code) = f.code {
+                v["code"] = json!(code);
+            }
+            v
+        })
+        .collect()
+}
+
+/// A call never answered: its final names the ending (`abandoned` for the
+/// 487 to the caller's own CANCEL), else how loadgen stopped waiting. The
+/// reason is the final's cause key, else its code, else the stop.
+fn ending_before_answer(wire: &WireFacts, stop: Stop) -> (&'static str, String) {
+    if let Some(code) = wire.final_code {
+        let reason = wire.final_cause.clone().unwrap_or_else(|| code.to_string());
+        let ending = if code == 487 && wire.cancelled { "abandoned" } else { "rejected" };
+        return (ending, reason);
+    }
+    match stop {
+        Stop::Transport => ("failed", "transport".into()),
+        Stop::Protocol | Stop::Generator => ("failed", "protocol".into()),
+        Stop::Ok | Stop::Timeout | Stop::Flagged => ("timeout", "timeout".into()),
+    }
+}
+
+/// An answered call's ending and whether it reached `released` (a BYE of the
+/// call drew a 2xx either way). A generator, protocol or transport stop is
+/// `failed` whatever the teardown drew; a call ended on an accepted branch is
+/// `answered`; otherwise a 481 or a BYE the caller did not wait for is `cut`,
+/// the call's BYE without a final `stranded`, a dialog the call or the
+/// generator's teardown released `answered`.
+fn ending_after_answer(wire: &WireFacts, stop: Stop) -> (&'static str, bool) {
+    let released = matches!(wire.bye, Some(Some(c)) if c < 300)
+        || matches!(wire.bye_received, Some(Some(c)) if c < 300);
+    let ending = match stop {
+        Stop::Generator | Stop::Transport | Stop::Protocol => "failed",
+        Stop::Ok => "answered",
+        Stop::Timeout | Stop::Flagged if wire.saw_481 || wire.bye_received.is_some() => "cut",
+        Stop::Timeout | Stop::Flagged if wire.bye == Some(None) => "stranded",
+        Stop::Timeout | Stop::Flagged if released || wire.teardown_released => "answered",
+        Stop::Timeout | Stop::Flagged => "failed",
+    };
+    (ending, released || ending == "answered")
+}
+
+/// Each callee leg's ending, from the final it sent before the verdict.
+fn legs(wire: &WireFacts) -> Vec<Value> {
+    wire.legs
+        .iter()
+        .map(|l| {
+            let ending = match l.final_code {
+                Some(c) if c < 300 => "answered",
+                Some(487) if l.cancelled => "abandoned",
+                Some(_) => "rejected",
+                None => "timeout",
+            };
+            json!({
+                "role": l.role,
+                "ending": ending,
+                "final_code": l.final_code,
+                "early_media": l.early_media,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

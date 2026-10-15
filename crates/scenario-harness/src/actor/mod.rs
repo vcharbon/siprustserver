@@ -353,6 +353,7 @@ pub(crate) async fn run_call_accepting(
         }
     };
     let result = std::panic::AssertUnwindSafe(drive).catch_unwind().await;
+    ctx.resolved();
 
     // The loser future is dropped; teardown acts on whatever each scope last
     // registered (Terminated → no-op on the happy path) — including after a

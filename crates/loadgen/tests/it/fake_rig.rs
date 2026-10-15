@@ -65,7 +65,26 @@ pub(crate) async fn setup_fake_shaped(
     make_sut: fn(&str, u16) -> b2bua_harness::B2buaSutBuilder,
     extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
-    let sim = Arc::new(SimulatedSignalingNetwork::new(1));
+    setup_fake_on(SimulatedSignalingNetwork::new(1), base, make_sut, extra_tune).await
+}
+
+/// [`setup_fake`] on a fabric whose sends between `base` (the caller) and
+/// the SUT `fault` may refuse.
+pub(crate) async fn setup_fake_faulty(
+    base: u16,
+    fault: sip_net::SendFault,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    let sim = SimulatedSignalingNetwork::new(1).with_send_fault(fault);
+    setup_fake_on(sim, base, B2buaSut::route_all_with_refer, |_| {}).await
+}
+
+async fn setup_fake_on(
+    sim: SimulatedSignalingNetwork,
+    base: u16,
+    make_sut: fn(&str, u16) -> b2bua_harness::B2buaSutBuilder,
+    extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    let sim = Arc::new(sim);
     let clock = Clock::test_at(0);
     let h = Harness::with_network_and_clock(
         "loadgen-fake-net",

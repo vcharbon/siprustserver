@@ -273,10 +273,13 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     reporter.finalize_run(&args.out_dir, meta_for(&clock, true), mux_canaries(&core))?;
     outcomes.close();
     eprintln!(
-        "[{name}] done: {} calls ({} records, {} not placed); registry_size={}; report at {}",
-        reporter.total_calls(),
+        "[{name}] done: {} offered: {} records, {} not placed, {} generator failures{}; \
+         registry_size={}; report at {}",
+        outcomes.offered_total(),
         outcomes.records_written(),
         outcomes.not_placed_total(),
+        outcomes.generator_failures_total(),
+        if outcomes.reconciles() { "" } else { " (UNACCOUNTED calls)" },
         core.registry_size(),
         args.out_dir.display()
     );
