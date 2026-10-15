@@ -492,6 +492,16 @@ made. A run profile joins the two.
 7. **The fault primitives stay shell** behind the incident contract. The
    readers that judge a soak today move into the package with their product
    terms made parameters, and are wired to the verdict where they overlap.
+   They are `hakit` subcommands over a run directory (`hakit/readers/`): what
+   is a product's (pods, containers, bounds, series scopes) is a flag or a
+   `--spec` YAML the product keeps in its own repository, never a search-path
+   family. `drift` judges memory, CPU per call, setup latency per shape (from
+   the records), the gauges after the drain and one CDR outcome per call, on
+   samples outside the verdict's windows; `chart` draws a range query with the
+   run's windows and phases; `logs` reads every container incarnation's lines
+   back from VictoriaLogs; `obs-check` checks the series of named scopes; the
+   capacity ramp's step judgement and CPU fit are pure functions over step
+   rows.
 
 ### 7. Deployment, dashboards and metrics
 

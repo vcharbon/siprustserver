@@ -1,4 +1,4 @@
-"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2)."""
+"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2), and the readers."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from .offschedule import active_runs, defaults_spec, request_fire
 from .paths import results_root, search_path
 from .preflight import open_events
 from .profile import Profile, parse_profile
+from .readers import cli as readers
 from .runner import Runner, RunRefused
 from .schedule import PlannedEvent, plan, plan_event
 from .schemas import SchemaSet
@@ -162,6 +163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_fire.add_argument("--run", type=Path, help="the run directory, when several runs are running")
     p_clean = sub.add_parser("cleanup", help="heal every event a crashed run left open")
     p_clean.add_argument("run_dirs", type=Path, nargs="*")
+    readers.add_parsers(sub)
     args = ap.parse_args(argv)
     env = dict(os.environ)
     try:
@@ -177,6 +179,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_run(schemas, content, env, str(args.profile), dry)
     if cmd == "verdict":
         return cmd_verdict(schemas, content, env, Path(args.run_dir))
+    if cmd in readers.COMMANDS:
+        return readers.run(cmd, args, env, RealExecutor())
     if cmd == "fire":
         run = None if args.run is None else Path(args.run)
         return cmd_fire(content, env, str(args.incident), run, dry)

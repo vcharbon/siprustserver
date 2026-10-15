@@ -90,13 +90,23 @@ def _leg_impacts(r: Json, shape: Shape, base: Impact) -> list[Impact]:
     return out
 
 
+def setup_latency(r: Json) -> SetupLatency | None:
+    """From `started_at_ms` to the first provisional, or to the setup's end when none
+    came; None when the setup never ended."""
+    first_prov = jv.opt_number(r, "first_provisional_at_ms")
+    measured_at = first_prov if first_prov is not None else jv.opt_number(r, "setup_ended_at_ms")
+    if measured_at is None:
+        return None
+    started = jv.number(r, "started_at_ms")
+    return SetupLatency(jv.string(r, "stream"), jv.string(r, "call_id"), measured_at, measured_at - started)
+
+
 def classify(r: Json, shape: Shape) -> Classified:
     stream = jv.string(r, "stream")
     call_id = jv.string(r, "call_id")
     started = jv.number(r, "started_at_ms")
     ended = jv.number(r, "ended_at_ms")
     setup_end = jv.opt_number(r, "setup_ended_at_ms")
-    first_prov = jv.opt_number(r, "first_provisional_at_ms")
     answered_at = jv.opt_number(r, "answered_at_ms")
     ending = jv.string(r, "ending")
     code = jv.opt_int(r, "final_code")
@@ -110,9 +120,7 @@ def classify(r: Json, shape: Shape) -> Classified:
         out.generator_failure = jv.string(gen[0], "detail", "generator failure")
         return out
 
-    measured_at = first_prov if first_prov is not None else setup_end
-    if measured_at is not None:
-        out.latency = SetupLatency(stream, call_id, measured_at, measured_at - started)
+    out.latency = setup_latency(r)
 
     setup_instant = setup_end if setup_end is not None else ended
     answered = answered_at is not None
