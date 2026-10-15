@@ -8,6 +8,7 @@ printed from the run's own `events.jsonl`.
 
 from __future__ import annotations
 
+import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,10 +21,13 @@ STAT_ROW = "0;0;0;0;0\n"
 
 
 class SimulatedLab:
-    """Docker generators that run until drained, and quiet observability endpoints."""
+    """Docker generators that run until drained, and quiet observability endpoints
+    whose live series stay fresh: a sample at every instant, a record a second."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock: FakeClock) -> None:
         self.drained: set[str] = set()
+        self.clock = clock
+        self.t0 = clock.now_ms()
 
     def rule(self, call: Call) -> ProcResult | HttpResult | str | None:
         if call.kind == "run" and call.argv[:2] == ["docker", "kill"]:
@@ -41,16 +45,25 @@ class SimulatedLab:
         if call.kind == "read" and call.path == Path("/proc/loadavg"):
             return "0.00 0.00 0.00 1/100 1\n"
         if call.kind == "http" and "/select/logsql/query" in call.url:
-            return HttpResult(200, '{"n":"0"}\n' if "stats" in call.url else "")
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(call.url).query).get("query", [""])[0]
+            if query.endswith("count() live"):
+                return HttpResult(200, f'{{"live":"{(self.clock.now_ms() - self.t0) // 1000}"}}\n')
+            for field in ("n", "cdrs"):
+                if query.endswith(f"count() {field}"):
+                    return HttpResult(200, f'{{"{field}":"0"}}\n')
+            return HttpResult(200, "")
         if call.kind == "http" and "/api/v1/query" in call.url:
-            body = '{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[0,"0"]}]}}'
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(call.url).query).get("query", [""])[0]
+            value = self.clock.now_ms() / 1000 if "timestamp(" in query else 0
+            body = f'{{"status":"success","data":{{"resultType":"vector","result":[{{"metric":{{}},"value":[0,"{value}"]}}]}}}}'
             return HttpResult(200, body)
         return None
 
 
 def simulated(extra: list[Rule] | None = None) -> tuple[FakeClock, FakeExecutor]:
-    lab = SimulatedLab()
-    return FakeClock(), FakeExecutor([*(extra or []), lab.rule])
+    clock = FakeClock()
+    lab = SimulatedLab(clock)
+    return clock, FakeExecutor([*(extra or []), lab.rule])
 
 
 def timeline(run_dir_events: list[dict[str, object]], start_ms: int) -> list[str]:

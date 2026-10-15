@@ -15,15 +15,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .check import profile_errors
+from .classes import run_counts
 from .clock import Clock
+from .collect import collect_cdrs
 from .content import Content
 from .events import KEEPALIVE_MS, EventJournal
 from .executor import Executor
+from .freshness import Freshness
 from .incident_exec import EventRunner
 from .injection import render
 from .jsonval import Json
 from .lab import Lab
 from .model import Incident
+from .offschedule import OffSchedule, clear_active, mark_active
 from .paths import REPO_ROOT
 from .preflight import earlier_open_events, host_facts, limit_errors
 from .profile import Profile
@@ -33,7 +37,7 @@ from .sipp_driver import SippStream
 from .summary import render as render_summary
 from .verdict import compute
 from .vlogs import VictoriaLogs
-from .vm import QueryFailed, VictoriaMetrics, chaos_event
+from .vm import QueryFailed, VictoriaMetrics
 
 SHIP_WAIT_S = 60
 
@@ -68,6 +72,9 @@ class _Live:
     died: set[str] = field(default_factory=lambda: set())
     loading: bool = False
     event: tuple[PlannedEvent, list[Incident]] | None = None
+    load_start_ms: int = 0
+    off: OffSchedule | None = None
+    fresh: Freshness | None = None
 
 
 class Runner:
@@ -108,6 +115,8 @@ class Runner:
                     errs.append(f"incident {name!r} requires {missing}, which the lab lacks")
         if len(profile.streams) > self.lab.sipp_ip_slots:
             errs.append(f"{len(profile.streams)} streams exceed the lab's {self.lab.sipp_ip_slots} generator slots")
+        if profile.cdr_join and "cdr" not in self.lab.capabilities:
+            errs.append("cdr_join needs the lab capability `cdr` (a CDR consumer shipping observations)")
         return errs
 
     def run(self, profile_name: str) -> Path:
@@ -145,11 +154,17 @@ class Runner:
             self._wait(target_ms, journal, live, integrity, run)
 
         events = EventRunner(run, run_dir, self.lab, self.executor, self.clock, journal, wait_until)
+        live.off = OffSchedule(
+            run_dir, profile, self.content, journal, events, self.clock, lambda: live.load_start_ms, self.say
+        )
         self.say(f"hakit: run {run} in {run_dir}")
+        mark_active(run_dir)
         restore = _raise_on_termination()
         try:
             self._start_streams(run, run_dir, profile, live)
             load_start = self.clock.now_ms()
+            live.load_start_ms = load_start
+            live.fresh = self._freshness(run, profile, started)
             live.loading = True
             for ev in plan(profile, self.content.incidents):
                 wait_until(load_start + int(ev.at_s * 1000))
@@ -168,14 +183,16 @@ class Runner:
                 wait_until(close)
                 close = journal.next_close_ms()
         except BaseException:
-            if live.event is not None:
-                ev, incs = live.event
+            in_progress = live.event or live.off.current
+            if in_progress is not None:
+                ev, incs = in_progress
                 events.heal_only(ev, incs)
             for s in live.streams:
                 s.remove()
             raise
         finally:
             restore()
+            clear_active(run_dir)
         for s in live.streams:
             s.remove()
         records, bad = self.vlogs.export(run, started - 3_600_000, self.clock.now_ms() + 3_600_000)
@@ -183,11 +200,15 @@ class Runner:
             fh.writelines(json.dumps(r) + "\n" for r in records)
         unreadable: list[Json] = [{"kind": "generator_failure", "detail": f"unreadable record line: {b}"} for b in bad]
         integrity += unreadable
+        if profile.cdr_join:
+            integrity += collect_cdrs(self.vlogs, self.clock, run, run_dir, started)
+        run_counts(self.content.classes, run_dir, self.executor)
         _dump(run_dir / "streams.json", stream_docs)
         with (run_dir / "integrity.jsonl").open("w") as fh:
             fh.writelines(json.dumps(i) + "\n" for i in integrity)
         meta = json.loads((run_dir / "run-meta.json").read_text())
         meta["ended_at_ms"] = self.clock.now_ms()
+        meta["load_started_at_ms"] = live.load_start_ms
         _dump(run_dir / "run-meta.json", meta)
         self.write_verdict(run_dir)
         return run_dir
@@ -228,6 +249,10 @@ class Runner:
         }
         _dump(run_dir / "run-meta.json", meta)
 
+    def _freshness(self, run: str, profile: Profile, started: int) -> Freshness:
+        streams = [(s.name, s.cps, max(s.setup_deadline_s, s.ring_s + s.hold_s)) for s in profile.streams if s.start == "run"]
+        return Freshness(run, self.vm, self.vlogs, self.clock, streams, self.lab.live_series, started)
+
     def _start_streams(self, run: str, run_dir: Path, profile: Profile, live: _Live) -> None:
         for slot, s in enumerate(profile.streams):
             sdir = run_dir / "streams" / s.name
@@ -252,7 +277,12 @@ class Runner:
                         integrity.append(
                             {"kind": "stream_died", "stream": s.stream.name, "at_ms": at, "detail": "generator exited"}
                         )
-                        self.vm.push([chaos_event("stream_died", "inject", "detected", run, at)])
+                        if live.off is not None:
+                            live.off.detected("stream_died")
+                if live.fresh is not None:
+                    integrity += live.fresh.tick()
+                if live.off is not None:
+                    live.off.poll()
             now = self.clock.now_ms()
             if now >= target_ms:
                 return

@@ -137,12 +137,30 @@ class SetupSlowAllowance:
 
 
 @dataclass(frozen=True)
+class RecoveryRule:
+    """How a window's traffic counts as back (ADR-0049 §3.6); `max_s` None means
+    back before the incident's maximum."""
+
+    max_s: float | None = None
+    tolerance: float = 0.1
+    baseline_s: float = 60
+    hold_s: float = 10
+    latency_slack_ms: float = 50
+
+
+@dataclass(frozen=True)
 class Budget:
     name: str
     setup_failed: list[Allowance]
     unexpected_ending: list[Allowance]
     setup_slow: SetupSlowAllowance
     raw: Json = field(compare=False)
+    cdr_mismatch_max: int = 0
+    recovery: RecoveryRule = RecoveryRule()
+    classes: dict[str, float] = field(default_factory=lambda: {})
+
+
+NO_BUDGET = Budget("", [], [], SetupSlowAllowance(None, None, None), raw={})
 
 
 def _allowances(d: Json, key: str) -> list[Allowance]:
@@ -163,6 +181,7 @@ def _allowances(d: Json, key: str) -> list[Allowance]:
 
 def parse_budget(d: Json) -> Budget:
     slow = jv.obj(d, "setup_slow")
+    rec = jv.obj(d, "recovery")
     return Budget(
         name=jv.string(d, "name"),
         setup_failed=_allowances(d, "setup_failed"),
@@ -173,6 +192,15 @@ def parse_budget(d: Json) -> Budget:
             max_seconds=jv.opt_number(slow, "max_seconds"),
         ),
         raw=d,
+        cdr_mismatch_max=jv.opt_int(jv.obj(d, "cdr_mismatch"), "max_calls") or 0,
+        recovery=RecoveryRule(
+            max_s=jv.opt_number(rec, "max_s"),
+            tolerance=jv.number(rec, "tolerance", 0.1),
+            baseline_s=jv.number(rec, "baseline_s", 60),
+            hold_s=jv.number(rec, "hold_s", 10),
+            latency_slack_ms=jv.number(rec, "latency_slack_ms", 50),
+        ),
+        classes={k: jv.number(jv.as_obj(v, k), "max") for k, v in jv.obj(d, "classes").items()},
     )
 
 

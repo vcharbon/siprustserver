@@ -94,5 +94,12 @@ def timed_out(call_id: str, started: float, deadline_ms: float = 32_000) -> Json
     return record(call_id, started, "timeout", answered=None, setup=deadline_ms, code=None, reason="timeout", ended=deadline_ms)
 
 
+def paced(prefix: str, from_ms: float, to_ms: float, cps: float, **kw: object) -> list[Json]:
+    """Answered calls started at `cps` in [from_ms, to_ms); `kw` overrides `record`'s offsets."""
+    step = 1000 / cps
+    n = int(round((to_ms - from_ms) / step))
+    return [record(f"{prefix}{i}", from_ms + i * step, **kw) for i in range(n)]  # pyright: ignore[reportArgumentType]
+
+
 def write_jsonl(p: Path, rows: list[Json]) -> None:
     p.write_text("".join(json.dumps(r) + "\n" for r in rows))

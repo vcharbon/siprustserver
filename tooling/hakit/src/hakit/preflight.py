@@ -61,14 +61,18 @@ def limit_errors(limits: Preflight, facts: Json) -> list[str]:
 def open_events(run_dir: Path) -> list[str]:
     """Events of a run directory with an incident that injected and never healed.
 
-    `hakit cleanup` leaves a `cleaned` marker once it healed them all.
+    `hakit cleanup` leaves a `cleaned` marker once it healed them all. A
+    detected event heals nothing and is never open.
     """
     if (run_dir / "cleaned").is_file():
         return []
     injected: set[tuple[str, str]] = set()
     healed: set[tuple[str, str]] = set()
+    detected: set[str] = set()
     for line in read_jsonl(run_dir / "events.jsonl"):
-        if line.get("kind") != "phase":
+        if line.get("kind") == "event" and line.get("source") == "detected":
+            detected.add(str(line.get("event")))
+        if line.get("kind") != "phase" or line.get("event") in detected:
             continue
         key = (str(line.get("event")), str(line.get("step")))
         if line.get("phase") == "inject":

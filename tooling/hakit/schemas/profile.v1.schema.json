@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "profile.v1.schema.json",
-  "$comment": "minor 1",
+  "$comment": "minor 2",
   "title": "profile.v1",
   "description": "A file `profiles/<name>.yaml`: one run. The load streams, the schedule of incident events, the budget of each event's window, and the defaults of an event the schedule did not fire. Impact outside every window is `unattributed`. ADR-0049.",
   "type": "object",
@@ -36,6 +36,17 @@
       "description": "A setup (INVITE to its first provisional, or to its final when none came) longer than this is `setup_slow`, unless a window's budget raises it.",
       "type": "number",
       "exclusiveMinimum": 0
+    },
+    "generator_stall_ms": {
+      "description": "A gap between two consecutive call starts of a stream longer than 1/cps plus this is a generator stall (ADR-0049 §3.12).",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "default": 500
+    },
+    "cdr_join": {
+      "description": "Join the CDR consumer's observations of the run with its records (`cdr_mismatch`); the lab must offer the capability `cdr`.",
+      "type": "boolean",
+      "default": false
     },
     "catalogs": {
       "description": "The treatment catalogs the streams' shapes come from, by catalog name.",

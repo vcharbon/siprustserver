@@ -213,7 +213,8 @@ made. A run profile joins the two.
    One record may yield several impacts (a re-INVITE answered 481 is a
    `dialog_request_failed`, and the call it ended is a `call_cut`). A record
    whose `failures` hold a `generator` entry is not an impact of the system
-   under test: it is a `generator_failure` integrity finding.
+   under test: it is a `generator_failure` integrity finding. Nor is a
+   measurement the generator took while it stalled (§3.12).
 
 2. **Nothing is accepted by default.** A class or key a budget does not name
    allows 0. A `setup_failed` or `unexpected_ending` code a budget does not
@@ -239,63 +240,114 @@ made. A run profile joins the two.
    generator stopped the call on a message it could not accept). SIPp and
    loadgen use the same spellings.
 5. **Windows.** An event's window opens at its first `inject` instant and
-   closes `settle_s` after its last `recovered` instant. A budgetable impact
-   belongs to the window that holds its instant; one outside every window is
+   closes `settle_s` after the later of its last `recovered` instant and the
+   instant every stream with a baseline is back (§3.6), at most at its limit:
+   the incident's maximum (every timeout and `duration_s`, plus `settle_s`)
+   or the next window's opening, whichever comes first. While a stream is not
+   back the window closes at that limit. The `sip_chaos_window` series show the window up to
+   `recovered` + `settle_s`, the only close the runner knows live; the
+   verdict's window is the one above. A budgetable impact belongs to the
+   window that holds its instant; one outside every window is
    `unattributed`. An in-dialog impact takes no budget, so its attribution is
    for analysis: its `candidate_windows` are every window whose `inject` fell
    inside the call's lifetime before the failure, and with none it is
    `unattributed`. A call stranded before a window opens and whose setup
    deadline falls inside it is charged to that window by its instant. A
    window whose inject, heal or probe step fails closes at the incident's
-   maximum (every timeout and `duration_s`, plus `settle_s`) with status
-   `incident_failed`, which makes the run `invalid`.
-6. **Recovery** is computed from the records, so a verdict recomputes from the
-   run directory alone. The baseline of a stream is its successful-setup
-   ratio and its p99 setup time (as `setup_slow` measures it) over
-   `baseline_s` before `inject`. Traffic is back when, over `hold_s` in a row,
-   every stream's ratio is within `tolerance` below its baseline and its p99
-   within `tolerance` above. Ratios, not counts, so a rate change from
-   `steps` inside a window is no impact. `recovery_s` is the time from
-   `healed` to the start of that span; a budget's `recovery.max_s` caps it,
-   and without one traffic must be back before the window closes. A stream
-   with no baseline (one that starts with an incident) has no recovery.
+   maximum with status `incident_failed`, which makes the run `invalid`.
+6. **Recovery** is computed per stream from the records, so a verdict
+   recomputes from the run directory alone. A call's setup succeeded when its
+   record yields no budgetable impact; its setup time is what `setup_slow`
+   measures. The baseline of a stream is the successful-setup ratio and the
+   nearest-rank p99 setup time of its calls started in the `baseline_s`
+   before `inject`; a stream with no call there (one that starts with an
+   incident) has no baseline and no recovery. From `healed`, in steps of 1 s,
+   the first span of `hold_s` whose calls (by `started_at_ms`, at least one)
+   have a ratio of at least the baseline's × (1 − `tolerance`) and a p99 of at
+   most the baseline's × (1 + `tolerance`) + `latency_slack_ms` (default 50:
+   a relative tolerance alone is jitter on a setup of a few milliseconds) is
+   where the stream is back. Ratios, not counts, so a rate change from
+   `steps` is no impact. `recovery_s` is the time from `healed` to the start
+   of that span; a budget's `recovery.max_s` caps it, and without one the
+   stream must be back before the window's limit (§3.5). A measurement taken
+   across a generator stall (§3.12) counts in neither the baseline nor a
+   span.
 7. **Timing bounds.** `settle_s` is at least the longest `setup_deadline_s`
    of the streams, so a call stranded at the fault reaches its deadline
    inside the window; `drain_s` is at least max(`setup_deadline_s`,
    `ring_s` + `hold_s`) of every stream. The runner refuses a profile that
    breaks either. The dry-run checks that no two windows overlap using each
    event's `expected_s` (default `duration_s` + 60) plus `settle_s`; with the
-   defaults (`settle_s` 60) a kill every 3 minutes passes. At run time a
-   window that opens while another is open is a `window_overlap` integrity
+   defaults (`settle_s` 60) a kill every 3 minutes passes. A window of the
+   verdict that opens while another is open is a `window_overlap` integrity
    finding.
-8. **CDR mismatch.** The CDR consumer's output reaches the run directory as
-   `cdrs.jsonl`, one `cdr-observation.v1` line per CDR (call_id, start,
-   answer, end, duration, its unit, disposition). Joined on `call_id` with
-   the records: an answered call with no CDR is charged at its `ended_at_ms`;
-   a CDR with no record at its own `end_ms`; a CDR whose disposition differs
-   from the record's, or whose duration differs from `ended_at_ms` −
-   `answered_at_ms` by more than 1 s plus the CDR's unit, at the record's
-   `ended_at_ms`.
+8. **CDR mismatch.** A profile with `cdr_join: true` joins the run's CDRs with
+   its records, on a lab that offers the capability `cdr`. The base's CDR
+   consumer (`cdr-consumer-runner`, with `CDR_OBSERVATION_URL` set) ships one
+   `cdr-observation.v1` line per CDR it consumes to VictoriaLogs the way the
+   generators ship records (`source` `cdr-consumer`); a product whose CDR
+   payload differs builds the consumer from the same library with its own
+   observation view. After the drain the runner exports the observations
+   whose `call_id` carries the run id (the Call-ID nonce of §6.4) into
+   `cdrs.jsonl`, once their count has stopped growing for 10 s (at most
+   60 s). Joined on `call_id`:
+   - an answered call with no CDR is charged at its `ended_at_ms`;
+   - a CDR with no record at its own `end_ms`;
+   - each CDR after the first of a call at the record's `ended_at_ms`;
+   - a CDR whose disposition differs from the record's at the record's
+     `ended_at_ms`;
+   - for a record ending `answered` (a planned teardown, timed by the
+     caller), a duration that differs from `ended_at_ms` − `answered_at_ms`
+     by more than 1 s plus the CDR's unit, at the record's `ended_at_ms`. A
+     `cut` or `stranded` call is an impact already: of its CDR only the
+     presence and the disposition are compared.
+
+   An unanswered call without a CDR is no mismatch. A window allows
+   `cdr_mismatch.max_calls`.
 9. **Events off the schedule.** `hakit fire <incident>` during a run and a
    `detected` event (named after what was detected, such as `stream_died`)
-   open windows under the same rules, closing at their `recovered` instant or
-   at the incident's maximum. Their budget, parameters and target come from
-   the profile's `defaults` entry for that incident. `hakit fire` without an
-   entry, or while a window is open, is refused; a detected event without an
-   entry opens a window that allows nothing.
+   open windows under the same rules. Their ids are `m<seq>-<incident>` and
+   `d<seq>-<name>`. `hakit fire` leaves a request in the running run's
+   directory (`fire/`) and waits for the answer; the runner takes it between
+   two waits, refuses it without a `defaults` entry for the incident or while
+   a window is open, and otherwise runs the event with the entry's budget,
+   parameters and target. A detected event heals nothing: its window opens at
+   the detection and closes `settle_s` later, under the `defaults` entry of
+   its name, or without one under a budget that allows nothing.
 10. **Added classes.** A product adds a class with `classes/<name>.yaml` and
-    its executable `classes/<name>.count`, which reads the run directory and
-    prints the impacts with their instants. Attribution and budgets work on it
-    as on a built-in class (`budget.classes.<name>.max`).
+    its executable `classes/<name>.count`. After the records and CDRs are
+    exported the runner runs each count once, with `HAKIT_RUN_DIR` set; it
+    prints one JSON array of impacts with their instants, kept as
+    `classes/<name>.json` in the run directory so the verdict recomputes
+    without the executable. A count that fails or prints anything else is a
+    `class_failed` integrity finding. Attribution and budgets work on it as
+    on a built-in class (`budget.classes.<name>.max` per window).
 11. **The verdict.** `verdict.json` (`verdict.v1`): per stream the calls, the
-    calls never placed, the records and the successes; per window its source,
-    status, every phase as `{phase, at_ms, step}`, the facts, each stream's
-    recovery and every budgetable impact with its count, its seconds of
-    offered rate, its allowance and whether it is a finding; the in-dialog
-    impacts with their candidate windows; the unattributed impact; the
-    integrity findings. `status` is `invalid` when an integrity finding
-    exists, else `fail` when any impact is a finding, else `pass`. A human
-    `summary.md` is rendered from it.
+    calls never placed, the records, the successes and the generator's
+    stalls; per window its source, status, every phase as
+    `{phase, at_ms, step}`, the facts, each stream's recovery and every
+    budgetable impact with its count, its seconds of offered rate, its
+    allowance and whether it is a finding; the in-dialog impacts with their
+    candidate windows; the unattributed impact; the integrity findings.
+    `status` is `invalid` when an integrity finding exists, else `fail` when
+    any impact is a finding, else `pass`. A human `summary.md` is rendered
+    from it: the status and why, then per window and per stream each class
+    against its allowance.
+12. **Generator health.** A generator stall is a time the generator did not
+    run: it placed no call and read no message. Its signal is in the records:
+    two consecutive calls of a stream started more than 1/cps +
+    `generator_stall_ms` apart (profile, default 500 ms, SIPp's own watchdog
+    threshold), at the rate of the step in force; the stall is the interval
+    between the two starts. A paced generator places the calls it owes once
+    it runs again, and the runner sizes SIPp's call limit at twice the
+    stream's concurrency, so a gap is never the system under test holding
+    calls. A setup time measured across a stall, and a setup deadline that
+    falls inside one, measure the generator: they leave the impacts and are
+    listed, with their Call-IDs, in one `generator_stall` integrity finding
+    per stall. A stall that spoiled no measurement is listed in the stream's
+    `stalls` and leaves the status alone. A generator's own count of calls it
+    failed without a record (loadgen's `loadgen_generator_failures_total`) is
+    a `generator_failure` integrity finding when above 0.
 
 ### 4. The call-outcome record
 
@@ -428,8 +480,14 @@ made. A run profile joins the two.
    refuses to start while the system under test holds calls (a
    `leftover_calls` finding) or while an event of an earlier run is open.
 6. **During the load.** Every series the run reads live is checked for
-   freshness; one that stops updating for three scrape intervals is a
-   `series_stale` integrity finding with its instant. A generator that exits
+   freshness every scrape interval (15 s): each stream's records in
+   VictoriaLogs, whose count must grow once the stream's first calls could
+   have ended, and each VictoriaMetrics selector of the lab's `live_series`
+   (`HAKIT_LIVE_SERIES`, `;`-separated; the system under test's call gauge
+   by default), whose newest sample must be recent. One that stops updating
+   for three scrape intervals (for records, at least five calls of the
+   stream's rate) is a `series_stale` integrity finding with the instant it
+   was last fresh. A generator that exits
    before its stream is due to stop is `stream_died`, and a `detected` event.
 7. **The fault primitives stay shell** behind the incident contract. The
    readers that judge a soak today move into the package with their product

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "budget.v1.schema.json",
-  "$comment": "minor 0",
+  "$comment": "minor 1",
   "title": "budget.v1",
   "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
   "type": "object",
@@ -68,6 +68,12 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "default": 10
+        },
+        "latency_slack_ms": {
+          "description": "Added to the baseline p99 × (1 + tolerance): a relative tolerance alone is jitter on a setup of a few milliseconds.",
+          "type": "number",
+          "minimum": 0,
+          "default": 50
         }
       }
     },

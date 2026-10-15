@@ -1,4 +1,4 @@
-"""The `hakit` command line: validate, run, verdict, cleanup (ADR-0049 §6.2)."""
+"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .check import all_profile_errors
@@ -19,15 +20,20 @@ from .incident_exec import EventRunner
 from . import jsonval as jv
 from .jsonval import as_obj
 from .lab import lab_from_env
+from .offschedule import active_runs, defaults_spec, request_fire
 from .paths import results_root, search_path
 from .preflight import open_events
-from .profile import parse_profile
+from .profile import Profile, parse_profile
 from .runner import Runner, RunRefused
-from .schedule import plan
+from .schedule import PlannedEvent, plan, plan_event
 from .schemas import SchemaSet
 from .verdict import read_jsonl
 from .vm import VictoriaMetrics
 from .events import EventJournal
+
+# How long `hakit fire` waits for the runner, which takes requests between two
+# waits: after an executable step, at most an inject timeout.
+FIRE_WAIT_S = 300
 
 
 def load(env: Mapping[str, str]) -> tuple[SchemaSet, Content]:
@@ -97,7 +103,7 @@ def cmd_cleanup(content: Content, env: Mapping[str, str], run_dirs: Sequence[Pat
         profile = parse_profile(as_obj(json.loads((d / "profile.json").read_text())))
         journal = EventJournal(run, d, clock, VictoriaMetrics(executor, lab.vm_url))
         stepper = EventRunner(run, d, lab, executor, clock, journal, lambda _t: None)
-        for ev in plan(profile, content.incidents):
+        for ev in plan(profile, content.incidents) + manual_events(profile, content, ids):
             if ev.event_id in ids:
                 bad = stepper.heal_only(ev, [content.incidents[n] for n in ev.spec.incidents])
                 print(f"hakit: {run}/{ev.event_id} healed" + (f", failed: {bad}" if bad else ""))
@@ -111,6 +117,37 @@ def cmd_cleanup(content: Content, env: Mapping[str, str], run_dirs: Sequence[Pat
     return 1 if failed else 0
 
 
+def manual_events(profile: Profile, content: Content, ids: Sequence[str]) -> list[PlannedEvent]:
+    """The manual events among `ids` (`m<seq>-<incident>`), planned from the profile's defaults."""
+    out: list[PlannedEvent] = []
+    for event in ids:
+        seq, _, incident = event.removeprefix("m").partition("-")
+        spec = defaults_spec(profile, incident) if event.startswith("m") and seq.isdigit() else None
+        if spec is not None and incident in content.incidents:
+            out.append(plan_event(int(seq), 0, spec, profile, content.incidents, prefix="m"))
+    return out
+
+
+def cmd_fire(content: Content, env: Mapping[str, str], incident: str, run_dir: Path | None, dry_run: bool) -> int:
+    dirs = [run_dir] if run_dir is not None else active_runs(results_root(env))
+    if len(dirs) != 1:
+        print(f"hakit: fire refused: {len(dirs)} running runs; name one with --run", file=sys.stderr)
+        return 2
+    target = dirs[0]
+    profile = parse_profile(as_obj(json.loads((target / "profile.json").read_text())))
+    if dry_run:
+        ok = incident in content.incidents and defaults_spec(profile, incident) is not None
+        print(f"hakit: dry run: {incident} would be {'requested' if ok else 'refused'} in {target.name}")
+        return 0 if ok else 2
+    nonce = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    answer = request_fire(target, incident, RealClock(), FIRE_WAIT_S, nonce)
+    if answer.get("accepted") is True:
+        print(f"hakit: {target.name}: event {answer.get('event')} fired")
+        return 0
+    print(f"hakit: fire refused: {answer.get('reason')}", file=sys.stderr)
+    return 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="hakit", description="Pluggable HA tooling base (ADR-0049).")
     ap.add_argument("--dry-run", action="store_true", help="fake clock and simulated lab; no effect leaves the runner")
@@ -120,6 +157,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_run.add_argument("profile")
     p_ver = sub.add_parser("verdict", help="recompute verdict.json from a run directory")
     p_ver.add_argument("run_dir", type=Path)
+    p_fire = sub.add_parser("fire", help="fire one manual event in the running run")
+    p_fire.add_argument("incident")
+    p_fire.add_argument("--run", type=Path, help="the run directory, when several runs are running")
     p_clean = sub.add_parser("cleanup", help="heal every event a crashed run left open")
     p_clean.add_argument("run_dirs", type=Path, nargs="*")
     args = ap.parse_args(argv)
@@ -137,6 +177,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_run(schemas, content, env, str(args.profile), dry)
     if cmd == "verdict":
         return cmd_verdict(schemas, content, env, Path(args.run_dir))
+    if cmd == "fire":
+        run = None if args.run is None else Path(args.run)
+        return cmd_fire(content, env, str(args.incident), run, dry)
     return cmd_cleanup(content, env, [Path(p) for p in args.run_dirs], dry)
 
 

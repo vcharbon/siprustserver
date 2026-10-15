@@ -16,10 +16,12 @@ class PlannedEvent:
     duration_s: float
     expected_s: float
     settle_s: float
+    # `m` for a manual event; a scheduled one has none.
+    prefix: str = ""
 
     @property
     def event_id(self) -> str:
-        return f"{self.seq:03d}-{self.spec.label}"
+        return f"{self.prefix}{self.seq:03d}-{self.spec.label}"
 
     @property
     def window_end_s(self) -> float:
@@ -27,7 +29,9 @@ class PlannedEvent:
         return self.at_s + self.expected_s + self.settle_s
 
 
-def plan_event(seq: int, at_s: float, spec: EventSpec, profile: Profile, incidents: dict[str, Incident]) -> PlannedEvent:
+def plan_event(
+    seq: int, at_s: float, spec: EventSpec, profile: Profile, incidents: dict[str, Incident], prefix: str = ""
+) -> PlannedEvent:
     incs = [incidents[n] for n in spec.incidents]
     duration = spec.duration_s if spec.duration_s is not None else max(i.duration_s for i in incs)
     if spec.expected_s is not None:
@@ -37,7 +41,9 @@ def plan_event(seq: int, at_s: float, spec: EventSpec, profile: Profile, inciden
     else:
         expected = max(i.expected_s for i in incs)
     settle = spec.settle_s if spec.settle_s is not None else profile.settle_s
-    return PlannedEvent(seq=seq, at_s=at_s, spec=spec, duration_s=duration, expected_s=expected, settle_s=settle)
+    return PlannedEvent(
+        seq=seq, at_s=at_s, spec=spec, duration_s=duration, expected_s=expected, settle_s=settle, prefix=prefix
+    )
 
 
 def plan(profile: Profile, incidents: dict[str, Incident]) -> list[PlannedEvent]:

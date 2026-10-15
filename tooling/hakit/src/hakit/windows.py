@@ -1,8 +1,10 @@
 """Incident windows rebuilt from a run's `events.jsonl` (ADR-0049 §3.5).
 
 A window opens at its event's first `inject` and closes `settle_s` after its
-last `recovered`. An event with a `failed` phase, or one that never recovered,
-closes at its maximum (every timeout and the hold, plus `settle_s`) with status
+last `recovered`; `close_on_recovery` moves the close to `settle_s` after the
+instant traffic is back when that is later, and to the maximum while it is not
+back. An event with a `failed` phase, or one that never recovered, closes at
+its maximum (every timeout and the hold, plus `settle_s`) with status
 `incident_failed`.
 """
 
@@ -32,12 +34,29 @@ class Window:
     closed_at_ms: int
     phases: list[Phase] = field(default_factory=lambda: [])
     facts: dict[str, Json] = field(default_factory=lambda: {})
+    settle_ms: int = 0
+    max_close_ms: int = 0
 
     def holds(self, at_ms: float) -> bool:
         return self.opened_at_ms <= at_ms <= self.closed_at_ms
 
     def first(self, phase: str) -> int | None:
         return next((p.at_ms for p in self.phases if p.phase == phase), None)
+
+    def last(self, phase: str) -> int | None:
+        return max((p.at_ms for p in self.phases if p.phase == phase), default=None)
+
+    def close_on_recovery(self, back_at_ms: list[float | None], limit_ms: int) -> None:
+        """Close `settle_s` after the latest stream's return when it is after the
+        probe's; at `limit_ms` (the maximum, or the next window's opening) when a
+        stream never came back before it."""
+        if self.status != "ok" or not back_at_ms:
+            return
+        if any(b is None for b in back_at_ms):
+            self.closed_at_ms = max(self.closed_at_ms, limit_ms)
+            return
+        latest = max(b for b in back_at_ms if b is not None)
+        self.closed_at_ms = max(self.closed_at_ms, min(limit_ms, int(latest) + self.settle_ms))
 
 
 def event_line(
@@ -89,9 +108,10 @@ def build_windows(lines: list[Json]) -> list[Window]:
         recovered = [p.at_ms for p in ps if p.phase == "recovered"]
         failed = any(p.phase == "failed" for p in ps)
         incidents = jv.strings(meta, "incidents")
+        max_close = opened + int(jv.number(meta, "max_s") * 1000) + settle_ms
         if failed or len(recovered) < len(incidents):
             status = "incident_failed"
-            closed = opened + int(jv.number(meta, "max_s") * 1000) + settle_ms
+            closed = max_close
         else:
             status = "ok"
             closed = max(recovered) + settle_ms
@@ -106,6 +126,8 @@ def build_windows(lines: list[Json]) -> list[Window]:
                 closed_at_ms=closed,
                 phases=ps,
                 facts=facts.get(ev, {}),
+                settle_ms=settle_ms,
+                max_close_ms=max(max_close, closed),
             )
         )
     out.sort(key=lambda w: w.opened_at_ms)

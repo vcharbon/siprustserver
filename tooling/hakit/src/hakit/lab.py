@@ -28,6 +28,8 @@ class Lab:
     sipp_ip_slots: int
     callees: list[tuple[str, int]]
     leftover_calls_query: str
+    # VictoriaMetrics selectors the run reads live, checked for freshness.
+    live_series: list[str]
 
     @property
     def vm_import_url(self) -> str:
@@ -67,4 +69,5 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
         sipp_ip_slots=int(g("HAKIT_SIPP_IP_SLOTS", "36")),
         callees=_callees(g("HAKIT_CALLEES", "192.168.60.21:5060,192.168.60.22:5060")),
         leftover_calls_query=g("HAKIT_LEFTOVER_CALLS_QUERY", "sum(last_over_time(b2bua_active_calls[30s]))"),
+        live_series=[s.strip() for s in g("HAKIT_LIVE_SERIES", "b2bua_active_calls").split(";") if s.strip()],
     )

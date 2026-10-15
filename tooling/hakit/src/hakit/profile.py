@@ -22,6 +22,15 @@ class Stream:
     hold_s: float
     max_concurrent: int | None
     params: dict[str, Scalar]
+    steps: list[tuple[float, float]] = field(default_factory=lambda: [])
+
+    def cps_at(self, load_s: float) -> float:
+        """The offered rate `load_s` seconds after the load started."""
+        rate = self.cps
+        for at_s, cps in self.steps:
+            if at_s <= load_s:
+                rate = cps
+        return rate
 
 
 @dataclass(frozen=True)
@@ -66,6 +75,8 @@ class Profile:
     drain_s: float
     settle_s: float
     setup_slow_ms: float
+    generator_stall_ms: float
+    cdr_join: bool
     catalogs: list[str]
     preflight: Preflight
     streams: list[Stream]
@@ -106,6 +117,7 @@ def _stream(d: Json) -> Stream:
         hold_s=jv.number(d, "hold_s", 0),
         max_concurrent=mc,
         params=jv.scalars(d, "params"),
+        steps=sorted((jv.number(s, "at_s"), jv.number(s, "cps")) for s in jv.objs(d, "steps")),
     )
 
 
@@ -128,6 +140,8 @@ def parse_profile(d: Json) -> Profile:
         drain_s=jv.number(d, "drain_s", 120),
         settle_s=jv.number(d, "settle_s", 60),
         setup_slow_ms=jv.number(d, "setup_slow_ms"),
+        generator_stall_ms=jv.number(d, "generator_stall_ms", 500),
+        cdr_join=jv.boolean(d, "cdr_join"),
         catalogs=jv.strings(d, "catalogs"),
         preflight=Preflight(
             min_free_memory_gib=jv.opt_number(pf, "min_free_memory_gib"),

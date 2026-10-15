@@ -16,6 +16,7 @@ from pathlib import Path
 
 import yaml
 
+from .classes import ProductClass
 from .jsonval import Json, as_obj
 from .model import Budget, Catalog, Incident, Shape, parse_budget, parse_catalog, parse_incident
 from .profile import Profile, parse_profile
@@ -36,7 +37,7 @@ class Content:
     profiles: dict[str, Profile] = field(default_factory=lambda: {})
     catalogs: dict[str, Catalog] = field(default_factory=lambda: {})
     shapes: dict[str, Shape] = field(default_factory=lambda: {})
-    classes: dict[str, Json] = field(default_factory=lambda: {})
+    classes: dict[str, ProductClass] = field(default_factory=lambda: {})
     scenarios: dict[str, Path] = field(default_factory=lambda: {})
 
 
@@ -129,8 +130,13 @@ def discover(path: list[Path], schemas: SchemaSet) -> Content:
             for shape in cat.shapes:
                 if c.claim("shape", shape.shape, p):
                     out.shapes[shape.shape] = shape
-        for _, doc in _files(c, root, "classes", "impact-class", ".yaml"):
-            out.classes[str(doc["name"])] = doc
+        for p, doc in _files(c, root, "classes", "impact-class", ".yaml"):
+            name = str(doc["name"])
+            count = p.with_suffix(".count")
+            if not count.is_file() or not os.access(count, os.X_OK):
+                c.errors.append(f"{p}: class {name!r} needs an executable {count.name}")
+                continue
+            out.classes[name] = ProductClass(name, str(doc["unit"]), count)
         for p in sorted((root / "scenarios").glob("*")):
             if p.is_file() and c.claim("scenario", p.name, p):
                 out.scenarios[p.name] = p
