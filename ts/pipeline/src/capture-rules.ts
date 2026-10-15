@@ -14,7 +14,6 @@
  * delete the second reason a case was refused.
  */
 import type { Flows } from "@sip/contracts"
-import { CAPTURE_EDGE_RULE } from "./capture-edge.js"
 import type * as Policy from "./policy.js"
 import { PROBE_SKEW_RULE } from "./probe-skew.js"
 import { REFER_REPLACES_RULE } from "./refer-replaces.js"
@@ -49,6 +48,6 @@ export interface CaptureRule extends RuleIdentity {
  * deployment. Read ahead of a deployment's ({@link Policy.CasePolicy.refuseAtCapture}),
  * in this ON-DISK order.
  */
-export const CAPTURE_RULES: ReadonlyArray<CaptureRule> = [REFER_REPLACES_RULE, PROBE_SKEW_RULE, CAPTURE_EDGE_RULE]
+export const CAPTURE_RULES: ReadonlyArray<CaptureRule> = [REFER_REPLACES_RULE, PROBE_SKEW_RULE]
 
 checkRefusalRoster(CAPTURE_RULES, { where: "@sip/pipeline capture rules", deploymentFree: true })

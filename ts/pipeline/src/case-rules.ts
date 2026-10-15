@@ -18,6 +18,7 @@ import type { CaptureInput } from "./capture-rules.js"
 import { checkRefusalRoster } from "./refusal-roster.js"
 import type { Finding, RuleIdentity } from "./refusal-rule.js"
 import { CALL_COMPLETENESS_RULE } from "./call-completeness.js"
+import { CAPTURE_EDGE_RULE } from "./capture-edge.js"
 import { IDENTITY_REOFFERED, reofferClause, reofferLine, reoffers } from "./reoffer.js"
 
 /** What a CASE-TIER refusal is decided from: the capture, plus the cut's vantages. */
@@ -35,6 +36,7 @@ export interface CaseRule extends RuleIdentity {
  * document of a vantage can state, whatever the deployment.
  */
 export const CASE_RULES: ReadonlyArray<CaseRule> = [
+  CAPTURE_EDGE_RULE,
   {
     id: IDENTITY_REOFFERED,
     subject: "scope",

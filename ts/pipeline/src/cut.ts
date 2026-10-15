@@ -332,6 +332,20 @@ export const vantageIsInbound = (
 }
 
 /**
+ * Whether the dialog anchored at this vantage is one the SUT DIALLED: its
+ * dialog-creating INVITE left the SUT. A vantage with no anchor at its hop is
+ * neither this nor {@link vantageIsInbound}.
+ */
+export const vantageIsOutbound = (
+  flows: Flows.FlowsDoc,
+  sut: SutSet,
+  v: CutVantage
+): boolean => {
+  vantageLeg(flows, v)
+  return anchorsOf(flows, v.leg, sut).some((a) => a.hop === v.hop && !a.inbound)
+}
+
+/**
  * The captured leg a vantage names. A vantage is cut from the same flows
  * document every rule reads, so one naming no leg of it is the caller's defect,
  * never a case to generate or to clear: it throws.

@@ -18,8 +18,9 @@ import type { SutSet } from "./sut.js"
 export const SOURCE_CALL_INCOMPLETE = "source-call-incomplete"
 
 /**
- * The dialog at one vantage where the capture ESTABLISHED it and never tore it
- * down, and `undefined` for every complete outcome.
+ * The dialog the capture ESTABLISHED at one vantage — the index of its
+ * establishing 2xx — and whether a BYE closed it; `undefined` where no 2xx
+ * answered the vantage's INVITE.
  *
  * Read off the datagrams the CUT gives this vantage rather than off the leg's
  * `final_status` / `terminated_by` summary: those are leg-wide, so on a leg the
@@ -27,16 +28,35 @@ export const SOURCE_CALL_INCOMPLETE = "source-call-incomplete"
  *
  * The LAST fresh 2xx is the establishing one, so an attempt retried after a
  * failure is judged on the attempt that succeeded and a 2xx retransmitted after
- * the teardown does not re-open the dialog. Terminated means a BYE after it: RFC
+ * the teardown does not re-open the dialog. Closed means a BYE after it: RFC
  * 3261 §9.1 gives CANCEL no effect on a dialog whose 2xx is already out, and §15
  * makes BYE the only way such a dialog ends.
  */
-const unterminatedDialog = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): RefusalEvidence | undefined => {
+const establishedDialog = (
+  flows: Flows.FlowsDoc,
+  sut: SutSet,
+  v: CutVantage
+): { readonly answered: number; readonly closed: boolean } | undefined => {
   const leg = vantageLeg(flows, v)
   const idxs = vantageMsgIdxs(flows, v.leg, v.hop, sut)
   const answered = idxs.filter((i) => !leg.msgs[i]!.retx && Flows.isSuccessToInvite(leg.msgs[i]!)).pop()
   if (answered === undefined) return undefined
-  if (idxs.some((i) => i > answered && Flows.isMethod(leg.msgs[i]!, "BYE"))) return undefined
+  return { answered, closed: idxs.some((i) => i > answered && Flows.isMethod(leg.msgs[i]!, "BYE")) }
+}
+
+/** Whether the capture established the dialog at this vantage and a BYE closed it. */
+export const closedByBye = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): boolean =>
+  establishedDialog(flows, sut, v)?.closed === true
+
+/**
+ * The dialog at one vantage where the capture ESTABLISHED it and never tore it
+ * down, and `undefined` for every complete outcome.
+ */
+const unterminatedDialog = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): RefusalEvidence | undefined => {
+  const dialog = establishedDialog(flows, sut, v)
+  if (dialog === undefined || dialog.closed) return undefined
+  const leg = vantageLeg(flows, v)
+  const answered = dialog.answered
   const summary = leg.msgs[answered]!.summary
   const status = summary.kind === "response" ? summary.status : 0
   return {

@@ -93,7 +93,7 @@ describe("the roster in its tiers", () => {
   })
 
   it("puts the pipeline's own case rules ahead of the deployment's, at the case tier", () => {
-    const deployment = { ...CASE_RULES[0]!, id: "scope-deployment-own" }
+    const deployment = { ...CASE_RULES.find((r) => r.subject === "scope")!, id: "scope-deployment-own" }
     const tiers = tieredRoster(policyWith({ refuse: [deployment] }))
     expect(tiers.case.map((r) => r.id)).toEqual([
       ...CASE_RULES.map((r) => r.id),

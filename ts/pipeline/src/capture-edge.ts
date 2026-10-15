@@ -1,38 +1,49 @@
 /**
- * THE CAPTURE EDGE: a family the file cut through is no full call.
+ * THE CAPTURE EDGE: a case the file cut through is no full call.
  *
  * A capture of a live tap starts and stops on the clock, not on a call, so the
  * calls under way at either edge are in it by half. A case cut from one would
  * script a call the wire never finished, and its count would be a full call the
- * population never held — so the family is refused, under a token that names
+ * population never held — so the case is refused, under a token that names
  * the leg and the termination it is missing, and never dropped.
  *
- * A family is complete when EVERY leg is terminated inside the capture:
+ * The legs judged are the ones the case's vantages SCRIPT: a leg the
+ * correlation joined to the family and no vantage plays is in no replay. A case
+ * is complete when every such leg is terminated inside the capture:
  *
- * - a BYE closed the dialog. Where the BYE drew no final, the leg is terminated
- *   only once {@link RETRANSMISSION_TAIL_US} separates its last message from the
- *   end of the capture: a BYE still being retried shows within that tail;
- * - a non-2xx final ended the attempt and its ACK is in the capture;
- * - the source GAVE UP — a CANCEL, a request nothing ever answered, a final
- *   nobody ACKed — and {@link GIVE_UP_SILENCE_US} separates the leg's last
- *   message from the end of the capture, so the silence is the source's own
- *   and not the file's.
+ * - a BYE closed the dialog, with or without its final. A BYE retransmitted
+ *   without a final is one still being retried, so it terminates the leg only
+ *   once {@link RETRANSMISSION_TAIL_US} separates the leg's last message from the
+ *   end of the capture;
+ * - a non-2xx final ended the attempt, whatever its ACK (RFC 3261 §17.1.1.3:
+ *   that ACK belongs to the final's transaction and ends nothing the final did
+ *   not);
+ * - the source GAVE UP — a CANCEL, or a request nothing ever answered — and
+ *   {@link GIVE_UP_SILENCE_US} separates the leg's last message from the end of
+ *   the capture, so the silence is the source's own and not the file's.
  *
  * A dialog the source answered and never closed is refused whatever the
  * silence: a call can be up for hours. A leg that OPENS mid-dialog — a response,
  * or a request carrying a To-tag, before any request opened one — began before
  * the capture did and is refused as truncated at the head.
  *
+ * A leg the SUT dialled is not judged at its tail once a BYE closed every
+ * caller-side dialog of the case: its teardown is the SUT's own at replay, the
+ * exemption `./call-completeness.ts` grants it.
+ *
  * "End of the capture" is the last SIP datagram the document holds, which for
  * a per-call export is the call's own last message: a complete termination is
  * never charged for the file ending on it.
  */
 import { Flows } from "@sip/contracts"
-import type { CaptureRule, CaptureInput } from "./capture-rules.js"
+import { closedByBye } from "./call-completeness.js"
+import type { CaseRule, RefusalInput } from "./case-rules.js"
+import { type CutVantage, vantageIsInbound, vantageIsOutbound } from "./cut.js"
 import { findingOf, type Finding } from "./refusal-rule.js"
 import type { RefusalEvidence } from "./policy.js"
+import type { SutSet } from "./sut.js"
 
-/** The reason token for a family the capture edge cut through. */
+/** The reason token for a case the capture edge cut through. */
 export const TRUNCATED_AT_EDGE = "source-truncated-at-edge"
 
 /**
@@ -165,13 +176,14 @@ const missingTermination = (
   const bye = after((m) => Flows.isMethod(m, "BYE"))
   if (bye >= 0) {
     if (msgs.some((m, i) => i > bye && isFinalTo(m, "BYE"))) return undefined
+    if (!msgs.some((m, i) => i > bye && m.retx && Flows.isMethod(m, "BYE"))) return undefined
     if (endUs - last.ts_us >= RETRANSMISSION_TAIL_US) return undefined
     return {
       leg: index,
       callId: leg.call_id,
       msg: bye,
-      detail: `its BYE (msg ${bye}) drew no final and the leg's last message (msg ${lastIdx}) is ` +
-        `${secondsBeforeEnd(last, endUs)}: bye-unanswered-at-edge, inside the ` +
+      detail: `its BYE (msg ${bye}) drew no final and was retransmitted, and the leg's last message ` +
+        `(msg ${lastIdx}) is ${secondsBeforeEnd(last, endUs)}: bye-unanswered-at-edge, inside the ` +
         `${RETRANSMISSION_TAIL_US / 1_000_000} s retransmission tail`
     }
   }
@@ -189,42 +201,56 @@ const missingTermination = (
     )
   }
   const status = Flows.statusOf(msgs[final]!) ?? 0
-  if (status < 300) {
-    return {
-      leg: index,
-      callId: leg.call_id,
-      msg: final,
-      detail: `took the ${status} (msg ${final}) answering ${attempt} and no BYE closed the ` +
-        `dialog: dialog-left-open`
-    }
+  if (status >= 300) return undefined
+  return {
+    leg: index,
+    callId: leg.call_id,
+    msg: final,
+    detail: `took the ${status} (msg ${final}) answering ${attempt} and no BYE closed the ` +
+      `dialog: dialog-left-open`
   }
-  if (msgs.some((m, i) => i > final && Flows.isMethod(m, "ACK") && m.summary.cseq.seq === seq)) {
-    return undefined
-  }
-  return gaveUp(`its ${status} to INVITE (msg ${final}) was never ACKed`)
 }
 
 /**
- * Every leg of the family the capture edge cut through, with what each is
- * missing; empty where the family is a full call.
+ * The legs the SUT dialled whose tail is exempt: every leg a vantage anchors
+ * outbound and none anchors inbound, where the case has a caller-side vantage
+ * and a BYE closed the dialog at each.
+ */
+const exemptTails = (
+  flows: Flows.FlowsDoc,
+  sut: SutSet,
+  vantages: ReadonlyArray<CutVantage>
+): ReadonlySet<number> => {
+  const inbound = vantages.filter((v) => vantageIsInbound(flows, sut, v))
+  if (inbound.length === 0 || !inbound.every((v) => closedByBye(flows, sut, v))) return new Set()
+  const callerLegs = new Set(inbound.map((v) => v.leg))
+  return new Set(
+    vantages.filter((v) => !callerLegs.has(v.leg) && vantageIsOutbound(flows, sut, v)).map((v) => v.leg)
+  )
+}
+
+/**
+ * Every leg the vantages script that the capture edge cut through, with what
+ * each is missing; empty where the case is a full call.
  */
 export const edgeEvidence = (
   flows: Flows.FlowsDoc,
-  legs: ReadonlyArray<number>
+  sut: SutSet,
+  vantages: ReadonlyArray<CutVantage>
 ): ReadonlyArray<RefusalEvidence> => {
   const endUs = captureEndUs(flows)
+  const exempt = exemptTails(flows, sut, vantages)
+  const legs = [...new Set(vantages.map((v) => v.leg))].sort((a, b) => a - b)
   return legs.flatMap((index) => {
-    const leg = flows.legs[index]
-    if (leg === undefined) return []
-    return [headTruncation(leg, index), missingTermination(leg, index, endUs)].flatMap((e) =>
-      e === undefined ? [] : [e]
-    )
+    const leg = flows.legs[index]!
+    const tail = exempt.has(index) ? undefined : missingTermination(leg, index, endUs)
+    return [headTruncation(leg, index), tail].flatMap((e) => (e === undefined ? [] : [e]))
   })
 }
 
-/** The refusal of a family the capture edge cut through, or `undefined` for a full call. */
-export const edgeFinding = (input: CaptureInput): Finding | undefined => {
-  const evidence = edgeEvidence(input.flows, input.legs)
+/** The refusal of a case the capture edge cut through, or `undefined` for a full call. */
+export const edgeFinding = (input: RefusalInput): Finding | undefined => {
+  const evidence = edgeEvidence(input.flows, input.sut, [input.spec.uac, ...input.spec.uas])
   if (evidence.length === 0) return undefined
   return findingOf(
     input.capture,
@@ -235,11 +261,11 @@ export const edgeFinding = (input: CaptureInput): Finding | undefined => {
   )
 }
 
-/** The rule: a family is refused whole where the capture edge cut through any leg of it. */
-export const CAPTURE_EDGE_RULE: CaptureRule = {
+/** The rule: a case is refused whole where the capture edge cut through any leg it scripts. */
+export const CAPTURE_EDGE_RULE: CaseRule = {
   id: TRUNCATED_AT_EDGE,
   subject: "source",
   disposition: "refuses",
-  why: "a leg of the call opens before the capture starts or is left unterminated at its end, so the call is not whole",
+  why: "a leg the case scripts opens before the capture starts or is left unterminated at its end, so the call is not whole",
   refuses: edgeFinding
 }
