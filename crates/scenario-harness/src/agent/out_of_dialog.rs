@@ -160,7 +160,7 @@ impl<'a> OutOfDialogRequest<'a> {
         });
         let opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(&request_uri)),
-            call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
+            call_id: caller.ids.call_id(&caller.name, caller.addr.ip()),
             from: Some(from_of(
                 &self.from_uri.unwrap_or_else(|| caller.uri.clone()),
                 &caller.tag(),
@@ -228,7 +228,7 @@ impl<'a> OutOfDialogRequest<'a> {
         });
         let mut opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(&request_uri)),
-            call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
+            call_id: caller.ids.call_id(&caller.name, caller.addr.ip()),
             from: Some(from_of(
                 &self.from_uri.clone().unwrap_or_else(|| caller.uri.clone()),
                 &caller.tag(),

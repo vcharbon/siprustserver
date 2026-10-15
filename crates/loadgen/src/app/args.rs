@@ -120,7 +120,8 @@ pub struct Args {
     /// endpoint (`POST /chaos?type=<kind>&target=<who>`) on.
     #[arg(long, default_value = "0.0.0.0:9300")]
     pub metrics_addr: SocketAddr,
-    /// The run id every call-outcome record names (the runner's run). Default:
+    /// The run id every call-outcome record names and every Call-ID carries
+    /// (the runner's run; letters, digits, `.`, `_`, `+`, `-`). Default:
     /// `<bin>-<start epoch ms>`.
     #[arg(long)]
     pub run: Option<String>,
@@ -359,6 +360,13 @@ pub(super) fn outcome_sink(
         return Err(invalid(format!("--stream {stream:?}: expected [a-z][a-z0-9_]*")));
     }
     let run = args.run.clone().unwrap_or_else(|| format!("{source}-{started_ms}"));
+    let nonce_safe = !run.is_empty()
+        && run.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
+    if !nonce_safe {
+        return Err(invalid(format!(
+            "--run {run:?}: expected letters, digits, `.`, `_`, `+`, `-`"
+        )));
+    }
     let file =
         args.records_file.clone().unwrap_or_else(|| args.out_dir.join("call-outcomes.jsonl"));
     let logs = args.records_url.as_deref().map(LogsTarget::parse).transpose().map_err(invalid)?;

@@ -26,7 +26,6 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -153,7 +152,7 @@ impl AgentBinder {
         recv_timeout: Duration,
         record: bool,
     ) -> Self {
-        let ids = Arc::new(Ids(AtomicU64::new(1)));
+        let ids = Arc::new(Ids::new());
         if !record {
             return Self {
                 network,
@@ -195,7 +194,13 @@ impl AgentBinder {
     /// (RFC 3261 §17.2.3 / §8.1.1.4). See
     /// [`Harness::seed_ids`](crate::Harness::seed_ids).
     pub fn seed_ids(&self, seed: u64) {
-        self.ids.0.store(seed, Ordering::Relaxed);
+        self.ids.seed(seed);
+    }
+
+    /// Carry `nonce` (a run id: letters, digits and `.`, `_`, `+`, `-`) in
+    /// every Call-ID this binder's agents mint, so two runs never share one.
+    pub fn call_id_nonce(&self, nonce: &str) {
+        self.ids.set_nonce(nonce);
     }
 
     /// Whether this binder records (the call was sampled).

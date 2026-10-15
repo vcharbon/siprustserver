@@ -213,9 +213,10 @@ impl<'a> Invite<'a> {
         let caller = self.caller;
         let peer = self.peer;
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
-        let (call_id, from_tag) = self.identity.clone().unwrap_or_else(|| {
-            (format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()), caller.tag())
-        });
+        let (call_id, from_tag) = self
+            .identity
+            .clone()
+            .unwrap_or_else(|| (caller.ids.call_id(&caller.name, caller.addr.ip()), caller.tag()));
         // Default identities are the agent URIs / a peer-addressed R-URI; a Test
         // case may override any of From/To/R-URI from its input data.
         let request_uri = self.request_uri.clone().unwrap_or_else(|| {

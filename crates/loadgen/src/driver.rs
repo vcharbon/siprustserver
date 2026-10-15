@@ -32,7 +32,7 @@ use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
 use crate::mix_entry::{LoadBody, MixEntry};
 use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation, MuxCore};
-use crate::outcome::{CallWire, OutcomeSink, RecordMeta, WireFacts};
+use crate::outcome::{CallWire, OutcomeSink};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
@@ -391,6 +391,10 @@ async fn run_one(
             record,
         );
         binder.seed_ids(next_seed(seed_base));
+        if let Some(sink) = &outcomes {
+            // The run is the Call-ID nonce: two runs never share a Call-ID.
+            binder.call_id_nonce(&sink.run);
+        }
         match bind_agents(&binder, &transport, legs).await {
             Ok((alice, callees)) => {
                 break (core, dwells, banner, resolved_input, token, binder, alice, callees)
@@ -613,7 +617,7 @@ async fn run_one(
     reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
     rtts.finish();
     if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
-        write_outcome(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
+        crate::outcome::write_call(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
     }
     reporter.dec_inflight();
 }
@@ -764,20 +768,4 @@ fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<Strin
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!("{detail} [phases: {trail}]"))
-}
-
-/// Write the record of a call that ran; a call whose scenario sent no INVITE
-/// wrote none, a generator failure.
-fn write_outcome(
-    sink: &OutcomeSink,
-    shape: ScenarioId,
-    wire: &WireFacts,
-    outcome: &CallOutcome,
-    ended_at_ms: i64,
-) {
-    let meta = RecordMeta { run: &sink.run, source: &sink.source, stream: &sink.stream, shape };
-    match crate::outcome::build(&meta, wire, outcome, ended_at_ms) {
-        Some(record) => sink.write(record),
-        None => sink.generator_failure(shape, "no_invite"),
-    }
 }

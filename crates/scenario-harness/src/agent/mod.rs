@@ -79,6 +79,7 @@ mod dialog;
 pub(crate) mod dialog_gate;
 mod failure_dump;
 mod harness;
+mod ids;
 mod invite;
 mod ladder;
 mod log_dump;
@@ -118,5 +119,5 @@ pub use waiver::WaiverScope;
 // dispatches on the INVITE fate and the top-Via branch.
 pub(crate) use addressing::top_via_branch;
 pub(crate) use client_invite::InviteResponseFate;
-pub(crate) use harness::Ids;
+pub(crate) use ids::Ids;
 pub(crate) use rr_fold::decide_rr_fold;

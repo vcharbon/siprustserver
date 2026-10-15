@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "treatment-catalog.v1.schema.json",
-  "$comment": "minor 0",
+  "$comment": "minor 1",
   "title": "treatment-catalog.v1",
   "description": "The call treatments a system under test offers, by shape id: how a caller requests each one, the callee-side legs it opens, and the endings that count as success. Read by the runner, the SIPp injection-file renderer, loadgen and the classifier. ADR-0049.",
   "type": "object",
@@ -35,7 +35,7 @@
         "shape": {
           "description": "The shape id: unique across every catalog on the search path. It is the record's `shape`, the `shape` label of every series, and the id a loadgen product shape registers under.",
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z][a-z0-9_]*(\\+[a-z0-9_]+)*$"
         },
         "description": { "type": "string" },
         "request": {

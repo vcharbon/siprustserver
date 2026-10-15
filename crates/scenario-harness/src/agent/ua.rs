@@ -20,7 +20,7 @@ use sip_net::UdpEndpoint;
 
 use super::client_txn::{expect_response, request_label};
 use super::dialog::InDialogTxn;
-use super::harness::Ids;
+use super::ids::Ids;
 use super::out_of_dialog::OutOfDialogRequest;
 use super::party::Party;
 use super::rr_fold::RecordRouteFold;

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "call-outcome.v1.schema.json",
-  "$comment": "minor 0",
+  "$comment": "minor 1",
   "title": "call-outcome.v1",
   "description": "One record per call a caller-side generator placed, written once when the generator is done with the call, whatever path it took. It states what the caller observed; it never judges it. The classifier compares it with the treatment catalog. Times are Unix epoch milliseconds. ADR-0049.",
   "type": "object",
@@ -40,7 +40,7 @@
     "shape": {
       "description": "The treatment catalog shape id the call requested.",
       "type": "string",
-      "pattern": "^[a-z][a-z0-9_]*$"
+      "pattern": "^[a-z][a-z0-9_]*(\\+[a-z0-9_]+)*$"
     },
     "call_id": {
       "description": "The Call-ID of the caller's INVITE as sent.",

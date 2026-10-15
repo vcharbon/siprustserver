@@ -11,7 +11,6 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +22,7 @@ use super::addr_alloc::AddrAlloc;
 use super::artifact_dump::ArtifactDump;
 use super::dialog_gate::{as_findings, render_dialog_panic, surviving_verdicts};
 use super::failure_dump::{first_cause, FailureDump, FailureView, FailureViews, Judges};
+use super::ids::Ids;
 use super::party::Party;
 use super::rr_fold::decide_rr_fold;
 use super::rule_coverage::{self, WaivedFindings};
@@ -44,17 +44,6 @@ use crate::run::RunReport;
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 /// The inbound queue bound of a SUT's bind.
 const SUT_QUEUE_MAX: usize = 256;
-
-/// Monotonic id source for branches / tags / Call-IDs. Deterministic (no RNG),
-/// so report bytes are stable across runs. `pub(crate)` so the Send
-/// [`loadbind::AgentBinder`](crate::loadbind::AgentBinder) can share an id
-/// source the same way [`Harness`] does.
-pub(crate) struct Ids(pub(crate) AtomicU64);
-impl Ids {
-    pub(crate) fn next(&self) -> u64 {
-        self.0.fetch_add(1, Ordering::Relaxed)
-    }
-}
 
 /// A running fluent session: owns the recording-wrapped simulated network and
 /// hands out [`Agent`]s. Drop or [`finish`](Harness::finish) when done.
@@ -235,7 +224,7 @@ impl Harness {
             network: wrapped.network,
             recording: wrapped.recording,
             recorder,
-            ids: Arc::new(Ids(AtomicU64::new(1))),
+            ids: Arc::new(Ids::new()),
             name,
             description,
             cseq_gate,
@@ -285,7 +274,7 @@ impl Harness {
     /// entropy so identifiers are unique across runs, as RFC 3261 §8.1.1.4
     /// demands of a real UA.
     pub fn seed_ids(&self, seed: u64) {
-        self.ids.0.store(seed, Ordering::Relaxed);
+        self.ids.seed(seed);
     }
 
     /// Label a message `agent` received with a canonical **anchor** name

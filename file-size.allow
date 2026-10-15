@@ -67,7 +67,7 @@ crates/failover-harness/tests/it/limiter_release_by_call.rs 958
 crates/failover-harness/tests/it/prack_takeover.rs 904
 crates/http-net/src/scripted/service.rs 535
 crates/http-net/tests/it/scripted.rs 921
-crates/loadgen/src/driver.rs 783
+crates/loadgen/src/driver.rs 771
 crates/loadgen/src/report.rs 768
 crates/loadgen/tests/it/fake_net.rs 932
 crates/loadgen/tests/it/smoke.rs 2768
@@ -102,7 +102,7 @@ crates/scenario-harness/src/actor/script.rs 540
 crates/scenario-harness/src/actor/state.rs 668
 crates/scenario-harness/src/agent/client_invite.rs 631
 crates/scenario-harness/src/agent/dialog.rs 745
-crates/scenario-harness/src/agent/harness.rs 869
+crates/scenario-harness/src/agent/harness.rs 858
 crates/scenario-harness/src/agent/server_txn.rs 599
 crates/scenario-harness/src/agent/ua.rs 804
 crates/scenario-harness/tests/it/template_emission.rs 1016

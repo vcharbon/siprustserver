@@ -64,7 +64,7 @@ async fn run(rig: Rig, shapes: &[&str], tune: impl FnOnce(&mut DriverCfg)) -> Ve
 fn assert_common(r: &Value) {
     assert_eq!(r["schema"], "call-outcome.v1");
     assert_eq!((r["run"].as_str(), r["stream"].as_str()), (Some("run-1"), Some("main")));
-    assert!(r["call_id"].as_str().is_some_and(|c| !c.is_empty()), "{r}");
+    assert!(r["call_id"].as_str().is_some_and(|c| c.contains(".run-1@")), "the run nonce: {r}");
     let started = r["started_at_ms"].as_i64().unwrap();
     let ended = r["ended_at_ms"].as_i64().unwrap();
     assert!(started <= ended, "{r}");
