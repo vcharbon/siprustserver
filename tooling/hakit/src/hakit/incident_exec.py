@@ -178,10 +178,11 @@ class EventRunner:
         return EventOutcome(opened_at_ms=opened, failed=failed, last_recovered_ms=last)
 
     def heal_only(self, ev: PlannedEvent, incs: list[Incident]) -> list[str]:
-        """Heal every incident of an event left open (`hakit cleanup`); the steps that failed."""
+        """Heal every incident of an event left open (an interrupted run, `hakit
+        cleanup`), journaling the phases; the incidents whose heal failed."""
         failed: list[str] = []
         for inc in reversed(incs):
-            rc, _ = self.step(inc, ev, "heal", inc.timeouts.heal_s)
-            if rc != 0:
+            self.journal.phase(ev.event_id, inc.name, "heal")
+            if not self._simple(inc, ev, "heal", "healed", inc.timeouts.heal_s):
                 failed.append(inc.name)
         return failed

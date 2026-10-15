@@ -37,7 +37,7 @@ def entry(tmp_path: Path, **profile: object) -> Content:
         "name": "p",
         "description": "d",
         "duration_s": 600,
-        "drain_s": 60,
+        "drain_s": 120,
         "settle_s": 40,
         "setup_slow_ms": 1000,
         "catalogs": ["x-api-call"],
@@ -73,7 +73,7 @@ def test_parameters_are_set_and_typed(tmp_path: Path) -> None:
 def test_settle_and_drain_cover_the_streams(tmp_path: Path) -> None:
     c = entry(tmp_path, settle_s=10, drain_s=20, schedule={"at": [{"at_s": 10, "incident": "freeze", "budget": "any", "params": {"mode": "m"}}]})
     assert errors(c) == [
-        "profile 'p': drain_s 20 is below the longest stream teardown 32",
+        "profile 'p': drain_s 20 is below the longest stream teardown 96",
         "profile 'p' event 1 (freeze): settle_s 10 is below the longest setup_deadline_s 32",
         "profile 'p': settle_s 10 is below the longest setup_deadline_s 32",
     ]

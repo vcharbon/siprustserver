@@ -185,3 +185,26 @@ def socket_port():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrimmedErrorFileTest(unittest.TestCase):
+    """The error file of a SIPp run without rotation, bounded by stat_trim: the
+    follower keeps counting what SIPp appends after a trim."""
+
+    def test_the_follower_counts_through_a_trim(self):
+        import stat_trim
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "errors.log")
+            entry = timeout_entry("c1")
+            with open(path, "w") as fh:
+                fh.write("The following events occurred:\n")
+                fh.write(entry * (3 * 1024 * 1024 // len(entry)))
+            follower = error_follow.ErrorFollower(path)
+            follower.poll()
+            before = follower.snapshot().entries
+            stat_trim.trim(path, 256 * 1024)
+            self.assertLess(os.stat(path).st_blocks * 512, 1024 * 1024)
+            with open(path, "a") as fh:
+                fh.write(entry * 10)
+            follower.poll()
+            self.assertEqual(follower.snapshot().entries, before + 10)

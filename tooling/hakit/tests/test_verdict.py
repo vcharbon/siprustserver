@@ -98,7 +98,7 @@ def test_a_failed_incident_closes_its_window_at_its_maximum_and_invalidates_the_
     v = compute(d, SCHEMAS)
     (w,) = jv.objs(v, "windows")
     assert (w["status"], w["closed_at_ms"]) == ("incident_failed", T0 + 80_000 + 220_000 + 40_000)
-    assert [i["kind"] for i in v["integrity"]] == ["incident_failed"]  # type: ignore[index, union-attr]
+    assert [i["kind"] for i in jv.objs(v, "integrity")] == ["incident_failed"]
     assert v["status"] == "invalid"
 
 
@@ -106,7 +106,7 @@ def test_overlapping_windows_and_runner_findings_are_integrity(tmp_path: Path) -
     died = {"kind": "stream_died", "stream": "basic", "at_ms": T0 + 1, "detail": "generator exited"}
     d = run_dir(tmp_path, [record("a", T0)], calls=1, events=kill(1, T0 + 80_000) + kill(2, T0 + 90_000), integrity=[died])
     v = compute(d, SCHEMAS)
-    assert [i["kind"] for i in v["integrity"]] == ["stream_died", "window_overlap"]  # type: ignore[index, union-attr]
+    assert [i["kind"] for i in jv.objs(v, "integrity")] == ["stream_died", "window_overlap"]
 
 
 def test_a_record_outside_the_schema_is_a_generator_failure(tmp_path: Path) -> None:
@@ -115,3 +115,21 @@ def test_a_record_outside_the_schema_is_a_generator_failure(tmp_path: Path) -> N
     v = compute(d, SCHEMAS)
     (i,) = jv.objs(v, "integrity")
     assert i["kind"] == "generator_failure" and str(i["detail"]).startswith("1 records unreadable")
+
+
+def test_a_generator_counter_that_cannot_be_read_is_a_record_gap(tmp_path: Path) -> None:
+    d = run_dir(tmp_path, [record("a", T0)], calls=None, events=[])
+    v = compute(d, SCHEMAS)
+    assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
+        ("record_gap", "the generator's call counter could not be read; 1 records")
+    ]
+
+
+def test_a_window_whose_incident_never_recovered_closes_at_its_maximum(tmp_path: Path) -> None:
+    events = kill(1, T0 + 80_000)[:-1]  # inject .. healed, no recovered
+    d = run_dir(tmp_path, [record("a", T0)], calls=1, events=events)
+    v = compute(d, SCHEMAS)
+    (w,) = jv.objs(v, "windows")
+    assert (w["status"], w["closed_at_ms"]) == ("incident_failed", T0 + 80_000 + 220_000 + 40_000)
+    assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [("incident_failed", "the event never recovered")]
+

@@ -9,8 +9,8 @@ from hakit.model import ExpectedEnding, Leg, Shape
 
 ANSWER = Shape("basic", "c", None, [], [], [ExpectedEnding("answered", None, None)], True)
 REJECT_486 = Shape("busy", "c", None, [], [], [ExpectedEnding("rejected", 486, None)], True)
-REROUTE = Shape(
-    "reroute",
+FAILOVER = Shape(
+    "failover",
     "c",
     None,
     [],
@@ -94,10 +94,12 @@ def test_a_generator_failure_is_no_impact_of_the_system_under_test() -> None:
 def test_a_leg_that_never_opened_or_ended_otherwise_is_an_unexpected_ending() -> None:
     r = record("a", T0)
     r["legs"] = [{"role": "primary", "ending": "rejected", "final_code": 486}]
-    (imp,) = classify(r, REROUTE).impacts
+    c = classify(r, FAILOVER)
+    (imp,) = c.impacts
     assert (imp.cls, imp.reason, imp.code) == ("unexpected_ending", "leg:backup", 0)
+    assert not c.success
     r["legs"] = [{"role": "primary", "ending": "rejected", "final_code": 503}, {"role": "backup", "ending": "answered", "final_code": 200}]
-    (imp,) = classify(r, REROUTE).impacts
+    (imp,) = classify(r, FAILOVER).impacts
     assert (imp.reason, imp.code) == ("leg:primary", 503)
     r["legs"] = [{"role": "primary", "ending": "rejected", "final_code": 486}, {"role": "backup", "ending": "answered", "final_code": 200}]
-    assert classify(r, REROUTE).success
+    assert classify(r, FAILOVER).success

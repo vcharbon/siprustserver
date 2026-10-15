@@ -31,6 +31,10 @@ def chaos_window(incident: str, run: str, value: int, at_ms: int) -> str:
     return sample("sip_chaos_window", {"incident": incident, "run": run}, value, at_ms)
 
 
+class QueryFailed(Exception):
+    pass
+
+
 class VictoriaMetrics:
     def __init__(self, executor: Executor, base_url: str) -> None:
         self.executor = executor
@@ -47,19 +51,20 @@ class VictoriaMetrics:
             self.failures += 1
         return ok
 
-    def scalar(self, query: str) -> float | None:
-        """The summed value of an instant query, or None when it returns nothing or fails."""
+    def scalar(self, query: str) -> float:
+        """The summed value of an instant query; `QueryFailed` when VictoriaMetrics
+        does not answer or the query selects no series."""
         url = f"{self.base_url}/api/v1/query?{urllib.parse.urlencode({'query': query})}"
         res = self.executor.http("GET", url)
         if res.status != 200:
-            return None
+            raise QueryFailed(f"VictoriaMetrics did not answer {query!r}: HTTP {res.status} {res.body[:120]}")
         try:
             data = as_obj(as_obj(json.loads(res.body)).get("data"))
             result = as_list(data.get("result"))
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError) as e:
+            raise QueryFailed(f"VictoriaMetrics answered {query!r} with no vector: {e}") from e
         if not result:
-            return None
+            raise QueryFailed(f"VictoriaMetrics holds no series for {query!r}")
         total = 0.0
         for r in result:
             value = as_list(as_obj(r).get("value"))

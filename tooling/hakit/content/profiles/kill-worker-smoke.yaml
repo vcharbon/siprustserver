@@ -4,7 +4,7 @@ description: >-
   A short run of the basic call at a modest rate with a worker crash every
   150 s: the walking skeleton of the tooling, from the incident to the verdict.
 duration_s: 600
-drain_s: 90
+drain_s: 120
 settle_s: 40
 setup_slow_ms: 1000
 catalogs: [x-api-call]

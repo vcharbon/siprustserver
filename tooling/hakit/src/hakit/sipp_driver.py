@@ -22,8 +22,19 @@ from .profile import Stream
 
 # Retransmission bound of an INVITE or BYE without an answer (64 * T1).
 TXN_BOUND_S = 32
+# Tail of SIPp's error file the exporter twin keeps: every 1 s deadline check
+# logs a line there, and the file is not rotated, since -ringbuffer_* would
+# rotate the record file too.
+ERROR_KEEP_BYTES = 16 * 1024 * 1024
 # Margin of the global `-recv_timeout` above every timeout of the scenario.
 RECV_BACKSTOP_MARGIN_S = 60
+
+
+def worst_call_s(stream: Stream) -> float:
+    """The longest a call of the base UAC scenario can take: the setup deadline
+    (or Timer B, when later), then either the hold or the 64*T1 wait for the
+    INVITE's final after a CANCEL, then a BYE that gets no final."""
+    return max(stream.setup_deadline_s, TXN_BOUND_S) + max(stream.hold_s, TXN_BOUND_S) + TXN_BOUND_S
 
 
 @dataclass(frozen=True)
@@ -80,7 +91,7 @@ class SippStream:
 
     def recv_timeout_ms(self) -> int:
         s = self.stream
-        return int((s.setup_deadline_s + s.ring_s + s.hold_s + 2 * TXN_BOUND_S + RECV_BACKSTOP_MARGIN_S) * 1000)
+        return int((worst_call_s(s) + RECV_BACKSTOP_MARGIN_S) * 1000)
 
     def max_concurrent(self) -> int:
         s = self.stream
@@ -155,6 +166,7 @@ class SippStream:
             + ["-e", f"SIPP_ROLE={self.stream.name}", "-e", f"SIPP_JOB={self.uac}"]
             + ["-e", f"SIPP_STREAM={self.stream.name}", "-e", f"SIPP_SHAPE={self.stream.shape}"]
             + ["-e", "SIPP_RECORD_FILE=/stats/records.jsonl", "-e", f"SIPP_RUN={self.run}"]
+            + ["-e", f"SIPP_ERROR_KEEP_BYTES={ERROR_KEEP_BYTES}"]
             + ["-e", f"SIPP_RECORD_URL={self.lab.vlogs_url_from_generators}"]
             + [self.lab.sipp_image, "python3", "/exporter/sipp_stat_exporter.py"],
             timeout_s=60,

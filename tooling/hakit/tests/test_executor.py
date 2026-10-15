@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import http.server
+import subprocess
 import threading
 import time
+from pathlib import Path
+
+import pytest
 
 from hakit.executor import RealExecutor
 
@@ -37,3 +41,24 @@ def test_a_step_overrunning_its_timeout_is_killed_with_its_children() -> None:
     res = RealExecutor().run(["sh", "-c", "sleep 30 & sleep 30"], timeout_s=0.5)
     assert res.timed_out and res.rc == -9
     assert time.monotonic() - t0 < 5
+
+
+def test_an_interruption_during_a_step_kills_its_process_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pidfile = tmp_path / "child.pid"
+
+    def interrupted(self: subprocess.Popen[str], input: str | None = None, timeout: float | None = None) -> tuple[str, str]:  # noqa: A002
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    t0 = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        RealExecutor().run(["sh", "-c", f"sleep 30 & echo $! > {pidfile}; wait"], timeout_s=60)
+    assert time.monotonic() - t0 < 10  # the step's children died with it, nothing was waited out
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while Path(f"/proc/{child}").exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not Path(f"/proc/{child}").exists()

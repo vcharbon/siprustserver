@@ -75,6 +75,8 @@ def test_the_smoke_profile_fires_its_kills_on_schedule_with_their_series(tmp_pat
     uac = next(a for a in docker if a[:2] == ["docker", "run"] and "hakit-basic" in a and "sipp" in a)
     assert docker.index(twin) < docker.index(uac)
     assert "container:hakit-basic-exporter" in uac and f"%u-%p-{run}@%s" in uac
+    assert "-trace_err" in uac and "-ringbuffer_files" not in uac  # the record file is never rotated
+    assert "SIPP_ERROR_KEEP_BYTES=16777216" in twin
     assert ["docker", "kill", "--signal", "USR1", "hakit-basic"] in docker
     inject_env = next(c.env for c in fake.calls if c.kind == "run" and c.argv[0].endswith("kill_worker/inject"))
     assert inject_env["HAKIT_TARGET_SELECTOR"] == "app=b2bua-worker"
@@ -91,7 +93,7 @@ def entry_with(tmp_path: Path, inject_body: str) -> Content:
         "name": "flaky-smoke",
         "description": "d",
         "duration_s": 120,
-        "drain_s": 60,
+        "drain_s": 120,
         "settle_s": 40,
         "setup_slow_ms": 1000,
         "catalogs": ["x-api-call"],

@@ -8,6 +8,7 @@ interruption heals the event in progress and removes the generators.
 from __future__ import annotations
 
 import json
+import signal
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,13 +33,29 @@ from .sipp_driver import SippStream
 from .summary import render as render_summary
 from .verdict import compute
 from .vlogs import VictoriaLogs
-from .vm import VictoriaMetrics, chaos_event
+from .vm import QueryFailed, VictoriaMetrics, chaos_event
 
 SHIP_WAIT_S = 60
 
 
 class RunRefused(Exception):
     pass
+
+
+def _terminate(signum: int, _frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
+def _raise_on_termination() -> Callable[[], None]:
+    """SIGTERM and SIGHUP raise, so the run heals its open event; the returned
+    call restores the previous handlers."""
+    previous = {s: signal.signal(s, _terminate) for s in (signal.SIGTERM, signal.SIGHUP)}
+
+    def restore() -> None:
+        for s, h in previous.items():
+            signal.signal(s, h)
+
+    return restore
 
 
 def _dump(p: Path, doc: object) -> None:
@@ -107,8 +124,11 @@ class Runner:
         errs = limit_errors(profile.preflight, facts)
         if errs:
             raise RunRefused("host outside the profile's preflight limits: " + "; ".join(errs))
-        held = self.vm.scalar(self.lab.leftover_calls_query)
-        if held is not None and held > 0:
+        try:
+            held = self.vm.scalar(self.lab.leftover_calls_query)
+        except QueryFailed as e:
+            raise RunRefused(f"leftover_calls: {e}") from e
+        if held > 0:
             raise RunRefused(f"leftover_calls: the system under test holds {held:g} calls")
 
         started = self.clock.now_ms()
@@ -126,6 +146,7 @@ class Runner:
 
         events = EventRunner(run, run_dir, self.lab, self.executor, self.clock, journal, wait_until)
         self.say(f"hakit: run {run} in {run_dir}")
+        restore = _raise_on_termination()
         try:
             self._start_streams(run, run_dir, profile, live)
             load_start = self.clock.now_ms()
@@ -153,6 +174,8 @@ class Runner:
             for s in live.streams:
                 s.remove()
             raise
+        finally:
+            restore()
         for s in live.streams:
             s.remove()
         records, bad = self.vlogs.export(run, started - 3_600_000, self.clock.now_ms() + 3_600_000)
@@ -179,7 +202,7 @@ class Runner:
         return v
 
     def _write_inputs(
-        self, run_dir: Path, run: str, profile: Profile, facts: Json, held: float | None, started: int
+        self, run_dir: Path, run: str, profile: Profile, facts: Json, held: float, started: int
     ) -> None:
         _dump(run_dir / "profile.json", profile.raw)
         (run_dir / "budgets").mkdir()

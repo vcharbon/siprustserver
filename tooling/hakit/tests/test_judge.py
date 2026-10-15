@@ -121,3 +121,26 @@ def test_a_window_without_an_allowance_allows_nothing() -> None:
     w = window("001-x", T0, T0 + 100_000, budget="strict")
     per, _, _ = run([timed_out("a", T0)], [w])
     assert [(r["count"], r["allowed"], r["finding"]) for r in per["001-x"]] == [(1, 0, True)]
+
+
+def test_an_impact_is_charged_to_the_first_entry_that_matches_it() -> None:
+    first_then_wide = Budget(
+        "ordered",
+        setup_failed=[Allowance("*", 0, "timeout", 1, None), Allowance("*", 0, "*", 100, None)],
+        unexpected_ending=[],
+        setup_slow=SetupSlowAllowance(None, None, None),
+        raw={},
+    )
+    w = window("001-x", T0, T0 + 100_000, budget="ordered")
+    impacts = [i for r in (timed_out("a", T0), timed_out("b", T0 + 1)) for i in classify(r, ANSWER).impacts]
+    j = judge([w], impacts, [], {"ordered": first_then_wide}, 1000, {"basic": 10})
+    (row,) = j.per_window["001-x"]
+    assert (row["reason"], row["count"], row["allowed"], row["finding"]) == ("timeout", 2, 1.0, True)
+
+
+def test_a_window_injected_after_the_failure_is_no_candidate() -> None:
+    before = window("001-kill_worker", T0 + 5_000, T0 + 10_000)
+    after = window("002-kill_worker", T0 + 25_000, T0 + 30_000)
+    cut = record("a", T0, "cut", ended=40_000, failures=[{"at_ms": T0 + 20_000, "kind": "dialog_request", "method": "BYE", "code": 481}])
+    _, in_dialog, _ = run([cut], [before, after])
+    assert [i["candidate_windows"] for i in in_dialog] == [["001-kill_worker"], ["001-kill_worker"]]

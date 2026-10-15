@@ -43,7 +43,8 @@ class SimulatedLab:
         if call.kind == "http" and "/select/logsql/query" in call.url:
             return HttpResult(200, '{"n":"0"}\n' if "stats" in call.url else "")
         if call.kind == "http" and "/api/v1/query" in call.url:
-            return HttpResult(200, '{"status":"success","data":{"resultType":"vector","result":[]}}')
+            body = '{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[0,"0"]}]}}'
+            return HttpResult(200, body)
         return None
 
 

@@ -2,7 +2,9 @@
 
 Each phase is written to `events.jsonl` and pushed as `sip_chaos_event` at the
 same instant. An open window is pushed as `sip_chaos_window` 1 at its open,
-again every 10 s while it stays open, and 0 at its close.
+again every 10 s while it stays open, and 0 at its close. Pushes are for
+display: one that fails is counted, and the count of an event's failed pushes
+lands in its facts (`hakit` / `vm_push`) when its window closes.
 """
 
 from __future__ import annotations
@@ -35,6 +37,11 @@ class EventJournal:
         self.vm = vm
         self.open: dict[str, OpenWindow] = {}
         self.sources: dict[str, str] = {}
+        self.push_failed: dict[str, int] = {}
+
+    def _push(self, event: str, lines: list[str]) -> None:
+        if lines and not self.vm.push(lines):
+            self.push_failed[event] = self.push_failed.get(event, 0) + 1
 
     def _append(self, line: Json) -> None:
         with self.path.open("a") as fh:
@@ -52,7 +59,7 @@ class EventJournal:
             w = OpenWindow(event, step.split("+"), last_push_ms=at)
             self.open[event] = w
             lines += [chaos_window(i, self.run, 1, at) for i in w.incidents]
-        self.vm.push(lines)
+        self._push(event, lines)
         return at
 
     def facts(self, event: str, step: str, executable: str, facts: Json) -> None:
@@ -67,15 +74,16 @@ class EventJournal:
     def tick(self) -> None:
         """Push the keepalive of every open window and the close of every window that ended."""
         now = self.clock.now_ms()
-        lines: list[str] = []
         for ev, w in list(self.open.items()):
             if w.closes_at_ms is not None and now >= w.closes_at_ms:
-                lines += [chaos_window(i, self.run, 0, w.closes_at_ms) for i in w.incidents]
+                self._push(ev, [chaos_window(i, self.run, 0, w.closes_at_ms) for i in w.incidents])
                 del self.open[ev]
+                failed = self.push_failed.pop(ev, 0)
+                if failed:
+                    self.facts(ev, "hakit", "vm_push", {"failed": failed})
             elif now - w.last_push_ms >= KEEPALIVE_MS:
-                lines += [chaos_window(i, self.run, 1, now) for i in w.incidents]
+                self._push(ev, [chaos_window(i, self.run, 1, now) for i in w.incidents])
                 w.last_push_ms = now
-        self.vm.push(lines)
 
     def next_close_ms(self) -> int | None:
         closes = [w.closes_at_ms for w in self.open.values() if w.closes_at_ms is not None]

@@ -89,7 +89,11 @@ def compute(run_dir: Path, schemas: SchemaSet) -> Json:
         calls = jv.opt_int(s, "calls")
         not_placed = jv.opt_int(s, "not_placed") or 0
         records = records_by_stream.get(name, 0)
-        if calls is not None and jv.boolean(s, "reconciled", True) and records + not_placed != calls:
+        if calls is None and jv.boolean(s, "reconciled", True):
+            integrity.append(
+                _integrity("record_gap", f"the generator's call counter could not be read; {records} records", stream=name)
+            )
+        elif calls is not None and jv.boolean(s, "reconciled", True) and records + not_placed != calls:
             integrity.append(
                 _integrity(
                     "record_gap",

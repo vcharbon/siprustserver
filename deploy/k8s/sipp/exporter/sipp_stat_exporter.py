@@ -51,6 +51,10 @@ Env:
                                          0 disables it (the file needs write access)
   SIPP_ERROR_FILE (default /stats/errors.log) -> SIPp's -error_file, followed
                                          across rotations; empty disables it
+  SIPP_ERROR_KEEP_BYTES (default 0)   -> tail of the error file kept on disk by a
+                                         second trimmer, for a SIPp run without
+                                         -ringbuffer_* (whose rotation would also
+                                         rotate the record file); 0 disables it
   SIPP_RECORD_FILE (default "")       -> the UAC's call-outcome record file;
                                          empty disables record shipping
   SIPP_RECORD_URL (default "")        -> VictoriaLogs base URL the records go to
@@ -71,6 +75,7 @@ JOB = os.environ.get("SIPP_JOB", "")
 PORT = int(os.environ.get("EXPORTER_PORT", "9035"))
 KEEP_BYTES = int(os.environ.get("SIPP_STAT_KEEP_BYTES", str(16 * 1024 * 1024)))
 ERROR_FILE = os.environ.get("SIPP_ERROR_FILE", "/stats/errors.log")
+ERROR_KEEP_BYTES = int(os.environ.get("SIPP_ERROR_KEEP_BYTES", "0"))
 STREAM = os.environ.get("SIPP_STREAM", "")
 SHAPE = os.environ.get("SIPP_SHAPE", "")
 RECORD_FILE = os.environ.get("SIPP_RECORD_FILE", "")
@@ -285,6 +290,8 @@ def main():
         TRIMMER = stat_trim.Trimmer(STAT_FILE, KEEP_BYTES).start()
     if ERROR_FILE:
         FOLLOWER = error_follow.start(ERROR_FILE)
+    if ERROR_FILE and ERROR_KEEP_BYTES > 0:
+        stat_trim.Trimmer(ERROR_FILE, ERROR_KEEP_BYTES).start()
     if RECORD_FILE and RECORD_URL:
         SHIPPER = record_ship.start(RECORD_FILE, RECORD_URL, RUN, STREAM, SHAPE)
     srv.serve_forever()

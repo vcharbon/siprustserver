@@ -50,6 +50,13 @@ class Executor(Protocol):
     def disk_free_bytes(self, path: Path) -> int: ...
 
 
+def _kill_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 class RealExecutor:
     def run(
         self,
@@ -78,12 +85,13 @@ class RealExecutor:
             out, err = proc.communicate(timeout=timeout_s)
             return ProcResult(rc=proc.returncode, stdout=out, stderr=err)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _kill_group(proc.pid)
             out, err = proc.communicate()
             return ProcResult(rc=-9, stdout=out, stderr=err, timed_out=True)
+        except BaseException:
+            _kill_group(proc.pid)
+            proc.wait()
+            raise
 
     def http(self, method: str, url: str, body: bytes | None = None, timeout_s: float = 10) -> HttpResult:
         # Never urllib's default form content type: a form body is parsed, not ingested.

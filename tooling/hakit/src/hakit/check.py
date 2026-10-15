@@ -10,8 +10,9 @@ from __future__ import annotations
 from .content import Content
 from .jsonval import as_obj
 from .model import Incident
-from .profile import EventSpec, Profile
+from .profile import EventSpec, Profile, Stream
 from .schedule import overlaps, plan
+from .sipp_driver import worst_call_s
 
 _PY_TYPES: dict[str, tuple[type, ...]] = {
     "string": (str,),
@@ -62,6 +63,13 @@ def _event_errors(where: str, ev: EventSpec, profile: Profile, content: Content)
     return errs
 
 
+def _teardown_s(s: Stream) -> float:
+    """How long a stream's last call can take after the drain starts: ADR-0049
+    §3.7's bound, and for SIPp the base scenario's own worst case."""
+    bound = max(s.setup_deadline_s, s.ring_s + s.hold_s)
+    return max(bound, worst_call_s(s)) if s.driver == "sipp" else bound
+
+
 def profile_errors(profile: Profile, content: Content) -> list[str]:
     where = f"profile {profile.name!r}"
     errs: list[str] = []
@@ -80,7 +88,7 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
         if s.driver == "sipp" and (s.scenario or "") not in content.scenarios:
             errs.append(f"{where}: stream {s.name!r}: scenario {s.scenario!r} is not on the search path")
     deadline = max((s.setup_deadline_s for s in profile.streams), default=0.0)
-    teardown = max((max(s.setup_deadline_s, s.ring_s + s.hold_s) for s in profile.streams), default=0.0)
+    teardown = max((_teardown_s(s) for s in profile.streams), default=0.0)
     if profile.drain_s < teardown:
         errs.append(f"{where}: drain_s {profile.drain_s:g} is below the longest stream teardown {teardown:g}")
     sched = profile.schedule
