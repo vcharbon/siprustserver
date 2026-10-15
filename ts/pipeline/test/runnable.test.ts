@@ -271,6 +271,447 @@ describe("a 2xx whose ACK the leg never captured", () => {
   })
 })
 
+/** The step placed at `ms` on the capture's clock. */
+const at = (s: Flow.Step, ms: number): Flow.Step => ({
+  ...s,
+  observed: { leg: 0, msg: 0, at_us: ms * 1000 }
+})
+const bye = (id: string, leg: string, op: "send" | "expect") => step(id, leg, op, { method: "BYE" })
+const byeOk = (id: string, leg: string, op: "send" | "expect") =>
+  step(id, leg, op, { status: 200, "cseq-method": "BYE" })
+
+/** 64·T1, the bound of the 2xx ladder (RFC 3261 §13.3.1.4). */
+const GIVE_UP_MS = Schedules.SCHEDULES.classes.find((c) => c.class === "final-2xx")!.give_up_ms
+
+const cancel = (id: string, leg: string, op: "send" | "expect") =>
+  step(id, leg, op, { method: "CANCEL" })
+
+/**
+ * A dial leg A places through the SUT to leg B, answered and relayed: the 2xx
+ * at s3 is the one the SUT waits on leg A's ACK to acknowledge.
+ */
+const relayedAnswer = [
+  at(invite("s1", "A", "send"), 0),
+  at(invite("s2", "B", "expect"), 100),
+  at(final("s3", "B", 200), 1_000),
+  at(final("s4", "A", 200, "expect"), 1_100)
+]
+
+describe("a 2xx whose answerer ends the dialog before any ACK reaches it", () => {
+  it("leaves the callee's 2xx alone where the callee BYEs first and nobody ever ACKs", () => {
+    // The caller never ACKs and the callee hangs up well inside the give-up: the
+    // dialog is gone before the SUT composes an ACK, and none exists to relay.
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(bye("s5", "B", "send"), 10_000),
+        at(byeOk("s6", "B", "expect"), 10_100),
+        at(bye("s7", "A", "expect"), 10_200),
+        at(byeOk("s8", "A", "send"), 10_300)
+      ])
+    ).toEqual([])
+  })
+
+  it("leaves a re-INVITE's 2xx alone where its answerer BYEs before any ACK", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(final("s3", "B", 200), 1_000),
+        at(final("s4", "A", 200, "expect"), 1_100),
+        at(ack("s5", "A", "send"), 1_200),
+        at(ack("s6", "B", "expect"), 1_300),
+        at(invite("s7", "B", "send"), 2_000),
+        at(invite("s8", "A", "expect"), 2_100),
+        at(final("s9", "A", 200), 2_200),
+        at(final("s10", "B", 200, "expect"), 2_300),
+        at(bye("s11", "A", "send"), 2_400),
+        at(byeOk("s12", "A", "expect"), 2_500),
+        at(bye("s13", "B", "expect"), 2_600),
+        at(byeOk("s14", "B", "send"), 2_700)
+      ])
+    ).toEqual([])
+  })
+
+  it("leaves it alone where the answerer's BYE lands just inside the give-up", () => {
+    expect(
+      unackedFinals([...relayedAnswer, at(bye("s5", "B", "send"), 1_000 + GIVE_UP_MS - 1)])
+    ).toEqual([])
+  })
+
+  it("charges it where the answerer's BYE comes at the give-up — the give-up ACKed first", () => {
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(bye("s5", "B", "send"), 1_000 + GIVE_UP_MS),
+        at(byeOk("s6", "B", "expect"), 1_100 + GIVE_UP_MS)
+      ]).map((c) => c.final)
+    ).toEqual(["s3"])
+  })
+
+  it("charges it where the far party ACKs after the BYE — RFC 5407 §2 relays that ACK", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "B", "send"), 0),
+        at(invite("s2", "A", "expect"), 100),
+        at(final("s3", "A", 200), 1_000),
+        at(final("s4", "B", 200, "expect"), 1_100),
+        at(bye("s5", "A", "send"), 2_000),
+        at(byeOk("s6", "A", "expect"), 2_100),
+        at(ack("s7", "B"), 3_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s3"])
+  })
+
+  it("charges it where the other party's BYE comes first — the SUT's teardown ACKs ahead of its BYE", () => {
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(bye("s5", "A", "send"), 2_000),
+        at(bye("s6", "B", "send"), 2_100),
+        at(byeOk("s7", "B", "expect"), 2_200)
+      ]).map((c) => c.final)
+    ).toEqual(["s3"])
+  })
+
+  it("charges it where the SUT BYEs the leg first — its teardown ACKs ahead of that BYE", () => {
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(bye("s5", "B", "expect"), 2_000),
+        at(bye("s6", "B", "send"), 2_100)
+      ]).map((c) => c.final)
+    ).toEqual(["s3"])
+  })
+
+  it("charges it where the SUT BYEs another leg first — its teardown ACKs this one too", () => {
+    // The teardown crosses the answerer's own BYE: the SUT ACKs leg B ahead of
+    // the BYE it sends there, whichever leg its release started on.
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(bye("s5", "A", "expect"), 2_000),
+        at(bye("s6", "B", "send"), 2_002),
+        at(bye("s7", "B", "expect"), 2_003)
+      ]).map((c) => c.final)
+    ).toEqual(["s3"])
+  })
+
+  it("charges it where the capture states no instant — nothing places the BYE inside the give-up", () => {
+    expect(
+      unackedFinals([
+        invite("s1", "A", "send"),
+        invite("s2", "B", "expect"),
+        final("s3", "B", 200),
+        final("s4", "A", 200, "expect"),
+        bye("s5", "B", "send")
+      ]).map((c) => c.final)
+    ).toEqual(["s3"])
+  })
+
+  it("charges it where only one of the two instants is stated", () => {
+    const [i1, i2, , f4] = relayedAnswer
+    expect(
+      unackedFinals([i1!, i2!, final("s3", "B", 200), f4!, at(bye("s5", "B", "send"), 2_000)])
+        .map((c) => c.final)
+    ).toEqual(["s3"])
+    expect(
+      unackedFinals([...relayedAnswer, bye("s5", "B", "send")]).map((c) => c.final)
+    ).toEqual(["s3"])
+  })
+
+  it("charges a 2xx to the SUT's own dial — no ingress ACK is awaited, the SUT ACKs on arrival", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "expect"), 0),
+        at(final("s2", "A", 200), 100),
+        at(bye("s3", "A", "send"), 200),
+        at(byeOk("s4", "A", "expect"), 300)
+      ]).map((c) => c.final)
+    ).toEqual(["s2"])
+  })
+
+  it("charges a 2xx to the SUT's own re-INVITE — it relays that 2xx to no one", () => {
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(ack("s5", "A", "send"), 1_200),
+        at(ack("s6", "B", "expect"), 1_300),
+        at(invite("s7", "B", "expect"), 2_000),
+        at(final("s8", "B", 200), 2_100),
+        at(bye("s9", "B", "send"), 2_200),
+        at(byeOk("s10", "B", "expect"), 2_300),
+        at(bye("s11", "A", "expect"), 2_400),
+        at(byeOk("s12", "A", "send"), 2_500)
+      ]).map((c) => c.final)
+    ).toEqual(["s8"])
+  })
+
+  it("charges a 2xx on a leg the SUT dials once the ingress dial is settled", () => {
+    // A new leg C the SUT dials after leg A's dial completed: its 2xx answers no
+    // INVITE an ingress party still has pending, so the SUT ACKs it itself.
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(ack("s5", "A", "send"), 1_200),
+        at(ack("s6", "B", "expect"), 1_300),
+        at(invite("s7", "C", "expect"), 2_000),
+        at(final("s8", "C", 200), 2_500),
+        at(invite("s9", "A", "expect"), 2_510),
+        at(final("s10", "A", 200), 2_600),
+        at(ack("s11", "A", "expect"), 2_610),
+        at(bye("s12", "C", "send"), 5_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s8"])
+  })
+
+  it("charges a 2xx crossing the CANCEL the SUT relayed — the SUT ACKs and BYEs it (§9.1)", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(cancel("s3", "A", "send"), 300),
+        at(cancel("s4", "B", "expect"), 310),
+        at(final("s5", "B", 200), 320),
+        at(final("s6", "A", 487, "expect"), 330),
+        at(bye("s7", "B", "send"), 5_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s5"])
+  })
+
+  it("charges a 2xx the CANCEL crossed though the SUT relayed that 2xx onward", () => {
+    // The relayed 2xx alone does not settle it: the CANCEL the leg took ahead of
+    // its 2xx is what makes the SUT ACK that 2xx itself.
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(cancel("s3", "A", "send"), 300),
+        at(cancel("s4", "B", "expect"), 310),
+        at(final("s5", "B", 200), 320),
+        at(final("s6", "A", 200, "expect"), 330),
+        at(bye("s7", "B", "send"), 5_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s5"])
+  })
+
+  /** A 2xx answering the forked INVITE on the early dialog `tag`. */
+  const forked = (id: string, tag: string): Flow.Step => ({ ...final(id, "B", 200), early: tag })
+
+  it("charges a forked 2xx landing behind the first one — the SUT ACKs and BYEs that fork itself", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(forked("s3", "e1"), 1_000),
+        at(forked("s4", "e2"), 1_010),
+        at(final("s5", "A", 200, "expect"), 1_100),
+        at(bye("s6", "B", "send"), 6_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s4"])
+  })
+
+  it("charges a forked 2xx landing behind the first one though its own fork BYEs", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(forked("s3", "e1"), 1_000),
+        at(forked("s4", "e2"), 1_010),
+        at(final("s5", "A", 200, "expect"), 1_100),
+        at({ ...bye("s6", "B", "send"), early: "e2" }, 6_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s4"])
+  })
+
+  it("charges a forked 2xx landing after the relayed one", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(forked("s3", "e1"), 1_000),
+        at(final("s4", "A", 200, "expect"), 1_100),
+        at(forked("s5", "e2"), 1_200),
+        at(bye("s6", "B", "send"), 6_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s5"])
+  })
+
+  it("charges the relayed 2xx where the BYE rides another fork's dialog", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(forked("s3", "e1"), 1_000),
+        at(final("s4", "A", 200, "expect"), 1_100),
+        at({ ...bye("s5", "B", "send"), early: "e2" }, 6_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s3"])
+  })
+
+  it("charges a 2xx whose relay the document places ahead of it — no relay follows it", () => {
+    expect(
+      unackedFinals([
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(final("s3", "A", 200, "expect"), 1_000),
+        at(final("s4", "B", 200), 1_010),
+        at(bye("s5", "B", "send"), 6_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s4"])
+  })
+
+  it("charges a 2xx relayed to an ingress INVITE opened after the SUT's own", () => {
+    // Leg A's re-INVITE pending when the SUT re-INVITEs B is finalised and
+    // replaced; the 2xx A expects answers the replacement, so the SUT's 2xx on
+    // B answers no dial still waiting on it. A's ACK to the 487 is off the capture.
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(ack("s5", "A", "send"), 1_200),
+        at(ack("s6", "B", "expect"), 1_300),
+        at(invite("s7", "A", "send"), 2_000),
+        at(invite("s8", "B", "expect"), 2_100),
+        at(cancel("s9", "A", "send"), 2_200),
+        at(final("s10", "A", 487, "expect"), 2_300),
+        at(invite("s11", "A", "send"), 2_400),
+        at(final("s12", "B", 200), 2_500),
+        at(final("s13", "A", 200, "expect"), 2_600),
+        at(bye("s14", "B", "send"), 6_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s12"])
+  })
+
+  it("charges a 2xx on a leg the SUT dialled before the ingress re-INVITE it answers", () => {
+    // The SUT dials C with nothing pending on leg A; A's later re-INVITE is
+    // answered by the SUT, and C's 2xx is the SUT's own to ACK.
+    expect(
+      unackedFinals([
+        ...relayedAnswer,
+        at(ack("s5", "A", "send"), 1_200),
+        at(ack("s6", "B", "expect"), 1_300),
+        at(invite("s7", "C", "expect"), 2_000),
+        at(final("s8", "C", 200), 2_100),
+        at(invite("s9", "A", "send"), 2_200),
+        at(final("s10", "A", 200, "expect"), 2_300),
+        at(bye("s11", "C", "send"), 5_000)
+      ]).map((c) => c.final)
+    ).toEqual(["s8"])
+  })
+})
+
+describe("a 2xx to an INVITE a release caught open", () => {
+  /** A call answered and ACKed end to end, leg A dialling leg B through the SUT. */
+  const confirmed = [
+    invite("s1", "A", "send"),
+    invite("s2", "B", "expect"),
+    final("s3", "B", 200),
+    final("s4", "A", 200, "expect"),
+    ack("s5", "A", "send"),
+    ack("s6", "B", "expect")
+  ]
+
+  it("leaves the 2xx alone where the SUT's BYE reaches the leg while the re-INVITE is open", () => {
+    // The caller re-INVITEs and hangs up before the callee answers; the SUT ends
+    // the open re-INVITE with its release, so the 2xx scripted after it is moot.
+    expect(
+      unackedFinals([
+        ...confirmed,
+        invite("s7", "A", "send"),
+        invite("s8", "B", "expect"),
+        step("s9", "B", "send", { status: 100, "cseq-method": "INVITE" }, true),
+        bye("s10", "A", "send"),
+        byeOk("s11", "A", "expect"),
+        bye("s12", "B", "expect"),
+        final("s13", "B", 200),
+        byeOk("s14", "B", "send")
+      ])
+    ).toEqual([])
+  })
+
+  it("charges a re-INVITE's 2xx the leg answered before the release", () => {
+    expect(
+      unackedFinals([
+        ...confirmed,
+        invite("s7", "A", "send"),
+        invite("s8", "B", "expect"),
+        final("s9", "B", 200),
+        bye("s10", "A", "send"),
+        byeOk("s11", "A", "expect"),
+        bye("s12", "B", "expect"),
+        byeOk("s13", "B", "send")
+      ]).map((c) => c.final)
+    ).toEqual(["s9"])
+  })
+
+  it("charges a 2xx repeated past the release of an INVITE answered before it", () => {
+    // The re-INVITE's first 2xx closed the transaction ahead of the BYE, so the
+    // release caught nothing open and the repeat past it is still owed its ACK.
+    expect(
+      unackedFinals([
+        ...confirmed,
+        invite("s7", "A", "send"),
+        invite("s8", "B", "expect"),
+        final("s9", "B", 200),
+        final("s10", "A", 200, "expect"),
+        bye("s11", "B", "expect"),
+        final("s12", "B", 200)
+      ]).map((c) => c.final)
+    ).toEqual(["s12"])
+  })
+
+  it("charges the 2xx where the answerer's own BYE crossed its re-INVITE — the SUT ACKs it", () => {
+    // The answerer BYEs with the re-INVITE open and then answers it: the SUT
+    // CANCELs that re-INVITE on the BYE, the 2xx crosses the CANCEL, and §9.1
+    // has the SUT ACK the 2xx it receives.
+    expect(
+      unackedFinals([
+        ...confirmed,
+        invite("s7", "A", "send"),
+        invite("s8", "B", "expect"),
+        bye("s9", "B", "send"),
+        final("s10", "B", 200),
+        byeOk("s11", "B", "expect")
+      ]).map((c) => c.final)
+    ).toEqual(["s10"])
+  })
+
+  it("charges a later re-INVITE's 2xx — the leg's next INVITE clears the release mark", () => {
+    // The SUT's BYE draws a 481 and the call goes on: the next re-INVITE opens a
+    // transaction no release has caught.
+    expect(
+      unackedFinals([
+        ...confirmed,
+        invite("s7", "A", "send"),
+        invite("s8", "B", "expect"),
+        bye("s9", "B", "expect"),
+        step("s10", "B", "send", { status: 481, "cseq-method": "BYE" }),
+        final("s11", "B", 200),
+        final("s12", "A", 200, "expect"),
+        ack("s13", "A", "send"),
+        ack("s14", "B", "expect"),
+        invite("s15", "A", "send"),
+        invite("s16", "B", "expect"),
+        final("s17", "B", 200),
+        final("s18", "A", 200, "expect")
+      ]).map((c) => c.final)
+    ).toEqual(["s17"])
+  })
+
+  it("charges the 2xx to an initial INVITE the SUT BYEd in its early dialog", () => {
+    expect(
+      unackedFinals([
+        invite("s1", "A", "send"),
+        invite("s2", "B", "expect"),
+        final("s3", "B", 180),
+        bye("s4", "B", "expect"),
+        final("s5", "B", 200),
+        byeOk("s6", "B", "send")
+      ]).map((c) => c.final)
+    ).toEqual(["s5"])
+  })
+})
+
 describe("a response whose request the leg never captured", () => {
   const options = (id: string, leg: string, op: "send" | "expect") =>
     step(id, leg, op, { method: "OPTIONS" })
