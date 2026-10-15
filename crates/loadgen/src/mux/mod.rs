@@ -63,7 +63,9 @@ mod buffers;
 mod correlation;
 mod demux;
 mod endpoint;
+mod late_final;
 mod loss;
+mod registry;
 mod retransmit;
 mod rtt;
 mod stats;
@@ -79,11 +81,13 @@ pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
 
+use late_final::SentInvites;
 use loss::DropModel;
+use registry::SocketRegistry;
 use retransmit::CallTxns;
 use rtt::RttTracker;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -147,6 +151,8 @@ pub(in crate::mux) struct Delivery {
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
     pub(in crate::mux) rtt: Option<Arc<RttTracker>>,
+    /// A caller dialog's INVITEs still open to a non-2xx final.
+    pub(in crate::mux) invites: Option<Arc<SentInvites>>,
 }
 
 /// One receiver bound on a socket: an inbox + its label (the agent name a
@@ -214,43 +220,6 @@ impl CallGate {
     /// its INVITE (a leg before that belongs to an earlier call on the key).
     pub(in crate::mux) fn open(&self) -> bool {
         !self.has_caller.load(Ordering::Relaxed) || self.invite_sent.load(Ordering::Acquire)
-    }
-}
-
-#[derive(Default)]
-pub(in crate::mux) struct SocketRegistry {
-    pub(in crate::mux) by_call_id: HashMap<String, Delivery>,
-    pub(in crate::mux) by_token: HashMap<String, CallSlot>,
-    /// Call-IDs released by finished calls, until their hold deadline.
-    released: HashMap<String, Instant>,
-    /// The same holds in deadline order, so expiry pops only what expired.
-    released_order: VecDeque<(Instant, String)>,
-}
-
-impl SocketRegistry {
-    /// Hold `call_id` back until `deadline` (deadlines arrive in order: every
-    /// hold is the same length from its release).
-    pub(in crate::mux) fn release(&mut self, call_id: String, deadline: Instant) {
-        self.released.insert(call_id.clone(), deadline);
-        self.released_order.push_back((deadline, call_id));
-    }
-
-    /// Whether `call_id` is held back at `now`.
-    pub(in crate::mux) fn is_released(&self, call_id: &str, now: Instant) -> bool {
-        self.released.get(call_id).is_some_and(|deadline| *deadline > now)
-    }
-
-    /// Drop the holds that expired by `now`, touching only those.
-    pub(in crate::mux) fn expire_released(&mut self, now: Instant) {
-        while let Some((deadline, _)) = self.released_order.front() {
-            if *deadline > now {
-                break;
-            }
-            let (_, call_id) = self.released_order.pop_front().expect("front exists");
-            if self.released.get(&call_id).is_some_and(|d| *d <= now) {
-                self.released.remove(&call_id);
-            }
-        }
     }
 }
 

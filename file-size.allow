@@ -68,8 +68,6 @@ crates/failover-harness/tests/it/prack_takeover.rs 904
 crates/http-net/src/scripted/service.rs 535
 crates/http-net/tests/it/scripted.rs 921
 crates/loadgen/src/driver.rs 1001
-crates/loadgen/src/mux/endpoint.rs 503
-crates/loadgen/src/mux/mod.rs 503
 crates/loadgen/src/report.rs 768
 crates/loadgen/tests/it/fake_net.rs 1056
 crates/loadgen/tests/it/smoke.rs 2768

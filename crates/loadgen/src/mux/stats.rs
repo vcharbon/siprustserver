@@ -32,6 +32,10 @@ pub struct MuxStats {
     /// A new INVITE (To without a tag) on a Call-ID a caller owns: the SUT
     /// reused the dialog's Call-ID for a new leg (RFC 3261 §8.1.1.4).
     pub orphan_call_id_reuse: AtomicU64,
+    /// Non-2xx finals (retransmissions included) to the INVITE of a caller
+    /// dialog its call already released, each answered with its ACK (RFC 3261
+    /// §17.1.1.3) — never an orphan.
+    pub late_final_acked: AtomicU64,
     pub pending_expired: AtomicU64,
     pub inbox_drop: AtomicU64,
     pub delivered: AtomicU64,

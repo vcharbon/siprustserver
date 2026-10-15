@@ -11,6 +11,7 @@
 mod fake_net;
 mod from_user_net;
 mod governor;
+mod late_final;
 mod mux_claims;
 mod mux_from_user;
 mod smoke;

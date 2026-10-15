@@ -20,6 +20,7 @@ use sip_net::{
 };
 use tokio::time::Instant;
 
+use super::late_final::SentInvites;
 use super::loss::{DropDir, DropModel, TargetedDrop};
 use super::retransmit::CallTxns;
 use super::rtt::{RttSink, RttTracker};
@@ -307,6 +308,7 @@ impl SignalingNetwork for MuxNetwork {
             drop,
             txns,
             rtt,
+            invites: (role == Role::Caller).then(Default::default),
         }))
     }
 
@@ -354,6 +356,9 @@ struct MuxEndpoint {
     /// This endpoint's SIP round-trip tracker (present iff the call has an
     /// [`RttSink`]), shared with the inbound `route` path.
     rtt: Option<Arc<RttTracker>>,
+    /// A caller's INVITEs still open to a non-2xx final; handed to the
+    /// registry on `Drop` so a late final is still ACKed.
+    invites: Option<Arc<SentInvites>>,
 }
 
 #[async_trait]
@@ -393,6 +398,7 @@ impl UdpEndpoint for MuxEndpoint {
                             drop: self.drop.clone(),
                             txns: self.txns.clone(),
                             rtt: self.rtt.clone(),
+                            invites: self.invites.clone(),
                         },
                     );
                     keys.push(Key::CallId(cid));
@@ -410,6 +416,9 @@ impl UdpEndpoint for MuxEndpoint {
         // the resender re-applies the same loss model on every retry.
         if let Some(txns) = &self.txns {
             txns.on_outbound(buf, dst);
+        }
+        if let Some(invites) = &self.invites {
+            invites.on_outbound(buf, dst);
         }
         // A round trip runs from the first transmission attempt, lost or not.
         if let Some(rtt) = &self.rtt {
@@ -467,31 +476,12 @@ impl UdpEndpoint for MuxEndpoint {
 
 impl Drop for MuxEndpoint {
     fn drop(&mut self) {
+        // Lock order: registry, then keyset (as the demux, which promotes a
+        // leg's Call-ID into its keyset under the registry lock).
         let mut g = self.mux.reg.lock().unwrap();
-        for key in self.keyset.lock().unwrap().drain(..) {
-            match key {
-                Key::CallId(c) => {
-                    g.by_call_id.remove(&c);
-                    g.release(c, Instant::now() + RELEASE_HOLD);
-                }
-                // Remove only THIS receiver from a possibly-shared slot; drop the
-                // slot once its last receiver leaves. A claim that never fired is
-                // counted on its way out (the scenario's expected leg never came).
-                Key::Token { token, label } => {
-                    if let Some(slot) = g.by_token.get_mut(&token) {
-                        if let Some(pos) = slot.receivers.iter().position(|r| r.label == label) {
-                            let r = slot.receivers.remove(pos);
-                            if r.claim.is_some() && !r.claimed {
-                                self.mux.stats.claim_unfired.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        if slot.receivers.is_empty() {
-                            g.by_token.remove(&token);
-                        }
-                    }
-                }
-            }
-        }
+        let keys: Vec<Key> = self.keyset.lock().unwrap().drain(..).collect();
+        let invites = |c: &str| self.invites.as_ref().and_then(|i| i.take(c));
+        g.release_keys(keys, invites, Instant::now() + RELEASE_HOLD, &self.mux.stats);
         drop(g);
         self.queue.close();
         // Stop this call's resender tasks now (call ended) rather than letting them
