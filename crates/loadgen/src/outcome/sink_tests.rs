@@ -97,3 +97,24 @@ fn a_records_url_reads_its_host_and_base() {
     assert_eq!(t.path, "/vl/insert/jsonline?_stream_fields=run,source,stream");
     assert!(LogsTarget::parse("https://logs:9428").is_err());
 }
+
+/// An endpoint that never answers holds the writer for the push timeout, not
+/// for the system's: `close` returns, and the file holds the record.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_silent_endpoint_does_not_hold_the_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = LogsTarget::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let dir = scratch("silent");
+    let file = dir.join("r.jsonl");
+    let sink = OutcomeSink::new("r1", "loadgen", "main", &file, Some(target)).unwrap();
+    sink.write(json!({ "shape": "basic_call", "ending": "answered", "ended_at_ms": 1 }));
+    let started = std::time::Instant::now();
+    sink.close();
+    let held = started.elapsed();
+    let lines = std::fs::read_to_string(&file).unwrap().lines().count();
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(held < Duration::from_secs(4), "the close waited {held:?}");
+    assert_eq!(lines, 1);
+}

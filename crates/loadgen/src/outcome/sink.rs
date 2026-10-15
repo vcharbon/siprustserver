@@ -3,7 +3,7 @@
 //! per-stream counters of records written and calls never placed.
 
 use std::io::{BufWriter, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
@@ -14,6 +14,10 @@ use metric_catalogue::OpenRows;
 use serde_json::Value;
 
 use crate::catalogue::{NOT_PLACED, OUTCOME_RECORDS};
+
+/// The bound on each step of a push (connect, write, read the answer): an
+/// unreachable endpoint delays the writer by this much per batch, never more.
+const POST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often the writer flushes the file and pushes a batch.
 const FLUSH_EVERY: Duration = Duration::from_millis(1000);
@@ -188,8 +192,12 @@ fn logs_line(mut record: Value) -> String {
 
 /// One HTTP/1.1 POST of `body`; `Err` unless the answer is 2xx.
 fn post(target: &LogsTarget, body: &[u8]) -> std::io::Result<()> {
-    let mut stream = TcpStream::connect(&target.authority)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let addr = target.authority.to_socket_addrs()?.next().ok_or_else(|| {
+        std::io::Error::other(format!("{} resolves to no address", target.authority))
+    })?;
+    let mut stream = TcpStream::connect_timeout(&addr, POST_TIMEOUT)?;
+    stream.set_read_timeout(Some(POST_TIMEOUT))?;
+    stream.set_write_timeout(Some(POST_TIMEOUT))?;
     let head = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/stream+json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n",
