@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Dedicated CDR consumer: drains the RabbitMQ CDR queue and exposes Prometheus metrics (total CDR count, plus in json mode the summed call duration derived from each record's created_at/terminated_at). No SIP, no persistence — telemetry only."
+description = "Dedicated CDR consumer: drains the RabbitMQ CDR queue and exposes Prometheus metrics (total CDR count, plus in json mode the summed call duration derived from each record's created_at/terminated_at); optionally ships one cdr-observation.v1 line per CDR to VictoriaLogs for the HA tooling's CDR join. No SIP, no persistence."
 
 [lints]
 workspace = true

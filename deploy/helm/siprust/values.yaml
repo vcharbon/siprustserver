@@ -225,6 +225,10 @@ cdr:
     # `json` sums the workers' JSON records; `opaque` counts deliveries of any
     # format.
     payload: json
+    # `http://host:port` of the VictoriaLogs the consumer ships one
+    # cdr-observation.v1 line per CDR to (the HA tooling's CDR join); empty
+    # ships none.
+    observationUrl: ""
     env: {}
     extraEnv: []
     extraVolumeMounts: []

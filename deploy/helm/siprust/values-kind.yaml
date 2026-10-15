@@ -89,6 +89,8 @@ cdr:
     tolerations:
       - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
   consumer:
+    # The host stack's VictoriaLogs through the kind bridge gateway.
+    observationUrl: http://172.20.0.1:9428
     nodeSelector: { tier: infra }
     tolerations:
       - { key: tier, operator: Equal, value: infra, effect: NoSchedule }

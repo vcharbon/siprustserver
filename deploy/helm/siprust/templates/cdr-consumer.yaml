@@ -1,8 +1,9 @@
 {{- if and .Values.cdr.enabled .Values.cdr.consumer.enabled }}
 {{- /*
 The CDR consumer: drains the queue into Prometheus counters (cdr_consumed_total,
-cdr_call_duration_ms_total with the json payload). One replica; its counters
-are per process, rate() covers a restart.
+cdr_call_duration_ms_total with the json payload), and with observationUrl
+ships one cdr-observation.v1 line per CDR to VictoriaLogs. One replica; its
+counters are per process, rate() covers a restart.
 */}}
 {{- $c := .Values.cdr.consumer }}
 {{- $env := dict
@@ -12,6 +13,7 @@ are per process, rate() covers a restart.
   "CDR_METRICS_LISTEN" "0.0.0.0:9093"
   "CDR_PAYLOAD" $c.payload
 }}
+{{- with $c.observationUrl }}{{ $_ := set $env "CDR_OBSERVATION_URL" . }}{{- end }}
 {{- include "siprust.overlayEnv" (dict "into" $env "from" $c.env) }}
 apiVersion: apps/v1
 kind: Deployment

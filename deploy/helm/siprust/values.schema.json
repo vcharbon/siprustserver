@@ -596,6 +596,10 @@
                 "opaque"
               ]
             },
+            "observationUrl": {
+              "type": "string",
+              "pattern": "^(http://[^/]+/?)?$"
+            },
             "env": {
               "$ref": "#/definitions/env"
             },

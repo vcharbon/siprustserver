@@ -22,6 +22,8 @@ CONTAINER_FIELDS = ("image", "imagePullPolicy", "command", "readinessProbe", "li
 # Their script reads its settings from env in the chart, where the old manifest
 # inlined them through envsubst: the text and the env differ by design.
 SCRIPT_CONTAINERS = {"vip-loopback", "masq-exempt"}
+# Settings the chart adds that the old manifests never had.
+CHART_ONLY_ENV = {"cdr-consumer": {"CDR_OBSERVATION_URL"}}
 
 
 def old_render() -> list[Doc]:
@@ -89,7 +91,9 @@ class Parity(unittest.TestCase):
                     for field in CONTAINER_FIELDS:
                         self.assertEqual(nc.get(field), oc.get(field), f"{name}.{field}")
                     if name not in SCRIPT_CONTAINERS:
-                        self.assertEqual(env_of(nc), env_of(oc), f"{name}.env")
+                        added = CHART_ONLY_ENV.get(name, set())
+                        new_env = {k: v for k, v in env_of(nc).items() if k not in added}
+                        self.assertEqual(new_env, env_of(oc), f"{name}.env")
                         self.assertEqual(nc.get("args"), oc.get("args"), f"{name}.args")
 
     def test_services_expose_the_same_ports(self) -> None:
