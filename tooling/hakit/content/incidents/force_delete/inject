@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Force-delete the target pods through the API (grace 0) and leave their
+# processes running: the API forgets the pod at once, its workload starts a
+# replacement, and the elder runs on until its kubelet stops it. Its
+# containers are recorded first so the probe can follow them on the node.
+# Facts: the pods, their uids, the live pods before, the delete instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=crash.sh
+source "$HAKIT_LIB/crash.sh"
+hk_pick_targets
+hk_crash_prepare
+hk_delete_targets 0

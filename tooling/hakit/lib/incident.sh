@@ -60,7 +60,7 @@ hk_delete_targets() { # grace_s
       kubectl -n "$NS" delete pod "$pod" --grace-period="$grace" --wait=false >&2
     fi
   done < <(hk_targets)
-  echo "$at" > "$HAKIT_EVENT_DIR/deleted_at_ms"
+  echo "$at" > "$HAKIT_EVENT_DIR/killed_at_ms"
   jq -cn --argjson pods "$(hk_target_pods_json)" --argjson uids "$(hk_targets | awk '{ print $2 }' | jq -Rnc '[inputs]')" \
     --argjson before "$(cat "$HAKIT_EVENT_DIR/live_before")" --argjson at "$at" \
     '{pods: $pods, uids: $uids, live_before: $before, deleted_at_ms: $at}'

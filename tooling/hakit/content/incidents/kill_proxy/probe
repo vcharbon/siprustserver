@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Recovered when the killed proxy is replaced, as many proxies are live as
-# before, and exactly one of them holds the virtual address. Exit 75 while not
-# yet. Facts: the replacement's start and Ready, the new holder.
+# Recovered when the crashed proxy's containers restarted with no overlap, it
+# is Ready again, and exactly one proxy holds the virtual address. Exit 75
+# while not yet. Facts: the crash's restart timings, the holder.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=vip.sh
 source "$HAKIT_LIB/vip.sh"
-replaced="$(hk_probe_replaced)"
+# shellcheck source=crash.sh
+source "$HAKIT_LIB/crash.sh"
+crashed="$(hk_probe_crashed)"
 holders="$(hk_vip_holders "$HAKIT_PARAM_ADDRESS" "$HAKIT_PARAM_CONTAINER")"
 [ "$(grep -c . <<<"$holders" || true)" -eq 1 ] || exit "$HK_NOT_YET"
 read -r pod node _ <<<"$holders"
-jq -cn --argjson r "$replaced" --arg pod "$pod" --arg node "$node" '$r + {holder: $pod, holder_node: $node}'
+jq -cn --argjson c "$crashed" --arg pod "$pod" --arg node "$node" '$c + {holder: $pod, holder_node: $node}'

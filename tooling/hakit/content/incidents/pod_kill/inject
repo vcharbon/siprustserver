@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Force-delete the target pods (grace 0). Facts: the pods, their uids, the live
-# pods before, the delete instant.
+# Crash the target pods: SIGKILL every container process from its node and
+# prove them dead. Facts: the pods, their containers, the signal and death
+# instants.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
+# shellcheck source=crash.sh
+source "$HAKIT_LIB/crash.sh"
 hk_pick_targets
-hk_delete_targets 0
+hk_crash_prepare
+hk_crash_kill

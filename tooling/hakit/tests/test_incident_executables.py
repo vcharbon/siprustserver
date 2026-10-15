@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from exe_kit import Rule, Sandbox, facts
+from exe_kit import Rule, Sandbox, crash_rules, facts
 
 WORKERS = Rule(r"get pods -l app=b2bua-worker -o jsonpath=.*spec\.nodeName", "w-0 u0 n1 True\n")
 REPLACED = r"get pods -l app=b2bua-worker -o jsonpath=.*lastTransitionTime"
@@ -35,18 +35,20 @@ def iso(ms: int) -> str:
 # ── kill_worker_held ──────────────────────────────────────────────────────
 
 
-def test_a_held_kill_taints_the_admitting_nodes_before_the_kill(tmp_path: Path) -> None:
+def test_a_held_kill_taints_the_admitting_nodes_then_deletes_and_crashes_the_pod(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "kill_worker_held")
     sb.rules(
         WORKERS,
         Rule(r"get pod w-0 -o json$", '{"spec": {"nodeSelector": {"tier": "app"}}}'),
         Rule(r"get nodes -l tier=app ", "n1\nn2\n"),
+        *crash_rules("w-0", "n1", [("worker", "c1", 4242)]),
     )
     f = facts(sb.run("inject"))
-    taint, kill = sb.index("taint nodes n1 n2 hakit.io/hold=r-1:NoSchedule"), sb.index("delete pod w-0")
-    assert 0 <= taint < kill
-    assert "--grace-period=0 --force" in sb.calls()[kill].line
-    assert f["held_nodes"] == ["n1", "n2"] and f["pods"] == ["w-0"]
+    taint, delete = sb.index("taint nodes n1 n2 hakit.io/hold=r-1:NoSchedule"), sb.index("delete pod w-0")
+    kill, dead = sb.index("docker exec n1 kill -9 4242"), sb.index("docker exec n1 test -d /proc/4242")
+    assert 0 <= taint < delete < kill < dead
+    assert "--grace-period=0 --force" in sb.calls()[delete].line
+    assert f["held_nodes"] == ["n1", "n2"] and f["pods"] == ["w-0"] and f["containers"] == ["w-0/worker"]
 
 
 def test_heal_lifts_the_hold_from_every_tainted_node_and_notes_the_waiting_replacement(tmp_path: Path) -> None:
@@ -81,7 +83,7 @@ def held_probe(tmp_path: Path, uid: str, scheduled_ms: int, old_present: bool = 
     sb.state("live_before", "2\n")
     sb.state("pending_uid", "u9\n")
     sb.state("released_at_ms", f"{T_RELEASE}\n")
-    sb.state("deleted_at_ms", f"{T_RELEASE - 60_000}\n")
+    sb.state("killed_at_ms", f"{T_RELEASE - 60_000}\n")
     t = iso(scheduled_ms)
     rows = f"w-0 {uid} True {t} {t}\nw-1 u1 True {t} {t}\n" + ("w-0x u0 False\n" if old_present else "")
     sb.rules(
@@ -117,17 +119,6 @@ def test_the_held_probe_waits_while_the_killed_pod_remains(tmp_path: Path) -> No
     assert held_probe(tmp_path, "u9", T_RELEASE + 2000, old_present=True).run("probe").returncode == 75
 
 
-# ── kill_worker: restart timings ──────────────────────────────────────────
-
-
-def test_the_kill_probe_waits_until_as_many_pods_are_live_as_before(tmp_path: Path) -> None:
-    sb = Sandbox(tmp_path, "kill_worker")
-    sb.state("targets", "w-0 u0 n1\n")
-    sb.state("live_before", "2\n")
-    sb.rules(Rule(REPLACED, "w-0 u9 False\nw-1 u1 True 2026-10-15T22:29:10Z 2026-10-15T22:29:00Z\n"))
-    assert sb.run("probe").returncode == 75
-
-
 # ── kill_proxy / cut_external_plane ───────────────────────────────────────
 
 PROXIES = Rule(r"get pods -l app=sip-front-proxy -o jsonpath=.*spec\.nodeName", "p-0 u0 e1 True\np-1 u1 e2 True\n")
@@ -135,13 +126,15 @@ HOLDER = Rule(r"exec p-1 -c keepalived -- ip", "1: lo    inet 127.0.0.1/8 scope 
 BACKUP = Rule(r"exec p-0 -c keepalived -- ip", "1: lo    inet 192.168.60.250/32 scope host lo\n")
 
 
-def test_kill_proxy_deletes_the_address_holder_and_not_its_backup(tmp_path: Path) -> None:
+def test_kill_proxy_crashes_every_process_of_the_address_holder_and_not_its_backup(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "kill_proxy")
-    sb.rules(PROXIES, HOLDER, BACKUP)
+    sb.rules(PROXIES, HOLDER, BACKUP, *crash_rules("p-1", "e2", [("proxy", "c1", 11), ("keepalived", "c2", 12)]))
     f = facts(sb.run("inject"))
-    deletes = [c.line for c in sb.calls() if " delete pod " in c.line]
-    assert len(deletes) == 1 and "delete pod p-1 --grace-period=0 --force" in deletes[0]
+    kills = [c.line for c in sb.calls() if " kill -9 " in c.line]
+    assert kills == ["docker exec e2 kill -9 11", "docker exec e2 kill -9 12"]
+    assert sb.index(" delete pod ") == -1
     assert (f["pods"], f["node"], f["interface"], f["live_before"]) == (["p-1"], "e2", "eth1", 2)
+    assert f["containers"] == ["p-1/proxy", "p-1/keepalived"]
 
 
 def test_cut_external_plane_disconnects_the_holders_node_and_keeps_its_address(tmp_path: Path) -> None:

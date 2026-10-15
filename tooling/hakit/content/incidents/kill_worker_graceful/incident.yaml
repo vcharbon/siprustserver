@@ -3,7 +3,7 @@ name: kill_worker_graceful
 description: >-
   Delete one ready worker pod with its grace period (SIGTERM, then the drain the
   worker runs before it exits): a rolling restart. The workload re-creates it;
-  the probe is kill_worker's.
+  the probe waits for the replacement and reads kill_worker's restart timings.
 kind: fault
 target:
   selector: app=b2bua-worker

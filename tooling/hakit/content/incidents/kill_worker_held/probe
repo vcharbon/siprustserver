@@ -17,6 +17,6 @@ scheduled_ms="$(hk_ms "$scheduled")"
 [ "$uid" = "$pending" ] || hk_die "$pod came back as $uid, not the replacement $pending that waited through the hold"
 [ "$scheduled_ms" != null ] && [ "$scheduled_ms" -ge $(( released - 1000 )) ] \
   || hk_die "$pod was scheduled at $scheduled, before the release at $released"
-timings="$(hk_worker_timings "$pod" "$(cat "$HAKIT_EVENT_DIR/deleted_at_ms")")"
+timings="$(hk_worker_timings "$pod" "$(cat "$HAKIT_EVENT_DIR/killed_at_ms")")"
 jq -cn --argjson r "$replaced" --argjson t "$timings" --argjson s "$scheduled_ms" --argjson rel "$released" \
   '$r + $t + {scheduled_at_ms: $s, released_at_ms: $rel, incarnations: 1}'

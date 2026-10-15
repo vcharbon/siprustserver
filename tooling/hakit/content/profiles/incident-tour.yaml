@@ -6,9 +6,10 @@ description: >-
   the call limiter and the broker hung, slowed, refused, cut and restarted,
   the infrastructure node stopped, the replication link partitioned, the SIP
   plane made lossy, a store stalled, a clock shifted, a spike, the overload
-  of CPU scarcity plus a spike, and orphaned dialogs. Each window carries the
+  of CPU scarcity plus a spike, orphaned dialogs, and a pod force-deleted
+  while its process runs on. Each window carries the
   budget of what its fault may cost.
-duration_s: 2640
+duration_s: 2720
 drain_s: 130
 settle_s: 15
 setup_slow_ms: 1000
@@ -69,4 +70,5 @@ schedule:
     - { at_s: 2005, incident: cut_external_plane, duration_s: 30, budget: proxy-failover }
     - { at_s: 2115, incident: spike, stream: burst, budget: spike }
     - { at_s: 2315, incidents: [cpu_starve, spike], stream: burst, duration_s: 30, expected_s: 180, budget: cpu-overload }
-    - { at_s: 2515, incident: orphan, stream: orphaned, budget: dependency-fault }
+    - { at_s: 2515, incident: force_delete, budget: worker-kill }
+    - { at_s: 2600, incident: orphan, stream: orphaned, budget: dependency-fault }

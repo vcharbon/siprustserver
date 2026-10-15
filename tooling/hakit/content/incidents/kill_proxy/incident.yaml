@@ -1,10 +1,12 @@
 schema: incident.v1
 name: kill_proxy
 description: >-
-  Force-delete the front proxy holding the virtual address (the VRRP master,
-  found as the pod carrying the address on an interface other than lo). Its
-  peer takes the address over and the workload re-creates the killed pod as a
-  backup. The probe waits for the replacement and for exactly one holder.
+  Crash the front proxy holding the virtual address (the VRRP master, found as
+  the pod carrying the address on an interface other than lo): every container
+  process of the pod is killed with SIGKILL and proven dead. Its peer takes the
+  address over and the kubelet restarts the crashed pod as a backup. The probe
+  waits for the restart, proves no incarnation overlap, and wants exactly one
+  holder.
 kind: fault
 target:
   selector: app=sip-front-proxy
@@ -25,4 +27,4 @@ timeouts:
   heal_s: 10
   probe_s: 180
   probe_interval_s: 2
-requires: [kind]
+requires: [kind, docker]

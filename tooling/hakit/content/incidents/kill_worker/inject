@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Force-delete one ready worker pod (grace 0): a crash. Facts: the pod, its
-# uid, the live pods before, the delete instant.
+# Crash one ready worker: SIGKILL every container process of the pod from its
+# node and prove them dead; the kubelet restarts them. Facts: the pod, its
+# containers, the signal instant and the instant they were proven dead.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
+# shellcheck source=crash.sh
+source "$HAKIT_LIB/crash.sh"
 hk_pick_targets
-hk_delete_targets 0
+hk_crash_prepare
+hk_crash_kill

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Recovered when the killed pod is replaced and as many pods of the selector are
-# live as before. Exit 75 while not yet. Facts: the replacement's container
-# start and Ready instants, each survivor's peer park and each proxy's registry
-# leave and join (lib/worker.sh).
+# Recovered when the deleted pod is replaced and as many pods of the selector
+# are live as before. Exit 75 while not yet. Facts: the replacement's start and
+# Ready, each survivor's peer park and each proxy's registry leave and join
+# (lib/worker.sh).
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=worker.sh
 source "$HAKIT_LIB/worker.sh"
 replaced="$(hk_probe_replaced)"
 read -r pod _ _ < <(hk_targets)
-timings="$(hk_worker_timings "$pod" "$(cat "$HAKIT_EVENT_DIR/deleted_at_ms")")"
+timings="$(hk_worker_timings "$pod" "$(cat "$HAKIT_EVENT_DIR/killed_at_ms")")"
 jq -cn --argjson r "$replaced" --argjson t "$timings" '$r + $t'

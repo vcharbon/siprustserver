@@ -108,3 +108,15 @@ class Sandbox:
 def facts(res: subprocess.CompletedProcess[str]) -> Json:
     assert res.returncode == 0, res.stderr
     return as_obj(json.loads(res.stdout))
+
+
+def crash_rules(pod: str, node: str, containers: list[tuple[str, str, int]], alive: bool = False) -> list[Rule]:
+    """The reads and kills of lib/crash.sh for one pod: its containers (name,
+    id, host pid) at restart count 0, each process gone after the SIGKILL
+    unless `alive`."""
+    statuses = "".join(f"{name} containerd://{cid} 0\n" for name, cid, _ in containers)
+    rules = [Rule(rf"get pod {pod} -o jsonpath={{range \.status\.containerStatuses\[\*\]}}{{\.name}}", statuses)]
+    for _, cid, pid in containers:
+        rules.append(Rule(rf"docker exec {node} crictl inspect --output go-template --template {{{{\.info\.pid}}}} {cid}$", str(pid)))
+        rules.append(Rule(rf"docker exec {node} test -d /proc/{pid}$", rc=0 if alive else 1))
+    return rules

@@ -43,7 +43,7 @@ def read_params(name: str) -> set[str]:
 
 def test_the_base_library_covers_every_primitive_of_the_contract() -> None:
     assert set(FAULTS) >= {
-        "kill_worker", "kill_worker_graceful", "kill_worker_held", "kill_proxy", "pod_kill", "pod_restart",
+        "kill_worker", "kill_worker_graceful", "kill_worker_held", "kill_proxy", "pod_kill", "force_delete", "pod_restart",
         "pod_freeze", "net_delay", "net_loss", "tcp_reset", "cpu_starve", "node_stop", "partition",
         "cut_external_plane", "sip_loss", "io_stall", "clock_skew",
     }
@@ -82,7 +82,7 @@ def test_a_chaos_mesh_incident_requires_chaos_mesh(name: str) -> None:
 @pytest.mark.parametrize("name", FAULTS)
 def test_a_node_or_cgroup_fault_requires_docker(name: str) -> None:
     text = " ".join(e.read_text() for e in executables(name))
-    docker = re.search(r"\b(docker|pf_[a-z_]+|hk_timed_[a-z]+)\b", text) is not None
+    docker = re.search(r"\b(docker|pf_[a-z_]+|hk_timed_[a-z]+|hk_crash_[a-z]+)\b", text) is not None
     assert docker == ("docker" in BASE.incidents[name].requires), name
 
 

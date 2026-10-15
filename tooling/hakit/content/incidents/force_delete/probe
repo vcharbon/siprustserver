@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Follows each elder container on its node (its last log line and its exit,
+# kept in `elders` while the node still holds it) and is recovered when the
+# replacement is live and every elder has exited. Exit 75 while not yet.
+# Facts: per elder its exit and last log instants, the replacement's first log
+# line, and the overlap of the two incarnations.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=crash.sh
+source "$HAKIT_LIB/crash.sh"
+seen="$HAKIT_EVENT_DIR/elders"
+[ -f "$seen" ] || echo '{}' > "$seen"
+while read -r pod _ node cname cid _ _; do
+  state="$(docker exec "$node" crictl inspect --output go-template --template '{{.status.state}} {{.status.finishedAt}}' "$cid" 2>/dev/null || true)"
+  [ -n "$state" ] || continue
+  read -r st fin <<<"$state"
+  line="$(docker exec "$node" crictl logs --timestamps --tail 1 "$cid" 2>&1 | tail -n 1 || true)"
+  last="$(date -d "${line%% *}" +%s%3N 2>/dev/null || echo null)"
+  exited=null
+  [ "$st" != CONTAINER_EXITED ] || exited="$(hk_ms "$fin")"
+  jq --arg k "$pod/$cname" --argjson l "$last" --argjson e "$exited" \
+    '.[$k] = {last_log_ms: ($l // .[$k].last_log_ms), exited_at_ms: $e}' "$seen" > "$seen.new"
+  mv "$seen.new" "$seen"
+  [ "$st" = CONTAINER_EXITED ] || exit "$HK_NOT_YET"
+done < "$HAKIT_EVENT_DIR/crashed"
+replaced="$(hk_probe_replaced)"
+facts="[]"
+while read -r pod _ _ cname _ _ _; do
+  first="$(hk_log_edge "$pod" "$cname" first)"
+  facts="$(jq -c --arg k "$pod/$cname" --argjson f "${first:-null}" --slurpfile s "$seen" \
+    '. + [{container: $k, elder_last_log_ms: $s[0][$k].last_log_ms, elder_exited_at_ms: $s[0][$k].exited_at_ms,
+           successor_first_log_ms: $f,
+           overlap_ms: (if $s[0][$k].last_log_ms == null or $f == null then null
+                        else ([$s[0][$k].last_log_ms - $f, 0] | max) end)}]' <<<"$facts")"
+done < "$HAKIT_EVENT_DIR/crashed"
+jq -cn --argjson r "$replaced" --argjson e "$facts" '$r + {elders: $e}'

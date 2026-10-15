@@ -175,11 +175,12 @@ tolerated (§3).
 
     | incident | kind | what it does | replaces in `chaos.sh` |
     |---|---|---|---|
-    | `kill_worker` | fault | force-delete one worker pod (grace 0) | `kill_worker` |
+    | `kill_worker` | fault | crash one worker: SIGKILL its processes from the node, proven dead; the kubelet restarts it | `kill_worker` |
     | `kill_worker_graceful` | fault | delete one worker pod with its grace period | `kill_worker` with `KILL_GRACE` |
-    | `kill_worker_held` | fault | delete one worker and keep it absent for `duration_s` (the nodes it may run on tainted NoSchedule), then let it start once | (new) |
-    | `kill_proxy` | fault | force-delete the front proxy that holds the virtual address | `kill_proxy` |
-    | `pod_kill` | fault | force-delete one pod of any selector | `limiter_kill` |
+    | `kill_worker_held` | fault | crash one worker and keep it absent for `duration_s` (the nodes it may run on tainted NoSchedule), then let it start once | (new) |
+    | `kill_proxy` | fault | crash the front proxy that holds the virtual address | `kill_proxy` |
+    | `pod_kill` | fault | crash one pod of any selector | `limiter_kill` |
+    | `force_delete` | fault | force-delete one pod through the API, its processes left running: two incarnations at once | `kill_worker`'s former mechanism |
     | `pod_restart` | fault | delete one pod of any selector with its grace period | `limiter_restart` |
     | `pod_freeze` | fault | cgroup-freeze one pod for `duration_s` | `limiter_freeze`, `broker_freeze` |
     | `net_delay` | fault | netem delay on one pod for `duration_s` | `limiter_slow` |
@@ -195,6 +196,11 @@ tolerated (§3).
     | `spike` | load | a burst stream, drained at heal | `peak` |
     | `abuse` | load | a stream of an abuse scenario, drained at heal | `abuse_up`, `abuse_down` |
     | `orphan` | load | a stream abandoned mid-call at heal (`stop: abandon`) | `orphan_kill` |
+
+    A crash kills the process: an API force-delete leaves the elder running
+    beside its replacement for the seconds its kubelet takes to stop it, two
+    incarnations owning the same calls. That shape is `force_delete`'s, which
+    measures the overlap; a crash's probe proves it is 0.
 
     `overload_mix` and `overload_all` are combined events
     (`incidents: [cpu_starve, spike]`), not incidents.
