@@ -150,8 +150,8 @@ sipp-exporter-check:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/k8s/sipp/exporter-check
 
 # The HA tooling runner (tooling/hakit, ADR-0049): pyright strict and its tests
-# under the toolchain its uv lockfile pins (needs `uv`; the SIPp record checks
-# need `sipp` and are skipped without it).
+# under the toolchain its uv lockfile pins (needs `uv`, and `sipp` for the
+# record checks, which fail without it).
 hakit-check:
     cd tooling/hakit && uv run --locked pyright && uv run --locked pytest
 

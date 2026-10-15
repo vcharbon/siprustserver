@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Refuses 503 with a Reason header holding two values; the first keys the record. -->
+<scenario name="peer-reason-list">
+  <recv request="INVITE" crlf="true" rrs="true"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 503 Service Unavailable
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Reason: SIP;cause=503;text="overload", Q.850;cause=34
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" timeout="5000"/>
+</scenario>

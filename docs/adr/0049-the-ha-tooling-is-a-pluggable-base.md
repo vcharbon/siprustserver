@@ -242,9 +242,11 @@ made. A run profile joins the two.
    `unattributed`. An in-dialog impact takes no budget, so its attribution is
    for analysis: its `candidate_windows` are every window whose `inject` fell
    inside the call's lifetime before the failure, and with none it is
-   `unattributed`. A window whose inject, heal or probe step fails closes at
-   the incident's maximum (every timeout and `duration_s`, plus `settle_s`)
-   with status `incident_failed`, which makes the run `invalid`.
+   `unattributed`. A call stranded before a window opens and whose setup
+   deadline falls inside it is charged to that window by its instant. A
+   window whose inject, heal or probe step fails closes at the incident's
+   maximum (every timeout and `duration_s`, plus `settle_s`) with status
+   `incident_failed`, which makes the run `invalid`.
 6. **Recovery** is computed from the records, so a verdict recomputes from the
    run directory alone. The baseline of a stream is its successful-setup
    ratio and its p99 setup time (as `setup_slow` measures it) over
@@ -317,7 +319,16 @@ made. A run profile joins the two.
      path that reaches a label that writes the record;
    - every `<send>` SIPp retransmits has `ontimeout`;
    - the `_unexp.main` handler accepts any request and any response (a
-     regexp `response` match), writes the record, then ends the call;
+     regexp `response` match). A response there is one that landed while the
+     call stood on a step other than a recv, and SIPp discards a byte-identical
+     copy of the message it last received, so the handler acts on it as the
+     missed step would have (a provisional is stamped, an INVITE final answers
+     or rejects the call, a 2xx retransmission is ACKed again) and the call
+     resumes. A request the scenario cannot serve writes the record and ends
+     the call, its dialog torn down first when answered;
+   - the handler's resume applies the `next` of the step before the one it
+     returns to, so a label a jump reaches never follows a step with an
+     unconditional `next`;
    - every abort path the scenario can reach writes a record before it ends;
    - `-recv_timeout` is above every timeout of the scenario, a backstop that
      never fires on a correct scenario.

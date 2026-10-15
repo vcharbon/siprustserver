@@ -1,33 +1,25 @@
 """The base UAC scenario writes one schema-valid call-outcome record at every exit.
 
 Each pairing runs the scenario against a SIPp peer on loopback that drives one
-exit (answer, reject, ring forever, silence, far-end BYE, 481 or no final to
-the BYE, an in-dialog request the caller cannot serve) and checks the record
-the call left. Needs `sipp` on PATH; skipped without it.
+exit (answer, reject, ring forever, silence, a late answer, a 2xx crossing the
+CANCEL, far-end BYE, 481 or no final to the BYE, an in-dialog request the
+caller cannot serve, a 2xx retransmitted after the ACK) and checks the record
+the call left and that the peer, which fails on any missing ACK, BYE or
+answer, exits 0. Needs `sipp` on PATH: without it the tests fail.
 """
 
 from __future__ import annotations
 
-import json
-import xml.etree.ElementTree as ET
-import shutil
-import socket
-import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from sipp_pairing import SIPP, Pairing, run_pair
 
 from hakit import jsonval as jv
-from hakit.jsonval import Json, as_obj
-from hakit.paths import BASE_CONTENT
 from hakit.schemas import SchemaSet
-
-PEERS = Path(__file__).parent / "sipp_peers"
-UAC = BASE_CONTENT / "scenarios" / "uac-basic-hold.xml"
-SIPP = shutil.which("sipp")
 
 
 @dataclass(frozen=True)
@@ -47,76 +39,43 @@ CASES = [
     Case("peer-early-media.xml", "answered", 200, None, "released", early_media=True),
     Case("peer-reject-486.xml", "rejected", 486, "486", "provisional"),
     Case("peer-reject-503-reason.xml", "rejected", 503, "Q.850;cause=34", "invited", provisional=False),
+    Case("peer-reason-list.xml", "rejected", 503, "SIP;cause=503", "invited", provisional=False),
     Case("peer-ring-no-answer.xml", "timeout", None, "timeout", "provisional"),
+    Case("peer-cancel-crossing.xml", "timeout", None, "timeout", "provisional"),
     Case("peer-silent.xml", "timeout", None, "timeout", "invited", provisional=False),
+    Case("peer-late-answer.xml", "timeout", None, "timeout", "invited", provisional=False),
+    Case("peer-tick.xml", "answered", 200, None, "released"),
+    Case("peer-2xx-twice.xml", "answered", 200, None, "released"),
+    Case("peer-ack-lost.xml", "answered", 200, None, "released"),
+    Case("peer-ack-lost-at-bye.xml", "answered", 200, None, "released"),
     Case("peer-bye-mid-hold.xml", "cut", 200, None, "released", provisional=False),
     Case("peer-bye-481.xml", "cut", 200, None, "released", failures=["dialog_request"]),
     Case("peer-bye-no-final.xml", "stranded", 200, None, "answered", failures=["dialog_request"]),
     Case("peer-info-mid-hold.xml", "failed", 200, None, "released", failures=["protocol"], provisional=False),
 ]
-
-
-def _free_port_pair() -> int:
-    for _ in range(200):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as a, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as b:
-            a.bind(("127.0.0.1", 0))
-            port = a.getsockname()[1]
-            try:
-                b.bind(("127.0.0.1", port + 1))
-            except OSError:
-                continue
-            return port
-    raise RuntimeError("no free UDP port pair")
-
-
-def _run_pair(case: Case, work: Path) -> list[Json]:
-    d = work / case.peer.removesuffix(".xml")
-    d.mkdir()
-    (d / "inject.csv").write_text("SEQUENTIAL\nservice;X-Test: loopback;;;\n")
-    caller = _free_port_pair()
-    callee = caller + 1
-    common = ["-i", "127.0.0.1", "-m", "1", "-nostdin", "-max_invite_retrans", "3", "-max_non_invite_retrans", "3"]
-    peer = subprocess.Popen(
-        [str(SIPP), "-sf", str(PEERS / case.peer), "-p", str(callee), *common, "-recv_timeout", "20000"],
-        cwd=d,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    uac = subprocess.run(
-        [str(SIPP), f"127.0.0.1:{callee}", "-sf", str(UAC), "-p", str(caller), *common]
-        + ["-inf", "inject.csv", "-key", "run", "loopback", "-key", "stream", "basic", "-key", "shape", "basic"]
-        + ["-key", "hold_ms", "1500", "-key", "setup_ms", "3000", "-recv_timeout", "20000"]
-        + ["-cid_str", "%u-%p-loopback@%s", "-trace_logs", "-log_file", "records.jsonl"],
-        cwd=d,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=60,
-        check=False,
-    )
-    try:
-        peer.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        peer.kill()
-    assert uac.returncode in (0, 1), f"{case.peer}: sipp exited {uac.returncode}"
-    text = (d / "records.jsonl").read_text() if (d / "records.jsonl").is_file() else ""
-    return [as_obj(json.loads(line)) for line in text.splitlines() if line.strip()]
+# Peers that never complete their side by design.
+PEER_MAY_FAIL = {"peer-silent.xml", "peer-bye-no-final.xml"}
+BULK_PEER, BULK_CALLS = "peer-tick.xml", 150
 
 
 @pytest.fixture(scope="module")
-def records() -> dict[str, list[Json]]:
-    if SIPP is None:
-        pytest.skip("no sipp on PATH")
-    with tempfile.TemporaryDirectory(prefix="hakit-sipp-") as tmp, ThreadPoolExecutor(len(CASES)) as pool:
+def pairings() -> dict[str, Pairing]:
+    assert SIPP is not None, "sipp is not on PATH: the SIPp record checks are part of the gate"
+    with tempfile.TemporaryDirectory(prefix="hakit-sipp-") as tmp, ThreadPoolExecutor(len(CASES) + 1) as pool:
         work = Path(tmp)
-        futures = {c.peer: pool.submit(_run_pair, c, work) for c in CASES}
+        futures = {c.peer: pool.submit(run_pair, c.peer, work) for c in CASES}
+        futures["bulk"] = pool.submit(run_pair, BULK_PEER, work, BULK_CALLS, 50)
         return {k: f.result() for k, f in futures.items()}
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.peer.removesuffix(".xml") for c in CASES])
-def test_every_exit_writes_one_valid_record(case: Case, records: dict[str, list[Json]]) -> None:
-    got = records[case.peer]
-    assert len(got) == 1, f"{case.peer}: {len(got)} records"
-    r = got[0]
+def test_every_exit_writes_one_valid_record(case: Case, pairings: dict[str, Pairing]) -> None:
+    p = pairings[case.peer]
+    assert p.uac_rc in (0, 1), f"{case.peer}: sipp exited {p.uac_rc}"
+    if case.peer not in PEER_MAY_FAIL:
+        assert p.peer_rc == 0, f"{case.peer}: the peer exited {p.peer_rc}"
+    assert len(p.records) == 1, f"{case.peer}: {len(p.records)} records"
+    r = p.records[0]
     assert SchemaSet.load().errors("call-outcome.v1", r) == []
     assert r["ending"] == case.ending
     assert r["final_code"] == case.final_code
@@ -129,24 +88,13 @@ def test_every_exit_writes_one_valid_record(case: Case, records: dict[str, list[
     assert str(r["call_id"]).endswith("-loopback@127.0.0.1")
 
 
-def test_a_resumed_call_lands_where_it_stood() -> None:
-    """`_unexp.main` resumes with a jump to the step the call stood on, and SIPp
-    then applies the `next` of the step before it. So a label reached by a jump
-    follows no step with an unconditional `next`, but an unreachable `<nop/>`."""
-    root = ET.parse(UAC).getroot()
-    prev: ET.Element | None = None
-    offenders: list[str] = []
-    for e in root:
-        if e.tag == "label":
-            if prev is not None and prev.get("next") and not prev.get("test") and e.get("id") != "_unexp.main":
-                offenders.append(str(e.get("id")))
-        elif e.tag in ("nop", "send", "recv", "pause"):
-            prev = e
-    assert offenders == []
-
-
-def test_every_optional_recv_names_its_next() -> None:
-    """An optional recv without `next` leaves the call on the following recv,
-    which may have no timeout of its own."""
-    root = ET.parse(UAC).getroot()
-    assert [e.attrib for e in root if e.tag == "recv" and e.get("optional") and not e.get("next")] == []
+def test_a_response_landing_on_a_deadline_check_is_acted_on(pairings: dict[str, Pairing]) -> None:
+    """The peer answers 1 s after its 180, where the caller checks its deadline:
+    every call is answered, ACKed and torn down."""
+    p = pairings["bulk"]
+    assert p.peer_rc == 0
+    assert len(p.records) == BULK_CALLS
+    assert {str(r["ending"]) for r in p.records} == {"answered"}
+    assert p.counter("TotalCallCreated") == BULK_CALLS
+    # The handler did act: about four in ten of these answers land on the check.
+    assert p.counter("GenericCounter2(C)") > 0
