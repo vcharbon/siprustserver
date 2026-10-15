@@ -9,6 +9,7 @@ the call left. Needs `sipp` on PATH; skipped without it.
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 import shutil
 import socket
 import subprocess
@@ -126,3 +127,26 @@ def test_every_exit_writes_one_valid_record(case: Case, records: dict[str, list[
     assert (r["first_provisional_at_ms"] is not None) is case.provisional
     assert r["run"] == "loopback" and r["stream"] == "basic" and r["shape"] == "basic"
     assert str(r["call_id"]).endswith("-loopback@127.0.0.1")
+
+
+def test_a_resumed_call_lands_where_it_stood() -> None:
+    """`_unexp.main` resumes with a jump to the step the call stood on, and SIPp
+    then applies the `next` of the step before it. So a label reached by a jump
+    follows no step with an unconditional `next`, but an unreachable `<nop/>`."""
+    root = ET.parse(UAC).getroot()
+    prev: ET.Element | None = None
+    offenders: list[str] = []
+    for e in root:
+        if e.tag == "label":
+            if prev is not None and prev.get("next") and not prev.get("test") and e.get("id") != "_unexp.main":
+                offenders.append(str(e.get("id")))
+        elif e.tag in ("nop", "send", "recv", "pause"):
+            prev = e
+    assert offenders == []
+
+
+def test_every_optional_recv_names_its_next() -> None:
+    """An optional recv without `next` leaves the call on the following recv,
+    which may have no timeout of its own."""
+    root = ET.parse(UAC).getroot()
+    assert [e.attrib for e in root if e.tag == "recv" and e.get("optional") and not e.get("next")] == []

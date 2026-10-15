@@ -55,7 +55,9 @@ def to_line(raw, run, stream, shape):
 
 
 def http_post(url, body):
-    req = urllib.request.Request(url, data=body, method="POST")
+    # A form content type (urllib's default with a body) makes VictoriaLogs
+    # read the body as a form and ingest nothing.
+    req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/stream+json"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return 200 <= resp.status < 300

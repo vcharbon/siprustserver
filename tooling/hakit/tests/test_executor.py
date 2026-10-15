@@ -1,0 +1,39 @@
+"""The real executor's effects: a process group killed on its timeout, a post never sent as a form."""
+
+from __future__ import annotations
+
+import http.server
+import threading
+import time
+
+from hakit.executor import RealExecutor
+
+
+def test_a_post_is_never_a_form() -> None:
+    seen: dict[str, str] = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            seen["type"] = str(self.headers.get("Content-Type"))
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.handle_request, daemon=True).start()
+    try:
+        res = RealExecutor().http("POST", f"http://127.0.0.1:{srv.server_port}/api/v1/import/prometheus", b"m 1\n")
+    finally:
+        srv.server_close()
+    assert res.status == 204
+    assert seen["type"] == "application/octet-stream"
+
+
+def test_a_step_overrunning_its_timeout_is_killed_with_its_children() -> None:
+    t0 = time.monotonic()
+    res = RealExecutor().run(["sh", "-c", "sleep 30 & sleep 30"], timeout_s=0.5)
+    assert res.timed_out and res.rc == -9
+    assert time.monotonic() - t0 < 5

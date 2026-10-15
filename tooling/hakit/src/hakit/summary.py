@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from . import jsonval as jv
@@ -46,6 +47,9 @@ def render(v: Json) -> str:
         out.append("")
         for p in jv.objs(w, "phases"):
             out.append(f"- {_t(jv.number(p, 'at_ms'))} {p['step']} {p['phase']}")
+        for step, by_exe in jv.obj(w, "facts").items():
+            for exe, facts in jv.as_obj(by_exe).items():
+                out.append(f"- facts of {step} {exe}: `{json.dumps(facts, sort_keys=True)}`")
         rows = jv.objs(w, "impacts")
         out += [_impact(r) for r in rows] or ["- no impact"]
         out.append("")

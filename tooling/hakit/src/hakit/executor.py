@@ -86,7 +86,9 @@ class RealExecutor:
             return ProcResult(rc=-9, stdout=out, stderr=err, timed_out=True)
 
     def http(self, method: str, url: str, body: bytes | None = None, timeout_s: float = 10) -> HttpResult:
-        req = urllib.request.Request(url, data=body, method=method)
+        # Never urllib's default form content type: a form body is parsed, not ingested.
+        headers = {"Content-Type": "application/octet-stream"} if body is not None else {}
+        req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
                 return HttpResult(status=resp.status, body=resp.read().decode(errors="replace"))

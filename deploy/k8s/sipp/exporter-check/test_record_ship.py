@@ -6,10 +6,12 @@ nothing, and a partial line waits for its end.
 
   python3 -m unittest discover -s deploy/k8s/sipp/exporter-check
 """
+import http.server
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -95,6 +97,28 @@ class RecordShipTest(unittest.TestCase):
         (ln,) = self.sink.lines()
         self.assertEqual((ln["_msg"], ln["unparsed"], ln["run"]), ("not json", "true", "r1"))
         self.assertEqual(self.shipper.snapshot().by_ending, {"unparsed": 1})
+
+    def test_the_post_is_never_a_form(self):
+        seen = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                seen["type"] = self.headers.get("Content-Type")
+                seen["body"] = self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.handle_request, daemon=True).start()
+        try:
+            ok = record_ship.http_post(f"http://127.0.0.1:{srv.server_port}/insert/jsonline", b"{}\n")
+        finally:
+            srv.server_close()
+        self.assertTrue(ok)
+        self.assertEqual((seen["type"], seen["body"]), ("application/stream+json", b"{}\n"))
 
     def test_the_exporter_renders_the_counters(self):
         self.append(record("a") + "\n")
