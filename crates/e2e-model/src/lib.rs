@@ -45,6 +45,7 @@ pub use model::{
     CheckOp, CheckSet, Concurrency, Input, ModelError, TestCase,
 };
 pub use registry::{
-    LegSpec, LoadFactory, ReroutingParams, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry,
+    intern, intern_legs, intern_prefixes, LegSpec, LoadFactory, ReroutingParams, Scenario,
+    ScenarioInputs, ShapeDescriptor, ShapeRegistry, ShapeSource,
 };
 pub use shape::{Anchor, CoreInput, ShapeCatalog, ShapeSpec};

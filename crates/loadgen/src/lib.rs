@@ -28,10 +28,10 @@
 //!   [`MixEntry`] is built from.
 //! - [`driver`] — the CPS governor + max-in-flight semaphore + per-call
 //!   `catch_unwind` boundary + [`scope`]-based teardown.
-//! - [`app`] — the whole CLI application ([`app::Args`] + [`app::run`]) behind
-//!   an injectable [`ShapeRegistry`], so a
-//!   third-party load bin is a one-liner passing its own composed registry
-//!   (the shipped bin passes `with_defaults()`).
+//! - [`app`] — the whole CLI application ([`app::main`]) behind the
+//!   [`app::Product`] seam: a product names its bin, adds its flags and builds
+//!   the [`ShapeRegistry`] they select, so its load bin is one line (the
+//!   shipped bin passes [`app::Shipped`]).
 //! - [`report`] — bounded-memory counters, latency histograms, sampling gate,
 //!   Prometheus text, on-disk report.
 //! - `call_rtt` — one call's SIP round trips, held by the call and folded

@@ -34,6 +34,9 @@ use scenario_harness::actor::ActorScenario;
 
 use crate::shape::{Anchor, ShapeSpec};
 
+mod source;
+pub use source::{intern, intern_legs, intern_prefixes, ShapeSource};
+
 /// Per-run **scenario inputs** — SUT auth data (and any future non-topology
 /// per-run value) fed into load-body *construction*. Deliberately NOT part of
 /// the per-call `CallEnv`: the env carries the environment axis (agents,
@@ -71,7 +74,7 @@ pub type LoadFactory = Arc<dyn Fn(&ScenarioInputs) -> Scenario + Send + Sync>;
 /// there. Generalizes the closed `needs_bob2`/`needs_charlie` label list — an
 /// open-registry shape's legs arrive under dialled R-URI digits, never under
 /// the agent name, so label and prefix must be declared independently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LegSpec {
     /// Agent name the load body binds/choreographs against (`"bob"`, `"mrf"`,
     /// …) — the label the driver's leg picker returns and the `CallEnv` callee
@@ -310,11 +313,7 @@ impl ShapeRegistry {
     /// Register a shape. One id space: a duplicate id panics loudly at
     /// registration (a third-party shape may not shadow a shipped one).
     pub fn register(&mut self, shape: ShapeDescriptor) -> &mut Self {
-        let prev = self.shapes.insert(shape.id.to_string(), shape);
-        if let Some(prev) = prev {
-            panic!("duplicate shape id {:?} in the registry (one id space)", prev.id);
-        }
-        self
+        self.try_register(shape).unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub fn get(&self, id: &str) -> Option<&ShapeDescriptor> {

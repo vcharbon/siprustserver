@@ -130,16 +130,23 @@ Per-run values (numbers, header names, `refer_key`) come from the case JSON /
 
 ## 3. Registering shapes — the ~30-LOC downstream bin
 
-The load application (`loadgen::app`) is parameterised by an injectable
-`ShapeRegistry`, so a third-party load bin is a one-liner over its own registry.
-The shipped bin (`crates/loadgen/src/bin/loadgen.rs`) is just:
+The load application (`loadgen::app`) runs behind the `Product` seam: a product
+names its bin, adds its own flags, sets the loadgen flag defaults it runs with,
+and builds the `ShapeRegistry` its flags select once the endpoint layout is
+resolved. A product's load bin is one line; the shipped bin
+(`crates/loadgen/src/bin/loadgen.rs`) is:
 
 ```rust
-loadgen::app::run(Args::parse(), loadgen::ShapeRegistry::with_defaults()).await
+fn main() -> std::io::Result<()> {
+    loadgen::app::main(loadgen::app::Shipped)
+}
 ```
 
-A downstream bin starts from `ShapeRegistry::empty()` (or `with_defaults()`) and
-registers its composed shapes. `ShapeDescriptor` carries the load metadata:
+A product's registry starts from `ShapeRegistry::empty()` (or `with_defaults()`)
+and registers its composed shapes, one by one or as a `ShapeSource` (a compiled
+table, a generator, a directory of authored documents; a source building ids
+and legs from runtime data interns them with `e2e_model::intern` /
+`intern_legs`). `ShapeDescriptor` carries the load metadata:
 
 ```rust
 use e2e_model::{ShapeRegistry, ShapeDescriptor};
@@ -157,7 +164,16 @@ fn platform_registry() -> ShapeRegistry {
     // …register the rest…
     reg
 }
-// fn main() { loadgen::app::run(Args::parse(), platform_registry()).await }
+// struct Platform;
+// impl loadgen::app::Product for Platform {
+//     type Flags = loadgen::app::NoFlags;
+//     fn name(&self) -> &'static str { "platform-loadgen" }
+//     fn about(&self) -> &'static str { "platform load generator" }
+//     fn registry(&self, _: &NoFlags, _: &RunLayout<'_>) -> Result<ShapeRegistry, String> {
+//         Ok(platform_registry())
+//     }
+// }
+// fn main() -> std::io::Result<()> { loadgen::app::main(Platform) }
 ```
 
 Descriptor knobs: `.anchors(&[Anchor])` (sampling), `.needs_charlie()` /
