@@ -1,0 +1,81 @@
+{{- if .Values.cdr.enabled }}
+{{- /*
+The CDR broker. One replica, Recreate, no clustering and no volume claim: a
+test dependency, not durable storage, so a restart empties the queue. The queue
+is bounded broker-side by x-max-length (drop-head) in both declarations, so an
+absent consumer never grows the broker without bound. The -management image
+serves Prometheus metrics on :15692 and the management UI on :15672.
+*/}}
+{{- $r := .Values.cdr.rabbitmq }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "rabbitmq") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: rabbitmq }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "15692"
+        prometheus.io/path: "/metrics"
+        {{- with $r.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- with include "siprust.scheduling" $r | trim }}{{ . | nindent 6 }}{{- end }}
+      containers:
+        - name: rabbitmq
+          image: {{ printf "%s:%s" $r.image.repository (toString $r.image.tag) | quote }}
+          imagePullPolicy: {{ $r.image.pullPolicy }}
+          env:
+            - { name: RABBITMQ_DEFAULT_USER, value: {{ $r.user | quote }} }
+            - { name: RABBITMQ_DEFAULT_PASS, value: {{ $r.password | quote }} }
+          ports:
+            - { name: amqp, containerPort: 5672, protocol: TCP }
+            - { name: metrics, containerPort: 15692, protocol: TCP }
+            - { name: mgmt, containerPort: 15672, protocol: TCP }
+          readinessProbe:
+            tcpSocket: { port: 5672 }
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec: { command: ["rabbitmq-diagnostics", "-q", "ping"] }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 15
+          # The store on memory: a disk-backed store waits on the host's fsync
+          # before confirming a publish, past a publisher's confirm bound on a
+          # busy host.
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/rabbitmq }
+          resources:
+            {{- toYaml $r.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: { medium: Memory, sizeLimit: {{ $r.storeSizeLimit }} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "rabbitmq") | nindent 4 }}
+spec:
+  selector: { app: rabbitmq }
+  ports:
+    - { name: amqp, port: 5672, targetPort: 5672, protocol: TCP }
+    - { name: metrics, port: 15692, targetPort: 15692, protocol: TCP }
+    - { name: mgmt, port: 15672, targetPort: 15672, protocol: TCP }
+{{- end }}

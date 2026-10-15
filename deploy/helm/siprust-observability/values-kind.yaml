@@ -1,0 +1,11 @@
+# The kind lab: the host stack (deploy/observability/stack) through the kind
+# bridge gateway, the address the host owns on 172.20.0.0/16.
+#
+#   helm upgrade --install siprust-observability deploy/helm/siprust-observability \
+#     -n observability --create-namespace \
+#     -f deploy/helm/siprust-observability/values-kind.yaml
+
+hostStack:
+  address: 172.20.0.1
+
+clusterName: kind-sip-e2e

@@ -1,0 +1,924 @@
+apiVersion: v1
+data:
+  keepalived.conf: "# Rendered by the siprust chart (files/keepalived.conf).\n#\n\
+    # Identical on both pods, same base priority. state BACKUP: the first pod up\n\
+    # wins the VIPs; VRRP preempts only on a strictly higher priority, so the\n# holder\
+    \ keeps them across its peer's reboots. Multicast VRRP: the node bridge\n# floods\
+    \ 224.0.0.18 between the edge nodes.\n#\n# ONE vrrp_instance owns both identities,\
+    \ the internal VIP on the internal\n# interface and the external VIP on the external\
+    \ one: one election, adverts on\n# the internal plane, so the two faces never\
+    \ split across pods.\n# track_interface drives the instance to FAULT when the\
+    \ external interface\n# disappears, so the peer takes both VIPs together.\n#\n\
+    # The VIPs follow proxy health (ADR-0046): chk_proxy_health GETs the proxy's\n\
+    # /healthz, weighted, never a FAULT trigger. 3 failures in a row drop this\n#\
+    \ node's priority by 50, so a dead proxy hands the VIPs to a healthy peer;\n#\
+    \ both failing leaves the priorities equal and the VIPs where they are; a\n# recovered\
+    \ proxy is back at the same priority and does not take them back.\n# init_fail:\
+    \ a starting keepalived sits at the lowered priority until its\n# proxy passes\
+    \ `rise 2`. The check is clamped to exit 0/1, so an exec failure\n# reads as one\
+    \ failed check.\n#\n# A move takes 4.6-6.6 s: d + 2*interval + master_down - e,\
+    \ d in (0, 1] the\n# check's phase, master_down = 3*advert_int + (256-100)/256\
+    \ = 3.609 s, e in\n# [0, 1) the age of the last full-priority advert at the drop.\n\
+    global_defs {\n    router_id sip-front-proxy\n    script_user root\n}\nvrrp_script\
+    \ chk_proxy_health {\n    script \"/bin/sh -c 'wget -q -T 1 -O /dev/null http://127.0.0.1:9090/healthz\
+    \ && exit 0; exit 1'\"\n    interval 1\n    timeout 1\n    fall 3\n    rise 2\n\
+    \    weight -50\n    init_fail\n}\nvrrp_instance VI_SIP {\n    state BACKUP\n\
+    \    interface eth0\n    virtual_router_id 51\n    priority 100\n    # VRRPv2\
+    \ adverts are whole seconds.\n    advert_int 1\n    # A gratuitous-ARP burst at\
+    \ election is lost while a fresh bridge's FDB\n    # settles: repeat it, and refresh\
+    \ the claim so a stale neighbour binding\n    # heals within garp_master_refresh\
+    \ seconds, per address on both planes.\n    garp_master_delay 1\n    garp_master_repeat\
+    \ 5\n    garp_master_refresh 10\n    garp_master_refresh_repeat 2\n    virtual_ipaddress\
+    \ {\n        172.20.255.250 dev eth0\n        192.168.60.250 dev eth1\n    }\n\
+    \    track_interface {\n        eth1\n    }\n    track_script {\n        chk_proxy_health\n\
+    \    }\n    # Both VIPs stay on lo at all times, so either pod binds them and\
+    \ sources\n    # its egress from them.\n    notify_master \"/bin/sh -c 'ip addr\
+    \ add 172.20.255.250/32 dev lo 2>/dev/null; ip addr add 192.168.60.250/32 dev\
+    \ lo 2>/dev/null; true'\"\n    notify_backup \"/bin/sh -c 'ip addr add 172.20.255.250/32\
+    \ dev lo 2>/dev/null; ip addr add 192.168.60.250/32 dev lo 2>/dev/null; true'\"\
+    \n    notify_fault  \"/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null;\
+    \ ip addr add 192.168.60.250/32 dev lo 2>/dev/null; true'\"\n}\n"
+kind: ConfigMap
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy-keepalived
+  namespace: sip-test
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: masq-exempt
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: masq-exempt
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: masq-exempt
+  namespace: sip-test
+spec:
+  selector:
+    matchLabels:
+      app: masq-exempt
+  template:
+    metadata:
+      labels:
+        app: masq-exempt
+    spec:
+      containers:
+      - args:
+        - "#!/bin/sh\n# The masq-exempt DaemonSet's loop, on every node's network\
+          \ namespace\n# (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTERNAL_SUBNET,\n\
+          # EXTERNAL_INTERFACE and PERIOD from its env; the chart never rewrites this\
+          \ text.\n#\n# kindnetd's KIND-MASQ-AGENT chain (nat POSTROUTING) exempts\
+          \ only the pod CIDR.\n# The SIP plane keeps real addresses: worker -> internal\
+          \ VIP would be SNAT'd to\n# a node IP with its source port remapped, and\
+          \ the VIP-sourced replies would no\n# longer match the peer's conntrack\
+          \ tuple; the external plane is never\n# masqueraded either. One RETURN rule\
+          \ per identity and direction at position 1,\n# re-asserted every PERIOD\
+          \ seconds so a kindnetd reconcile wipes them for one\n# period at most.\n\
+          #\n# One filter rule rides the same loop: a packet for the internal VIP\
+          \ arriving\n# on the external interface is dropped. The proxy trusts whatever\
+          \ reaches its\n# internal socket (ADR-0048), and an edge node holds both\
+          \ VIPs.\necho \"masq-exempt: asserting KIND-MASQ-AGENT RETURN rules for\
+          \ $PROXY_VIP, $EXTERNAL_VIP, $EXTERNAL_SUBNET and the $EXTERNAL_INTERFACE\
+          \ -> $PROXY_VIP DROP (period ${PERIOD}s)\"\nwhile true; do\n  iptables -C\
+          \ INPUT -i \"$EXTERNAL_INTERFACE\" -d \"$PROXY_VIP/32\" -j DROP 2>/dev/null\
+          \ \\\n    || { iptables -I INPUT 1 -i \"$EXTERNAL_INTERFACE\" -d \"$PROXY_VIP/32\"\
+          \ -j DROP && echo \"masq-exempt: inserted INPUT -i $EXTERNAL_INTERFACE -d\
+          \ $PROXY_VIP/32 DROP\"; }\n  if iptables -t nat -nL KIND-MASQ-AGENT >/dev/null\
+          \ 2>&1; then\n    for rule in \"-s $PROXY_VIP/32\" \"-d $PROXY_VIP/32\"\
+          \ \"-s $EXTERNAL_VIP/32\" \"-d $EXTERNAL_SUBNET\"; do\n      # shellcheck\
+          \ disable=SC2086 # $rule is two words by design\n      iptables -t nat -C\
+          \ KIND-MASQ-AGENT $rule -j RETURN 2>/dev/null \\\n        || { iptables\
+          \ -t nat -I KIND-MASQ-AGENT 1 $rule -j RETURN && echo \"masq-exempt: inserted\
+          \ $rule RETURN\"; }\n    done\n  fi\n  sleep \"$PERIOD\"\ndone\n"
+        command:
+        - /bin/sh
+        - -c
+        env:
+        - name: PROXY_VIP
+          value: 172.20.255.250
+        - name: EXTERNAL_VIP
+          value: 192.168.60.250
+        - name: EXTERNAL_SUBNET
+          value: 192.168.60.0/24
+        - name: EXTERNAL_INTERFACE
+          value: eth1
+        - name: PERIOD
+          value: '15'
+        image: siprustserver-keepalived:dev
+        imagePullPolicy: IfNotPresent
+        name: masq-exempt
+        resources:
+          limits:
+            memory: 32Mi
+          requests:
+            cpu: 10m
+            memory: 8Mi
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+      hostNetwork: true
+      tolerations:
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/control-plane
+        operator: Exists
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: call-limiter
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: call-limiter
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: call-limiter
+  namespace: sip-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: call-limiter
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8080'
+        prometheus.io/scrape: 'true'
+      labels:
+        app: call-limiter
+    spec:
+      containers:
+      - command:
+        - /usr/local/bin/call-limiter-runner
+        env:
+        - name: LIMITER_LEASE_SECONDS
+          value: '120'
+        - name: LIMITER_LISTEN
+          value: 0.0.0.0:8080
+        image: siprustserver:dev
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        name: call-limiter
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 2
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 1
+          periodSeconds: 2
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 32Mi
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+      nodeSelector:
+        tier: infra
+      tolerations:
+      - effect: NoSchedule
+        key: tier
+        operator: Equal
+        value: infra
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: cdr-consumer
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cdr-consumer
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: cdr-consumer
+  namespace: sip-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cdr-consumer
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: '9093'
+        prometheus.io/scrape: 'true'
+      labels:
+        app: cdr-consumer
+    spec:
+      containers:
+      - command:
+        - /usr/local/bin/cdr-consumer-runner
+        env:
+        - name: CDR_AMQP_URL
+          value: amqp://guest:guest@rabbitmq.sip-test.svc.cluster.local:5672/%2f
+        - name: CDR_METRICS_LISTEN
+          value: 0.0.0.0:9093
+        - name: CDR_PAYLOAD
+          value: json
+        - name: CDR_QUEUE
+          value: cdr
+        - name: CDR_QUEUE_MAX_LEN
+          value: '100000'
+        image: siprustserver:dev
+        imagePullPolicy: IfNotPresent
+        name: cdr-consumer
+        ports:
+        - containerPort: 9093
+          name: metrics
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 9093
+          initialDelaySeconds: 1
+          periodSeconds: 5
+        resources:
+          limits:
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 32Mi
+      nodeSelector:
+        tier: infra
+      tolerations:
+      - effect: NoSchedule
+        key: tier
+        operator: Equal
+        value: infra
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: rabbitmq
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: rabbitmq
+  namespace: sip-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: '15692'
+        prometheus.io/scrape: 'true'
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+      - env:
+        - name: RABBITMQ_DEFAULT_USER
+          value: guest
+        - name: RABBITMQ_DEFAULT_PASS
+          value: guest
+        image: rabbitmq:3.13-management
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          exec:
+            command:
+            - rabbitmq-diagnostics
+            - -q
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 15
+        name: rabbitmq
+        ports:
+        - containerPort: 5672
+          name: amqp
+          protocol: TCP
+        - containerPort: 15692
+          name: metrics
+          protocol: TCP
+        - containerPort: 15672
+          name: mgmt
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 3
+          tcpSocket:
+            port: 5672
+        resources:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /var/lib/rabbitmq
+          name: data
+      nodeSelector:
+        tier: infra
+      tolerations:
+      - effect: NoSchedule
+        key: tier
+        operator: Equal
+        value: infra
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 512Mi
+        name: data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy
+  namespace: sip-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sip-front-proxy
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        checksum/keepalived: 91c2c14621e75d8a05fb87b9d5b43648ebdaf4bdd03dbcc5271a6a22ce09a0e0
+        prometheus.io/port: '9090'
+        prometheus.io/scrape: 'true'
+      labels:
+        app: sip-front-proxy
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: sip-front-proxy
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - command:
+        - /usr/local/bin/sip-proxy-runner
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: PROXY_HMAC_KID
+          valueFrom:
+            secretKeyRef:
+              key: kid
+              name: sip-front-proxy-hmac
+        - name: PROXY_HMAC_KEY
+          valueFrom:
+            secretKeyRef:
+              key: key
+              name: sip-front-proxy-hmac
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://172.20.0.1:10428/insert/opentelemetry
+        - name: PROXY_ADVERTISE
+          value: 172.20.255.250:5060
+        - name: PROXY_ADVERTISE_EXT
+          value: 192.168.60.250:5060
+        - name: PROXY_FACE_INT_CIDRS
+          value: 10.244.0.0/16,172.20.0.0/16
+        - name: PROXY_LISTEN
+          value: 172.20.255.250:5060
+        - name: PROXY_LISTEN_EXT
+          value: 192.168.60.250:5060
+        - name: PROXY_METRICS
+          value: 0.0.0.0:9090
+        - name: PROXY_UDP_RCVBUF
+          value: '4194304'
+        - name: PROXY_UDP_SNDBUF
+          value: '4194304'
+        - name: PROXY_WORKER_PORT
+          value: '5060'
+        - name: PROXY_WORKER_SERVICE
+          value: b2bua-worker
+        - name: SIP_TRACE_HEADER
+          value: '1'
+        - name: _RJEM_MALLOC_CONF
+          value: dirty_decay_ms:1000,muzzy_decay_ms:1000
+        image: siprustserver:dev
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9090
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        name: sip-front-proxy
+        ports:
+        - containerPort: 5060
+          name: sip
+          protocol: UDP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /readyz
+            port: 9090
+          initialDelaySeconds: 1
+          periodSeconds: 2
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 500m
+            memory: 64Mi
+      - args:
+        - --dont-fork
+        - --log-console
+        - --log-detail
+        - --use-file=/etc/keepalived/keepalived.conf
+        command:
+        - /usr/sbin/keepalived
+        image: siprustserver-keepalived:dev
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - pkill keepalived; sleep 1
+        name: keepalived
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_BROADCAST
+            - NET_RAW
+        volumeMounts:
+        - mountPath: /etc/keepalived
+          name: keepalived-conf
+          readOnly: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      initContainers:
+      - args:
+        - "#!/bin/sh\n# The proxy pod's init container, on the node's network namespace\n\
+          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP and UNRES_QLEN_BYTES from\
+          \ its\n# env; the chart never rewrites this text.\n#\n# Both VIPs go on\
+          \ lo before the proxy starts, so its bind(VIP:port) on each\n# face succeeds\
+          \ on the VRRP backup too. Strict ARP: with the VIPs on lo of both\n# nodes,\
+          \ only the interface owning an address answers ARP for it.\n#\n# A next\
+          \ hop the kernel cannot resolve holds every datagram sent to it on the\n\
+          # neighbour's unresolved queue, charged to the sending socket, for the whole\n\
+          # ARP cycle (ADR-0033). The default bound equals a default socket send buffer;\n\
+          # UNRES_QLEN_BYTES bounds it per neighbour on every interface. net.core.wmem_max\n\
+          # is the host's and read-only here (the host preflight raises it).\nset\
+          \ -e\nip addr add \"$PROXY_VIP/32\" dev lo 2>/dev/null || ip addr show dev\
+          \ lo | grep -q \"$PROXY_VIP/32\"\nip addr add \"$EXTERNAL_VIP/32\" dev lo\
+          \ 2>/dev/null || ip addr show dev lo | grep -q \"$EXTERNAL_VIP/32\"\necho\
+          \ 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\necho 2 > /proc/sys/net/ipv4/conf/all/arp_announce\n\
+          echo 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore\necho 2 > /proc/sys/net/ipv4/conf/lo/arp_announce\n\
+          for f in /proc/sys/net/ipv4/neigh/*/unres_qlen_bytes; do\n  echo \"$UNRES_QLEN_BYTES\"\
+          \ > \"$f\" || echo \"vip-loopback: WARN could not set $f\"\ndone\necho \"\
+          vip-loopback: $PROXY_VIP/32 + $EXTERNAL_VIP/32 + strict-ARP + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES\
+          \ ready\"\n"
+        command:
+        - /bin/sh
+        - -c
+        env:
+        - name: PROXY_VIP
+          value: 172.20.255.250
+        - name: EXTERNAL_VIP
+          value: 192.168.60.250
+        - name: UNRES_QLEN_BYTES
+          value: '16384'
+        image: siprustserver-keepalived:dev
+        imagePullPolicy: IfNotPresent
+        name: vip-loopback
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+          privileged: true
+      nodeSelector:
+        tier: edge
+      serviceAccountName: sip-front-proxy
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          name: sip-front-proxy-keepalived
+        name: keepalived-conf
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app: b2bua-worker
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: b2bua-worker
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: b2bua-endpointslice-reader
+  namespace: sip-test
+rules:
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app: b2bua-worker
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: b2bua-worker
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: b2bua-worker-endpointslice-reader
+  namespace: sip-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: b2bua-endpointslice-reader
+subjects:
+- kind: ServiceAccount
+  name: b2bua-worker
+  namespace: sip-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy-endpointslice-reader
+  namespace: sip-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: b2bua-endpointslice-reader
+subjects:
+- kind: ServiceAccount
+  name: sip-front-proxy
+  namespace: sip-test
+---
+apiVersion: v1
+data:
+  key: <random>
+  kid: azE=
+kind: Secret
+metadata:
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy-hmac
+  namespace: sip-test
+type: Opaque
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: b2bua-worker
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: b2bua-worker
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: b2bua-worker
+  namespace: sip-test
+spec:
+  clusterIP: None
+  ports:
+  - name: sip
+    port: 5060
+    protocol: UDP
+    targetPort: 5060
+  - name: metrics
+    port: 9091
+    protocol: TCP
+    targetPort: 9091
+  - name: repl
+    port: 9092
+    protocol: TCP
+    targetPort: 9092
+  selector:
+    app: b2bua-worker
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: call-limiter
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: call-limiter
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: call-limiter
+  namespace: sip-test
+spec:
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: call-limiter
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: cdr-consumer
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: cdr-consumer
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: cdr-consumer
+  namespace: sip-test
+spec:
+  ports:
+  - name: metrics
+    port: 9093
+    protocol: TCP
+    targetPort: 9093
+  selector:
+    app: cdr-consumer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: rabbitmq
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: rabbitmq
+  namespace: sip-test
+spec:
+  ports:
+  - name: amqp
+    port: 5672
+    protocol: TCP
+    targetPort: 5672
+  - name: metrics
+    port: 15692
+    protocol: TCP
+    targetPort: 15692
+  - name: mgmt
+    port: 15672
+    protocol: TCP
+    targetPort: 15672
+  selector:
+    app: rabbitmq
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy
+  namespace: sip-test
+spec:
+  ports:
+  - name: metrics
+    port: 9090
+    protocol: TCP
+    targetPort: 9090
+  selector:
+    app: sip-front-proxy
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app: b2bua-worker
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: b2bua-worker
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: b2bua-worker
+  namespace: sip-test
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy
+  namespace: sip-test
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app: b2bua-worker
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: b2bua-worker
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: b2bua-worker
+  namespace: sip-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: b2bua-worker
+  serviceName: b2bua-worker
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: '9091'
+        prometheus.io/scrape: 'true'
+      labels:
+        app: b2bua-worker
+    spec:
+      containers:
+      - command:
+        - /usr/local/bin/b2bua-runner
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: B2BUA_ADVERTISE
+          value: $(POD_IP)
+        - name: B2BUA_CDR_RABBITMQ_MAX_LEN
+          value: '100000'
+        - name: B2BUA_CDR_RABBITMQ_QUEUE
+          value: cdr
+        - name: B2BUA_CDR_RABBITMQ_URL
+          value: amqp://guest:guest@rabbitmq.sip-test.svc.cluster.local:5672/%2f
+        - name: B2BUA_DEST
+          value: 192.168.60.21:5060
+        - name: B2BUA_DRAIN_GRACE_MS
+          value: '5000'
+        - name: B2BUA_DRAIN_MIN_MS
+          value: '1000'
+        - name: B2BUA_DRAIN_RELEASE_FLUSH_MS
+          value: '3000'
+        - name: B2BUA_KEEPALIVE_SEC
+          value: '300'
+        - name: B2BUA_KEEPALIVE_TIMEOUT_SEC
+          value: '120'
+        - name: B2BUA_LISTEN
+          value: 0.0.0.0:5060
+        - name: B2BUA_METRICS
+          value: 0.0.0.0:9091
+        - name: B2BUA_ORDINAL
+          value: $(POD_NAME)
+        - name: B2BUA_OUTBOUND_PROXY
+          value: 172.20.255.250:5060
+        - name: B2BUA_RELAY_HEADERS
+          value: X-Loadgen-Id
+        - name: B2BUA_REPL
+          value: '1'
+        - name: B2BUA_REPL_LISTEN
+          value: 0.0.0.0:9092
+        - name: B2BUA_REPL_PORT
+          value: '9092'
+        - name: B2BUA_REPL_SERVICE
+          value: b2bua-worker
+        - name: B2BUA_REQUIRE_OUTBOUND_PROXY
+          value: '1'
+        - name: B2BUA_STRESS_LIMITER_ID
+          value: global-stress
+        - name: B2BUA_STRESS_LIMITER_LIMIT
+          value: '999999'
+        - name: B2BUA_UDP_RCVBUF
+          value: '4194304'
+        - name: B2BUA_UDP_SNDBUF
+          value: '4194304'
+        - name: LIMITER_REFRESH_SECONDS
+          value: '40'
+        - name: LIMITER_RELEASE_TIMEOUT_MS
+          value: '2000'
+        - name: LIMITER_TIMEOUT_MS
+          value: '150'
+        - name: LIMITER_URL
+          value: call-limiter.sip-test.svc.cluster.local:8080
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://172.20.0.1:10428/insert/opentelemetry
+        - name: SIP_TRACE_HEADER
+          value: '1'
+        - name: WORKER_ALLOWED_TARGET_SUFFIXES
+          value: .svc.cluster.local
+        - name: _RJEM_MALLOC_CONF
+          value: prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/tmp/jeprof/auto
+        image: siprustserver:dev
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 9091
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        name: b2bua-worker
+        ports:
+        - containerPort: 5060
+          name: sip
+          protocol: UDP
+        - containerPort: 9091
+          name: metrics
+          protocol: TCP
+        - containerPort: 9092
+          name: repl
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 2
+          httpGet:
+            path: /ready
+            port: 9091
+          initialDelaySeconds: 1
+          periodSeconds: 2
+        resources:
+          limits:
+            memory: 2Gi
+          requests:
+            cpu: 250m
+            memory: 128Mi
+      nodeSelector:
+        tier: app
+      serviceAccountName: b2bua-worker
+      terminationGracePeriodSeconds: 30

@@ -44,6 +44,12 @@ One image carries both binaries; the k8s `command` selects which to run.
 docker build -f deploy/docker/Dockerfile -t siprustserver:dev .   # context = repo root
 ```
 
+## Helm charts — `deploy/helm`
+
+`deploy/helm/siprust` deploys the SUT and its backends, and
+`deploy/helm/siprust-observability` the in-cluster collectors; `deploy/helm/kind-lab.sh`
+brings the kind lab up from them. See [deploy/helm/README.md](helm/README.md).
+
 ## Thin k8s runner — `deploy/k8s/run.sh`
 
 ```bash

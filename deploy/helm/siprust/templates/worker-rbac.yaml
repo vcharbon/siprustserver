@@ -1,0 +1,40 @@
+{{- /*
+The EndpointSlice reader both the worker's replication membership and the
+proxy's worker discovery watch through (ADR-0011 X7, ADR-0012 D4): get/list/
+watch on endpointslices in this namespace only.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: b2bua-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "b2bua-worker") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: b2bua-endpointslice-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "b2bua-worker") | nindent 4 }}
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: b2bua-worker-endpointslice-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "b2bua-worker") | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: b2bua-worker
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: b2bua-endpointslice-reader
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,621 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app: fluent-bit
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: fluent-bit
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app: kube-state-metrics
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: kube-state-metrics
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  - secrets
+  - nodes
+  - pods
+  - services
+  - serviceaccounts
+  - resourcequotas
+  - replicationcontrollers
+  - limitranges
+  - persistentvolumeclaims
+  - persistentvolumes
+  - namespaces
+  - endpoints
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  - daemonsets
+  - deployments
+  - replicasets
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  - jobs
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  - networkpolicies
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  - volumeattachments
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - certificates.k8s.io
+  resources:
+  - certificatesigningrequests
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  - clusterrolebindings
+  - roles
+  - rolebindings
+  verbs:
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app: vmagent
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: vmagent
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - nodes
+  - nodes/metrics
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+- nonResourceURLs:
+  - /metrics
+  - /metrics/cadvisor
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app: fluent-bit
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: fluent-bit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit
+subjects:
+- kind: ServiceAccount
+  name: fluent-bit
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app: kube-state-metrics
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+- kind: ServiceAccount
+  name: kube-state-metrics
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app: vmagent
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: vmagent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vmagent
+subjects:
+- kind: ServiceAccount
+  name: vmagent
+  namespace: observability
+---
+apiVersion: v1
+data:
+  fluent-bit.conf: "[SERVICE]\n    Flush         5\n    Daemon        Off\n    Log_Level\
+    \     info\n    Parsers_File  parsers.conf\n    HTTP_Server   On\n    HTTP_Listen\
+    \   0.0.0.0\n    HTTP_Port     2020\n\n[INPUT]\n    Name              tail\n \
+    \   Path              /var/log/containers/*.log\n    Path_Key          file\n\
+    \    Exclude_Path      /var/log/containers/fluent-bit*.log,/var/log/containers/*_kube-system_*.log\n\
+    \    multiline.parser  docker, cri\n    Tag               kube.*\n    Refresh_Interval\
+    \  5\n    Skip_Long_Lines   On\n    DB                /var/log/fluent-bit-tail.db\n\
+    \n# The metadata cache is keyed by pod name; Cache_Use_Docker_Id fetches it\n\
+    # again for a new container, so a restarted container or a pod re-created\n# under\
+    \ the same name carries its own docker_id and pod_id.\n[FILTER]\n    Name    \
+    \            kubernetes\n    Match               kube.*\n    Cache_Use_Docker_Id\
+    \ On\n    Kube_URL            https://kubernetes.default.svc:443\n    Kube_CA_File\
+    \        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt\n    Kube_Token_File\
+    \     /var/run/secrets/kubernetes.io/serviceaccount/token\n    Merge_Log     \
+    \      On\n    Keep_Log            Off\n    K8S-Logging.Parser  On\n    K8S-Logging.Exclude\
+    \ On\n\n# VictoriaLogs flattens the nested `kubernetes` map into dotted field\n\
+    # names; the stream fields name them so, one stream per container output.\n[OUTPUT]\n\
+    \    Name              http\n    Match             kube.*\n    Host          \
+    \    172.20.0.1\n    Port              9428\n    URI               /insert/jsonline?_stream_fields=stream,kubernetes.pod_name,kubernetes.namespace_name,kubernetes.container_name&_msg_field=log&_time_field=date\n\
+    \    Format            json_lines\n    Json_date_format  iso8601\n    Json_date_key\
+    \     date\n    compress          gzip\n"
+  parsers.conf: "[PARSER]\n    Name    docker\n    Format  json\n    Time_Key time\n\
+    \    Time_Format %Y-%m-%dT%H:%M:%S.%L\n"
+kind: ConfigMap
+metadata:
+  labels:
+    app: fluent-bit
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: fluent-bit-config
+  namespace: observability
+---
+apiVersion: v1
+data:
+  vmagent.yaml: "global:\n  scrape_interval: 15s\n  external_labels:\n    cluster:\
+    \ kind-sip-e2e\n\nscrape_configs:\n  # Pods annotated prometheus.io/scrape: \"\
+    true\", on the annotated port only.\n  - job_name: 'kubernetes-pods'\n    kubernetes_sd_configs:\n\
+    \      - role: pod\n    relabel_configs:\n      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]\n\
+    \        action: keep\n        regex: true\n      # The pod role makes one target\
+    \ per declared container port; keep the\n      # one the annotation names (RE2\
+    \ has no backreference: keepequal).\n      - source_labels: [__meta_kubernetes_pod_container_port_number]\n\
+    \        target_label: __tmp_pod_port\n      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]\n\
+    \        action: keepequal\n        target_label: __tmp_pod_port\n      - source_labels:\
+    \ [__meta_kubernetes_pod_annotation_prometheus_io_path]\n        action: replace\n\
+    \        target_label: __metrics_path__\n        regex: (.+)\n      - source_labels:\
+    \ [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]\n       \
+    \ action: replace\n        regex: ([^:]+)(?::\\d+)?;(\\d+)\n        replacement:\
+    \ $1:$2\n        target_label: __address__\n      - action: labelmap\n       \
+    \ regex: __meta_kubernetes_pod_label_(.+)\n      - source_labels: [__meta_kubernetes_namespace]\n\
+    \        target_label: namespace\n      - source_labels: [__meta_kubernetes_pod_name]\n\
+    \        target_label: pod\n      - source_labels: [__meta_kubernetes_pod_node_name]\n\
+    \        target_label: node\n      - source_labels: [__meta_kubernetes_pod_container_name]\n\
+    \        target_label: container\n\n  # The kubelet of every node, through the\
+    \ API server proxy.\n  - job_name: 'kubernetes-kubelet'\n    scheme: https\n \
+    \   tls_config: { insecure_skip_verify: true }\n    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token\n\
+    \    kubernetes_sd_configs: [{ role: node }]\n    relabel_configs:\n      - action:\
+    \ labelmap\n        regex: __meta_kubernetes_node_label_(.+)\n      - target_label:\
+    \ __address__\n        replacement: kubernetes.default.svc:443\n      - source_labels:\
+    \ [__meta_kubernetes_node_name]\n        regex: (.+)\n        target_label: __metrics_path__\n\
+    \        replacement: /api/v1/nodes/$1/proxy/metrics\n\n  # cAdvisor: per-container\
+    \ CPU, memory and IO.\n  - job_name: 'kubernetes-cadvisor'\n    scheme: https\n\
+    \    tls_config: { insecure_skip_verify: true }\n    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token\n\
+    \    kubernetes_sd_configs: [{ role: node }]\n    relabel_configs:\n      - action:\
+    \ labelmap\n        regex: __meta_kubernetes_node_label_(.+)\n      - target_label:\
+    \ __address__\n        replacement: kubernetes.default.svc:443\n      - source_labels:\
+    \ [__meta_kubernetes_node_name]\n        regex: (.+)\n        target_label: __metrics_path__\n\
+    \        replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor\n\n  - job_name:\
+    \ 'vmagent'\n    static_configs: [{ targets: ['127.0.0.1:8429'] }]\n"
+kind: ConfigMap
+metadata:
+  labels:
+    app: vmagent
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: vmagent-config
+  namespace: observability
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: fluent-bit
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: fluent-bit
+  namespace: observability
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      annotations:
+        checksum/config: 6b7115684c2c1f3dc80db8ad0f229975e807df9d5f26fb7214c60b3205e2e32a
+      labels:
+        app: fluent-bit
+    spec:
+      containers:
+      - image: fluent/fluent-bit:3.1.10
+        imagePullPolicy: IfNotPresent
+        name: fluent-bit
+        ports:
+        - containerPort: 2020
+          name: http
+        resources:
+          limits:
+            cpu: 300m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        volumeMounts:
+        - mountPath: /var/log
+          name: varlog
+        - mountPath: /var/lib/docker/containers
+          name: varlibdocker
+          readOnly: true
+        - mountPath: /fluent-bit/etc/fluent-bit.conf
+          name: config
+          subPath: fluent-bit.conf
+        - mountPath: /fluent-bit/etc/parsers.conf
+          name: config
+          subPath: parsers.conf
+      serviceAccountName: fluent-bit
+      tolerations:
+      - operator: Exists
+      volumes:
+      - hostPath:
+          path: /var/log
+        name: varlog
+      - hostPath:
+          path: /var/lib/docker/containers
+        name: varlibdocker
+      - configMap:
+          name: fluent-bit-config
+        name: config
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: node-exporter
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: node-exporter
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: node-exporter
+  namespace: observability
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: '9100'
+        prometheus.io/scrape: 'true'
+      labels:
+        app: node-exporter
+    spec:
+      containers:
+      - args:
+        - --path.procfs=/host/proc
+        - --path.sysfs=/host/sys
+        - --path.rootfs=/host/root
+        - --web.listen-address=:9100
+        - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+        image: quay.io/prometheus/node-exporter:v1.8.2
+        imagePullPolicy: IfNotPresent
+        name: node-exporter
+        ports:
+        - containerPort: 9100
+          hostPort: 9100
+          name: metrics
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        volumeMounts:
+        - mountPath: /host/proc
+          name: proc
+          readOnly: true
+        - mountPath: /host/sys
+          name: sys
+          readOnly: true
+        - mountPath: /host/root
+          mountPropagation: HostToContainer
+          name: rootfs
+          readOnly: true
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+      - operator: Exists
+      volumes:
+      - hostPath:
+          path: /proc
+        name: proc
+      - hostPath:
+          path: /sys
+        name: sys
+      - hostPath:
+          path: /
+        name: rootfs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: kube-state-metrics
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: kube-state-metrics
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-state-metrics
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: '8080'
+        prometheus.io/scrape: 'true'
+      labels:
+        app: kube-state-metrics
+    spec:
+      containers:
+      - image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0
+        imagePullPolicy: IfNotPresent
+        name: kube-state-metrics
+        ports:
+        - containerPort: 8080
+          name: http-metrics
+        - containerPort: 8081
+          name: telemetry
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+      serviceAccountName: kube-state-metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: vmagent
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: vmagent
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vmagent
+  template:
+    metadata:
+      labels:
+        app: vmagent
+    spec:
+      containers:
+      - args:
+        - -promscrape.config=/config/vmagent.yaml
+        - -promscrape.configCheckInterval=10s
+        - -remoteWrite.url=http://172.20.0.1:8428/api/v1/write
+        - -remoteWrite.tmpDataPath=/cache
+        - -httpListenAddr=:8429
+        image: victoriametrics/vmagent:v1.143.0
+        imagePullPolicy: IfNotPresent
+        name: vmagent
+        ports:
+        - containerPort: 8429
+          name: http
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - mountPath: /config
+          name: config
+        - mountPath: /cache
+          name: cache
+      serviceAccountName: vmagent
+      volumes:
+      - configMap:
+          name: vmagent-config
+        name: config
+      - emptyDir: {}
+        name: cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: kube-state-metrics
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: kube-state-metrics
+  namespace: observability
+spec:
+  ports:
+  - name: http-metrics
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: kube-state-metrics
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app: fluent-bit
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: fluent-bit
+  namespace: observability
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app: kube-state-metrics
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: kube-state-metrics
+  namespace: observability
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app: vmagent
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: siprust-observability
+    helm.sh/chart: siprust-observability-0.1.0
+  name: vmagent
+  namespace: observability

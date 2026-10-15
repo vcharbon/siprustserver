@@ -1,0 +1,177 @@
+{{- if .Values.proxy.enabled }}
+{{- /*
+SIP front proxy and load balancer, an active/passive pair (ADR-0012 D7) on the
+tier=edge nodes, the only nodes on both SIP planes. One keepalived VRRP
+instance floats the internal VIP (worker-facing) and the external VIP
+(caller-facing) together; the master serves all traffic, the backup keeps a
+live worker view through its own OPTIONS probes and stays Ready. The proxy
+advertises the VIPs in Via and Record-Route, stable across failover and pod
+restart; the HMAC stickiness cookie and worker replication keep in-dialog
+routing correct from either pod. Workers are discovered from the EndpointSlices
+of the headless b2bua-worker Service (ADR-0012 D4).
+*/}}
+{{- $p := .Values.proxy }}
+{{- $vip := include "siprust.net" (dict "root" $ "key" "proxyVip") }}
+{{- $extVip := include "siprust.net" (dict "root" $ "key" "externalVip") }}
+{{- $port := int .Values.network.sipPort }}
+{{- $env := dict
+  "PROXY_LISTEN" (printf "%s:%d" $vip $port)
+  "PROXY_ADVERTISE" (printf "%s:%d" $vip $port)
+  "PROXY_LISTEN_EXT" (printf "%s:%d" $extVip $port)
+  "PROXY_ADVERTISE_EXT" (printf "%s:%d" $extVip $port)
+  "PROXY_FACE_INT_CIDRS" (include "siprust.net" (dict "root" $ "key" "internalCidrs"))
+  "PROXY_METRICS" "0.0.0.0:9090"
+  "PROXY_WORKER_SERVICE" "b2bua-worker"
+  "PROXY_WORKER_PORT" "5060"
+  "OTEL_EXPORTER_OTLP_ENDPOINT" .Values.tracing.otlpEndpoint
+  "SIP_TRACE_HEADER" (include "siprust.traceHeader" .)
+}}
+{{- if not (kindIs "invalid" $p.recvShards) }}
+{{- $_ := set $env "PROXY_RECV_SHARDS" (toString (int $p.recvShards)) }}
+{{- end }}
+{{- if not (kindIs "invalid" $p.selfGate.cpsRate) }}
+{{- $_ := set $env "PROXY_SELF_GATE_CPS_RATE" (toString (int $p.selfGate.cpsRate)) }}
+{{- end }}
+{{- if not (kindIs "invalid" $p.selfGate.cpsSize) }}
+{{- $_ := set $env "PROXY_SELF_GATE_CPS_SIZE" (toString (int $p.selfGate.cpsSize)) }}
+{{- end }}
+{{- include "siprust.overlayEnv" (dict "into" $env "from" $p.env) }}
+{{- $hmacSecret := $p.hmac.existingSecret | default "sip-front-proxy-hmac" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sip-front-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+spec:
+  replicas: {{ int $p.replicas }}
+  selector:
+    matchLabels: { app: sip-front-proxy }
+  # The pods are hard anti-affine, one per edge node: a rollout replaces one
+  # pod at a time, the VIP gap covered by re-election and SIP retransmission.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
+  template:
+    metadata:
+      labels:
+        {{- include "siprust.podLabels" (dict "app" "sip-front-proxy" "extra" $p.podLabels) | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        checksum/keepalived: {{ tpl (.Files.Get "files/keepalived.conf") . | sha256sum }}
+        {{- with $p.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: sip-front-proxy
+      {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- with include "siprust.scheduling" $p | trim }}{{ . | nindent 6 }}{{- end }}
+      terminationGracePeriodSeconds: {{ int $p.terminationGracePeriodSeconds }}
+      # keepalived answers ARP for the VIPs on the node's interfaces, and reads
+      # the proxy's /healthz over the shared host network.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: sip-front-proxy } }
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: vip-loopback
+          {{- include "siprust.keepalivedImage" . | nindent 10 }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              {{- .Files.Get "files/vip-loopback.sh" | nindent 14 }}
+          env:
+            - { name: PROXY_VIP, value: {{ $vip | quote }} }
+            - { name: EXTERNAL_VIP, value: {{ $extVip | quote }} }
+            - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
+          securityContext:
+            privileged: true
+            capabilities: { add: ["NET_ADMIN"] }
+        {{- with $p.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: sip-front-proxy
+          {{- include "siprust.image" (dict "root" $ "image" $p.image) | nindent 10 }}
+          command: {{ toJson $p.command }}
+          {{- with $p.args }}
+          args: {{ toJson . }}
+          {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: PROXY_HMAC_KID
+              valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: kid } }
+            - name: PROXY_HMAC_KEY
+              valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: key } }
+            {{- with include "siprust.envMap" $env | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with $p.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # containerPort is a label under hostNetwork: the bind is PROXY_LISTEN.
+          ports:
+            - { name: sip, containerPort: 5060, protocol: UDP }
+            - { name: metrics, containerPort: 9090, protocol: TCP }
+          # Ready on >=1 routable worker (ADR-0012 D4), never on VRRP mastership,
+          # so the warm backup stays Ready. Liveness: process up and every recv
+          # shard turning (ADR-0046 D4); an idle shard is never stalled.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 9090 }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9090 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml $p.resources | nindent 12 }}
+          {{- with $p.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        # The VRRP sidecar; preStop drops the VIPs at once so the peer promotes
+        # before SIGTERM reaches the proxy.
+        - name: keepalived
+          {{- include "siprust.keepalivedImage" . | nindent 10 }}
+          command: ["/usr/sbin/keepalived"]
+          args: ["--dont-fork", "--log-console", "--log-detail", "--use-file=/etc/keepalived/keepalived.conf"]
+          securityContext:
+            capabilities: { add: ["NET_ADMIN", "NET_BROADCAST", "NET_RAW"] }
+          lifecycle:
+            preStop:
+              exec: { command: ["/bin/sh", "-c", "pkill keepalived; sleep 1"] }
+          {{- with $p.keepalivedResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - { name: keepalived-conf, mountPath: /etc/keepalived, readOnly: true }
+        {{- with $p.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: keepalived-conf
+          configMap: { name: sip-front-proxy-keepalived }
+        {{- with $p.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+---
+# Metrics-only Service: SIP flows through the VIPs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sip-front-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+spec:
+  selector: { app: sip-front-proxy }
+  ports:
+    - { name: metrics, port: 9090, targetPort: 9090, protocol: TCP }
+{{- end }}

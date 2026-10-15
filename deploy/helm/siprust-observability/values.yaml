@@ -1,0 +1,66 @@
+# Values of the siprust-observability chart: the in-cluster collectors. The
+# stores and Grafana live outside the cluster (deploy/observability/stack), so
+# their history survives a cluster teardown. Every collector is on by default.
+
+# Where VictoriaMetrics and VictoriaLogs listen, as the pods reach them.
+# Required.
+hostStack:
+  address: ""
+  metricsPort: 8428
+  logsPort: 9428
+
+# External label `cluster` on every series vmagent writes. Required.
+clusterName: ""
+
+imagePullSecrets: []
+
+vmagent:
+  enabled: true
+  image:
+    repository: victoriametrics/vmagent
+    tag: v1.143.0
+    pullPolicy: IfNotPresent
+  scrapeInterval: 15s
+  # Scrape jobs appended to the built-in ones (pods annotated
+  # prometheus.io/scrape, kubelet, cAdvisor, vmagent itself).
+  extraScrapeConfigs: []
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "512Mi" }
+
+kubeStateMetrics:
+  enabled: true
+  image:
+    repository: registry.k8s.io/kube-state-metrics/kube-state-metrics
+    tag: v2.13.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: "50m", memory: "64Mi" }
+    limits: { cpu: "200m", memory: "256Mi" }
+
+nodeExporter:
+  enabled: true
+  image:
+    repository: quay.io/prometheus/node-exporter
+    tag: v1.8.2
+    pullPolicy: IfNotPresent
+  # hostNetwork port of the exporter on every node.
+  port: 9100
+  resources:
+    requests: { cpu: "50m", memory: "64Mi" }
+    limits: { cpu: "200m", memory: "128Mi" }
+
+# Container logs of every node to VictoriaLogs, one stream per container.
+logShipping:
+  enabled: true
+  image:
+    repository: fluent/fluent-bit
+    tag: 3.1.10
+    pullPolicy: IfNotPresent
+  # Container log files left out (fluent-bit Exclude_Path globs).
+  excludePaths:
+    - /var/log/containers/fluent-bit*.log
+    - /var/log/containers/*_kube-system_*.log
+  resources:
+    requests: { cpu: "50m", memory: "64Mi" }
+    limits: { cpu: "300m", memory: "256Mi" }

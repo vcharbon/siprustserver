@@ -1,0 +1,252 @@
+# Values of the siprust chart: the SIP front proxy, the B2BUA worker pool, the
+# call limiter, the CDR broker and the CDR consumer.
+#
+# Every object keeps a fixed name (b2bua-worker, sip-front-proxy, call-limiter,
+# rabbitmq, cdr-consumer, masq-exempt) and its `app` label, which the tooling
+# selects pods by: one release per namespace. A downstream chart that depends
+# on this one replaces a runner through `image` + `command`, adds env through
+# `env` (by name) and `extraEnv`, and adds sidecars through `extraContainers` /
+# `extraVolumes` / `extraVolumeMounts`. Env values are strings. A null in
+# user-supplied values (-f, --set) removes a default env; Helm keeps a default
+# a parent chart's own values.yaml sets to null, so a parent overrides it.
+
+# Default image of every runner (worker, proxy, call limiter, CDR consumer);
+# a component's own `image` overrides it key by key.
+image:
+  repository: siprustserver
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Alpine with keepalived, iproute2 and iptables: the proxy's VRRP sidecar, its
+# vip-loopback init container and the masq-exempt DaemonSet.
+keepalivedImage:
+  repository: siprustserver-keepalived
+  tag: dev
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The two SIP planes. The proxy owns both VIPs through one keepalived VRRP
+# instance (ADR-0012 D7) and is the only component on both planes; workers
+# reach the world through the internal VIP only. Required when the proxy is
+# enabled.
+network:
+  # Internal VIP (worker-facing) and the node interface it lives on.
+  proxyVip: ""
+  internalInterface: ""
+  # External VIP (caller-facing) and the node interface it lives on.
+  externalVip: ""
+  externalInterface: ""
+  # The external plane's subnet (masq-exempt only).
+  externalSubnet: ""
+  # UDP port both VIPs listen on.
+  sipPort: 5060
+  # The proxy's egress face-picker: a destination in these comma-separated
+  # CIDRs leaves on the internal face, any other on the external face.
+  internalCidrs: ""
+
+# Per-call tracing (ADR-0026).
+tracing:
+  # OTLP/HTTP base the runners export spans to (they append /v1/traces).
+  # Empty exports nothing and leaves the sampling machinery inert.
+  otlpEndpoint: ""
+  # Honour an `X-Trace-Sample` header: a lab setting, since the header is
+  # untrusted on a serving edge.
+  traceHeader: false
+
+worker:
+  # Off leaves a chart of backends only (the RBAC the proxy shares stays).
+  enabled: true
+  replicas: 2
+  image: {}
+  command: ["/usr/local/bin/b2bua-runner"]
+  args: []
+  # B2BUA_DEST: the callee of the scripted decision backend, an IP literal
+  # (workers never resolve an external name). Empty leaves the runner default.
+  dest: ""
+  # With the proxy enabled, every b-leg request goes through the proxy's
+  # internal VIP (B2BUA_OUTBOUND_PROXY, ADR-0048) and the worker refuses to
+  # boot without it (B2BUA_REQUIRE_OUTBOUND_PROXY).
+  outboundProxy: true
+  # HA call replication (ADR-0011): the changelog on `port`, peers from the
+  # EndpointSlices of the headless b2bua-worker Service.
+  replication:
+    enabled: false
+    port: 9092
+  # Env by name over the env the chart derives (pod identity, listen and
+  # advertise, metrics, outbound proxy, replication, limiter URL, CDR sink,
+  # tracing): a name here overrides a derived one.
+  env:
+    # b-leg destination allow-list: a non-IP callee host matching no suffix is
+    # refused 503 before any DNS lookup. `*` disables the gate.
+    WORKER_ALLOWED_TARGET_SUFFIXES: ".svc.cluster.local"
+    # Headers copied from the a-leg INVITE onto every originated b-leg INVITE.
+    B2BUA_RELAY_HEADERS: "X-Loadgen-Id"
+    # Signalling socket buffers (ADR-0033), clamped at the host's
+    # net.core.wmem_max / rmem_max.
+    B2BUA_UDP_SNDBUF: "4194304"
+    B2BUA_UDP_RCVBUF: "4194304"
+    # In-dialog OPTIONS keepalive interval and its answer grace. The interval
+    # bounds the backup reaper (1.5x) and the reboot budget (0.5x) of the HA
+    # fail-back (ADR-0011 X11); the grace rides out a burst's shedding.
+    B2BUA_KEEPALIVE_SEC: "300"
+    B2BUA_KEEPALIVE_TIMEOUT_SEC: "120"
+    # Limiter lease refresh cadence, admit timeout and release budget.
+    LIMITER_REFRESH_SECONDS: "40"
+    LIMITER_TIMEOUT_MS: "150"
+    LIMITER_RELEASE_TIMEOUT_MS: "2000"
+    # A limiter entry the scripted backend attaches to every call, cap never
+    # reached, so every call runs the admit/release/refresh chain. Empty ID
+    # disables it.
+    B2BUA_STRESS_LIMITER_ID: "global-stress"
+    B2BUA_STRESS_LIMITER_LIMIT: "999999"
+    # Drain on SIGTERM: grace, earliest exit once every backup applied its
+    # head (ADR-0031 D2), release flush bound. terminationGracePeriodSeconds
+    # stays above grace + flush.
+    B2BUA_DRAIN_GRACE_MS: "5000"
+    B2BUA_DRAIN_MIN_MS: "1000"
+    B2BUA_DRAIN_RELEASE_FLUSH_MS: "3000"
+    # Heap profiling for /debug/heap at jemalloc's default interval (ADR-0038).
+    _RJEM_MALLOC_CONF: "prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/tmp/jeprof/auto"
+  # EnvVar entries appended after `env` (valueFrom and the like).
+  extraEnv: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  # Sidecar containers of the worker pod.
+  extraContainers: []
+  extraInitContainers: []
+  podAnnotations: {}
+  podLabels: {}
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests: { cpu: "250m", memory: "128Mi" }
+    limits: { memory: "2Gi" }
+  nodeSelector: { tier: app }
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+proxy:
+  enabled: true
+  replicas: 2
+  image: {}
+  command: ["/usr/local/bin/sip-proxy-runner"]
+  args: []
+  # PROXY_RECV_SHARDS: SO_REUSEPORT recv sockets, one serial core task each.
+  # Null keeps the runner default.
+  recvShards: null
+  # The self-gate's CPS token bucket: refill per second and capacity. Null
+  # keeps the runner default.
+  selfGate:
+    cpsRate: null
+    cpsSize: null
+  # The stickiness-cookie signing key both proxies share (ADR-0046), keys
+  # `kid` and `key`. Empty `existingSecret`: the chart keeps one Secret
+  # (sip-front-proxy-hmac) whose key is drawn once and reused by every
+  # upgrade; changing it 403s the in-dialog requests of calls in progress.
+  hmac:
+    existingSecret: ""
+    kid: k1
+  # Per-neighbour bound of the unresolved ARP queue in the proxy node's
+  # network namespace (ADR-0033), set by the vip-loopback init container.
+  unresQlenBytes: 16384
+  # VRRP virtual router id of the VIP pair.
+  virtualRouterId: 51
+  env:
+    # Signalling socket buffers (ADR-0033), far above what one unresolved
+    # neighbour can pin; clamped at the host's wmem_max / rmem_max.
+    PROXY_UDP_SNDBUF: "4194304"
+    PROXY_UDP_RCVBUF: "4194304"
+    _RJEM_MALLOC_CONF: "dirty_decay_ms:1000,muzzy_decay_ms:1000"
+  extraEnv: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  extraContainers: []
+  extraInitContainers: []
+  podAnnotations: {}
+  podLabels: {}
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests: { cpu: "500m", memory: "64Mi" }
+    limits: { memory: "512Mi" }
+  keepalivedResources: {}
+  nodeSelector: { tier: edge }
+  tolerations: []
+
+callLimiter:
+  enabled: true
+  image: {}
+  command: ["/usr/local/bin/call-limiter-runner"]
+  args: []
+  # The lease every admit and refresh answer states (ADR-0040).
+  leaseSeconds: 120
+  env: {}
+  extraEnv: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  extraContainers: []
+  podAnnotations: {}
+  podLabels: {}
+  securityContext: {}
+  resources:
+    requests: { cpu: "100m", memory: "32Mi" }
+    limits: { memory: "256Mi" }
+  nodeSelector: { tier: infra }
+  tolerations:
+    - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
+
+# The CDR transport: one record per terminated call, worker -> RabbitMQ ->
+# consumer. One queue declaration bound shared by producer and consumer.
+cdr:
+  enabled: true
+  queue: cdr
+  # x-max-length (drop-head) of the queue, declared alike by both sides.
+  maxLength: 100000
+  rabbitmq:
+    image:
+      repository: rabbitmq
+      tag: 3.13-management
+      pullPolicy: IfNotPresent
+    user: guest
+    password: guest
+    podAnnotations: {}
+    # The store lives on a memory-backed emptyDir counted in the memory limit.
+    storeSizeLimit: 512Mi
+    resources:
+      requests: { cpu: "200m", memory: "256Mi" }
+      limits: { memory: "1Gi" }
+    nodeSelector: { tier: infra }
+    tolerations:
+      - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
+  consumer:
+    enabled: true
+    image: {}
+    command: ["/usr/local/bin/cdr-consumer-runner"]
+    args: []
+    # `json` sums the workers' JSON records; `opaque` counts deliveries of any
+    # format.
+    payload: json
+    env: {}
+    extraEnv: []
+    extraVolumeMounts: []
+    extraVolumes: []
+    extraContainers: []
+    podAnnotations: {}
+    podLabels: {}
+    resources:
+      requests: { cpu: "50m", memory: "32Mi" }
+      limits: { memory: "128Mi" }
+    nodeSelector: { tier: infra }
+    tolerations:
+      - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
+
+# kindnetd's KIND-MASQ-AGENT chain masquerades everything outside the pod
+# CIDR; this DaemonSet keeps both VIPs and the external subnet out of it and
+# drops a packet for the internal VIP arriving on the external interface
+# (ADR-0048). kind clusters only.
+masqExempt:
+  enabled: false
+  periodSeconds: 15
+  resources:
+    requests: { cpu: "10m", memory: "8Mi" }
+    limits: { memory: "32Mi" }

@@ -1,0 +1,39 @@
+# The kind lab: deploy/k8s/cluster.yaml's nodes (tier=edge|app|infra) on the
+# docker bridges deploy/k8s/lib/net-env.sh lays out with its defaults: the
+# internal kind bridge 172.20.0.0/16 (eth0 on a node, gateway = the host) and
+# the no-NAT external bridge 192.168.60.0/24 the edge nodes join as eth1.
+# The helm check asserts these values agree with net-env.sh's defaults.
+#
+#   helm upgrade --install siprust deploy/helm/siprust -n sip-test \
+#     --create-namespace -f deploy/helm/siprust/values-kind.yaml [--set ...]
+
+network:
+  proxyVip: 172.20.255.250
+  internalInterface: eth0
+  externalVip: 192.168.60.250
+  externalInterface: eth1
+  externalSubnet: 192.168.60.0/24
+  sipPort: 5060
+  internalCidrs: 10.244.0.0/16,172.20.0.0/16
+
+# The host stack's VictoriaTraces through the kind bridge gateway; the lab
+# trusts X-Trace-Sample.
+tracing:
+  otlpEndpoint: http://172.20.0.1:10428/insert/opentelemetry
+  traceHeader: true
+
+worker:
+  # The first SIPp UAS container on the external plane.
+  dest: 192.168.60.21:5060
+  # The lab is the HA lab: worker kills fail over to the survivor.
+  replication:
+    enabled: true
+
+# The chaos tooling's limiter network cut runs `tc netem` inside the pod.
+callLimiter:
+  securityContext:
+    capabilities:
+      add: ["NET_ADMIN"]
+
+masqExempt:
+  enabled: true

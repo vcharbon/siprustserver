@@ -1,0 +1,8 @@
+apiVersion: v2
+name: siprust
+description: >-
+  SIP front proxy (keepalived VRRP pair, dual-faced), B2BUA worker pool and
+  their backends: call limiter, CDR broker and CDR consumer.
+type: application
+version: 0.1.0
+appVersion: "dev"

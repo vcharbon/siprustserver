@@ -1,0 +1,92 @@
+{{- if .Values.vmagent.enabled }}
+{{- $v := .Values.vmagent }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmagent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "vmagent") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vmagent
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "vmagent") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/metrics, nodes/proxy, services, endpoints, pods]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vmagent
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "vmagent") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vmagent
+subjects:
+  - kind: ServiceAccount
+    name: vmagent
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmagent-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "vmagent") | nindent 4 }}
+data:
+  vmagent.yaml: |
+    {{- tpl (.Files.Get "files/scrape.yaml") . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmagent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "vmagent") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vmagent }
+  template:
+    metadata:
+      labels: { app: vmagent }
+    spec:
+      serviceAccountName: vmagent
+      {{- with include "obs.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
+      containers:
+        - name: vmagent
+          {{- include "obs.image" $v.image | nindent 10 }}
+          args:
+            - "-promscrape.config=/config/vmagent.yaml"
+            - "-promscrape.configCheckInterval=10s"
+            - {{ printf "-remoteWrite.url=http://%s:%d/api/v1/write" (include "obs.host" .) (int .Values.hostStack.metricsPort) | quote }}
+            - "-remoteWrite.tmpDataPath=/cache"
+            - "-httpListenAddr=:8429"
+          ports:
+            - { name: http, containerPort: 8429 }
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: cache, mountPath: /cache }
+      volumes:
+        - { name: config, configMap: { name: vmagent-config } }
+        - { name: cache, emptyDir: {} }
+{{- end }}

@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "siprust chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "fullImage": {
+      "allOf": [
+        { "$ref": "#/definitions/image" },
+        { "required": ["repository", "tag", "pullPolicy"] }
+      ]
+    },
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "args": { "type": "array", "items": { "type": "string" } },
+    "env": {
+      "description": "Plain env by name; values are strings, null removes a default.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "additionalProperties": { "type": ["string", "null"] }
+    },
+    "objects": { "type": "array", "items": { "type": "object" } },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": { "type": "object" },
+        "limits": { "type": "object" }
+      }
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "optionalPositive": { "type": ["integer", "null"], "minimum": 1 }
+  },
+  "properties": {
+    "global": { "type": "object" },
+    "image": { "$ref": "#/definitions/fullImage" },
+    "keepalivedImage": { "$ref": "#/definitions/fullImage" },
+    "imagePullSecrets": { "$ref": "#/definitions/objects" },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "proxyVip": { "type": "string" },
+        "internalInterface": { "type": "string" },
+        "externalVip": { "type": "string" },
+        "externalInterface": { "type": "string" },
+        "externalSubnet": { "type": "string" },
+        "sipPort": { "$ref": "#/definitions/port" },
+        "internalCidrs": { "type": "string" }
+      }
+    },
+    "tracing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "otlpEndpoint": { "type": "string" },
+        "traceHeader": { "type": "boolean" }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicas": { "$ref": "#/definitions/count" },
+        "image": { "$ref": "#/definitions/image" },
+        "command": { "$ref": "#/definitions/command" },
+        "args": { "$ref": "#/definitions/args" },
+        "dest": { "type": "string" },
+        "outboundProxy": { "type": "boolean" },
+        "replication": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "$ref": "#/definitions/port" }
+          }
+        },
+        "env": { "$ref": "#/definitions/env" },
+        "extraEnv": { "$ref": "#/definitions/objects" },
+        "extraVolumeMounts": { "$ref": "#/definitions/objects" },
+        "extraVolumes": { "$ref": "#/definitions/objects" },
+        "extraContainers": { "$ref": "#/definitions/objects" },
+        "extraInitContainers": { "$ref": "#/definitions/objects" },
+        "podAnnotations": { "$ref": "#/definitions/stringMap" },
+        "podLabels": { "$ref": "#/definitions/stringMap" },
+        "terminationGracePeriodSeconds": { "$ref": "#/definitions/count" },
+        "resources": { "$ref": "#/definitions/resources" },
+        "nodeSelector": { "$ref": "#/definitions/stringMap" },
+        "tolerations": { "$ref": "#/definitions/objects" },
+        "affinity": { "type": "object" },
+        "topologySpreadConstraints": { "$ref": "#/definitions/objects" }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicas": { "$ref": "#/definitions/count" },
+        "image": { "$ref": "#/definitions/image" },
+        "command": { "$ref": "#/definitions/command" },
+        "args": { "$ref": "#/definitions/args" },
+        "recvShards": { "type": ["integer", "null"], "minimum": 1, "maximum": 1024 },
+        "selfGate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpsRate": { "$ref": "#/definitions/optionalPositive" },
+            "cpsSize": { "$ref": "#/definitions/optionalPositive" }
+          }
+        },
+        "hmac": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "kid": { "type": "string", "minLength": 1 }
+          }
+        },
+        "unresQlenBytes": { "type": "integer", "minimum": 1 },
+        "virtualRouterId": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "env": { "$ref": "#/definitions/env" },
+        "extraEnv": { "$ref": "#/definitions/objects" },
+        "extraVolumeMounts": { "$ref": "#/definitions/objects" },
+        "extraVolumes": { "$ref": "#/definitions/objects" },
+        "extraContainers": { "$ref": "#/definitions/objects" },
+        "extraInitContainers": { "$ref": "#/definitions/objects" },
+        "podAnnotations": { "$ref": "#/definitions/stringMap" },
+        "podLabels": { "$ref": "#/definitions/stringMap" },
+        "terminationGracePeriodSeconds": { "$ref": "#/definitions/count" },
+        "resources": { "$ref": "#/definitions/resources" },
+        "keepalivedResources": { "$ref": "#/definitions/resources" },
+        "nodeSelector": { "$ref": "#/definitions/stringMap" },
+        "tolerations": { "$ref": "#/definitions/objects" }
+      }
+    },
+    "callLimiter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "command": { "$ref": "#/definitions/command" },
+        "args": { "$ref": "#/definitions/args" },
+        "leaseSeconds": { "type": "integer", "minimum": 1 },
+        "env": { "$ref": "#/definitions/env" },
+        "extraEnv": { "$ref": "#/definitions/objects" },
+        "extraVolumeMounts": { "$ref": "#/definitions/objects" },
+        "extraVolumes": { "$ref": "#/definitions/objects" },
+        "extraContainers": { "$ref": "#/definitions/objects" },
+        "podAnnotations": { "$ref": "#/definitions/stringMap" },
+        "podLabels": { "$ref": "#/definitions/stringMap" },
+        "securityContext": { "type": "object" },
+        "resources": { "$ref": "#/definitions/resources" },
+        "nodeSelector": { "$ref": "#/definitions/stringMap" },
+        "tolerations": { "$ref": "#/definitions/objects" }
+      }
+    },
+    "cdr": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "queue": { "type": "string", "minLength": 1 },
+        "maxLength": { "type": "integer", "minimum": 1 },
+        "rabbitmq": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "image": { "$ref": "#/definitions/fullImage" },
+            "user": { "type": "string", "minLength": 1 },
+            "password": { "type": "string", "minLength": 1 },
+            "podAnnotations": { "$ref": "#/definitions/stringMap" },
+            "storeSizeLimit": { "type": "string" },
+            "resources": { "$ref": "#/definitions/resources" },
+            "nodeSelector": { "$ref": "#/definitions/stringMap" },
+            "tolerations": { "$ref": "#/definitions/objects" }
+          }
+        },
+        "consumer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": { "$ref": "#/definitions/image" },
+            "command": { "$ref": "#/definitions/command" },
+            "args": { "$ref": "#/definitions/args" },
+            "payload": { "enum": ["json", "opaque"] },
+            "env": { "$ref": "#/definitions/env" },
+            "extraEnv": { "$ref": "#/definitions/objects" },
+            "extraVolumeMounts": { "$ref": "#/definitions/objects" },
+            "extraVolumes": { "$ref": "#/definitions/objects" },
+            "extraContainers": { "$ref": "#/definitions/objects" },
+            "podAnnotations": { "$ref": "#/definitions/stringMap" },
+            "podLabels": { "$ref": "#/definitions/stringMap" },
+            "resources": { "$ref": "#/definitions/resources" },
+            "nodeSelector": { "$ref": "#/definitions/stringMap" },
+            "tolerations": { "$ref": "#/definitions/objects" }
+          }
+        }
+      }
+    },
+    "masqExempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    }
+  }
+}
