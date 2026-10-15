@@ -3,7 +3,7 @@
 //! A product names its binary, adds its own flags beside loadgen's, sets the
 //! loadgen flag defaults it runs with, and builds the shape registry the run
 //! drives — from compiled shapes, a generator, or authored documents, each a
-//! [`ShapeSource`](crate::ShapeSource). [`main`] does everything else (parsing,
+//! [`ShapeSource`](e2e_model::ShapeSource). [`main`] does everything else (parsing,
 //! profile precedence, mux, driver, metrics, report), so a product binary is
 //!
 //! ```ignore

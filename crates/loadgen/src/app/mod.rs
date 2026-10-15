@@ -1,7 +1,7 @@
 //! The reusable `loadgen` CLI application: arg parsing, load-profile
 //! precedence, mix resolution, mux/driver wiring, the metrics socket and the
 //! report writer, behind the [`Product`] seam. A product binary supplies its
-//! name, its own flags and the [`ShapeRegistry`] they select, and calls
+//! name, its own flags and the [`ShapeRegistry`](crate::ShapeRegistry) they select, and calls
 //! [`main`]; it adds no wiring of its own (see [`product`]).
 
 use std::sync::Arc;
