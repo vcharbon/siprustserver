@@ -16,7 +16,7 @@ use sip_net::queue::PacketQueue;
 use sip_net::{UdpEndpoint, UdpPacket};
 use tokio::time::Instant;
 
-use super::late_final::ack_for;
+use super::late_final::Reply;
 use super::stats::{MuxStats, OrphanReason};
 use super::{CallSlot, Delivery, Key, MuxSocket};
 
@@ -26,9 +26,9 @@ use super::{CallSlot, Delivery, Key, MuxSocket};
 pub(super) async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, endpoint: Arc<dyn UdpEndpoint>) {
     while let Some(pkt) = endpoint.recv().await {
         let Some(mux) = mux.upgrade() else { return };
-        if let Some((ack, dst)) = route(&mux, &pkt.raw, pkt.src) {
+        for (datagram, dst) in route(&mux, &pkt.raw, pkt.src) {
             // Best effort, as any UDP send: a lost ACK draws the final again.
-            let _ = mux.endpoint.send_to(&ack, dst).await;
+            let _ = mux.endpoint.send_to(&datagram, dst).await;
         }
     }
 }
@@ -38,9 +38,10 @@ pub(super) async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, endpoint: Arc
 /// Call-ID (`call_id_reuse` orphan); (2) correlation token — an initial INVITE
 /// spawning a new leg of a known call, unless its Call-ID was released by a
 /// finished call (`released`) or the call's caller has not sent its INVITE yet
-/// (`early`); (3) a non-2xx final to the INVITE a released caller dialog last
-/// sent, answered with the ACK this returns; (4) orphan.
-fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Option<(Vec<u8>, SocketAddr)> {
+/// (`early`); (3) a final to the INVITE a released caller dialog last sent,
+/// answered with the datagrams this returns (its ACK, and for a 2xx the BYE
+/// ending the dialog); (4) orphan.
+fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAddr)> {
     let cid = call_id(raw);
     let mut g = mux.reg.lock().unwrap();
 
@@ -52,12 +53,12 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Option<(Vec<u8>, Socke
         if let Some(d) = g.by_call_id.get(cid) {
             if d.caller && is_invite_request_buffer(raw) && LegInfo::new(raw).is_initial_invite() {
                 mux.stats.orphan(OrphanReason::CallIdReuse, raw);
-                return None;
+                return Vec::new();
             }
             let d = d.clone();
             drop(g);
             handle_inbound(mux, &d, raw, src);
-            return None;
+            return Vec::new();
         }
     }
     // 2. A new leg of a known call: an INITIAL INVITE whose Call-ID we have not
@@ -69,19 +70,19 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Option<(Vec<u8>, Socke
     if is_invite_request_buffer(raw) {
         if cid.as_ref().is_some_and(|c| g.is_released(c, Instant::now())) {
             mux.stats.orphan(OrphanReason::Released, raw);
-            return None;
+            return Vec::new();
         }
         let Some(tok) = mux.correlation.token(raw) else {
             mux.stats.orphan(OrphanReason::NoHeader, raw);
-            return None;
+            return Vec::new();
         };
         let Some(slot) = g.by_token.get_mut(&tok) else {
             mux.stats.orphan(OrphanReason::UnknownToken, raw);
-            return None;
+            return Vec::new();
         };
         if !slot.gate.open() {
             mux.stats.orphan(OrphanReason::Early, raw);
-            return None;
+            return Vec::new();
         }
         // Receiver selection. A claim-mode slot resolves by the scenario's
         // declared per-leg rules (consumed once; a miss is `unclaimed`, never
@@ -104,14 +105,14 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Option<(Vec<u8>, Socke
                 None => {
                     mux.stats.unclaimed(raw);
                     tap_unrouted(mux, slot, raw, src);
-                    return None;
+                    return Vec::new();
                 }
             }
         } else {
             match slot.receivers.len() {
                 0 => {
                     mux.stats.orphan(OrphanReason::NoRoute, raw);
-                    return None;
+                    return Vec::new();
                 }
                 1 => 0,
                 _ => match &slot.picker {
@@ -133,7 +134,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Option<(Vec<u8>, Socke
                             None => {
                                 mux.stats.orphan(OrphanReason::NoRoute, raw);
                                 tap_unrouted(mux, slot, raw, src);
-                                return None;
+                                return Vec::new();
                             }
                         }
                     }
@@ -142,7 +143,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Option<(Vec<u8>, Socke
                         // scenario bug, not a silent first-wins.
                         mux.stats.orphan(OrphanReason::NoRoute, raw);
                         tap_unrouted(mux, slot, raw, src);
-                        return None;
+                        return Vec::new();
                     }
                 },
             }
@@ -167,17 +168,25 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Option<(Vec<u8>, Socke
         }
         drop(g);
         handle_inbound(mux, &delivery, raw, src);
-        return None;
+        return Vec::new();
     }
     // 3. A late final of a released caller's INVITE transaction.
     let late = cid.as_deref().and_then(|c| g.released_invite(c, Instant::now()));
-    if let Some(ack) = late.and_then(|invite| ack_for(invite, raw)) {
-        mux.stats.late_final_acked.fetch_add(1, Ordering::Relaxed);
-        return Some(ack);
+    match late.map_or(Reply::NotHeld, |held| held.on_final(raw)) {
+        Reply::Absorbed => return Vec::new(),
+        Reply::AckNon2xx(ack, dst) => {
+            mux.stats.late_final_acked.fetch_add(1, Ordering::Relaxed);
+            return vec![(ack, dst)];
+        }
+        Reply::Answered(datagrams) => {
+            mux.stats.late_answer_ended.fetch_add(1, Ordering::Relaxed);
+            return datagrams;
+        }
+        Reply::NotHeld => {}
     }
     // 4. Not a known dialog and not an initial INVITE → a late straggler.
     mux.stats.orphan(OrphanReason::Stray, raw);
-    None
+    Vec::new()
 }
 
 /// Hand one resolved-to-a-call datagram to the app: apply simulated inbound loss

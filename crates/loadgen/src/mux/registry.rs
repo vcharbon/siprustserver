@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 
 use tokio::time::Instant;
 
-use super::late_final::SentInvite;
+use super::late_final::Held;
 use super::stats::MuxStats;
 use super::{CallSlot, Delivery, Key};
 
@@ -20,7 +20,7 @@ pub(in crate::mux) struct SocketRegistry {
     released_order: VecDeque<(Instant, String)>,
     /// The INVITE a released caller dialog last sent, held with its Call-ID:
     /// a non-2xx final to it is still ACKed (RFC 3261 §17.1.1.3).
-    released_invites: HashMap<String, SentInvite>,
+    released_invites: HashMap<String, Held>,
 }
 
 impl SocketRegistry {
@@ -31,7 +31,7 @@ impl SocketRegistry {
     pub(in crate::mux) fn release_keys(
         &mut self,
         keys: Vec<Key>,
-        mut invites: impl FnMut(&str) -> Option<SentInvite>,
+        mut invites: impl FnMut(&str) -> Option<Held>,
         deadline: Instant,
         stats: &MuxStats,
     ) {
@@ -72,11 +72,14 @@ impl SocketRegistry {
 
     /// The INVITE a released dialog last sent, while its hold lasts at `now`.
     pub(in crate::mux) fn released_invite(
-        &self,
+        &mut self,
         call_id: &str,
         now: Instant,
-    ) -> Option<&SentInvite> {
-        self.is_released(call_id, now).then(|| self.released_invites.get(call_id)).flatten()
+    ) -> Option<&mut Held> {
+        if !self.is_released(call_id, now) {
+            return None;
+        }
+        self.released_invites.get_mut(call_id)
     }
 
     /// Drop the holds that expired by `now`, touching only those.

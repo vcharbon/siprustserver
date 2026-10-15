@@ -36,6 +36,10 @@ pub struct MuxStats {
     /// dialog its call already released, each answered with its ACK (RFC 3261
     /// §17.1.1.3) — never an orphan.
     pub late_final_acked: AtomicU64,
+    /// 2xx finals to the INVITE of a caller dialog its call already released,
+    /// each answered with its ACK, the first with the BYE ending the dialog
+    /// (RFC 3261 §13.2.2.4, §15) — never an orphan.
+    pub late_answer_ended: AtomicU64,
     pub pending_expired: AtomicU64,
     pub inbox_drop: AtomicU64,
     pub delivered: AtomicU64,

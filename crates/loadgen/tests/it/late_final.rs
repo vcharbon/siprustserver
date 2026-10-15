@@ -143,3 +143,70 @@ async fn an_invite_answered_2xx_is_not_held_after_release() {
     assert!(recv(sut.as_ref()).await.is_none(), "nothing held for an answered INVITE");
     assert_eq!(core.stats().orphans_total(), 1);
 }
+
+/// The SUT's 2xx to a released call's INVITE (it answered after the caller
+/// gave up): the mux ACKs it and ends the dialog with a BYE (RFC 3261
+/// §13.2.2.4, §15), re-ACKs a retransmitted 2xx without a second BYE, absorbs
+/// the BYE's final, and counts no orphan.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_late_2xx_is_acked_then_its_dialog_ended() {
+    let (_sim, core, sut) = setup().await;
+    released_call(&core, sut.as_ref(), "cid-late-200").await;
+    let ok = format!(
+        "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:46301;branch={BRANCH}\r\n\
+         Call-ID: cid-late-200\r\nFrom: <sip:caller@h>;tag=c1\r\nTo: <sip:callee@h>;tag=u9\r\n\
+         CSeq: 7 INVITE\r\nContact: <sip:callee@{}>\r\nContent-Length: 0\r\n\r\n",
+        sut.local_addr()
+    )
+    .into_bytes();
+
+    sut.send_to(&ok, addr(46301)).await.unwrap();
+    let ack = recv(sut.as_ref()).await.expect("the late 2xx is ACKed");
+    assert!(ack.starts_with(b"ACK "), "{}", String::from_utf8_lossy(&ack));
+    assert_eq!(cseq_value(&ack), "CSeq: 7 ACK");
+    assert_ne!(via_branch(&ack).as_deref(), Some(BRANCH), "a 2xx ACK is its own transaction");
+    let bye = recv(sut.as_ref()).await.expect("the dialog is ended");
+    assert!(bye.starts_with(b"BYE "), "{}", String::from_utf8_lossy(&bye));
+    assert_eq!(cseq_value(&bye), "CSeq: 8 BYE");
+    assert_eq!(call_id(&bye).as_deref(), Some("cid-late-200"));
+    assert!(header_value(&bye, "To").is_some_and(|to| to.contains("tag=u9")));
+
+    sut.send_to(&ok, addr(46301)).await.unwrap();
+    let again = recv(sut.as_ref()).await.expect("the retransmitted 2xx is ACKed again");
+    assert_eq!(again, ack);
+    assert!(recv(sut.as_ref()).await.is_none(), "one BYE only");
+
+    let bye_ok = format!(
+        "SIP/2.0 200 OK\r\nVia: {}\r\nCall-ID: cid-late-200\r\nFrom: <sip:caller@h>;tag=c1\r\n\
+         To: <sip:callee@h>;tag=u9\r\nCSeq: 8 BYE\r\nContent-Length: 0\r\n\r\n",
+        header_value(&bye, "Via").unwrap()
+    );
+    sut.send_to(bye_ok.as_bytes(), addr(46301)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(core.stats().orphans_total(), 0, "no late answer is an orphan");
+}
+
+/// A non-2xx final the live call already had: after the call released, the
+/// hold keeps only the ACK it drew, and a retransmission of that final gets it.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_final_seen_live_is_reacked_after_release() {
+    let (_sim, core, sut) = setup().await;
+    let net = core.network(CallRouting::new("tok-late"));
+    let caller = net.bind_udp(BindUdpOpts::new(addr(46301), 16)).await.unwrap();
+    caller.send_to(&invite("cid-live-486", sut.local_addr()), sut.local_addr()).await.unwrap();
+    assert!(recv(sut.as_ref()).await.is_some_and(|raw| raw.starts_with(b"INVITE ")));
+    let busy = final_response("486 Busy Here", "cid-live-486", 7);
+    sut.send_to(&busy, addr(46301)).await.unwrap();
+    let seen = tokio::time::timeout(RECV, caller.recv()).await.unwrap().unwrap();
+    assert!(seen.raw.starts_with(b"SIP/2.0 486"));
+    drop(caller);
+    drop(net);
+
+    sut.send_to(&busy, addr(46301)).await.unwrap();
+    let ack = recv(sut.as_ref()).await.expect("the retransmitted 486 is ACKed");
+    assert!(ack.starts_with(b"ACK "));
+    assert_eq!(via_branch(&ack).as_deref(), Some(BRANCH));
+    assert_eq!(core.stats().orphans_total(), 0);
+}
