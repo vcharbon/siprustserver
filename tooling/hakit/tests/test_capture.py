@@ -115,7 +115,7 @@ def test_pcap_extracts_one_calls_packets_across_copies_and_link_types(tmp_path: 
         d.mkdir(parents=True)
     a1, a2, b1 = Packet(1_000, udp("call-a", 1)), Packet(3_000, udp("call-a", 2)), Packet(2_000, udp("call-b", 1))
     write(ring / "sip.pcap0", 1, [a1, b1, a2])
-    write(window / "sip.pcap0", 1, [a1, b1])
+    write(window / "sip.pcap3", 1, [a1, b1])  # a copy of a ring file since rotated
     write(node / "sip.pcap0", 276, [Packet(1_500, b"\x00" * 20 + udp("call-a", 1))])
     (ring / "sip.pcap1").write_bytes(b"not a pcap")
     out = extract(tmp_path, "call-a", tmp_path / "calls")
