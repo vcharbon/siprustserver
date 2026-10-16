@@ -1,7 +1,8 @@
 # 0009 — Front proxy + load balancer Rust shape
 
 **Status:** accepted (2026-05-31). Amended (2026-10-12): X1, X3, the cookie also rides the
-proxy's Via on a worker's in-dialog INVITE.
+proxy's Via on a worker's in-dialog INVITE. Amended (2026-10-16): the fresh-pod guard and the
+drain grace are removed; in-dialog routing reads liveness only (ADR-0050).
 
 **Source:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`,
 `src/sip-front-proxy/` (`ProxyCore.ts`, `RoutingStrategy.ts`, `CancelBranchLru.ts`,

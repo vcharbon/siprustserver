@@ -1,6 +1,8 @@
 # Outbound backend client policy
 
-**Status:** accepted (2026-10-11)
+**Status:** accepted (2026-10-11). Amended (2026-10-16): §11, the open breaker reports
+`new=refuse; cause=backend` on an OPTIONS `200`; §12, in-dialog routing reads liveness only
+(ADR-0050).
 
 **Owner:** `crates/http-net/src/backend/` (the backend client, its breaker,
 probe, rotation, in-flight slots, retry rule and env grammar),

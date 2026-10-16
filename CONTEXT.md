@@ -607,10 +607,14 @@ have drained this flow's backlog." **Sticky** across reconnects; a transient TCP
 blip does not revert a node to NotReady. Tracked **per flow**: the **Reclaim**
 stream's current flag gates readiness; the **Backup** stream's is **metrics-only**.
 
-**Readiness states** (`NotReady → Ready → Draining`):
-Self-reported via OPTIONS (`200` / `503 not-ready` / `503 draining`) and, in
-k8s, via the `/ready` HTTP probe; OPTIONS alone also reports a `Ready` node
-not-ready while a **backend gate** is open. **Ready** = every **Reclaim** stream to a
+**Readiness states** (`NotReady → Ready ⇄ Cordoned → Draining`):
+Two axes, read apart by the proxy (ADR-0050): **serving dialogs** (OPTIONS `200`,
+every state but NotReady) and **accepting new calls** (`X-Readiness: new=accept`, or
+`new=refuse; cause=backend|cordoned|draining`). NotReady answers OPTIONS `503`; in k8s
+the `/ready` HTTP probe reports NotReady / Ready / Draining and ignores acceptance. A
+**backend gate** open on a `Ready` node reports `cause=backend`. **Cordoned** = set and
+cleared by an operator (`/admin/cordon`): refuses new calls, serves every dialog, no
+timer. **Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
 `Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,

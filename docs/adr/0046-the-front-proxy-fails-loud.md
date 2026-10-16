@@ -1,6 +1,7 @@
 # The front proxy fails loud
 
-**Status:** accepted (2026-10-12)
+**Status:** accepted (2026-10-12). Amended (2026-10-16): §2, readiness waits for the first
+worker view and ignores acceptance; D4, the VRRP check also reads the first-view latch (ADR-0050).
 
 **Owner:** `crates/sip-proxy-runner/src/config.rs` and `config/reader.rs` (the
 env grammar and its ranges), `discovery.rs` (the worker pool),

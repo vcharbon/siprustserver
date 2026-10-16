@@ -1,6 +1,7 @@
 # 0012 — HA addressing & membership reconcile: self-healing topology, DNS-by-pod-name, one watcher for both consumers
 
-**Status:** accepted (2026-06-02)
+**Status:** accepted (2026-06-02). Amended (2026-10-16): D4, an address change resets health to
+`Unknown` and re-arms no guard; the fresh-pod guard and drain grace are removed (ADR-0050).
 
 **Source:** this codebase (no sipjsserver counterpart — the source mediated
 membership through Redis/`PeerEnumerator`, which the Rust port dropped in

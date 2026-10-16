@@ -1,7 +1,8 @@
 # ADR-0014 — Reactive-only takeover + `(p,b)` version-vector reconciliation
 
 **Status:** accepted (2026-06-05). Amended (2026-10-12): D1, a departed peer's calls with an
-INVITE in flight are taken over at its departure (ADR-0047).
+INVITE in flight are taken over at its departure (ADR-0047). Amended (2026-10-16): §5, affinity
+is the ACK/CANCEL exemption and liveness routing, no fresh-pod guard (ADR-0050).
 **Amends:** ADR-0011 Decision X11 — removes the *eager* (membership-driven) takeover
 and the *`Deactivate` watermark handshake*; **keeps** reactive takeover; **replaces**
 LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vector.
