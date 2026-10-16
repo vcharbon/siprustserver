@@ -120,6 +120,11 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
         {
             let mut uas = uas;
             uas.respond(code, reason).try_send().await?;
+            let (call_id, cseq) = (uas.request().call_id().to_string(), uas.request().cseq().seq());
+            st.obs.record(
+                Observation::RefusedInDialog { leg: st.role, call_id, cseq },
+                Instant::now(),
+            );
             st.obs.record(
                 Observation::ServicedStray {
                     leg: st.role,

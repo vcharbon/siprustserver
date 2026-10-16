@@ -203,7 +203,10 @@ async fn a_request_fact_folds_once_and_reads_its_state_and_body() {
         })
     };
     assert!(obs.with_snapshot(refused));
-    assert_eq!(obs.with_snapshot(|s| s.leg("bob").requests().count()), 1);
+    let retransmission_kept = |s: &StateInner| {
+        s.leg_received_where("bob", |f| f.subscription_state.as_deref() == Some("active"))
+    };
+    assert!(!obs.with_snapshot(retransmission_kept), "a retransmission folds into its original");
     assert!(!obs.with_snapshot(|s| s.leg_received_where("alice", |_| true)));
 }
 

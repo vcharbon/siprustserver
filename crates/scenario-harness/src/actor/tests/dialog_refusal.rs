@@ -85,3 +85,43 @@ async fn the_actors_verdict_fails_the_run_unless_opted_in() {
     forged_options_drawn_481(&h).await;
     h.finish().await;
 }
+
+/// A request the dialog table refuses for its CSeq still arrived: it closes the
+/// CSeq hole it would otherwise leave in the receiver's ledger, so a late
+/// retransmission refused after a later request settles the call.
+#[tokio::test(start_paused = true)]
+async fn a_request_refused_for_its_cseq_fills_the_ledger_s_gap() {
+    use crate::dialogs::{DIALOG_CSEQ_BACKWARDS, DIALOG_CSEQ_SKIP};
+    let h = Harness::new("actor-dialog-late-cseq").describe(
+        "alice's in-dialog INFO with the higher CSeq reaches bob first, the lower one after \
+         it: bob refuses the late one 500, and his ledger holds no CSeq hole",
+    );
+    h.waive(WaiverScope::rule(DIALOG_CSEQ_SKIP, "the reordering is the stimulus").on_party("bob"));
+    h.waive(
+        WaiverScope::rule(DIALOG_CSEQ_BACKWARDS, "the reordering is the stimulus").on_party("bob"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let alice_task = {
+        let (alice, bob) = (alice.clone(), bob.clone());
+        tokio::spawn(async move {
+            let mut call = alice.invite(&bob).with_sdp(OFFER_SDP).send().await;
+            call.expect(200).await;
+            let mut dialog = call.ack().await;
+            let before = dialog.local_cseq();
+            dialog.set_local_cseq(before + 1);
+            let mut later = dialog.send_request(InDialogMethod::Info).send().await;
+            later.expect(200).await;
+            dialog.set_local_cseq(before);
+            let mut late = dialog.send_request(InDialogMethod::Info).send().await;
+            late.expect(500).await;
+            dialog.set_local_cseq(before + 2);
+            let mut bye = dialog.bye().await;
+            bye.expect(200).await;
+        })
+    };
+    let verdict = run_call(answering_bob(&bob), Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the late request leaves no CSeq hole, got {verdict:?}");
+    alice_task.await.unwrap();
+    h.finish().await;
+}

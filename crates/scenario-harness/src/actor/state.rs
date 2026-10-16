@@ -141,8 +141,7 @@ pub struct LegObservation {
     /// origination can gate on an *observed* inbound request rather than a timed
     /// dwell (the MRF `INFO(EOF)` that must follow the worker's `INFO(play)`).
     received_methods: std::collections::BTreeSet<String>,
-    /// The inbound in-dialog requests this leg received, keyed by
-    /// `(Call-ID, CSeq, method)` so a retransmission folds into its original.
+    /// The in-dialog requests received, a retransmission once (`(Call-ID, CSeq, method)`).
     requests: std::collections::BTreeMap<(String, u32, String), RequestFact>,
     /// The renegotiations (re-INVITEs, UPDATEs) this leg ORIGINATED and
     /// COMPLETED, as `((local tag, remote tag), CSeq)` — a grow-only set (commutative
@@ -212,11 +211,6 @@ impl LegObservation {
     /// gates an origination on.
     pub fn received_method(&self, method: &str) -> bool {
         self.received_methods.contains(method)
-    }
-
-    /// The inbound in-dialog requests this leg received.
-    pub fn requests(&self) -> impl Iterator<Item = &RequestFact> {
-        self.requests.values()
     }
 
     /// How many renegotiations (re-INVITEs, UPDATEs) this leg originated and
@@ -401,6 +395,8 @@ pub enum Observation {
     /// detector (any method) AND into the receiving leg's received-method set
     /// (so an origination can gate on "leg X received an inbound `<method>`").
     InDialogRequest { leg: &'static str, call_id: String, cseq: u32, method: String },
+    /// An in-dialog request the dialog table refused still arrived: its CSeq is no hole.
+    RefusedInDialog { leg: &'static str, call_id: String, cseq: u32 },
     /// What an in-dialog request `leg` received said, once per `(call_id, cseq, method)`.
     LegRequest { leg: &'static str, call_id: String, cseq: u32, fact: RequestFact },
     /// `leg`'s establishing INVITE drew a non-2xx final (the reject path) —
@@ -476,6 +472,9 @@ impl StateInner {
             Observation::InDialogRequest { leg, call_id, cseq, method } => {
                 self.ledger.record_in_dialog(call_id, leg, cseq);
                 self.leg_mut(leg).record_method(method);
+            }
+            Observation::RefusedInDialog { leg, call_id, cseq } => {
+                self.ledger.record_in_dialog(call_id, leg, cseq)
             }
             Observation::LegRequest { leg, call_id, cseq, fact } => {
                 self.leg_mut(leg)
