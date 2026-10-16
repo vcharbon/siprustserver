@@ -1,4 +1,5 @@
-{"catalogues": [
+{"namespaces": ["sip_chaos_", "sip_soak_", "sipp_records_"],
+ "catalogues": [
   {"binary": "hakit", "families": [
     {"name": "sip_chaos_event", "kind": "gauge", "semi_open": true, "labels": [[{"name": "incident", "values": []}, {"name": "phase", "values": ["inject", "injected", "heal", "healed", "recovered", "failed"]}, {"name": "source", "values": ["schedule", "manual", "detected"]}, {"name": "run", "values": []}, {"name": "type", "values": []}, {"name": "result", "values": []}]], "help": "1 at the instant an incident reached a phase (incident, phase, source, run); the shell chaos lane pushes its events under type and result."},
     {"name": "sip_chaos_window", "kind": "gauge", "semi_open": true, "labels": [[{"name": "incident", "values": []}, {"name": "run", "values": []}, {"name": "type", "values": []}]], "help": "1 while an incident window is open, 0 when it closes (incident, run); the shell chaos lane pushes its windows under type."},

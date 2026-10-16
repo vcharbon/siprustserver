@@ -249,7 +249,11 @@ class Runner:
             raise AssertionError(f"the verdict breaks verdict.v1: {errs[:3]}")
         _dump(run_dir / "verdict.json", v)
         (run_dir / "summary.md").write_text(render_summary(v))
-        self.vm.push(verdict_lines(v, self.clock.now_ms()))
+        if not self.vm.push(verdict_lines(v, self.clock.now_ms())):
+            note = f"the verdict series did not reach VictoriaMetrics ({self.lab.vm_url}): the dashboards miss this verdict"
+            self.say(f"hakit: {note}")
+            with (run_dir / "summary.md").open("a") as fh:
+                fh.write(f"\n> {note}\n")
         return v
 
     def _write_inputs(

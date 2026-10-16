@@ -102,7 +102,31 @@
     }
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "run",
+        "label": "run",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "query": {
+          "query": "label_values(sip_chaos_event{incident!=\"\"}, run)",
+          "refId": "run"
+        },
+        "definition": "label_values(sip_chaos_event{incident!=\"\"}, run)",
+        "includeAll": true,
+        "allValue": ".+",
+        "multi": false,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "sort": 2
+      }
+    ]
   },
   "panels": [
     {
@@ -813,7 +837,7 @@
       },
       "targets": [
         {
-          "expr": "max by (type)(sip_chaos_window)",
+          "expr": "max by (type)(sip_chaos_window{type!=\"\"})",
           "refId": "A",
           "legendFormat": "{{type}}"
         }
@@ -963,7 +987,7 @@
       },
       "targets": [
         {
-          "expr": "last_over_time(sum by (type,result)(sip_chaos_event)[$__range:])",
+          "expr": "last_over_time(sum by (type,result)(sip_chaos_event{type!=\"\"})[$__range:])",
           "refId": "A",
           "format": "table",
           "instant": true
@@ -1198,7 +1222,7 @@
       "id": 34,
       "type": "timeseries",
       "title": "Ghost gap = b2bua_active − sipp_current − loadgen_inflight (double-serve leak detector, ADR-0014)",
-      "description": "The HA leak signal: the workers' active calls against the calls the generators hold (SIPp current calls plus the loadgens' calls in flight, which are the workers' calls too). A healthy cluster keeps the gap near 0 (plus scrape skew). A gap that rises and stays risen after a worker restart is a call served twice: a takeover copy the restarted primary serves as well (self-release failed), or an eager-takeover storm (ADR-0014). The threshold line is 300.",
+      "description": "The HA leak signal: the workers' active calls against the calls the generators hold (SIPp current calls plus the loadgens' calls in flight, which are the workers' calls too). A healthy cluster keeps the gap near 0 (plus scrape skew). A gap that rises and stays risen after a worker restart is a call served twice: a takeover copy the restarted primary serves as well (self-release failed), or an eager-takeover storm (ADR-0014). The threshold line is 300. A product call with several legs (a reroute, a transfer, a media leg) can hold more than one B2BUA call per generator call, so such a load keeps a positive gap at rest: read its trend, not its level.",
       "gridPos": {
         "h": 8,
         "w": 24,
@@ -1211,7 +1235,7 @@
       },
       "targets": [
         {
-          "expr": "sum(b2bua_active_calls) - sum(sipp_current_calls) - (sum(loadgen_inflight) or vector(0))",
+          "expr": "sum(b2bua_active_calls) - (sum(sipp_current_calls) or vector(0)) - (sum(loadgen_inflight) or vector(0))",
           "refId": "A",
           "legendFormat": "ghost gap (live)"
         },
@@ -2065,11 +2089,11 @@
     },
     {
       "id": 42,
-      "type": "timeseries",
-      "title": "Reverse flush refused per worker (must stay far below takeover_hydrated)",
+      "type": "stat",
+      "title": "Reverse flush refused per worker in range (must stay far below takeover_hydrated)",
       "description": "ADR-0014: a backup's reverse flush for a call this primary serves live that neither the (p,b) vector nor lifecycle progress let it fold, so the primary kept its own copy. A count near takeover_hydrated means the answered body is not reaching the fold: established calls are being lost.",
       "gridPos": {
-        "h": 8,
+        "h": 4,
         "w": 24,
         "x": 0,
         "y": 130
@@ -2080,37 +2104,40 @@
       },
       "targets": [
         {
-          "expr": "sum by (pod)(b2bua_repl_reverse_flush_refused_total)",
+          "expr": "sum by (pod)(increase(b2bua_repl_reverse_flush_refused_total[$__range]))",
           "refId": "A",
-          "legendFormat": "refused (cumulative) {{pod}}"
+          "legendFormat": "refused {{pod}}",
+          "instant": true
         },
         {
-          "expr": "sum(b2bua_repl_takeover_hydrated_total)",
+          "expr": "sum(increase(b2bua_repl_takeover_hydrated_total[$__range]))",
           "refId": "B",
-          "legendFormat": "takeover_hydrated (cumulative, all workers)"
+          "legendFormat": "takeover_hydrated (all workers)",
+          "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "fillOpacity": 6,
-            "showPoints": "never",
-            "lineWidth": 2
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
           }
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "reduceOptions": {
           "calcs": [
-            "last",
-            "max"
+            "lastNotNull"
           ]
-        },
-        "tooltip": {
-          "mode": "multi"
         }
       }
     },
@@ -2122,7 +2149,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 138
+        "y": 134
       },
       "collapsed": false,
       "panels": []
@@ -2136,7 +2163,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 139
+        "y": 135
       },
       "datasource": {
         "type": "prometheus",
@@ -2144,7 +2171,7 @@
       },
       "targets": [
         {
-          "expr": "max by (incident, run) (sip_chaos_window{incident!=\"\"})",
+          "expr": "max by (incident, run) (sip_chaos_window{incident!=\"\",run=~\"$run\"})",
           "refId": "A",
           "legendFormat": "{{incident}} {{run}}"
         }
@@ -2183,7 +2210,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 139
+        "y": 135
       },
       "datasource": {
         "type": "prometheus",
@@ -2191,7 +2218,7 @@
       },
       "targets": [
         {
-          "expr": "count_over_time(sip_chaos_event{incident!=\"\"}[$__range])",
+          "expr": "count_over_time(sip_chaos_event{incident!=\"\",run=~\"$run\"}[$__range])",
           "refId": "A",
           "format": "table",
           "instant": true
@@ -2223,12 +2250,12 @@
       "id": 203,
       "type": "table",
       "title": "Verdict per window",
-      "description": "Each window's verdict when its run's verdict was written: pass, fail (impacts above the window's budget, counted in findings) or invalid (its incident failed). verdict.json holds the impacts.",
+      "description": "Each window's verdict when its run's verdict was written: pass, fail (impacts above the window's budget, counted in findings) or invalid (its incident failed). verdict.json holds the impacts. Filtered by the run variable.",
       "gridPos": {
         "h": 8,
         "w": 16,
         "x": 0,
-        "y": 147
+        "y": 143
       },
       "datasource": {
         "type": "prometheus",
@@ -2236,13 +2263,13 @@
       },
       "targets": [
         {
-          "expr": "max by (run, event, budget) (last_over_time(sip_chaos_window_verdict[$__range]))",
+          "expr": "max by (run, event, budget) (last_over_time(sip_chaos_window_verdict{run=~\"$run\"}[$__range]))",
           "refId": "A",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "max by (run, event, budget) (last_over_time(sip_chaos_window_findings[$__range]))",
+          "expr": "max by (run, event, budget) (last_over_time(sip_chaos_window_findings{run=~\"$run\"}[$__range]))",
           "refId": "B",
           "format": "table",
           "instant": true
@@ -2324,7 +2351,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 147
+        "y": 143
       },
       "datasource": {
         "type": "prometheus",
@@ -2332,7 +2359,7 @@
       },
       "targets": [
         {
-          "expr": "last_over_time(sip_chaos_run_verdict[$__range])",
+          "expr": "last_over_time(sip_chaos_run_verdict{run=~\"$run\"}[$__range])",
           "refId": "A",
           "legendFormat": "{{run}}",
           "instant": true
@@ -2383,7 +2410,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 155
+        "y": 151
       },
       "collapsed": false,
       "panels": []
@@ -2397,7 +2424,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 156
+        "y": 152
       },
       "datasource": {
         "type": "prometheus",
@@ -2443,12 +2470,12 @@
       "id": 212,
       "type": "timeseries",
       "title": "Endings other than answered, by reason (records per interval)",
-      "description": "Call-outcome records in the log store whose ending is not answered, by stream, shape, ending and reason (the SIP code, a Reason protocol cause, timeout, transport or protocol).",
+      "description": "Call-outcome records in the log store whose ending is not answered, by stream, shape, ending and reason (the SIP code, a Reason protocol cause, timeout, transport or protocol). Filtered by the run variable.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 156
+        "y": 152
       },
       "datasource": {
         "type": "victoriametrics-logs-datasource",
@@ -2461,7 +2488,7 @@
             "type": "victoriametrics-logs-datasource",
             "uid": "vl"
           },
-          "expr": "_stream:{run=~\".+\"} | unpack_json from _msg fields (schema, reason, final_code) keep_original_fields | schema:=\"call-outcome.v1\" !ending:=answered | stats by (stream, shape, ending, reason) count() calls",
+          "expr": "_stream:{run=~\"$run\"} | unpack_json from _msg fields (schema, reason, final_code) keep_original_fields | schema:=\"call-outcome.v1\" !ending:=answered | stats by (stream, shape, ending, reason) count() calls",
           "queryType": "statsRange",
           "legendFormat": "{{stream}} {{shape}} {{ending}} {{reason}}"
         }
@@ -2495,12 +2522,12 @@
       "id": 213,
       "type": "table",
       "title": "Outcomes in range by stream, shape, ending, code and reason",
-      "description": "Every call-outcome record in the time range, counted by stream, shape, ending, final code and reason.",
+      "description": "Every call-outcome record in the time range, counted by stream, shape, ending, final code and reason. Filtered by the run variable.",
       "gridPos": {
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 164
+        "y": 160
       },
       "datasource": {
         "type": "victoriametrics-logs-datasource",
@@ -2513,7 +2540,7 @@
             "type": "victoriametrics-logs-datasource",
             "uid": "vl"
           },
-          "expr": "_stream:{run=~\".+\"} | unpack_json from _msg fields (schema, reason, final_code) keep_original_fields | schema:=\"call-outcome.v1\" | stats by (stream, shape, ending, final_code, reason) count() calls",
+          "expr": "_stream:{run=~\"$run\"} | unpack_json from _msg fields (schema, reason, final_code) keep_original_fields | schema:=\"call-outcome.v1\" | stats by (stream, shape, ending, final_code, reason) count() calls",
           "queryType": "stats"
         }
       ],
@@ -2569,7 +2596,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 172
+        "y": 168
       },
       "datasource": {
         "type": "prometheus",
@@ -2620,7 +2647,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 172
+        "y": 168
       },
       "datasource": {
         "type": "prometheus",
@@ -2680,7 +2707,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 180
+        "y": 176
       },
       "collapsed": false,
       "panels": []
@@ -2694,7 +2721,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 181
+        "y": 177
       },
       "datasource": {
         "type": "prometheus",
@@ -2745,7 +2772,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 181
+        "y": 177
       },
       "datasource": {
         "type": "prometheus",
@@ -2796,7 +2823,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 189
+        "y": 185
       },
       "datasource": {
         "type": "prometheus",

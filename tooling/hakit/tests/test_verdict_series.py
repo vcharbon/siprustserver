@@ -8,6 +8,7 @@ from pathlib import Path
 from hakit import jsonval as jv
 from hakit.content import discover
 from hakit.dryrun import simulated
+from hakit.executor import Call, HttpResult
 from hakit.jsonval import Json, as_obj
 from hakit.lab import lab_from_env
 from hakit.paths import BASE_CONTENT
@@ -38,6 +39,22 @@ def test_each_window_and_the_run_become_series_at_the_verdict_instant() -> None:
         'sip_chaos_window_findings{run="r1",event="003-freeze",budget="b"} 0 5000',
         'sip_chaos_run_verdict{run="r1",profile="p"} 2 5000',
     ]
+
+
+def test_a_verdict_push_that_fails_is_said_and_noted_in_the_summary(tmp_path: Path) -> None:
+    def refuse_verdicts(c: Call) -> HttpResult | None:
+        if c.kind == "http" and c.body and b"sip_chaos_run_verdict" in c.body:
+            return HttpResult(503, "busy")
+        return None
+
+    content = discover([BASE_CONTENT], SCHEMAS)
+    clock, fake = simulated([refuse_verdicts])
+    said: list[str] = []
+    run_dir = Runner(content, SCHEMAS, lab_from_env({}), fake, clock, tmp_path, say=said.append).run("kill-worker-smoke")
+    v = as_obj(json.loads((run_dir / "verdict.json").read_text()))
+    assert v["status"] == "pass"
+    assert any("verdict series did not reach VictoriaMetrics" in s for s in said), said
+    assert "verdict series did not reach VictoriaMetrics" in (run_dir / "summary.md").read_text()
 
 
 def test_a_dry_run_pushes_its_verdict(tmp_path: Path) -> None:

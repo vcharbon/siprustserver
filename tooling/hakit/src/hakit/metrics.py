@@ -1,12 +1,14 @@
 """The metric catalogues of the search path (ADR-0049 §7.7).
 
-`metrics/<name>.json` holds catalogues in the `metric-contract export` format:
-`{"catalogues": [{"binary", "families": [{"name", "kind", "labels",
+`metrics/<name>.json` holds catalogues in the `metric-contract export` format
+plus the name prefixes the file owns: `{"namespaces": ["<prefix>_", ...],
+"catalogues": [{"binary", "families": [{"name", "kind", "labels",
 "semi_open", "help"}]}]}`, `labels` a list of blocks of `{"name", "values"}`.
 The name checker (`metric-contract check --content <entry>`) reads them
-beside the shipped binaries' export; here each file is checked for the fields
-that checker reads, and its family names are returned for the search path's
-uniqueness rule.
+beside the shipped binaries' export and checks every name a reader spells
+under a declared prefix; here each file is checked for the fields that
+checker reads, every family lies under a declared prefix, and its family
+names are returned for the search path's uniqueness rule.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from .jsonval import ShapeError, as_list, as_obj
 KINDS = ("counter", "gauge", "histogram")
 _NAME = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
 _LABEL = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+_NAMESPACE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*_$")
 
 
 def _labels(name: str, blocks: object) -> list[str]:
@@ -62,15 +65,24 @@ def read_catalogues(p: Path) -> tuple[list[str], list[str]]:
     names: list[str] = []
     errs: list[str] = []
     try:
-        cats = as_list(as_obj(raw, "the file").get("catalogues"), "catalogues")
+        doc = as_obj(raw, "the file")
+        cats = as_list(doc.get("catalogues"), "catalogues")
         if not cats:
             return [], [f"{p}: no catalogues"]
+        prefixes = [str(ns) for ns in as_list(doc.get("namespaces") or [])]
+        if not prefixes:
+            return [], [f"{p}: no namespaces: declare the name prefixes the catalogue owns"]
+        bad = [ns for ns in prefixes if not _NAMESPACE.match(ns)]
+        if bad:
+            return [], [f"{p}: namespace {ns!r} is no name prefix ending in '_'" for ns in bad]
         for c in cats:
             cat = as_obj(c, "a catalogue")
             if not isinstance(cat.get("binary"), str) or not cat.get("binary"):
                 errs.append(f"{p}: a catalogue names its binary")
             for f in as_list(cat.get("families"), "families"):
                 name, fam_errs = _family(f)
+                if name is not None and not any(name.startswith(ns) for ns in prefixes):
+                    fam_errs.append(f"{name}: under none of the declared namespaces {', '.join(prefixes)}")
                 errs.extend(f"{p}: {e}" for e in fam_errs)
                 if name is not None and not fam_errs:
                     names.append(name)

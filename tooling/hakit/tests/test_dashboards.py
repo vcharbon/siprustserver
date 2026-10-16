@@ -44,9 +44,9 @@ def refusal(path: list[Path]) -> list[str]:
 
 def test_every_base_dashboard_carries_the_generic_block() -> None:
     content = discover([BASE_CONTENT], SCHEMAS)
-    assert len(content.dashboards) == len(list((BASE_CONTENT / "dashboards").glob("*.json")))
+    assert len(content.dashboards) == len(list((BASE_CONTENT / "dashboards").rglob("*.json")))
     assert {"sipp-endurance-chaos", "b2bua-worker", "loadgen-perf"} <= set(content.dashboards)
-    assert content.dashboard_dirs == [BASE_CONTENT / "dashboards"]
+    assert content.dashboard_dirs == [(0, BASE_CONTENT / "dashboards")]
 
 
 def test_a_product_dashboard_directory_is_mounted_in_place_after_the_base(tmp_path: Path) -> None:
@@ -59,6 +59,36 @@ def test_a_product_dashboard_directory_is_mounted_in_place_after_the_base(tmp_pa
     assert volumes == [
         {"type": "bind", "source": str(BASE_CONTENT / "dashboards"), "target": f"{MOUNT_ROOT}/0", "read_only": True},
         {"type": "bind", "source": str(product / "dashboards"), "target": f"{MOUNT_ROOT}/1", "read_only": True},
+    ]
+
+
+def test_a_mount_is_named_by_the_entry_s_position_on_the_path(tmp_path: Path) -> None:
+    bare, product = tmp_path / "bare", tmp_path / "product"
+    (bare / "budgets").mkdir(parents=True)
+    dashboard(product, "product-rows")
+    content = discover([BASE_CONTENT, bare, product], SCHEMAS)
+    override = as_obj(yaml.safe_load(compose_override(content.dashboard_dirs)))
+    volumes = as_list(as_obj(as_obj(override["services"])["grafana"])["volumes"])
+    assert [as_obj(v)["target"] for v in volumes] == [f"{MOUNT_ROOT}/0", f"{MOUNT_ROOT}/2"]
+
+
+def test_a_dashboard_in_a_subdirectory_is_read_like_grafana_reads_it(tmp_path: Path) -> None:
+    nested = tmp_path / "dashboards" / "team"
+    p = dashboard(nested.parent.parent, "x")
+    moved = nested / "x.json"
+    nested.mkdir(parents=True)
+    p.rename(moved)
+    assert discover([tmp_path], SCHEMAS).dashboards == {"x": moved}
+    bare = nested / "bare.json"
+    bare.write_text(json.dumps({"uid": "bare", "title": "bare"}))
+    assert f"{bare}: no tag {TAG!r}" in refusal([tmp_path])
+
+
+def test_a_title_defined_twice_on_the_path_is_refused(tmp_path: Path) -> None:
+    first = dashboard(tmp_path / "a", "one", title="Same title")
+    second = dashboard(tmp_path / "b", "two", title="Same title")
+    assert refusal([tmp_path / "a", tmp_path / "b"]) == [
+        f"dashboard title 'Same title' is defined twice: {first} and {second}"
     ]
 
 
@@ -76,6 +106,13 @@ def test_an_annotation_with_another_query_is_not_the_block(tmp_path: Path) -> No
     window["expr"] = "sip_chaos_window == 1"
     p = dashboard(tmp_path, "drifted", annotations={"list": [window, copy.deepcopy(PHASE_ANNOTATION)]})
     assert refusal([tmp_path]) == [f"{p}: no 'Incident window' annotation on {WINDOW_ANNOTATION['expr']}"]
+
+
+def test_the_block_reads_the_victoriametrics_datasource(tmp_path: Path) -> None:
+    phase = copy.deepcopy(PHASE_ANNOTATION)
+    phase["datasource"] = {"type": "prometheus", "uid": "other"}
+    p = dashboard(tmp_path, "elsewhere", annotations={"list": [copy.deepcopy(WINDOW_ANNOTATION), phase]})
+    assert refusal([tmp_path]) == [f"{p}: the 'Incident phase' annotation reads another datasource than VictoriaMetrics (uid vm)"]
 
 
 def test_a_uid_defined_twice_on_the_path_is_refused_naming_both_files(tmp_path: Path) -> None:

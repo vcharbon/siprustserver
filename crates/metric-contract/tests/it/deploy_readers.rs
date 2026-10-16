@@ -1,5 +1,6 @@
-//! The readers in `deploy/` (probes, chaos and endurance scripts) and the
-//! base dashboards of the HA tooling spell only names, selector labels and
+//! The readers in `deploy/` (probes, chaos and endurance scripts), the base
+//! dashboards of the HA tooling and its runner's own queries
+//! (`tooling/hakit/src`) spell only names, selector labels and
 //! closed label values the catalogues hold: the shipped binaries' export
 //! extended with the base content's own catalogues.
 
@@ -17,13 +18,20 @@ fn base_content() -> PathBuf {
     root().join("tooling/hakit/content")
 }
 
-/// The files git tracks under `deploy/` and the base dashboards: a run's
-/// results or data left on disk is no reader.
+/// The files git tracks under `deploy/`, the base dashboards and the
+/// runner's source: a run's results or data left on disk is no reader.
 fn readers() -> Vec<PathBuf> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(root())
-        .args(["ls-files", "-z", "--", "deploy", "tooling/hakit/content/dashboards"])
+        .args([
+            "ls-files",
+            "-z",
+            "--",
+            "deploy",
+            "tooling/hakit/content/dashboards",
+            "tooling/hakit/src",
+        ])
         .output()
         .expect("git ls-files");
     assert!(out.status.success(), "git ls-files: {}", String::from_utf8_lossy(&out.stderr));
@@ -52,6 +60,24 @@ fn the_deploy_readers_hold_to_the_contract() {
     let findings = check_paths(&contract(), &allow(), &readers());
     let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
     assert!(text.is_empty(), "{}", text.join("\n"));
+}
+
+/// The HA tooling's own queries (the lab's CDR and leftover-call queries,
+/// the readers' specs) are readers too: a family they name, renamed, is a
+/// finding there.
+#[test]
+fn a_renamed_family_the_tooling_queries_is_a_finding_in_the_tooling() {
+    let mut contract = contract();
+    let record = contract.families.remove("b2bua_cdr_written_total").expect("a read family");
+    contract.families.insert("b2bua_cdr_emitted_total".to_owned(), record);
+    let findings = check_paths(&contract, &allow(), &readers());
+    let hakit_src = root().join("tooling/hakit/src");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.name == "b2bua_cdr_written_total" && f.file.starts_with(&hakit_src)),
+        "{findings:?}"
+    );
 }
 
 /// A family a reader names, renamed in the catalogue, is a finding.

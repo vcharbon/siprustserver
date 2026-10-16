@@ -593,28 +593,36 @@ made. A run profile joins the two.
    holds only its product rows and links to the base dashboards with the time
    range carried. Grafana provisions every `dashboards/` directory of the
    search path in place, without staging copies: each is mounted read-only at
-   `/hakit/dashboards/<i>`, `i` its position on the path, and
+   `/hakit/dashboards/<i>`, `i` its entry's position on the path (so a mount
+   keeps its name whatever the entries before it hold), and
    `hakit dashboards --compose-override` writes the mounts of the `HAKIT_PATH`
-   entries. Every dashboard carries the generic block: window regions from
-   `sip_chaos_window == 1` and phase points from `sip_chaos_event`, titled by
-   incident and phase, the tag `hakit`, and a link listing every dashboard so
-   tagged with the time range kept. `hakit validate` refuses a dashboard on
-   the path without it, and a dashboard uid defined twice. When a verdict is
-   written the runner pushes it as series for the dashboards
-   (`sip_chaos_window_verdict`, `sip_chaos_window_findings`,
-   `sip_chaos_run_verdict`).
+   entries. The provider reads them recursively into one folder, and
+   `hakit validate` reads the same set. Every dashboard carries the generic
+   block: window regions from `sip_chaos_window == 1` and phase points from
+   `sip_chaos_event`, read from the VictoriaMetrics datasource (uid `vm`) and
+   titled by incident and phase, the tag `hakit`, and a link listing every
+   dashboard so tagged with the time range kept. `hakit validate` refuses a
+   dashboard on the path without it, and a dashboard uid or title defined
+   twice. When a verdict is written the runner pushes it as series for the
+   dashboards (`sip_chaos_window_verdict`, `sip_chaos_window_findings`,
+   `sip_chaos_run_verdict`); a failed push is said and noted in the summary,
+   and the verdict stands.
 6. **Series labels.** Every series a generator exposes and every record carry
    `stream` and `shape`, so the generic panels show a product's shapes
    without product panels.
 7. **Metric catalogue.** A product extends the contract through `metrics/`:
-   catalogue files in the `metric-contract export` JSON format. The name
+   catalogue files in the `metric-contract export` JSON format plus a
+   top-level `namespaces`, the name prefixes the product owns. The name
    checker reads the base's export plus every `metrics/` file of the search
-   path (`metric-contract check --content <entry>`), and refuses a family the
-   contract already holds. The series the tooling itself pushes
-   (`sip_chaos_*`, and the `sip_soak_*` state a workflow supervising a run
-   pushes) and the SIPp exporter twin's record counters are declared in the
-   base's `content/metrics/`, not allow-listed; loadgen's record and
-   not-placed counters are in its own catalogue.
+   path (`metric-contract check --content <entry>`) and checks every name a
+   reader spells under a declared prefix, so a product with one family still
+   has its other names refused. It refuses a catalogue without declared
+   prefixes, a family under none of them, and a family the contract already
+   holds. The runner's own source is a reader too. The series the tooling
+   itself pushes (`sip_chaos_*`, and the `sip_soak_*` state a workflow
+   supervising a run pushes) and the SIPp exporter twin's record counters are
+   declared in the base's `content/metrics/`, not allow-listed; loadgen's
+   record and not-placed counters are in its own catalogue.
 
 ## Considered and rejected
 

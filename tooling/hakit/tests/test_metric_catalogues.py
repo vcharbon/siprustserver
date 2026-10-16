@@ -19,11 +19,29 @@ def family(name: str, **extra: object) -> Json:
     return {"name": name, "kind": "counter", "semi_open": True, "labels": [[{"name": "endpoint", "values": []}]], "help": "h", **extra}
 
 
-def catalogue(root: Path, name: str, families: list[Json]) -> Path:
+def catalogue(root: Path, name: str, families: list[Json], namespaces: list[str] | None = None, *, bare: bool = False) -> Path:
     p = root / "metrics" / f"{name}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"catalogues": [{"binary": name, "families": families}]}))
+    doc: Json = {"catalogues": [{"binary": name, "families": families}]}
+    if not bare:
+        doc["namespaces"] = namespaces if namespaces is not None else ["widget_", "sip_chaos_"]
+    p.write_text(json.dumps(doc))
     return p
+
+
+def test_a_product_catalogue_declares_its_namespaces(tmp_path: Path) -> None:
+    p = catalogue(tmp_path, "widget", [family("widget_total")], bare=True)
+    assert refusal([tmp_path]) == [f"{p}: no namespaces: declare the name prefixes the catalogue owns"]
+
+
+def test_a_family_outside_the_declared_namespaces_is_refused(tmp_path: Path) -> None:
+    p = catalogue(tmp_path, "widget", [family("gadget_total")], namespaces=["widget_"])
+    assert refusal([tmp_path]) == [f"{p}: gadget_total: under none of the declared namespaces widget_"]
+
+
+def test_a_namespace_is_a_prefix_ending_in_underscore(tmp_path: Path) -> None:
+    p = catalogue(tmp_path, "widget", [family("widget_total")], namespaces=["widget"])
+    assert refusal([tmp_path]) == [f"{p}: namespace 'widget' is no name prefix ending in '_'"]
 
 
 def refusal(path: list[Path]) -> list[str]:

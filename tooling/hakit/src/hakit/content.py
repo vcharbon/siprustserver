@@ -45,7 +45,7 @@ class Content:
     classes: dict[str, ProductClass] = field(default_factory=lambda: {})
     scenarios: dict[str, Path] = field(default_factory=lambda: {})
     dashboards: dict[str, Path] = field(default_factory=lambda: {})
-    dashboard_dirs: list[Path] = field(default_factory=lambda: [])
+    dashboard_dirs: list[tuple[int, Path]] = field(default_factory=lambda: [])
     metric_families: dict[str, Path] = field(default_factory=lambda: {})
 
 
@@ -117,13 +117,17 @@ def _files(c: _Collector, root: Path, sub: str, family: str, suffix: str) -> lis
     return found
 
 
-def _dashboards_and_metrics(c: _Collector, root: Path, out: Content) -> None:
+def _dashboards_and_metrics(c: _Collector, position: int, root: Path, out: Content) -> None:
+    # Grafana's provider reads every directory below, into one folder: uids
+    # and titles are both unique across the path.
     if (root / "dashboards").is_dir():
-        out.dashboard_dirs.append(root / "dashboards")
-    for p in sorted((root / "dashboards").glob("*.json")):
-        uid, errs = read_dashboard(p)
+        out.dashboard_dirs.append((position, root / "dashboards"))
+    for p in sorted((root / "dashboards").rglob("*.json")):
+        uid, title, errs = read_dashboard(p)
         c.errors.extend(errs)
-        if uid is not None and not errs and c.claim("dashboard", uid, p):
+        if uid is None or errs or not c.claim("dashboard", uid, p):
+            continue
+        if c.claim("dashboard title", title, p):
             out.dashboards[uid] = p
     for p in sorted((root / "metrics").glob("*.json")):
         names, errs = read_catalogues(p)
@@ -164,7 +168,7 @@ def discover(path: list[Path], schemas: SchemaSet) -> Content:
         for p in sorted((root / "scenarios").glob("*")):
             if p.is_file() and c.claim("scenario", p.name, p):
                 out.scenarios[p.name] = p
-        _dashboards_and_metrics(c, root, out)
+        _dashboards_and_metrics(c, path.index(root), root, out)
     if c.errors:
         raise ContentError(c.errors)
     return out
