@@ -54,13 +54,17 @@ k8s/sipp/: trace_*
 
 # Identifiers of the HA tooling runner (tooling/hakit/src: fields, functions,
 # row keys, SIPp options), read as a reader for its own queries.
+../tooling/hakit/src/: cdr_all
 ../tooling/hakit/src/: cdr_check
 ../tooling/hakit/src/: cdr_consumed_query
 ../tooling/hakit/src/: cdr_count
 ../tooling/hakit/src/: cdr_dropped
+../tooling/hakit/src/: cdr_firings
 ../tooling/hakit/src/: cdr_found
 ../tooling/hakit/src/: cdr_impacts
 ../tooling/hakit/src/: cdr_impacts_of
+../tooling/hakit/src/: cdr_in_flight_ms
+../tooling/hakit/src/: cdr_in_flight_s
 ../tooling/hakit/src/: cdr_join
 ../tooling/hakit/src/: cdr_required
 ../tooling/hakit/src/: cdr_mismatch
