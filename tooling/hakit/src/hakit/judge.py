@@ -1,6 +1,7 @@
 """Window attribution and budget evaluation (ADR-0049 §3.2, §3.3, §3.5, §3.8, §3.10).
 
-A budgetable impact belongs to the window that holds its instant and is
+A budgetable impact belongs to the window that holds its instant, or, for a
+setup that ended after the window it was pending in, to that window, and is
 charged to the first budget entry that matches it; a key no entry names allows
 0. A counted impact (`cdr_mismatch` by kind, a product's class) is charged to
 its window's allowance for the class and kind; a missing CDR whose call ended
@@ -114,11 +115,12 @@ def _holding(windows: list[Window], at_ms: float) -> Window | None:
 
 def _budget_window(windows: list[Window], imp: Impact) -> Window | None:
     """The window a budgetable impact belongs to: the one holding its instant;
-    for a setup that timed out outside every window, the first window open
-    while it was pending (its INVITE went out into the fault no hop answered,
-    and the generator gave up after the window closed)."""
+    for a setup that failed outside every window (timed out, a late final, a
+    treatment's unexpected ending before answer), the first window open while
+    it was pending: its INVITE went out into the fault, and its end came after
+    the window closed."""
     w = _holding(windows, imp.at_ms)
-    if w is not None or imp.cls != SETUP_FAILED or imp.reason != "timeout":
+    if w is not None or imp.answered or imp.cls not in (SETUP_FAILED, UNEXPECTED_ENDING):
         return w
     return next((w for w in windows if w.opened_at_ms <= imp.at_ms and imp.started_at_ms <= w.closed_at_ms), None)
 

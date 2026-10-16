@@ -172,6 +172,27 @@ def test_a_setup_timeout_ending_after_the_window_is_charged_to_the_window_it_was
     assert per["001-kill_worker"] == [] and [u["reason"] for u in unatt] == ["timeout"]
 
 
+def test_a_late_final_to_a_setup_sent_into_the_window_is_charged_to_it() -> None:
+    # The INVITE went out into the kill; the final (a 480 the takeover sent)
+    # lands after the window closed.
+    w = window("001-kill_worker", T0 + 60_000, T0 + 85_000)
+    late = record("a", T0 + 60_040, "rejected", answered=None, setup=30_000, ended=30_100, code=480, reason="480")
+    per, _, unatt = run([late], [w])
+    assert [(r["class"], r["code"], r["count"]) for r in per["001-kill_worker"]] == [("setup_failed", 480, 1)]
+    assert unatt == []
+
+
+def test_a_reject_shaped_treatment_timing_out_after_the_window_is_charged_to_it() -> None:
+    # A treatment whose only expected ending is a rejection: its pre-answer
+    # timeout is an unexpected ending, pending in the window.
+    reject = Shape("final", "c", None, [], [], [ExpectedEnding("rejected", 603, None)], True)
+    w = window("001-kill_worker", T0 + 60_000, T0 + 85_000)
+    impacts = classify({**timed_out("a", T0 + 60_200), "shape": "final"}, reject).impacts
+    j = judge([w], impacts, [], {"kill": KILL, "strict": STRICT}, 1000, {"basic": 10.0})
+    assert [(r["class"], r["reason"]) for r in j.per_window["001-kill_worker"]] == [("unexpected_ending", "timeout")]
+    assert j.unattributed == []
+
+
 def test_a_setup_no_hop_answered_takes_no_setup_latency() -> None:
     # The generator's giving up is no latency of the system under test: the
     # call is a failed setup, never also a slow one.

@@ -242,7 +242,7 @@ made. A run profile joins the two.
 
    | class | from the record | instant | budget |
    |---|---|---|---|
-   | `setup_failed` | the shape expects `answered` and the call ended before answer some other way: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0). Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms`; a `timeout` outside every window belongs to the first window open while it was pending (§3.5) | per key |
+   | `setup_failed` | the shape expects `answered` and the call ended before answer some other way: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0). Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms`; one outside every window belongs to the first window open while it was pending (§3.5) | per key |
    | `unexpected_ending` | any other caller ending not in `expected` (`rejected` with another code, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing; a consult's contract refusal (§3.2) at the refusal | per key before answer; 0 after answer but a consult's contract refusal |
    | `setup_slow` | from `started_at_ms` to `first_provisional_at_ms` (to `setup_ended_at_ms` when no provisional came) above the threshold; ring time never counts; a setup that drew no response at all takes none (it is a `setup_failed`) | that instant | count |
    | `dialog_request_failed` | each `failures` entry of kind `dialog_request` | its `at_ms` | 0 |
@@ -309,10 +309,11 @@ made. A run profile joins the two.
    back the window closes at that limit. The `sip_chaos_window` series show the window up to
    `recovered` + `settle_s`, the only close the runner knows live; the
    verdict's window is the one above. A budgetable impact belongs to the
-   window that holds its instant; a setup that timed out outside every
-   window belongs to the first window open while it was pending (an INVITE
-   no hop answered from the fault on, given up after the window closed); one
-   outside every window is `unattributed`. An in-dialog impact takes no budget, so its attribution is
+   window that holds its instant; a setup that failed outside every window
+   (`setup_failed`, or an `unexpected_ending` before answer: timed out, or a
+   final that came late) belongs to the first window open while it was
+   pending (an INVITE sent into the fault, ended after the window closed);
+   one outside every window is `unattributed`. An in-dialog impact takes no budget, so its attribution is
    for analysis: its `candidate_windows` are every window whose `inject` fell
    inside the call's lifetime before the failure, or that holds the failure's
    instant, and with none it is `unattributed`. A call stranded before a window opens and whose setup
