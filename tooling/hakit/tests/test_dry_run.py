@@ -67,8 +67,8 @@ def test_the_smoke_profile_fires_its_kills_on_schedule_with_their_series(tmp_pat
     lines = vm_lines(fake)
     for _ev, ph, at in got:
         assert f'sip_chaos_event{{incident="kill_worker",phase="{ph}",source="schedule",run="{run}"}} 1 {at}' in lines
-    opens = [ln for ln in lines if ln.startswith("sip_chaos_window") and " 1 " in ln]
-    closes = [ln for ln in lines if ln.startswith("sip_chaos_window") and " 0 " in ln]
+    opens = [ln for ln in lines if ln.startswith("sip_chaos_window{") and " 1 " in ln]
+    closes = [ln for ln in lines if ln.startswith("sip_chaos_window{") and " 0 " in ln]
     assert len(closes) == 4 and len(opens) >= 4 * 4  # an open and a keepalive every 10 s of a 40 s window
     docker = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:1] == ["docker"]]
     twin = next(a for a in docker if a[:2] == ["docker", "run"] and "hakit-basic-exporter" in a)

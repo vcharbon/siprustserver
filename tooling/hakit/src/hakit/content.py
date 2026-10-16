@@ -2,9 +2,12 @@
 
 Every directory of the search path may hold `incidents/<name>/incident.yaml`,
 `budgets/<name>.yaml`, `profiles/<name>.yaml`, `catalogs/<name>.json`,
-`classes/<name>.yaml` and `scenarios/`. A name defined twice anywhere on the
-path is refused, naming both files (ADR-0049 §1.3). A file that fails its
-schema is refused with its path and the schema error (§1.4).
+`classes/<name>.yaml`, `metrics/<name>.json`, `scenarios/` and
+`dashboards/<file>.json`. A name (a dashboard's uid and a metric family
+included) defined twice anywhere on the path is refused, naming both files
+(ADR-0049 §1.3). A file that fails its schema is refused with its path and
+the schema error (§1.4); a dashboard without the generic block and a malformed
+metric catalogue likewise (§7.5, §7.7).
 """
 
 from __future__ import annotations
@@ -17,7 +20,9 @@ from pathlib import Path
 import yaml
 
 from .classes import ProductClass
+from .dashboards import read_dashboard
 from .jsonval import Json, as_obj
+from .metrics import read_catalogues
 from .model import Budget, Catalog, Incident, Shape, parse_budget, parse_catalog, parse_incident
 from .profile import Profile, parse_profile
 from .schemas import SchemaSet
@@ -39,6 +44,9 @@ class Content:
     shapes: dict[str, Shape] = field(default_factory=lambda: {})
     classes: dict[str, ProductClass] = field(default_factory=lambda: {})
     scenarios: dict[str, Path] = field(default_factory=lambda: {})
+    dashboards: dict[str, Path] = field(default_factory=lambda: {})
+    dashboard_dirs: list[Path] = field(default_factory=lambda: [])
+    metric_families: dict[str, Path] = field(default_factory=lambda: {})
 
 
 def _load(p: Path) -> object:
@@ -109,6 +117,22 @@ def _files(c: _Collector, root: Path, sub: str, family: str, suffix: str) -> lis
     return found
 
 
+def _dashboards_and_metrics(c: _Collector, root: Path, out: Content) -> None:
+    if (root / "dashboards").is_dir():
+        out.dashboard_dirs.append(root / "dashboards")
+    for p in sorted((root / "dashboards").glob("*.json")):
+        uid, errs = read_dashboard(p)
+        c.errors.extend(errs)
+        if uid is not None and not errs and c.claim("dashboard", uid, p):
+            out.dashboards[uid] = p
+    for p in sorted((root / "metrics").glob("*.json")):
+        names, errs = read_catalogues(p)
+        c.errors.extend(errs)
+        for name in names:
+            if c.claim("metric family", name, p):
+                out.metric_families[name] = p
+
+
 def discover(path: list[Path], schemas: SchemaSet) -> Content:
     """Read and validate every entry of the search path; raise `ContentError` on any refusal."""
     c = _Collector(schemas)
@@ -140,6 +164,7 @@ def discover(path: list[Path], schemas: SchemaSet) -> Content:
         for p in sorted((root / "scenarios").glob("*")):
             if p.is_file() and c.claim("scenario", p.name, p):
                 out.scenarios[p.name] = p
+        _dashboards_and_metrics(c, root, out)
     if c.errors:
         raise ContentError(c.errors)
     return out

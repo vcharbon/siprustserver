@@ -28,37 +28,28 @@ pub struct Contract {
 }
 
 impl Contract {
-    /// The contract stated by `json`, the catalogues' export.
+    /// The contract stated by `json`, the catalogues' export. A family two
+    /// binaries both serve is stated once.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let root: Value = serde_json::from_str(json).map_err(|e| format!("catalogue JSON: {e}"))?;
-        let catalogues = root["catalogues"].as_array().ok_or("catalogue JSON: no catalogues")?;
         let mut contract = Contract::default();
-        for c in catalogues {
-            for f in c["families"].as_array().ok_or("catalogue JSON: no families")? {
-                let name = f["name"].as_str().ok_or("catalogue JSON: a family name")?;
-                let kind = f["kind"].as_str().ok_or("catalogue JSON: a family kind")?;
-                let closed = f["semi_open"].as_bool() == Some(false);
-                let mut labels: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
-                for block in f["labels"].as_array().into_iter().flatten() {
-                    for dim in block.as_array().into_iter().flatten() {
-                        let label = dim["name"].as_str().ok_or("catalogue JSON: a label name")?;
-                        let values = dim["values"].as_array().into_iter().flatten();
-                        let values: BTreeSet<String> =
-                            values.filter_map(|v| v.as_str().map(str::to_owned)).collect();
-                        let entry = labels
-                            .entry(label.to_owned())
-                            .or_insert_with(|| closed.then(BTreeSet::new));
-                        if let Some(set) = entry {
-                            set.extend(values);
-                        }
-                    }
-                }
-                let record = FamilyRecord { kind: kind.to_owned(), labels };
-                contract.families.insert(name.to_owned(), record);
-            }
-        }
+        contract.families.extend(families(json)?);
         contract.namespaces = namespaces(contract.families.keys().map(String::as_str));
         Ok(contract)
+    }
+
+    /// Add the families of a product's catalogue `json` (the export format),
+    /// read from `origin`. A family the contract already holds, or that
+    /// `json` states twice, is refused: a product extends the contract, it
+    /// never redefines a family.
+    pub fn extend_json(&mut self, json: &str, origin: &str) -> Result<(), String> {
+        for (name, record) in families(json).map_err(|e| format!("{origin}: {e}"))? {
+            if self.families.contains_key(&name) {
+                return Err(format!("{origin}: family {name} is already in the contract"));
+            }
+            self.families.insert(name, record);
+        }
+        self.namespaces = namespaces(self.families.keys().map(String::as_str));
+        Ok(())
     }
 
     /// The family a sample name belongs to: the family of that name, or the
@@ -78,6 +69,37 @@ impl Contract {
     pub(crate) fn has_prefix(&self, prefix: &str) -> bool {
         self.families.range(prefix.to_owned()..).next().is_some_and(|(n, _)| n.starts_with(prefix))
     }
+}
+
+/// Every family `json` (the export format) states, in order.
+fn families(json: &str) -> Result<Vec<(String, FamilyRecord)>, String> {
+    let root: Value = serde_json::from_str(json).map_err(|e| format!("catalogue JSON: {e}"))?;
+    let catalogues = root["catalogues"].as_array().ok_or("catalogue JSON: no catalogues")?;
+    let mut out = Vec::new();
+    for c in catalogues {
+        for f in c["families"].as_array().ok_or("catalogue JSON: no families")? {
+            let name = f["name"].as_str().ok_or("catalogue JSON: a family name")?;
+            let kind = f["kind"].as_str().ok_or("catalogue JSON: a family kind")?;
+            let closed = f["semi_open"].as_bool() == Some(false);
+            let mut labels: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
+            for block in f["labels"].as_array().into_iter().flatten() {
+                for dim in block.as_array().into_iter().flatten() {
+                    let label = dim["name"].as_str().ok_or("catalogue JSON: a label name")?;
+                    let values = dim["values"].as_array().into_iter().flatten();
+                    let values: BTreeSet<String> =
+                        values.filter_map(|v| v.as_str().map(str::to_owned)).collect();
+                    let entry = labels
+                        .entry(label.to_owned())
+                        .or_insert_with(|| closed.then(BTreeSet::new));
+                    if let Some(set) = entry {
+                        set.extend(values);
+                    }
+                }
+            }
+            out.push((name.to_owned(), FamilyRecord { kind: kind.to_owned(), labels }));
+        }
+    }
+    Ok(out)
 }
 
 /// The name prefixes `names` own, longest first (see [`Contract::namespaces`]).

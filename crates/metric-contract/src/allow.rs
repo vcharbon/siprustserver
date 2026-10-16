@@ -7,10 +7,10 @@
 //! name in that file, or under that directory (with or without a trailing
 //! `/`); `<path>: <prefix>*` every name starting with `<prefix>` there;
 //! `label:<name>` a selector label on any family. A path is relative to the
-//! allow-list file's directory, a leading `./` ignored.
+//! allow-list file's directory, a leading `./` ignored, `..` resolved by name.
 
 use std::cell::Cell;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// One scoped name entry.
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ impl Allow {
             } else if let Some((path, name)) = entry.split_once(": ") {
                 let path = path.trim();
                 let path = path.strip_prefix("./").unwrap_or(path);
-                let scope = base.join(path.trim_end_matches('/'));
+                let scope = lexical(&base.join(path.trim_end_matches('/')));
                 let dir = path.ends_with('/') || scope.is_dir();
                 self.names.push(Entry {
                     source: (file.to_owned(), n + 1),
@@ -95,9 +95,35 @@ impl Allow {
     }
 }
 
+/// `p` with its `.` and `..` components resolved by name, so a scope
+/// outside the allow-list's directory matches the checked file's path.
+fn lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scope_above_the_allow_list_s_directory_matches_by_name() {
+        let mut allow = Allow::default();
+        allow.add(Path::new("/r/deploy/metric-names.allow"), "../tools/d/: x_*\n").unwrap();
+        assert!(allow.name(Path::new("/r/tools/d/f.json"), "x_key"));
+        assert!(!allow.name(Path::new("/r/deploy/tools/d/f.json"), "x_key"));
+    }
 
     #[test]
     fn a_name_is_allowed_only_where_its_entry_scopes_it() {

@@ -4,6 +4,8 @@
 //! - [`catalogues`] — the catalogue of each binary, in a fixed order;
 //!   `metric_catalogue::export::to_json` states them as JSON.
 //! - [`contract::Contract`] — a contract read back from that JSON.
+//! - [`content`] — the catalogues a product registers on the HA tooling
+//!   search path (`<entry>/metrics/*.json`), added to the contract.
 //! - [`scan`] — the checker: every metric name a text spells under the
 //!   families' namespaces, and every label (and fixed label value) of a plain
 //!   `{label="…"}` selector attached to a catalogued name, against the
@@ -13,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod allow;
+pub mod content;
 pub mod contract;
 pub mod scan;
 

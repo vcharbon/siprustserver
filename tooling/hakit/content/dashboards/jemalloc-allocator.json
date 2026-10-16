@@ -4,7 +4,8 @@
   "tags": [
     "siprustserver",
     "jemalloc",
-    "memory"
+    "memory",
+    "hakit"
   ],
   "timezone": "",
   "schemaVersion": 39,
@@ -13,6 +14,50 @@
     "from": "now-3h",
     "to": "now"
   },
+  "annotations": {
+    "list": [
+      {
+        "name": "Incident window",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "enable": true,
+        "iconColor": "orange",
+        "expr": "max by (incident, run) (sip_chaos_window{incident!=\"\"}) == 1",
+        "titleFormat": "{{incident}}",
+        "tagKeys": "incident,run",
+        "step": "10s"
+      },
+      {
+        "name": "Incident phase",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "expr": "timestamp(sip_chaos_event{incident!=\"\"}) * 1000",
+        "useValueForTime": true,
+        "titleFormat": "{{incident}} {{phase}}",
+        "tagKeys": "incident,phase,source,run",
+        "step": "10s"
+      }
+    ]
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "HA tooling dashboards",
+      "tags": [
+        "hakit"
+      ],
+      "asDropdown": true,
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    }
+  ],
   "templating": {
     "list": [
       {

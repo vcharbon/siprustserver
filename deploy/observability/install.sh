@@ -21,6 +21,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_DIR="$HERE/stack"
 ADDONS_DIR="$HERE/kind-addons"
+HAKIT_DIR="$(cd "$HERE/../../tooling/hakit" && pwd)"
 KIND_NET="${KIND_NET:-kind}"
 NAMESPACE="${OBS_NAMESPACE:-observability}"
 
@@ -92,6 +93,21 @@ ensure_sipext_net() {
   fi
 }
 
+# docker compose on the stack. Grafana serves the dashboards/ directory of
+# every HA tooling search-path entry in place (ADR-0049 §7.5): the base content
+# is in the compose file; when HAKIT_PATH names more entries, `hakit dashboards`
+# validates the path and writes the override mounting theirs (gitignored data/).
+stack_compose() {
+  local files=(-f "$STACK_DIR/docker-compose.yml")
+  if [[ -n "${HAKIT_PATH:-}" ]]; then
+    require uv
+    local override="$STACK_DIR/data/hakit-dashboards.compose.yml"
+    uv run --quiet --project "$HAKIT_DIR" --locked hakit dashboards --compose-override "$override" >/dev/null
+    files+=(-f "$override")
+  fi
+  (cd "$STACK_DIR" && docker compose "${files[@]}" "$@")
+}
+
 kubectl_kind_present() {
   command -v kubectl >/dev/null 2>&1 && kubectl get nodes >/dev/null 2>&1
 }
@@ -132,7 +148,7 @@ cmd_bootstrap() {
   # plugin in at build time, honouring the proxy build-args exported above). Without
   # it, compose would skip the build whenever the tag already exists and the plugin
   # layer would silently go missing.
-  (cd "$STACK_DIR" && docker compose up -d --build)
+  stack_compose up -d --build
   c_cyan "==> waiting for stack health..."
   # Local health checks MUST bypass the proxy: these are 127.0.0.1 services, but a
   # proxified shell would otherwise route them through squid (issue1) and report
@@ -179,9 +195,10 @@ cmd_apply() {
   local_curl -fsS -X POST http://127.0.0.1:8428/-/reload \
     && c_green "VM reloaded" \
     || c_yellow "VM reload returned non-2xx (file watcher may handle it anyway)"
-  # Grafana auto-watches /var/lib/grafana/dashboards every 10s — files
-  # are bind-mounted from the repo so edits land without intervention.
-  c_cyan "==> Grafana dashboards: bind-mounted, auto-reload (≤10s)"
+  # The search path's dashboards/ directories are mounted in place and
+  # rescanned every 10 s: an edit lands without intervention. A new search-path
+  # entry is a new mount, made by --bootstrap.
+  c_cyan "==> Grafana dashboards: mounted in place, auto-reload (≤10s)"
   apply_addons
   c_green "apply done"
 }
@@ -189,7 +206,7 @@ cmd_apply() {
 cmd_down() {
   require docker
   c_cyan "==> docker compose down"
-  (cd "$STACK_DIR" && docker compose down)
+  stack_compose down
   if kubectl_kind_present; then
     c_cyan "==> deleting kind namespace $NAMESPACE"
     kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=false

@@ -37,6 +37,7 @@ from .schemas import SchemaSet
 from .streams import StreamLoad, StreamSet
 from .summary import render as render_summary
 from .verdict import compute
+from .verdict_series import verdict_lines
 from .vlogs import VictoriaLogs
 from .vm import QueryFailed, VictoriaMetrics
 
@@ -248,6 +249,7 @@ class Runner:
             raise AssertionError(f"the verdict breaks verdict.v1: {errs[:3]}")
         _dump(run_dir / "verdict.json", v)
         (run_dir / "summary.md").write_text(render_summary(v))
+        self.vm.push(verdict_lines(v, self.clock.now_ms()))
         return v
 
     def _write_inputs(

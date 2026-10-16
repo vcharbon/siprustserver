@@ -106,7 +106,10 @@ services:
     volumes:
       - ./data/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # The dashboards of the HA tooling search path, in place: the base content
+      # here at /hakit/dashboards/0; a product's HAKIT_PATH entries are added by
+      # the override `hakit dashboards --compose-override` writes (install.sh).
+      - ../../../tooling/hakit/content/dashboards:/hakit/dashboards/0:ro
     environment:
       # Listen on all interfaces so the published host-IP port is reachable.
       - GF_SERVER_HTTP_ADDR=0.0.0.0

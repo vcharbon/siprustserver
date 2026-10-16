@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import content_cli
 from .check import all_profile_errors
 from .clock import RealClock
 from .content import Content, ContentError, discover
@@ -55,7 +56,8 @@ def load(env: Mapping[str, str]) -> tuple[SchemaSet, Content]:
 def cmd_validate(content: Content) -> int:
     print(
         f"hakit: search path valid: {len(content.incidents)} incidents, {len(content.budgets)} budgets, "
-        f"{len(content.profiles)} profiles, {len(content.catalogs)} catalogs, {len(content.scenarios)} scenario files"
+        f"{len(content.profiles)} profiles, {len(content.catalogs)} catalogs, {len(content.scenarios)} scenario files, "
+        f"{len(content.dashboards)} dashboards, {len(content.metric_families)} metric families"
     )
     return 0
 
@@ -178,6 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_pcap.add_argument("-o", "--out", type=Path, help="the output directory (default: <run_dir>/pcap/calls)")
     p_clean = sub.add_parser("cleanup", help="heal every event a crashed run left open")
     p_clean.add_argument("run_dirs", type=Path, nargs="*")
+    content_cli.add_parsers(sub)
     readers.add_parsers(sub)
     args = ap.parse_args(argv)
     env = dict(os.environ)
@@ -190,6 +193,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     dry = bool(args.dry_run)
     if cmd == "validate":
         return cmd_validate(content)
+    if cmd in content_cli.COMMANDS:
+        return content_cli.run(cmd, args, content)
     if cmd == "run":
         return cmd_run(schemas, content, env, str(args.profile), dry)
     if cmd == "verdict":

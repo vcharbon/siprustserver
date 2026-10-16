@@ -42,10 +42,22 @@ Skip with `OBS_ENABLE=0 ./run.sh up`. Re-apply by hand with `./run.sh obs`.
 - VictoriaLogs:    http://localhost:9428/select/vmui
 - VictoriaTraces:  http://localhost:10428  (OTLP ingest `/insert/opentelemetry/v1/traces`)
 
-## Dashboards (auto-provisioned, bind-mounted)
+## Dashboards (auto-provisioned, mounted in place)
 
-`stack/grafana/dashboards/*.json` are bind-mounted into Grafana and reload within
-~10s — edit the JSON in this repo, no restart/upload needed.
+The dashboards live on the HA tooling search path (ADR-0049 §7.5): the base set
+in `tooling/hakit/content/dashboards/`, a product's in the `dashboards/`
+directory of each of its `HAKIT_PATH` entries. Grafana's file provider reads
+`/hakit/dashboards` recursively; each directory is bind-mounted read-only at
+`/hakit/dashboards/<i>`, `i` its position on the path. The base is in the
+compose file; with `HAKIT_PATH` set, `install.sh` runs
+`hakit dashboards --compose-override` (it validates the path first) and adds
+the override it writes. Nothing is copied: an edit reloads within ~10s.
+
+Every dashboard carries the generic block, and `hakit validate` refuses one
+without it: the `Incident window` annotation (regions from
+`sip_chaos_window == 1`), the `Incident phase` annotation (points from
+`sip_chaos_event`), the tag `hakit` and the link listing every dashboard so
+tagged with the time range kept.
 
 | UID | Title | Built from |
 |---|---|---|

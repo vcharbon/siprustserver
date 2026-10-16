@@ -1,6 +1,7 @@
-//! The readers in `deploy/` (dashboards, probes, chaos and endurance scripts)
-//! spell only names, selector labels and closed label values the catalogues
-//! hold.
+//! The readers in `deploy/` (probes, chaos and endurance scripts) and the
+//! base dashboards of the HA tooling spell only names, selector labels and
+//! closed label values the catalogues hold: the shipped binaries' export
+//! extended with the base content's own catalogues.
 
 use std::path::PathBuf;
 
@@ -12,13 +13,17 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root")
 }
 
-/// The files git tracks under `deploy/`: a run's results or data left on
-/// disk is no reader.
+fn base_content() -> PathBuf {
+    root().join("tooling/hakit/content")
+}
+
+/// The files git tracks under `deploy/` and the base dashboards: a run's
+/// results or data left on disk is no reader.
 fn readers() -> Vec<PathBuf> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(root())
-        .args(["ls-files", "-z", "--", "deploy"])
+        .args(["ls-files", "-z", "--", "deploy", "tooling/hakit/content/dashboards"])
         .output()
         .expect("git ls-files");
     assert!(out.status.success(), "git ls-files: {}", String::from_utf8_lossy(&out.stderr));
@@ -37,10 +42,14 @@ fn allow() -> Allow {
     allow
 }
 
+fn contract() -> Contract {
+    metric_contract::content::contract(&metric_contract::export(), &[base_content()])
+        .expect("contract")
+}
+
 #[test]
 fn the_deploy_readers_hold_to_the_contract() {
-    let contract = Contract::from_json(&metric_contract::export()).expect("contract");
-    let findings = check_paths(&contract, &allow(), &readers());
+    let findings = check_paths(&contract(), &allow(), &readers());
     let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
     assert!(text.is_empty(), "{}", text.join("\n"));
 }
@@ -48,9 +57,18 @@ fn the_deploy_readers_hold_to_the_contract() {
 /// A family a reader names, renamed in the catalogue, is a finding.
 #[test]
 fn a_renamed_family_its_readers_name_is_a_finding() {
-    let mut contract = Contract::from_json(&metric_contract::export()).expect("contract");
+    let mut contract = contract();
     let record = contract.families.remove("b2bua_active_calls").expect("a read family");
     contract.families.insert("b2bua_live_calls".to_owned(), record);
     let findings = check_paths(&contract, &allow(), &readers());
     assert!(findings.iter().any(|f| f.name == "b2bua_active_calls"), "{findings:?}");
+}
+
+/// The series the tooling pushes are declared by the base content, not
+/// allow-listed: without its catalogue, a dashboard reading them fails.
+#[test]
+fn the_tooling_series_come_from_the_base_content_catalogue() {
+    let bare = Contract::from_json(&metric_contract::export()).expect("contract");
+    let findings = check_paths(&bare, &allow(), &readers());
+    assert!(findings.iter().any(|f| f.name == "sip_chaos_window_verdict"), "{findings:?}");
 }
