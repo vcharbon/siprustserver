@@ -4,7 +4,8 @@
 Invoked through a symlink named after the tool. Appends its argv (the tool
 name first) and what it read on stdin to `$FAKE_LOG`, one JSON object a line,
 and answers from the rules in `$FAKE_RULES` (a JSON list of
-`{"match", "stdout", "rc", "once"}`): the first rule whose regular expression
+`{"match", "stdout", "rc", "once"}`), each line stamped with the call's
+epoch ms (`at_ms`): the first rule whose regular expression
 matches the space-joined argv decides; a `once` rule is spent after its first
 match. A call no rule scripts exits 97 with the call on stderr: a test
 states every answer the lab gives.
@@ -16,6 +17,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import cast
 
@@ -24,7 +26,7 @@ def main() -> int:
     argv = [Path(sys.argv[0]).name, *sys.argv[1:]]
     data = sys.stdin.read() if "-f" in argv and "-" in argv else ""
     with open(os.environ["FAKE_LOG"], "a") as log:
-        log.write(json.dumps({"argv": argv, "stdin": data}) + "\n")
+        log.write(json.dumps({"argv": argv, "stdin": data, "at_ms": int(time.time() * 1000)}) + "\n")
     rules_path = Path(os.environ["FAKE_RULES"])
     rules = cast(list[dict[str, object]], json.loads(rules_path.read_text()))
     joined = " ".join(argv)

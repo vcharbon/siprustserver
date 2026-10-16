@@ -88,6 +88,22 @@ def test_heal_lifts_the_hold_proves_it_lifted_and_notes_the_waiting_replacement(
     assert (sb.event_dir / "pending_uid").read_text().strip() == "u9"
 
 
+def test_the_release_instant_precedes_the_untaint(tmp_path: Path) -> None:
+    """The scheduler may place the waiting pod the moment the first taint goes,
+    so the release instant the probe compares with is taken before it."""
+    sb = Sandbox(tmp_path, "kill_worker_held")
+    sb.state("targets", "w-0 u0 n1\n")
+    sb.rules(
+        Rule(r"get pod w-0 --ignore-not-found -o jsonpath=\{\.metadata\.uid\}", "u9 Pending"),
+        Rule(r"get nodes -o json$", nodes_json("n1"), once=True),
+        Rule(r"taint nodes n1 hakit.io/hold:NoSchedule-$"),
+        Rule(r"get nodes -o json$", nodes_json(clean=("n1",))),
+    )
+    f = facts(sb.run("heal"))
+    [untaint] = [c for c in sb.calls() if " taint " in c.line]
+    assert int(str(f["released_at_ms"])) <= untaint.at_ms
+
+
 def test_heal_fails_while_a_node_still_carries_the_hold(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "kill_worker_held")
     sb.rules(Rule(r"get nodes -o json$", nodes_json("n2")), Rule(r"taint nodes n2 hakit.io/hold:NoSchedule-$"))

@@ -38,6 +38,7 @@ class Rule:
 class Call:
     argv: list[str]
     stdin: str
+    at_ms: int = 0
 
     @property
     def line(self) -> str:
@@ -102,7 +103,7 @@ class Sandbox:
         out: list[Call] = []
         for line in self.log.read_text().splitlines():
             d = json.loads(line)
-            out.append(Call(argv=[str(a) for a in d["argv"]], stdin=str(d["stdin"])))
+            out.append(Call(argv=[str(a) for a in d["argv"]], stdin=str(d["stdin"]), at_ms=int(d.get("at_ms", 0))))
         return out
 
     def index(self, needle: str) -> int:

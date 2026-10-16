@@ -2,7 +2,8 @@
 # Lift the hold: note the replacement that waited (its uid and phase), remove
 # the hold taint from every node that carries it, and prove no node carries
 # it, again a second later. Idempotent; correct after a partial inject or
-# none. Facts: the release instant and the waiting replacement.
+# none. Facts: the release instant, taken before the first taint goes (the
+# scheduler may place the waiting pod at once), and the waiting replacement.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 tainted() {
@@ -18,13 +19,13 @@ if [ -n "$target" ]; then
   read -r pending_uid pending_phase <<<"$row"
 fi
 list="$(tainted)"
+at="$(hk_now_ms)"
 if [ -n "$list" ]; then
   mapfile -t nodes <<<"$list"
   kubectl taint nodes "${nodes[@]}" hakit.io/hold:NoSchedule- >&2
 fi
 left="$(tainted)"
 [ -z "$left" ] || hk_die "$left still carries the hold taint"
-at="$(hk_now_ms)"
 sleep "${HK_RECHECK_S:-1}"
 left="$(tainted)"
 [ -z "$left" ] || hk_die "$left carries the hold taint again a second after its release"
