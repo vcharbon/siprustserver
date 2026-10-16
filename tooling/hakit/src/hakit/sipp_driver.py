@@ -12,6 +12,7 @@ A drain is SIGUSR1: SIPp places no new call and exits once its calls are done.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from .executor import Executor
 from .lab import Lab
 from .paths import SIPP_EXPORTER_DIR
 from .profile import Stream
+from .scenario_lint import key_defaults
 
 # Retransmission bound of an INVITE or BYE without an answer (64 * T1).
 TXN_BOUND_S = 32
@@ -32,13 +34,29 @@ ERROR_KEPT_FILE = "/stats/errors.kept.log"
 ERROR_KEPT_BYTES = 256 * 1024 * 1024
 # Margin of the global `-recv_timeout` above every timeout of the scenario.
 RECV_BACKSTOP_MARGIN_S = 60
+# The `-key`s every stream passes; a scenario's other keys come from the stream's params.
+DRIVER_KEYS = ("run", "stream", "shape", "hold_ms", "setup_ms")
 
 
-def worst_call_s(stream: Stream) -> float:
+def _key_number(stream: Stream, defaults: Mapping[str, str], key: str) -> float:
+    raw = stream.params.get(key, defaults.get(key, "0"))
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def worst_call_s(stream: Stream, defaults: Mapping[str, str] | None = None) -> float:
     """The longest a call of the base UAC scenario can take: the setup deadline
-    (or Timer B, when later), then either the hold or the 64*T1 wait for the
-    INVITE's final after a CANCEL, then a BYE that gets no final."""
-    return max(stream.setup_deadline_s, TXN_BOUND_S) + max(stream.hold_s, TXN_BOUND_S) + TXN_BOUND_S
+    (or Timer B, when later), then either the hold (or a flood) with each
+    re-INVITE's transaction bound, or the 64*T1 wait for the INVITE's final
+    after a CANCEL, then a BYE that gets no final. `defaults` are the
+    scenario's declared keys, under the stream's params."""
+    d = defaults or {}
+    flood_s = _key_number(stream, d, "flood_count") * _key_number(stream, d, "flood_gap_ms") / 1000
+    flooding = str(stream.params.get("abuse", d.get("abuse", "none"))).endswith("_flood")
+    hold = max(stream.hold_s, flood_s if flooding else 0.0) + _key_number(stream, d, "reinvites") * TXN_BOUND_S
+    return max(stream.setup_deadline_s, TXN_BOUND_S) + max(hold, TXN_BOUND_S) + TXN_BOUND_S
 
 
 @dataclass(frozen=True)
@@ -100,7 +118,7 @@ class SippStream:
 
     def recv_timeout_ms(self) -> int:
         s = self.stream
-        return int((worst_call_s(s) + RECV_BACKSTOP_MARGIN_S) * 1000)
+        return int((worst_call_s(s, key_defaults(self.scenario)) + RECV_BACKSTOP_MARGIN_S) * 1000)
 
     def max_concurrent(self) -> int:
         """SIPp's call limit: every call the peak rate places, each at its worst
@@ -161,6 +179,9 @@ class SippStream:
             "-fd",
             "1",
         ]
+        for k, v in sorted(key_defaults(self.scenario).items()):
+            if k not in DRIVER_KEYS:
+                argv += ["-key", k, v]
         for k, v in sorted(s.params.items()):
             argv += ["-key", k, str(v)]
         return argv

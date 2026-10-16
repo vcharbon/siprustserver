@@ -1,4 +1,6 @@
-"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2), pcap, and the readers."""
+"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2), pcap, the readers,
+and inject and sipp-keys, the injection file of a catalog shape and the key defaults of a
+scenario for a SIPp launcher outside the runner."""
 
 from __future__ import annotations
 
@@ -20,13 +22,15 @@ from .executor import RealExecutor
 from .incident_exec import EventRunner
 from . import jsonval as jv
 from .jsonval import as_obj
-from .lab import lab_from_env
+from .injection import InjectionError, render
+from .lab import lab_from_env, parse_callees
 from .offschedule import active_runs, defaults_spec, request_fire
 from .paths import results_root, search_path
 from .preflight import open_events
 from .profile import Profile, parse_profile
 from .readers import cli as readers
 from .runner import Runner, RunRefused
+from .scenario_lint import lint_all
 from .schedule import PlannedEvent, plan, plan_event
 from .schemas import SchemaSet
 from .jsonl import read_jsonl
@@ -47,7 +51,7 @@ def load(env: Mapping[str, str]) -> tuple[SchemaSet, Content]:
     if errs:
         raise ContentError(errs)
     content = discover(search_path(env), schemas)
-    errs = all_profile_errors(content)
+    errs = lint_all(content.scenarios) + all_profile_errors(content)
     if errs:
         raise ContentError(errs)
     return schemas, content
@@ -59,6 +63,21 @@ def cmd_validate(content: Content) -> int:
         f"{len(content.profiles)} profiles, {len(content.catalogs)} catalogs, {len(content.scenarios)} scenario files, "
         f"{len(content.dashboards)} dashboards, {len(content.metric_families)} metric families"
     )
+    return 0
+
+
+def cmd_inject(content: Content, env: Mapping[str, str], shape: str, callees: Sequence[str]) -> int:
+    """Print the SIPp injection file of a catalog shape, one row per callee."""
+    s = content.shapes.get(shape)
+    if s is None:
+        print(f"hakit: no catalog on the search path has shape {shape!r}", file=sys.stderr)
+        return 2
+    hosts = parse_callees(",".join(callees)) if callees else lab_from_env(env).callees
+    try:
+        sys.stdout.write(render(s, content.catalogs[s.catalog], hosts))
+    except InjectionError as e:
+        print(f"hakit: {e}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -178,6 +197,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_pcap.add_argument("run_dir", type=Path)
     p_pcap.add_argument("call_id")
     p_pcap.add_argument("-o", "--out", type=Path, help="the output directory (default: <run_dir>/pcap/calls)")
+    p_inj = sub.add_parser("inject", help="print the SIPp injection file of a catalog shape")
+    p_inj.add_argument("shape")
+    p_inj.add_argument("--callee", action="append", default=[], help="host[:port] of a callee (default: the lab's)")
     p_clean = sub.add_parser("cleanup", help="heal every event a crashed run left open")
     p_clean.add_argument("run_dirs", type=Path, nargs="*")
     content_cli.add_parsers(sub)
@@ -197,6 +219,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return content_cli.run(cmd, args, content)
     if cmd == "run":
         return cmd_run(schemas, content, env, str(args.profile), dry)
+    if cmd == "inject":
+        return cmd_inject(content, env, str(args.shape), [str(c) for c in args.callee])
     if cmd == "verdict":
         return cmd_verdict(schemas, content, env, Path(args.run_dir))
     if cmd == "pcap":

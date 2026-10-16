@@ -38,8 +38,9 @@ CASES = [
     Case("peer-answer.xml", "answered", 200, None, "released"),
     Case("peer-early-media.xml", "answered", 200, None, "released", early_media=True),
     Case("peer-reject-486.xml", "rejected", 486, "486", "provisional"),
-    Case("peer-reject-503-reason.xml", "rejected", 503, "Q.850;cause=34", "invited", provisional=False),
-    Case("peer-reason-list.xml", "rejected", 503, "SIP;cause=503", "invited", provisional=False),
+    Case("peer-reject-503-reason.xml", "rejected", 503, "q.850;cause=34", "invited", provisional=False),
+    Case("peer-reject-reason-token.xml", "rejected", 503, "503", "invited", provisional=False),
+    Case("peer-reason-list.xml", "rejected", 503, "sip;cause=503", "invited", provisional=False),
     Case("peer-ring-no-answer.xml", "timeout", None, "timeout", "provisional"),
     Case("peer-cancel-crossing.xml", "timeout", None, "timeout", "provisional"),
     Case("peer-silent.xml", "timeout", None, "timeout", "invited", provisional=False),
@@ -73,7 +74,7 @@ def pairings() -> dict[str, Pairing]:
 @pytest.mark.parametrize("case", CASES, ids=[c.peer.removesuffix(".xml") for c in CASES])
 def test_every_exit_writes_one_valid_record(case: Case, pairings: dict[str, Pairing]) -> None:
     p = pairings[case.peer]
-    assert p.uac_rc in (0, 1), f"{case.peer}: sipp exited {p.uac_rc}"
+    assert p.uac_rc == 0, f"{case.peer}: sipp exited {p.uac_rc}"
     if case.peer not in PEER_MAY_FAIL:
         assert p.peer_rc == 0, f"{case.peer}: the peer exited {p.peer_rc}"
     assert len(p.records) == 1, f"{case.peer}: {len(p.records)} records"

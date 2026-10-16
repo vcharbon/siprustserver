@@ -1,0 +1,552 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  UAS callee: 100, 180, a ring of ring_ms, 200, then it serves the dialog until
+  the far end's BYE. It writes no record (ADR-0049 section 4.2); its SIPp
+  counters are what it reports.
+
+  -key: ring_ms (180 to 200; 0 answers at once), gap_ms (the pause before each
+        request the callee originates).
+  hakit-key: ring_ms=5000
+  hakit-key: gap_ms=60000
+
+  The R-URI user selects what the callee does once the call is up:
+    - `reinvite...`: it originates two in-dialog re-INVITEs, gap_ms apart, then
+      a BYE gap_ms later (a callee-originated re-INVITE relayed to the caller);
+    - anything else: it answers what the dialog brings (a re-INVITE with an SDP
+      answer; OPTIONS, INFO, UPDATE, NOTIFY, MESSAGE with a 200) until the BYE.
+
+  RFC 3261: an INVITE retransmission during the ring is answered with the 180
+  again (section 17.2.1); a CANCEL during the ring is answered 200 and the
+  INVITE 487, whose ACK is awaited (section 9.2); a 200 is retransmitted until
+  its ACK, and a dialog whose 2xx never gets its ACK is ended with a BYE
+  (section 13.3.1.4), the call counted failed; a BYE before the dialog's ACK is
+  answered and the call counted failed; a re-INVITE crossing the callee's own
+  is answered 491 (section 14.2).
+
+  SIPp sends nothing while a send of its own is retransmitting, and a message
+  landing while the call runs `_unexp.main` aborts the call. So a request that
+  lands while a 200 waits for its ACK, or while the callee's re-INVITE waits
+  for its final, is captured by the wait itself and answered once the wait is
+  over; and every handler path answers and resumes in one step (the resume is
+  an action of the send). The resume applies the `next` of the step before the
+  one it returns to, so every label a jump reaches follows an unreachable
+  `<nop/>`.
+-->
+<scenario name="hakit UAS callee">
+
+  <recv request="INVITE" crlf="true" rrs="true">
+    <action>
+      <ereg regexp="^INVITE sip:([^@;&gt;[:space:]]*)@" search_in="msg" assign_to="ru_all,ru_user"/>
+      <ereg regexp="^reinvite" search_in="var" variable="ru_user" assign_to="orig_m"/>
+      <ereg regexp="[Ff]rom:[^&lt;]*&lt;([^&gt;]+)&gt;" search_in="msg" assign_to="fr_all,caller_uri"/>
+      <ereg regexp="[Cc]ontact:[^&lt;[:cntrl:]]*&lt;([^&gt;]+)&gt;" search_in="msg" assign_to="ct_all,ct_angle"/>
+      <ereg regexp="[Cc]ontact:[[:blank:]]*([^;&lt;&gt;[:space:]]+)" search_in="msg" assign_to="cb_all,ct_bare"/>
+      <ereg regexp=";tag=([^;&gt;[:space:]]+)" search_in="hdr" header="From:" assign_to="tg_all,caller_tag"/>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="inv_via_row,inv_via"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="inv_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="inv_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="inv_cseq"/>
+      <strcmp assign_to="orig_c" variable="orig_m" value=""/>
+      <test assign_to="originates" variable="orig_c" compare="not_equal" value="0"/>
+      <assignstr assign_to="ring_str" value="[ring_ms]"/>
+      <todouble assign_to="ring" variable="ring_str"/>
+      <assignstr assign_to="gap_str" value="[gap_ms]"/>
+      <todouble assign_to="gap" variable="gap_str"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]-[call_number]-callee
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <pause variable="ring"/>
+
+  <send retrans="500" ontimeout="no_ack">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$inv_via]
+      [last_Record-Route:]
+      From:[$inv_from]
+      To:[$inv_to];tag=[pid]-[call_number]-callee
+      Call-ID: [call_id]
+      CSeq:[$inv_cseq]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=callee 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+    <action>
+      <assign assign_to="answered" value="1"/>
+    </action>
+  </send>
+
+  <!-- The ACK of the 200. SIPp stops retransmitting a send only on a recv
+       placed after it, so each 200 has its own ACK wait. -->
+  <label id="ack_wait"/>
+  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE)$" regexp_match="true" optional="true" crlf="true" next="ack_wait">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_via_row,rq_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_rr_row,rq_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="rq_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="rq_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="rq_cseq"/>
+      <assign assign_to="rq_due" value="1"/>
+    </action>
+  </recv>
+  <recv request="BYE" optional="true" crlf="true" next="bye_before_ack"/>
+  <recv request="ACK" crlf="true" next="acked"/>
+
+  <nop/>
+  <label id="acked"/>
+  <send condexec="rq_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$rq_via]
+      [$rq_rr]
+      From:[$rq_from]
+      To:[$rq_to]
+      Call-ID: [call_id]
+      CSeq:[$rq_cseq]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="rq_due" value="0"/>
+    </action>
+  </send>
+  <nop test="originates" next="originate"/>
+
+  <!-- Serve the dialog until the BYE. -->
+  <label id="serve"/>
+  <recv request="INVITE" optional="true" crlf="true" next="answer_reinvite"/>
+  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE)$" regexp_match="true" optional="true" crlf="true" next="answer_200"/>
+  <recv request="BYE" crlf="true" next="answer_bye"/>
+
+  <nop/>
+  <label id="answer_200"/>
+  <send next="serve">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <nop/>
+  <label id="answer_reinvite"/>
+  <send retrans="500" ontimeout="no_ack">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=callee 53655765 2353687638 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <label id="reinvite_ack_wait"/>
+  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE)$" regexp_match="true" optional="true" crlf="true" next="reinvite_ack_wait">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_via_row,rq_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_rr_row,rq_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="rq_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="rq_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="rq_cseq"/>
+      <assign assign_to="rq_due" value="1"/>
+    </action>
+  </recv>
+  <recv request="BYE" optional="true" crlf="true" next="bye_before_ack"/>
+  <recv request="ACK" crlf="true" next="acked"/>
+
+  <!-- The callee's own requests: two re-INVITEs, then the BYE. A request the
+       caller sends meanwhile is captured and answered once the re-INVITE has
+       its final; the caller's BYE ends the call there. -->
+  <nop/>
+  <label id="originate"/>
+  <pause variable="gap"/>
+  <nop test="sent_two" next="callee_bye"/>
+  <send retrans="500" ontimeout="callee_bye">
+    <![CDATA[
+      INVITE [$ct_angle][$ct_bare] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: [cseq] INVITE
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=callee 53655765 2353687639 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+    <action>
+      <assign assign_to="orig_pending" value="1"/>
+      <add assign_to="reinvites_sent" value="1"/>
+      <test assign_to="sent_two" variable="reinvites_sent" compare="greater_than_equal" value="2"/>
+    </action>
+  </send>
+  <label id="orig_wait"/>
+  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="32000" ontimeout="callee_bye" next="orig_wait"/>
+  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE|BYE)$" regexp_match="true" optional="true" crlf="true" next="orig_wait">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_via_row,rq_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_rr_row,rq_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="rq_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="rq_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="rq_cseq"/>
+      <ereg regexp="BYE" search_in="hdr" header="CSeq:" assign_to="rq_bye"/>
+      <assign assign_to="rq_due" value="1"/>
+    </action>
+  </recv>
+  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" next="orig_ack"/>
+  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="orig_nack">
+    <action>
+      <ereg regexp="branch=([^;,[:space:]]+)" search_in="hdr" header="Via:" assign_to="br_all,orig_branch"/>
+    </action>
+  </recv>
+
+  <nop/>
+  <label id="orig_ack"/>
+  <send next="orig_done">
+    <![CDATA[
+      ACK [$ct_angle][$ct_bare] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: [cseq] ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop/>
+  <label id="orig_nack"/>
+  <send>
+    <![CDATA[
+      ACK [$ct_angle][$ct_bare] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[$orig_branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: [cseq] ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="orig_done"/>
+  <nop>
+    <action>
+      <assign assign_to="orig_pending" value="0"/>
+    </action>
+  </nop>
+  <send condexec="rq_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$rq_via]
+      [$rq_rr]
+      From:[$rq_from]
+      To:[$rq_to]
+      Call-ID: [call_id]
+      CSeq:[$rq_cseq]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="rq_due" value="0"/>
+    </action>
+  </send>
+  <nop test="rq_bye" next="done"/>
+  <nop next="originate"/>
+
+  <nop/>
+  <label id="callee_bye"/>
+  <send retrans="500" ontimeout="done">
+    <![CDATA[
+      BYE [$ct_angle][$ct_bare] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: [cseq] BYE
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="bye_wait"/>
+  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="bye_wait"/>
+  <recv response="^[2-6][0-9][0-9]$" regexp_match="true" next="done"/>
+
+  <!-- The far end's BYE. -->
+  <nop/>
+  <label id="answer_bye"/>
+  <send next="done">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- A BYE before the dialog's ACK: answered, the call fails. -->
+  <nop/>
+  <label id="bye_before_ack"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="fail"/>
+  <send condexec="rq_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$rq_via]
+      [$rq_rr]
+      From:[$rq_from]
+      To:[$rq_to]
+      Call-ID: [call_id]
+      CSeq:[$rq_cseq]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="done">
+    <action>
+      <assign assign_to="failed" value="1"/>
+      <test variable="failed" compare="equal" value="0" check_it="true"/>
+    </action>
+  </nop>
+
+  <!-- The 200 never got its ACK: end the dialog with a BYE (RFC 3261
+       section 13.3.1.4); the call fails. -->
+  <nop/>
+  <label id="no_ack"/>
+  <send retrans="500" ontimeout="fail">
+    <![CDATA[
+      BYE [$ct_angle][$ct_bare] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: [cseq] BYE
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="no_ack_bye"/>
+  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="no_ack_bye"/>
+  <recv response="^[2-6][0-9][0-9]$" regexp_match="true" next="fail"/>
+
+  <!-- A CANCEL during the ring: 200 to the CANCEL, 487 to the INVITE, and the
+       ACK of the 487. -->
+  <nop/>
+  <label id="cancelled"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]-[call_number]-callee
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <send retrans="500" ontimeout="done">
+    <![CDATA[
+      SIP/2.0 487 Request Terminated
+      [$inv_via]
+      From:[$inv_from]
+      To:[$inv_to];tag=[pid]-[call_number]-callee
+      Call-ID: [call_id]
+      CSeq:[$inv_cseq]
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" next="done"/>
+
+  <!-- Unexpected messages: an INVITE copy before the answer gets the 180
+       again, a re-INVITE is answered (a 491 while the callee's own is
+       pending); a CANCEL before the
+       answer cancels; an ACK or a response is let go; another request is
+       answered 200; a BYE ends the call. -->
+  <nop next="done"/>
+  <label id="_unexp.main"/>
+  <recv request="INVITE" optional="true" crlf="true" next="ux_invite"/>
+  <recv request="CANCEL" optional="true" crlf="true" next="ux_cancel"/>
+  <recv request="ACK" optional="true" crlf="true" next="ux_resume"/>
+  <recv request="BYE" optional="true" crlf="true" next="ux_bye"/>
+  <recv request="[A-Z]" regexp_match="true" optional="true" crlf="true" next="ux_200"/>
+  <recv response="^[1-6][0-9][0-9]$" regexp_match="true" next="ux_resume"/>
+
+  <nop/>
+  <label id="ux_invite"/>
+  <nop test="orig_pending" next="ux_reinvite"/>
+  <nop test="answered" next="ux_answer"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]-[call_number]-callee
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </send>
+  <nop/>
+  <label id="ux_reinvite"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 491 Request Pending
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </send>
+
+  <nop/>
+  <label id="ux_answer"/>
+  <nop next="answer_reinvite">
+    <action>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+
+  <nop/>
+  <label id="ux_cancel"/>
+  <nop test="answered" next="ux_200"/>
+  <nop next="cancelled">
+    <action>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+
+  <nop/>
+  <label id="ux_200"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </send>
+  <nop/>
+  <label id="ux_resume"/>
+  <nop>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+
+  <nop/>
+  <label id="ux_bye"/>
+  <nop next="answer_bye">
+    <action>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+
+  <nop/>
+  <label id="done"/>
+  <nop/>
+
+  <Reference variables="ru_all,fr_all,ct_all,cb_all,tg_all,br_all,inv_via_row,rq_via_row,rq_rr_row"/>
+  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
+  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000"/>
+</scenario>

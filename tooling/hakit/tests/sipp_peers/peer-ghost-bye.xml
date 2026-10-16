@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Answers, sends an OPTIONS and a BYE that a silent caller never answers; each ends on its retransmission bound. -->
+<scenario name="peer-ghost-bye">
+  <recv request="INVITE" crlf="true" rrs="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" assign_to="from_hdr"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" assign_to="to_raw"/>
+    </action>
+  </recv>
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=callee 1 1 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true"/>
+  <pause milliseconds="300"/>
+  <send retrans="500" ontimeout="bye">
+    <![CDATA[
+      OPTIONS [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      [routes]
+      From: [$to_raw];tag=[pid]P[call_number]
+      To: [$from_hdr]
+      Call-ID: [call_id]
+      CSeq: 1 OPTIONS
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv response="200" timeout="5000" ontimeout="bye" next="bye"/>
+  <label id="bye"/>
+  <send retrans="500" ontimeout="done">
+    <![CDATA[
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      [routes]
+      From: [$to_raw];tag=[pid]P[call_number]
+      To: [$from_hdr]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv response="200" timeout="5000" ontimeout="done" next="done"/>
+  <label id="done"/>
+  <nop/>
+  <Reference variables="from_hdr,to_raw"/>
+</scenario>

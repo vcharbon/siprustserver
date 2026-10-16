@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from hakit.cli import main
 from hakit.injection import InjectionError, render
 from hakit.model import Catalog, ExpectedEnding, Shape
 
@@ -41,3 +45,30 @@ def test_a_field_separator_or_too_many_headers_is_refused() -> None:
         render(shape([("X", "a;b")]), catalog(), [("h", 1)])
     with pytest.raises(InjectionError, match="5 headers"):
         render(shape([("X", "1")] * 5), catalog(), [("h", 1)])
+
+
+def test_hakit_inject_renders_a_product_catalog_on_the_search_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A product's catalog (here one asking by dialed number) is rendered like the base's."""
+    doc = {
+        "schema": "treatment-catalog.v1",
+        "name": "dialed",
+        "shapes": [
+            {
+                "shape": "dialed_em",
+                "description": "d",
+                "request": {"ruri_user": "+15550100", "headers": [{"name": "Resource-Priority", "value": "esnet.0"}]},
+                "expected": [{"ending": "answered"}],
+                "load_safe": True,
+            }
+        ],
+    }
+    (tmp_path / "catalogs").mkdir()
+    (tmp_path / "catalogs" / "dialed.json").write_text(json.dumps(doc))
+    monkeypatch.setenv("HAKIT_PATH", str(tmp_path))
+    assert main(["inject", "dialed_em", "--callee", "10.0.0.1"]) == 0
+    assert capsys.readouterr().out == "SEQUENTIAL\n+15550100;Resource-Priority: esnet.0;;;\n"
+    assert main(["inject", "basic", "--callee", "10.0.0.1:5070"]) == 0
+    assert '"host":"10.0.0.1","port":5070' in capsys.readouterr().out
+    assert main(["inject", "absent"]) == 2

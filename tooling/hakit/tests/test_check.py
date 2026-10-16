@@ -17,7 +17,7 @@ STREAM: Json = {
     "name": "basic",
     "driver": "sipp",
     "shape": "basic",
-    "scenario": "uac-basic-hold.xml",
+    "scenario": "uac-call.xml",
     "cps": 10,
     "setup_deadline_s": 32,
     "ring_s": 5,
@@ -113,3 +113,23 @@ def test_overlapping_windows_are_refused(tmp_path: Path) -> None:
         "profile 'p': event 006-freeze at 510s opens before 005-freeze's window closes "
         "(420s + expected 60s + settle 40s = 520s)",
     ]
+
+
+def test_a_key_the_scenario_reads_and_no_param_sets_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "scenarios").mkdir()
+    (tmp_path / "scenarios" / "uac-k.xml").write_text(
+        '<scenario name="k"><send><![CDATA[INVITE sip:[field0]@[remote_ip] SIP/2.0\nX-A: [ring_ms] [hold_ms]\n]]></send></scenario>'
+    )
+    c = entry(tmp_path, streams=[{**STREAM, "scenario": "uac-k.xml"}])
+    assert errors(c) == ["profile 'p': stream 'basic': scenario 'uac-k.xml' reads keys no param sets: ['ring_ms']"]
+    c = entry(tmp_path, streams=[{**STREAM, "scenario": "uac-k.xml", "params": {"ring_ms": 1000}}])
+    assert errors(c) == []
+
+
+def test_the_drain_covers_each_re_invite_and_a_flood(tmp_path: Path) -> None:
+    """Each re-INVITE of the base UAC adds its 64*T1 bound, a flood its count
+    times its gap: the longest teardown is 32 + (20 + 2*32) + 32 s, 32 + 100 + 32 s."""
+    c = entry(tmp_path, streams=[{**STREAM, "params": {"reinvites": 2}}])
+    assert errors(c) == ["profile 'p': drain_s 120 is below the longest stream teardown 148"]
+    c = entry(tmp_path, streams=[{**STREAM, "params": {"abuse": "options_flood", "flood_count": 500}}])
+    assert errors(c) == ["profile 'p': drain_s 120 is below the longest stream teardown 164"]

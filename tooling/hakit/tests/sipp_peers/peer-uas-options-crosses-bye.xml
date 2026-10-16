@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Peer UAS: answers the call, and on the caller's BYE sends an in-dialog
+     OPTIONS before answering the BYE, so the OPTIONS crosses the caller's
+     BYE. The OPTIONS carries two Vias and a Record-Route, as through a proxy;
+     the caller's 200 must echo them and the OPTIONS CSeq. -->
+<scenario name="peer uas: OPTIONS crosses the BYE">
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="From:" assign_to="caller"/>
+      <ereg regexp="sip:[^>;]*" search_in="hdr" header="Contact:" assign_to="caller_contact"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag01[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag01[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true"/>
+  <recv request="BYE" crlf="true"/>
+  <send>
+    <![CDATA[
+      OPTIONS [$caller_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-origin-[call_number]
+      Record-Route: <sip:192.0.2.1:5060;lr>
+      From: <sip:sut@[local_ip]:[local_port]>;tag=[pid]SIPpTag01[call_number]
+      To: [$caller]
+      [last_Call-ID:]
+      CSeq: 1 OPTIONS
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv response="200" timeout="5000">
+    <action>
+      <ereg regexp="CSeq: *1 OPTIONS" search_in="msg" check_it="true" assign_to="answer_cseq"/>
+      <ereg regexp="SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-origin-" search_in="msg" check_it="true" assign_to="answer_via"/>
+      <ereg regexp="Record-Route: .sip:192.0.2.1:5060;lr." search_in="msg" check_it="true" assign_to="answer_rr"/>
+    </action>
+  </recv>
+  <Reference variables="answer_cseq,answer_via,answer_rr"/>
+</scenario>

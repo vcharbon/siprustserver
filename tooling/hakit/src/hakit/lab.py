@@ -50,7 +50,7 @@ class Lab:
         return f"{prefix}.{int(last) + slot}"
 
 
-def _callees(raw: str) -> list[tuple[str, int]]:
+def parse_callees(raw: str) -> list[tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for item in raw.split(","):
         item = item.strip()
@@ -92,7 +92,7 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
         sip_target=g("HAKIT_SIP_TARGET", "192.168.60.250:5060"),
         sipp_ip_base=g("HAKIT_SIPP_IP_BASE", "192.168.60.100"),
         sipp_ip_slots=int(g("HAKIT_SIPP_IP_SLOTS", "36")),
-        callees=_callees(g("HAKIT_CALLEES", "192.168.60.21:5060,192.168.60.22:5060")),
+        callees=parse_callees(g("HAKIT_CALLEES", "192.168.60.21:5060,192.168.60.22:5060")),
         leftover_calls_query=g("HAKIT_LEFTOVER_CALLS_QUERY", "sum(last_over_time(b2bua_active_calls[30s]))"),
         live_series=[s.strip() for s in g("HAKIT_LIVE_SERIES", "b2bua_active_calls").split(";") if s.strip()],
         cdr_written_query=g("HAKIT_CDR_WRITTEN_QUERY", "sum(increase(b2bua_cdr_written_total[{span}s]))"),
