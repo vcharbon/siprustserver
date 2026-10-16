@@ -110,7 +110,10 @@
         "min_free_memory_gib": { "type": "number", "minimum": 0 },
         "max_swap_used_gib": { "type": "number", "minimum": 0 },
         "min_free_disk_gib": { "type": "number", "minimum": 0 },
-        "max_load_per_cpu": { "type": "number", "minimum": 0 }
+        "max_load_per_cpu": { "type": "number", "minimum": 0 },
+        "max_io_full_pct": { "description": "Host stress: the io full pressure (avg10 before the load, the share of a sample interval during it) refused before the load and marking the run's intervals under stress. Default 5.", "type": "number", "minimum": 0 },
+        "max_memory_full_pct": { "description": "Host stress: as max_io_full_pct, for memory. Default 5.", "type": "number", "minimum": 0 },
+        "max_swapin_pages_s": { "description": "Host stress: the swap-in rate, pages per second. Default 50.", "type": "number", "minimum": 0 }
       }
     },
     "streams": {

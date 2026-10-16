@@ -24,6 +24,8 @@ from .content import Content
 from .events import KEEPALIVE_MS, EventJournal
 from .executor import Executor
 from .freshness import Freshness
+from .host import HostSampler, preflight_errors
+from .host_stress import thresholds
 from .incident_exec import EventRunner
 from .jsonl import JsonlLog, write_jsonl
 from .jsonval import Json
@@ -117,6 +119,7 @@ class _Live:
     fresh: Freshness | None = None
     capture: Captures | None = None
     steps: RateSteps | None = None
+    host: HostSampler | None = None
 
 
 class Runner:
@@ -183,6 +186,9 @@ class Runner:
         errs = limit_errors(profile.preflight, facts)
         if errs:
             raise RunRefused("host outside the profile's preflight limits: " + "; ".join(errs))
+        stress = preflight_errors(self.executor, self.clock, thresholds(profile.preflight))
+        if stress:
+            raise RunRefused("host under stress: " + "; ".join(stress))
         try:
             held = self.vm.scalar(self.lab.leftover_calls_query)
         except QueryFailed as e:
@@ -199,6 +205,7 @@ class Runner:
         journal = EventJournal(run, run_dir, self.clock, self.vm)
         streams = StreamSet(run, run_dir, profile, self.content, self.lab, self.executor, self.clock, self.vlogs, started)
         live = _Live(streams)
+        live.host = HostSampler(run, run_dir, self.executor, self.clock, self.vm)
         # Appended as found, so `hakit probe` reads them while the run runs.
         integrity = JsonlLog(run_dir / "integrity.jsonl")
         steps_log = JsonlLog(run_dir / "steps.jsonl")
@@ -346,6 +353,8 @@ class Runner:
 
     def _wait(self, target_ms: int, journal: EventJournal, live: _Live, integrity: JsonlLog, steps_log: JsonlLog) -> None:
         while True:
+            if live.host is not None:
+                live.host.tick()
             journal.tick()
             for event, opened, _closed in journal.take_closed():
                 if live.capture is not None:
@@ -373,7 +382,7 @@ class Runner:
             if now >= target_ms:
                 return
             step = min(target_ms - now, KEEPALIVE_MS)
-            wake = [journal.next_close_ms()]
+            wake = [journal.next_close_ms(), live.host.next_ms() if live.host is not None else None]
             if live.loading and live.steps is not None:
                 wake.append(live.steps.next_ms(live.load_start_ms))
             for at in wake:

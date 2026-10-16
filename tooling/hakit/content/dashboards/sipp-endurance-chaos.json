@@ -2461,6 +2461,113 @@
           "mode": "multi"
         }
       }
+    },
+    {
+      "id": 230,
+      "type": "row",
+      "title": "Host under the run (pressure and swap: a stall here is the host's, not the SUT's)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 193
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 231,
+      "type": "timeseries",
+      "title": "Host full pressure (share of time stalled)",
+      "description": "Sampled by the hakit runner every second for the whole run (/proc/pressure, /proc/vmstat). A generator stall inside a stressed interval is reported as host_under_stress.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 194
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "100 * max by (resource) (hakit_host_pressure_ratio{kind=\"full\"})",
+          "refId": "A",
+          "legendFormat": "{{resource}} full"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 232,
+      "type": "timeseries",
+      "title": "Host swap (pages/s)",
+      "description": "Sampled by the hakit runner every second for the whole run (/proc/pressure, /proc/vmstat). A generator stall inside a stressed interval is reported as host_under_stress.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 194
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max by (direction) (hakit_host_swap_pages_per_second)",
+          "refId": "A",
+          "legendFormat": "swap {{direction}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     }
   ]
 }

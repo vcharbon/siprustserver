@@ -79,6 +79,11 @@ class Preflight:
     max_swap_used_gib: float | None
     min_free_disk_gib: float | None
     max_load_per_cpu: float | None
+    # Host stress (host.py): refused before the load, and an interval of the
+    # run past one of them is under stress; None takes the stated default.
+    max_io_full_pct: float | None = None
+    max_memory_full_pct: float | None = None
+    max_swapin_pages_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +213,9 @@ def parse_profile(d: Json) -> Profile:
             max_swap_used_gib=jv.opt_number(pf, "max_swap_used_gib"),
             min_free_disk_gib=jv.opt_number(pf, "min_free_disk_gib"),
             max_load_per_cpu=jv.opt_number(pf, "max_load_per_cpu"),
+            max_io_full_pct=jv.opt_number(pf, "max_io_full_pct"),
+            max_memory_full_pct=jv.opt_number(pf, "max_memory_full_pct"),
+            max_swapin_pages_s=jv.opt_number(pf, "max_swapin_pages_s"),
         ),
         streams=[_stream(s) for s in jv.objs(d, "streams")],
         schedule=schedule,

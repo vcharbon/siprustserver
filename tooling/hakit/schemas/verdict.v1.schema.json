@@ -171,8 +171,18 @@
         "required": ["kind", "detail"],
         "properties": {
           "kind": {
-            "description": "`record_gap`: a stream's records, calls not placed and generator failures differ from its generator's offered-call counter. `incident_failed`: an executable or probe failed or timed out. `stream_died`: a generator exited before its stream was due to stop. `series_stale`: a series the run reads stopped updating. `generator_failure`: a record names a `generator` failure, or the generator counted a call it failed without a record. `leftover_calls`: the system under test held calls before the run started. `window_overlap`: a window opened while another was open. `generator_stall`: the generator stalled across measurements, which leave the impacts (ADR-0049 §3.12). `class_failed`: a product class's count failed or printed no JSON array of impacts.",
-            "enum": ["record_gap", "incident_failed", "stream_died", "series_stale", "generator_failure", "generator_stall", "class_failed", "leftover_calls", "window_overlap"]
+            "description": "`record_gap`: a stream's records, calls not placed and generator failures differ from its generator's offered-call counter. `incident_failed`: an executable or probe failed or timed out. `stream_died`: a generator exited before its stream was due to stop. `series_stale`: a series the run reads stopped updating. `generator_failure`: a record names a `generator` failure, or the generator counted a call it failed without a record. `leftover_calls`: the system under test held calls before the run started. `window_overlap`: a window opened while another was open. `generator_stall`: the generator stalled across measurements, which leave the impacts (ADR-0049 §3.12). `class_failed`: a product class's count failed or printed no JSON array of impacts. `host_under_stress`: a generator stall, a spoiled measurement or a timed finding overlapped an interval where the host's io or memory full pressure or its swap-in rate passed the profile's thresholds (`at_ms` to `until_ms`, the worst values in `host`); it is listed first.",
+            "enum": ["record_gap", "incident_failed", "stream_died", "series_stale", "generator_failure", "generator_stall", "class_failed", "leftover_calls", "window_overlap", "host_under_stress"]
+          },
+          "until_ms": { "type": "number" },
+          "host": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "io_full_pct": { "type": "number" },
+              "memory_full_pct": { "type": "number" },
+              "swapin_pages_s": { "type": "number" }
+            }
           },
           "event": { "type": "string" },
           "stream": { "type": "string" },

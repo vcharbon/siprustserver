@@ -458,7 +458,13 @@ made. A run profile joins the two.
     per stall. A stall that spoiled no measurement is listed in the stream's
     `stalls` and leaves the status alone. A generator's own count of calls it
     failed without a record (loadgen's `loadgen_generator_failures_total`) is
-    a `generator_failure` integrity finding when above 0.
+    a `generator_failure` integrity finding when above 0. A stall, a spoiled
+    measurement or a timed finding that overlaps an interval where the host
+    was under stress (§6.6), and a record gap of a stream with such a stall,
+    make one `host_under_stress` finding per stressed span, listed first with
+    its instants and its worst io and memory full share and swap-in rate, so
+    a host stall is never investigated as a fault of the system under test
+    or of the tooling.
 
 ### 4. The call-outcome record
 
@@ -654,7 +660,8 @@ made. A run profile joins the two.
    (the tree that ran, the host facts, the load's start once it started),
    `events.jsonl`, `events/<event>/`, `integrity.jsonl` (each finding appended
    as the runner finds it, the file rewritten whole at the end),
-   `steps.jsonl` (the rate steps applied), the exported records,
+   `steps.jsonl` (the rate steps applied), `host.jsonl` (the host's
+   pressure and swap, §6.6), the exported records,
    `cdrs.jsonl`, `verdict.json` (each impact row lists 50 Call-IDs; the full
    lists are in `impact-calls.jsonl`), `summary.md`, `verdict-tree.json` (the
    tree that computed the verdict, which may be later than the run's), and with
@@ -671,8 +678,19 @@ made. A run profile joins the two.
 5. **Before the load.** The runner records the host (free memory, swap, disk,
    load) and refuses the run outside the profile's `preflight` limits; it
    refuses to start while the system under test holds calls (a
-   `leftover_calls` finding) or while an event of an earlier run is open.
-6. **During the load.** Every series the run reads live is checked for
+   `leftover_calls` finding), while an event of an earlier run is open, or
+   while the host is under stress: io or memory full pressure (avg10) or the
+   swap-in rate at or above the profile's `preflight` thresholds
+   (`max_io_full_pct` 5, `max_memory_full_pct` 5, `max_swapin_pages_s` 50 by
+   default; stated, not fitted).
+6. **During the load.** The runner samples the host every second, from the
+   run's start to its verdict: `/proc/pressure/{cpu,memory,io}` (`some` and
+   `full`, avg10 and the stall totals) and `/proc/vmstat` (`pswpin`,
+   `pswpout`) into `host.jsonl`, pushed as `hakit_host_pressure_ratio` (the
+   share of the interval stalled, from the totals, so a sample a blocking
+   step delayed loses nothing) and `hakit_host_swap_pages_per_second`. An
+   interval at or above a `preflight` threshold is under stress (§3.12).
+   Every series the run reads live is checked for
    freshness every scrape interval (15 s): each stream's records in
    VictoriaLogs, whose count must grow once the stream's first calls could
    have ended, and each VictoriaMetrics selector of the lab's `live_series`

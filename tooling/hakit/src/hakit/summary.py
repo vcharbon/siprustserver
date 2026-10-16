@@ -135,6 +135,8 @@ def render(v: Json) -> str:
 
 
 def _integrity(i: Json) -> str:
+    if i["kind"] == "host_under_stress":
+        return f"- `host_under_stress`: {i['detail']}"
     ids = jv.strings(i, "call_ids")
     calls = f" (calls {', '.join(ids[:5])}{', …' if len(ids) > 5 else ''})" if ids else ""
     return f"- `{i['kind']}` {i.get('stream') or i.get('event') or ''}: {i['detail']}{calls}"

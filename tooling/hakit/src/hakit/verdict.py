@@ -3,8 +3,9 @@
 The run directory holds what the verdict reads: the resolved profile, the
 budgets and catalogs it used, `events.jsonl`, the exported `records.jsonl`,
 `cdrs.jsonl` when the profile joins CDRs, the kept answers of the product
-classes (`classes/`), `streams.json` (each generator's own counters) and
-`integrity.jsonl` (what the runner saw go wrong while it ran).
+classes (`classes/`), `streams.json` (each generator's own counters),
+`integrity.jsonl` (what the runner saw go wrong while it ran) and `host.jsonl`
+(the host's pressure, host_stress.py).
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from .recovery import Sample, StreamSamples
 from .reconcile import integrity, reconcile
 from .schemas import SchemaSet
 from .generator_health import run_stalls
+from .host_stress import stress_findings, thresholds
 from .stalls import Stall, stall_holding, stall_of
 from .window_recovery import recover_windows
 from .windows import Window, build_windows
@@ -158,6 +160,7 @@ class _Run:
                 shapes[s.shape] = s
         self.calls = _Calls(read_jsonl(run_dir / "records.jsonl"), shapes, schemas)
         load_start = jv.opt_number(self.meta, "load_started_at_ms") or jv.number(self.meta, "started_at_ms")
+        self.load_start_ms = load_start
         self.stalls = run_stalls(run_dir, self.calls.starts(), self.profile, load_start)
 
 
@@ -254,6 +257,8 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         )
     streams_out, reconciled = reconcile(streams_doc, calls.per_stream, success, stall_rows)
     found += reconciled + _stall_findings(stalled) + _window_integrity(windows)
+    spoiled = {st: len(ids) for st, ids in stalled.items()}
+    found = stress_findings(run_dir, thresholds(profile.preflight), stalls, spoiled, found, run.load_start_ms) + found
 
     windows_out: list[Json] = []
     findings = len(judged.in_dialog) + len(judged.unattributed)
