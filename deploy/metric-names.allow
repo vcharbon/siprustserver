@@ -64,16 +64,11 @@ k8s/sipp/: trace_*
 ../tooling/hakit/src/: cdr_join
 ../tooling/hakit/src/: cdr_required
 ../tooling/hakit/src/: cdr_mismatch
-../tooling/hakit/src/: cdr_mismatch_max
 ../tooling/hakit/src/: cdr_ms
 ../tooling/hakit/src/: cdr_unaccounted
 ../tooling/hakit/src/: cdr_unread_query
 ../tooling/hakit/src/: cdr_written
 ../tooling/hakit/src/: cdr_written_query
-../tooling/hakit/src/: loadgen_503_cps
-../tooling/hakit/src/: loadgen_not_ok
-../tooling/hakit/src/: loadgen_ok_cps
-../tooling/hakit/src/: loadgen_refused_overload_cps
 ../tooling/hakit/src/: sip_target
 ../tooling/hakit/src/: trace_err
 ../tooling/hakit/src/: trace_logs
