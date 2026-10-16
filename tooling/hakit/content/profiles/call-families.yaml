@@ -5,10 +5,10 @@ description: >-
   worker crash every 150 s: the plain hold and its emergency variant, the
   limited call, the caller's re-INVITEs, a long call the far end may end, the
   callee's re-INVITEs, the ghost and the two floods. The ghost is released by
-  the system under test's keepalive, so the lab's keepalive must end a silent
-  dialog within its 120 s hold.
+  the system under test's keepalive, so its 600 s bound sits above the lab's
+  keepalive interval plus its answer grace (300 s + 120 s).
 duration_s: 900
-drain_s: 200
+drain_s: 700
 settle_s: 40
 setup_slow_ms: 1000
 catalogs: [x-api-call]
@@ -71,7 +71,7 @@ streams:
     cps: 0.5
     setup_deadline_s: 32
     ring_s: 2
-    hold_s: 120
+    hold_s: 600
     params: { abuse: ghost }
 schedule:
   first_at_s: 120
