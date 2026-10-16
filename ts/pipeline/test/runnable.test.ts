@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest"
 import {
   ACK_NOT_CAPTURED,
   ACTOR_ACK_NOT_CAPTURED,
+  answererEndsDialogFirst,
   FINAL_NOT_CAPTURED,
   orphanLine,
   orphanResponses,
@@ -597,6 +598,98 @@ describe("a 2xx whose answerer ends the dialog before any ACK reaches it", () =>
         at(bye("s11", "C", "send"), 5_000)
       ]).map((c) => c.final)
     ).toEqual(["s8"])
+  })
+})
+
+describe("the answerer's own BYE ahead of any ACK, as one predicate", () => {
+  it("names the answerer's BYE and how long after its 2xx it came", () => {
+    expect(
+      answererEndsDialogFirst([...relayedAnswer, at(bye("s5", "B", "send"), 10_000)], 2)
+    ).toEqual({ step: "s5", afterUs: 9_000_000 })
+  })
+
+  /** A BYE in the confirmed dialog carries no early-dialog stamp; it rides the first 2xx's dialog. */
+  it("names an unstamped BYE that follows a forked 2xx", () => {
+    const flow = [
+      at(invite("s1", "A", "send"), 0),
+      at(invite("s2", "B", "expect"), 100),
+      at({ ...final("s3", "B", 200), early: "e1" }, 1_000),
+      at(final("s4", "A", 200, "expect"), 1_100),
+      at(bye("s5", "B", "send"), 10_000)
+    ]
+    expect(answererEndsDialogFirst(flow, 2)).toEqual({ step: "s5", afterUs: 9_000_000 })
+    expect(unackedFinals(flow)).toEqual([])
+  })
+
+  it("answers nothing where the BYE comes at the give-up", () => {
+    expect(
+      answererEndsDialogFirst([...relayedAnswer, at(bye("s5", "B", "send"), 1_000 + GIVE_UP_MS)], 2)
+    ).toBeUndefined()
+  })
+
+  it("answers nothing at a step that is no 2xx the answerer sends", () => {
+    const flow = [...relayedAnswer, at(bye("s5", "B", "send"), 10_000)]
+    expect(answererEndsDialogFirst(flow, 1)).toBeUndefined()
+    expect(answererEndsDialogFirst(flow, 3)).toBeUndefined()
+  })
+
+  /** Each shape puts an ACK of the SUT's on the answerer's leg ahead of that BYE. */
+  const ackedAhead: ReadonlyArray<readonly [string, ReadonlyArray<Flow.Step>, number]> = [
+    [
+      "a CANCEL the leg took before the 2xx",
+      [
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(cancel("s3", "A", "send"), 300),
+        at(cancel("s4", "B", "expect"), 310),
+        at(final("s5", "B", 200), 320),
+        at(final("s6", "A", 200, "expect"), 330),
+        at(bye("s7", "B", "send"), 5_000)
+      ],
+      4
+    ],
+    [
+      "a 2xx to the SUT's own dial",
+      [at(invite("s1", "A", "expect"), 0), at(final("s2", "A", 200), 100), at(bye("s3", "A", "send"), 200)],
+      1
+    ],
+    [
+      "a BYE on another fork's early dialog",
+      [
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at({ ...final("s3", "B", 200), early: "e1" }, 1_000),
+        at(final("s4", "A", 200, "expect"), 1_100),
+        at({ ...bye("s5", "B", "send"), early: "e2" }, 6_000)
+      ],
+      2
+    ],
+    [
+      "an ACK on another leg between the INVITE and the 2xx",
+      [
+        at(invite("s1", "A", "send"), 0),
+        at(invite("s2", "B", "expect"), 100),
+        at(ack("s3", "A", "send"), 500),
+        at(final("s4", "B", 200), 1_000),
+        at(final("s5", "A", 200, "expect"), 1_100),
+        at(bye("s6", "B", "send"), 2_000)
+      ],
+      3
+    ],
+    [
+      "a far party's ACK after the BYE",
+      [...relayedAnswer, at(bye("s5", "B", "send"), 2_000), at(ack("s6", "A", "send"), 3_000)],
+      2
+    ],
+    [
+      "the SUT's BYE on another leg first",
+      [...relayedAnswer, at(bye("s5", "A", "expect"), 2_000), at(bye("s6", "B", "send"), 2_002)],
+      2
+    ]
+  ]
+
+  it.each(ackedAhead)("answers nothing for %s", (_shape, flow, at2xx) => {
+    expect(answererEndsDialogFirst(flow, at2xx)).toBeUndefined()
   })
 })
 

@@ -356,6 +356,82 @@ describe("deciding a whole capture", () => {
     expect(out.refused).toHaveLength(1)
     expect(out.outcomes[0]!.built).toBeUndefined()
   })
+
+  /** A deferral no declaration anchors: it stands wherever it is the only refusal. */
+  const unanchored = {
+    rule: "no-ack-to-dialog-creating-2xx",
+    callId: "1-caller-leg-call-id",
+    emitter: "10.0.0.1:5060",
+    leg: 1
+  }
+  const deferral: Refusal = {
+    caseId: SPEC.id,
+    capture: CAPTURE,
+    reason: "sut-violates:no-ack-to-dialog-creating-2xx",
+    line: "refused unless declared",
+    disposition: "defers",
+    charged: [unanchored]
+  }
+  const declaresNothing = () => ({
+    entries: [],
+    flags: [],
+    coverage: [{ ...unanchored, refusal: "no step carries that 2xx at this vantage" }]
+  })
+
+  it("records no deferred refusal beside a refusal no declaration can answer", () => {
+    const refusal: Refusal = {
+      caseId: SPEC.id,
+      capture: CAPTURE,
+      reason: "scope-mechanism-not-statable",
+      disposition: "refuses",
+      line: "refused: the mechanism is out of scope"
+    }
+    const out = decide([deferral, refusal], declaresNothing)
+    expect(out.outcomes[0]!.built).toBeUndefined()
+    expect(out.refused.map((r) => r.reason)).toEqual(["scope-mechanism-not-statable"])
+  })
+
+  it("records no deferred refusal beside an untrusted one, and quarantines nothing", () => {
+    const refusal: Refusal = {
+      caseId: SPEC.id,
+      capture: CAPTURE,
+      reason: "scope-order-untrusted",
+      disposition: "untrusted",
+      line: "refused: the capture's order of the call cannot be trusted"
+    }
+    const out = decide([deferral, refusal], declaresNothing, true)
+    expect(out.refused.map((r) => r.reason)).toEqual(["scope-order-untrusted"])
+    expect(out.outcomes[0]!.quarantined).toBeUndefined()
+    expect(out.outcomes[0]!.quarantineError).toBe(refusal.line)
+  })
+
+  it("keeps a deferral the document evaluated beside a refusal the document states", () => {
+    const partial: DocumentRule = {
+      id: "scope-partial-exchange",
+      subject: "scope",
+      disposition: "refuses",
+      why: "the vantage holds part of an exchange",
+      refuses: (input) => ({ line: `${input.caseId}: part of an exchange` })
+    }
+    const out = decideCases({
+      flows: cancelRaceFlows(),
+      capture: CAPTURE,
+      specs: [SPEC],
+      sut: sutSet(),
+      plan: plan(),
+      policy: policyWith({
+        derives: derivesOnePrefix,
+        refuse: rulesOf([deferral]),
+        declare: declaresNothing,
+        refuseOnDocument: [partial]
+      })
+    })
+    expect(out.outcomes[0]!.built).toBeUndefined()
+    expect(out.refused.map((r) => r.reason)).toEqual([
+      "sut-violates:no-ack-to-dialog-creating-2xx",
+      "scope-partial-exchange"
+    ])
+  })
 })
 
 describe("a call the platform refused", () => {

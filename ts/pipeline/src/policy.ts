@@ -143,7 +143,8 @@ export interface RefusalEvidence {
  * - `refuses` — decided, final, and a replay could contradict it.
  * - `defers` — waits on the case's own document: refused only where the case
  *   cannot DECLARE the divergence it names, because a case that replays a
- *   divergence it never declared is worse than no case at all.
+ *   divergence it never declared is worse than no case at all. Not recorded
+ *   on a case refused before assembly: with no document it claims nothing.
  * - `not-proposed` — no case was ever on the table. The family is not a call.
  * - `unreachable` — no document can exist for it, so no replay can falsify it.
  *   A DECLARED zero, never a silent one.

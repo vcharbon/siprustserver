@@ -18,7 +18,11 @@
  *    lane names is stated as a negative case rather than refused twice.
  *
  * Only a coordinate nothing anchors keeps the refusal, because a case that
- * cannot state its own divergence would replay one it never declared.
+ * cannot state its own divergence would replay one it never declared. A
+ * deferral is a claim about the case's document, so a case refused before
+ * assembly records none: no document was built to evaluate it against. One
+ * evaluated on the document and still standing is recorded beside the
+ * document's own refusals, all-that-apply.
  *
  * Deciding is separated from writing on purpose: a generator writes the cases
  * and a registry sync only READS what the generator would do with each hit, and
@@ -215,15 +219,17 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
       ...atCase([...CASE_RULES, ...input.policy.refuse], site, { ...captured, spec })
     ]
 
-    // A case refused on a rule no declaration can answer is never assembled, so
-    // its deferred refusals stand with it: there is no document to declare in.
+    // A case refused on a rule no declaration can answer is never assembled,
+    // so its deferrals, claims about a document, are not recorded.
     if (refusals.some((r) => r.disposition !== "defers")) {
-      outcomes.push({ spec, legs, callIds, refused: refusals, ...quarantineOf(input, index, spec, refusals) })
+      const refused = refusals.filter((r) => r.disposition !== "defers")
+      outcomes.push({ spec, legs, callIds, refused, ...quarantineOf(input, index, spec, refused) })
       continue
     }
     const attempt = build(input, index, spec)
     if ("error" in attempt) {
-      // No document, so nothing is declared and every deferred refusal stands.
+      // A case only deferrals refuse, with no document: nothing is declared,
+      // so every deferral stands.
       outcomes.push({
         spec,
         legs,
