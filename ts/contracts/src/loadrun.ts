@@ -34,15 +34,13 @@ export const LoadRunMeta = Schema.Struct({
 })
 export interface LoadRunMeta extends Schema.Schema.Type<typeof LoadRunMeta> {}
 
-/** One `(scenario, class, case, chaos)` completed-call count. */
+/** One `(scenario, class, case)` completed-call count. */
 export const CountRow = Schema.Struct({
   scenario: Schema.String,
   /** The result class label (`ok`, `timeout`, `status_503`, `check_fail`, …). */
   class: Schema.String,
   /** The bounded case discriminator refining the class. Empty = un-refined. */
   case: defaulted(Schema.String, ""),
-  /** Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral). */
-  chaos: Schema.String,
   count: Schema.Int,
   /** `true` iff the class is no failure (`ok`). */
   ok: Schema.Boolean
@@ -99,12 +97,11 @@ export interface Canaries extends Schema.Schema.Type<typeof Canaries> {}
 export const ringingRatio = (canaries: Canaries): number =>
   canaries.ringingExpected === 0 ? 1 : canaries.ringingReceived / canaries.ringingExpected
 
-/** The stored sampled callflow pages for one `(scenario, class, case, chaos)` bucket. */
+/** The stored sampled callflow pages for one `(scenario, class, case)` bucket. */
 export const SampleGroup = Schema.Struct({
   scenario: Schema.String,
   class: Schema.String,
   case: defaulted(Schema.String, ""),
-  chaos: Schema.String,
   /** Run-dir-relative paths to each sample's rendered callflow HTML page. */
   pages: Schema.Array(Schema.String)
 })
@@ -132,10 +129,6 @@ export const totalCalls = (index: LoadRunIndex): number => index.counts.reduce((
 export const failedCalls = (index: LoadRunIndex): number =>
   index.counts.filter((row) => !row.ok).reduce((sum, row) => sum + row.count, 0)
 
-/** Genuine (chaos=clear) non-ok calls — the triage total that excludes kill collateral. */
-export const clearFailures = (index: LoadRunIndex): number =>
-  index.counts.filter((row) => !row.ok && row.chaos === "clear").reduce((sum, row) => sum + row.count, 0)
-
 // --- Declaration-order emission ----------------------------------------------
 
 const pruned = (value: Record<string, unknown>): Record<string, unknown> =>
@@ -158,7 +151,6 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       scenario: row.scenario,
       class: row.class,
       case: row.case,
-      chaos: row.chaos,
       count: row.count,
       ok: row.ok
     })),
@@ -191,7 +183,6 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       scenario: group.scenario,
       class: group.class,
       case: group.case,
-      chaos: group.chaos,
       pages: group.pages
     }))
   })

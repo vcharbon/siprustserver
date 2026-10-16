@@ -171,8 +171,9 @@ long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
 A failover/kill failure is NOT automatically a SUT bug. Protected: ringing and
 established calls — a confirmed call dropping is always genuine. Accepted
 collateral: a dialog whose state changed within the acceptance window (default
-200 ms) of a kill (the confirm-race); the loadgen auto-buckets `chaos="near"`
-vs `chaos="clear"` — triage `clear`. A takeover keepalive firing ~one interval
+200 ms) of a kill (the confirm-race); the HA tooling attributes each impact
+to its incident window and judges it against that window's budget
+(ADR-0049 §3.5). A takeover keepalive firing ~one interval
 early on an endurance run is a host clock-STEP artifact (fix is infra; the SUT
 re-anchors restored timers to bound the residual). Design invariants — never
 reintroduce: time-based settle/handback (reconciliation is `(p,b)`-causal

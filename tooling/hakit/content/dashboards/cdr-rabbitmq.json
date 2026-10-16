@@ -9,19 +9,6 @@
   "annotations": {
     "list": [
       {
-        "name": "Chaos window",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "vm"
-        },
-        "enable": true,
-        "iconColor": "semi-dark-red",
-        "expr": "sip_chaos_window == 1",
-        "titleFormat": "chaos: {{type}}",
-        "tagKeys": "type",
-        "step": "10s"
-      },
-      {
         "name": "Incident window",
         "datasource": {
           "type": "prometheus",

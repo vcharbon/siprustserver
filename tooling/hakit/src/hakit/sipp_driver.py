@@ -31,9 +31,12 @@ TXN_BOUND_S = 32
 # rotate the record file too.
 ERROR_KEEP_BYTES = 16 * 1024 * 1024
 # Every error entry but the scenario's own receive timer, kept whole for the
-# run (the tail above holds minutes at a high rate), bounded by this tail.
+# run (the tail above holds minutes at a high rate), bounded by this tail. The
+# twin writes it, so its tmpfs pages are charged to the twin's TWIN_MEMORY,
+# beside the exporter's own resident memory (workdir.py).
 ERROR_KEPT_FILE = "/stats/errors.kept.log"
-ERROR_KEPT_BYTES = 256 * 1024 * 1024
+ERROR_KEPT_BYTES = 64 * 1024 * 1024
+TWIN_MEMORY = "256m"
 # Margin of the global `-recv_timeout` above every timeout of the scenario.
 RECV_BACKSTOP_MARGIN_S = 60
 # SIPp's remote control port, where a rate step is sent.
@@ -202,11 +205,12 @@ class SippStream:
         self.remove()
         twin = self.executor.run(
             ["docker", "run", "-d", "--name", self.twin, "--user", self.lab.generator_user, *labels]
-            + ["--network", self.lab.sipp_network, "--ip", ip, "--cpus", "0.5", "--memory", "256m", "--memory-swap", "256m"]
+            + ["--network", self.lab.sipp_network, "--ip", ip, "--cpus", "0.5", "--memory", TWIN_MEMORY, "--memory-swap", TWIN_MEMORY]
             + ["-v", f"{self.dir}:/stats", "-v", f"{SIPP_EXPORTER_DIR}:/exporter:ro"]
             + ["-e", "SIPP_STAT_FILE=/stats/stat.csv", "-e", f"SIPP_SCENARIO={self.scenario.name}"]
             + ["-e", f"SIPP_ROLE={self.stream.name}", "-e", f"SIPP_JOB={self.uac}"]
             + ["-e", f"SIPP_STREAM={self.stream.name}", "-e", f"SIPP_SHAPE={self.stream.shape}"]
+            + ["-e", f"SIPP_START={self.stream.start}"]
             + ["-e", "SIPP_RECORD_FILE=/stats/records.jsonl", "-e", f"SIPP_RUN={self.run}"]
             + ["-e", f"SIPP_ERROR_KEEP_BYTES={ERROR_KEEP_BYTES}"]
             + ["-e", f"SIPP_ERROR_KEPT_FILE={ERROR_KEPT_FILE}", "-e", f"SIPP_ERROR_KEPT_BYTES={ERROR_KEPT_BYTES}"]

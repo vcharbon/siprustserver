@@ -121,6 +121,17 @@ class TailRead(unittest.TestCase):
         self.assertIn('counter="12"} 3', text)
         self.assertNotIn("GenericCounter", text)
 
+    def test_the_stream_start_is_a_label_a_dashboard_can_exclude_on(self):
+        write_stat(self.path, 1, 3)
+        saved = exporter.START
+        try:
+            exporter.START = "incident"
+            text = exporter.render(self.path)
+        finally:
+            exporter.START = saved
+        self.assertIn('sipp_calls_created_total{scenario="unknown",role="uac",start="incident"} 3', text)
+        self.assertNotIn('start="', exporter.render(self.path))
+
     def test_header_only_is_down(self):
         with open(self.path, "wb") as fh:
             fh.write(header())

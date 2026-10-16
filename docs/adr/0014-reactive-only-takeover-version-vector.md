@@ -284,6 +284,8 @@ memory_clean, holds_any_trace}`). External behaviour (Alice/Bob: responses, CSeq
 order, call survival, clean teardown) is unchanged by this refactor.
 
 **Chaos-aware classification of the confirm-race (the accepted trade-off above).**
+Superseded by ADR-0049 §3.5: the HA tooling attributes each impact to its
+incident window and budget; loadgen carries no chaos classifier.
 The endurance load generator (`crates/loadgen`) is *chaos-aware*: the chaos driver
 flags it at each fault instant (`POST /chaos`), and every call carries dialog-state
 **phase markers** (`connected`, `reinvited`, `transferred`, …). A failed call is

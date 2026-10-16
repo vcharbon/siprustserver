@@ -18,24 +18,20 @@ impl Reporter {
         let st = g.stream.as_deref().unwrap_or(DEFAULT_STREAM);
         let mut out = String::new();
         // The case dimension is a report/sample refinement only — the Prometheus
-        // series stay (shape, class, chaos)-keyed (stable dashboards, bounded
-        // series), so aggregate over case here.
-        let mut calls: BTreeMap<(ScenarioId, String, &str), u64> = BTreeMap::new();
+        // series stay (shape, class)-keyed (stable dashboards, bounded series),
+        // so aggregate over case here.
+        let mut calls: BTreeMap<(ScenarioId, String), u64> = BTreeMap::new();
         for shape in &g.declared {
             for class in c::CLASS.values {
-                for chaos in c::CHAOS.values {
-                    calls.insert((shape, class.to_string(), chaos), 0);
-                }
+                calls.insert((shape, class.to_string()), 0);
             }
         }
-        for ((shape, class, _case, chaos), n) in &g.counts {
-            *calls.entry((*shape, class.clone(), chaos.label())).or_default() += n;
+        for ((shape, class, _case), n) in &g.counts {
+            *calls.entry((*shape, class.clone())).or_default() += n;
         }
         c::CALLS.render_rows(
             &mut out,
-            calls.into_iter().map(|((s, class, chaos), n)| {
-                ([st.to_string(), s.to_string(), class, chaos.to_string()], n)
-            }),
+            calls.into_iter().map(|((s, class), n)| ([st.to_string(), s.to_string(), class], n)),
         );
         c::BRANCHES.render_rows(
             &mut out,

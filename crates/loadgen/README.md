@@ -138,7 +138,7 @@ startup**, never silently mid-run.
 ### Live rate control (`POST /rate`)
 
 The offered rate is **re-targetable at runtime** — no restart — over the same
-HTTP socket as `/metrics` and `/chaos`:
+HTTP socket as `/metrics`:
 
 - **`POST /rate?cps=<float>`** — set the target call rate. The value is validated
   and **clamped to `>= 0`** (a negative/`NaN`/`inf` clamps to `0`); a missing or
@@ -245,8 +245,7 @@ per run with `--correlate`; all mux endpoints share the one strategy:
     holds or that is cooling is re-drawn from the case's pool, up to 8 draws;
     only when every draw is unavailable is the call `rejected`. Each refused
     draw counts once (`loadgen_mux_token_collision_total`,
-    `loadgen_mux_key_cooling_total`), so these count draws, not calls. Those contention rejections are classified against the
-    chaos markers of the last 64·T1, like the failure that caused them;
+    `loadgen_mux_key_cooling_total`), so these count draws, not calls;
   - the caller's first INVITE must carry the key as its From user; a mismatch
     fails the send and counts `loadgen_mux_caller_key_mismatch_total`;
   - a number whose call ended not ok cools for 64·T1 (32 s): a draw of it
@@ -496,11 +495,11 @@ quantiles, RSS + leak canaries), with the incident windows annotated.
 
 ## Where the results are (and *why* calls failed)
 
-The report is written to `--out-dir`, bucketed per `(scenario × result-class × chaos)`:
+The report is written to `--out-dir`, bucketed per `(scenario × result-class × case)`:
 
-- **`index.html`** — counts table (`scenario | class | chaos | count | sample-links`),
+- **`index.html`** — counts table (`scenario | class | case | count | sample-links`),
   OK rows green, failing rows red; plus latency percentiles and checkpoints.
-- **`callflows/<scenario>/<class>/<chaos>/<i>.html`** — the per-call **SIP sequence
+- **`callflows/<scenario>/<class>[/<case>]/<i>.html`** — the per-call **SIP sequence
   diagram** for sampled calls. For a failing call the page shows `FAIL` **and the
   reason** (the `StepError` / outcome) as the header banner and a `call-result`
   anomaly — e.g. *"alice expected 200, got 486 Busy Here"*,
@@ -515,7 +514,7 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
 - **`summary.md`** — the same counts in markdown.
 - **Live:** `curl <metrics-addr>/metrics` during a run (every series names its
   `--stream` first) for the per-`(stream, shape,
-  class, chaos)` counters, `loadgen_branch_total{stream,shape,branch}` (ok calls by
+  class)` counters, `loadgen_branch_total{stream,shape,branch}` (ok calls by
   the accepted ending they took) and `loadgen_failed_step_total{stream,shape,step}`
   (failed calls by the step they failed at), the call and checkpoint latency
   histograms, the SIP
@@ -523,33 +522,17 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   first `100` / first `18x` for INVITE, → final for every other method; a 2xx
   to an INVITE first sent → its ACK; none of them holds a scripted timer), plus
   the `loadgen_mux_orphan_total` /
-  `loadgen_mux_registry_size` canaries, `loadgen_chaos_markers_total`, and
-  `loadgen_target_cps` (the current offered-rate target). The same socket serves
-  `POST /rate?cps=<float>` / `GET /rate` (live rate control — see *Live rate
-  control* above) and `POST /chaos` (chaos correlation — below).
+  `loadgen_mux_registry_size` canaries, and `loadgen_target_cps` (the current
+  offered-rate target). The same socket serves `POST /rate?cps=<float>` /
+  `GET /rate` (live rate control — see *Live rate control* above) and
+  `POST /drain`.
 
-### Chaos correlation (near vs clear)
+### Calls across an incident
 
-When a fault is injected during a run, a chaos driver can flag the loadgen at
-the kill instant via **`POST /chaos?type=<kind>&target=<who>`** (same socket as
-`/metrics`). Each finished call is then auto-classified on the `chaos` label:
-
-- **`chaos="near"`** — an injected fault landed on a *fragile moment* of the
-  call: within `--chaos-phase-tolerance-ms` (default 200) of a dialog-state
-  transition (connected/reinvited/transferred/…), or mid-setup before it
-  connected. The state had no time to propagate and SIP retransmission normally
-  recovers it → likely acceptable kill collateral (in-setup at the kill → 408,
-  etc.) — **counted, but not hand-triaged.**
-- **`chaos="clear"`** — the call was stably connected across the fault (or none
-  overlapped). A genuine SUT signal.
-
-The loadgen timestamps the marker on its **own** clock — the single process-wide
-`Clock::system()` the calls also record on — so the overlap is exact (no
-Call-ID/tag ms-base reconciliation) and the marker renders on the very axis the
-frames do, even if the host wall clock steps mid-run. A post-reboot call (created
-seconds after the worker came back) is `clear`, so a reclaim-path defect stays
-visible. **Triage `loadgen_calls_total{class="rfc_audit_fail",chaos="clear"}`**
-and the `callflows/<sc>/<class>/clear/` flows; revisit `near` only if wanted.
+loadgen does not judge whether a failure is an incident's collateral: each
+call's record carries its own instants, and the HA tooling's verdict
+attributes it to the incident window it fell in, against that window's budget
+(ADR-0049 §3.5).
 
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub

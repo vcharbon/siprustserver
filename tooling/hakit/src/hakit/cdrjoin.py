@@ -33,8 +33,12 @@ NO_CDR = "answered call without a CDR"
 NO_REQUIRED_CDR = "a call that must have a CDR without one"
 
 
-def impact(stream: str, call_id: str, at_ms: float, kind: str, detail: str, excess_ms: float = math.inf) -> Impact:
-    return Impact(CDR_MISMATCH, stream, call_id, at_ms, at_ms, reason=kind, detail=detail, excess_ms=excess_ms)
+def impact(
+    stream: str, call_id: str, at_ms: float, kind: str, detail: str, excess_ms: float = math.inf, started_ms: float | None = None
+) -> Impact:
+    """A mismatch charged at `at_ms`, of a call alive from `started_ms` (`at_ms` when unknown)."""
+    started = at_ms if started_ms is None else started_ms
+    return Impact(CDR_MISMATCH, stream, call_id, at_ms, started, reason=kind, detail=detail, excess_ms=excess_ms)
 
 
 def _compare(r: Json, cdr: Json) -> tuple[str, float] | None:
@@ -97,18 +101,25 @@ def join(
         seen.add(call_id)
         stream = jv.string(r, "stream")
         ended = jv.number(r, "ended_at_ms")
+        started = jv.number(r, "started_at_ms")
         mine = by_call.get(call_id, [])
         if not mine:
             if charge_missing and jv.opt_number(r, "answered_at_ms") is not None:
-                out.append(impact(stream, call_id, ended, MISSING, NO_CDR))
+                out.append(impact(stream, call_id, ended, MISSING, NO_CDR, started_ms=started))
             elif charge_missing and required(r):
-                out.append(impact(stream, call_id, ended, MISSING, NO_REQUIRED_CDR))
+                out.append(impact(stream, call_id, ended, MISSING, NO_REQUIRED_CDR, started_ms=started))
             continue
         why = _compare(r, mine[0])
         if why is not None:
-            out.append(impact(stream, call_id, ended, DIFFERS, why[0], why[1]))
-        out += [impact(stream, call_id, ended, DUPLICATE, f"CDR {i + 2} of the call") for i in range(len(mine) - 1)]
+            out.append(impact(stream, call_id, ended, DIFFERS, why[0], why[1], started_ms=started))
+        out += [
+            impact(stream, call_id, ended, DUPLICATE, f"CDR {i + 2} of the call", started_ms=started)
+            for i in range(len(mine) - 1)
+        ]
     for call_id, mine in sorted(by_call.items()):
         if call_id not in seen:
-            out += [impact("", call_id, jv.number(c, "end_ms"), EXTRA, "CDR without a record") for c in mine]
+            out += [
+                impact("", call_id, jv.number(c, "end_ms"), EXTRA, "CDR without a record", started_ms=jv.number(c, "start_ms"))
+                for c in mine
+            ]
     return out

@@ -102,7 +102,9 @@ class PodLoadgenStream:
                     "resources": {"requests": {"cpu": "10m", "memory": "8Mi"}},
                 },
             ],
-            # In memory, charged to the pod: no write waits on the node's disk.
+            # In memory, charged to the gen container that writes it: no write
+            # waits on the node's disk, and its 1536Mi holds this 512Mi beside
+            # the generator's process.
             "volumes": [{"name": "stats", "emptyDir": {"medium": "Memory", "sizeLimit": "512Mi"}}],
         }
         if selector:

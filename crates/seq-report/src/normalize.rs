@@ -14,8 +14,7 @@
 //!   true (delivery is a transport fact, not a plan fact);
 //! - `at_ms` (wall/virtual timing) → the causal ordinal; `seq` is re-based onto
 //!   the same ordinal so two lanes' differing absolute sequence numbers agree;
-//! - `Lifecycle` bands (chaos markers — load-lane only, wall-clock placed) are
-//!   dropped;
+//! - `Lifecycle` bands (operator events, wall-clock placed) are dropped;
 //! - `Http` rows are dropped (whether a lane records the HTTP exchanges is a
 //!   transport fact), with the lanes only they reference and every `Service`
 //!   lane;

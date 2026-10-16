@@ -3,9 +3,11 @@
 
 A sample reads `/proc/pressure/{cpu,memory,io}` (the `some` and `full` lines:
 avg10 and the stall total in µs) and `/proc/vmstat` (`pswpin`, `pswpout`)
-through the executor. Two consecutive samples make an interval whose share of
-time stalled comes from the totals, so a sample delayed by a blocking step
-loses nothing: the interval covers it. An interval is under stress when its
+through the executor, while the runner waits between its steps: a step that
+blocks (a heal, an export) delays the next sample. Two consecutive samples make
+an interval whose share of time stalled comes from the totals, so a delayed
+sample's interval still counts every stall in it, averaged over its longer
+span: a short burst inside a long gap reads lower than it peaked. An interval is under stress when its
 `io` or `memory` full share or its swap-in rate reaches a threshold of the
 profile's `preflight` (stated defaults below). The samples are kept in
 `host.jsonl` and pushed as `hakit_host_*` series.
@@ -28,9 +30,12 @@ KINDS = ("some", "full")
 SAMPLE_MS = 1000
 HOST_FILE = "host.jsonl"
 
-# Stated, not fitted: past these a generator's one thread is likely to wait on
-# the host (an IO or memory full stall stops every runnable task of the cgroup).
-DEFAULT_IO_FULL_PCT = 5.0
+# Stated, not fitted. Swap-in is the trigger: a generator's own pages may be on
+# disk, and its one thread waits on each fault. Memory full pressure is reclaim
+# run by every allocating task, the generator's included. A tmpfs-backed
+# generator does not wait on the host's disk, so io full pressure counts only
+# as a sustained stall risk, a fifth of the time with every task stalled.
+DEFAULT_IO_FULL_PCT = 20.0
 DEFAULT_MEMORY_FULL_PCT = 5.0
 DEFAULT_SWAPIN_PAGES_S = 50.0
 

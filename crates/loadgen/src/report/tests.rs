@@ -11,58 +11,6 @@ fn rfc_fail(rule: &str, detail: &str) -> CallOutcome {
     }])
 }
 
-/// The chaos dimension splits a failure class into independent near/clear
-/// sub-buckets across counts, the Prometheus surface, and the on-disk dirs;
-/// the un-tagged `count` still sums both.
-#[test]
-#[ignore = "slow lane: loadgen"]
-fn chaos_splits_counts_samples_and_dirs() {
-    let r = Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 0 });
-    let mk =
-        |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 1.0 });
-    let outcome = rfc_fail("rfc3261.cseq", "CSeq went backwards");
-    let case = outcome.case(None);
-    r.record(
-        "reinvite",
-        &outcome,
-        &case,
-        Duration::from_millis(1),
-        &[],
-        mk("kill collateral"),
-        ChaosTag::Near,
-    );
-    r.record(
-        "reinvite",
-        &outcome,
-        &case,
-        Duration::from_millis(1),
-        &[],
-        mk("genuine desync"),
-        ChaosTag::Clear,
-    );
-
-    assert_eq!(r.count_tagged("reinvite", &ResultClass::RfcAuditFail, ChaosTag::Near), 1);
-    assert_eq!(r.count_tagged("reinvite", &ResultClass::RfcAuditFail, ChaosTag::Clear), 1);
-    assert_eq!(r.count("reinvite", &ResultClass::RfcAuditFail), 2, "untagged count sums both");
-
-    let prom = r.render_prometheus();
-    assert!(prom.contains("class=\"rfc_audit_fail\",chaos=\"near\""), "{prom}");
-    assert!(prom.contains("class=\"rfc_audit_fail\",chaos=\"clear\""), "{prom}");
-
-    let out = std::env::temp_dir().join(format!("loadgen-chaos-report-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
-    r.finalize(&out).unwrap();
-    assert!(
-        out.join("callflows/reinvite/rfc_audit_fail/rfc3261.cseq/near/0.html").exists(),
-        "near sub-bucket dir missing"
-    );
-    assert!(
-        out.join("callflows/reinvite/rfc_audit_fail/rfc3261.cseq/clear/0.html").exists(),
-        "clear sub-bucket dir missing"
-    );
-    let _ = std::fs::remove_dir_all(&out);
-}
-
 /// The latency histograms are exported as Prometheus histograms, so a
 /// scrape series gives the latency of any time window (histogram_quantile
 /// over an increase).
@@ -78,7 +26,6 @@ fn latency_histograms_are_exported_as_prometheus_histograms() {
             Duration::from_millis(e2e),
             &[("time_to_200", Duration::from_millis(setup))],
             None,
-            ChaosTag::Clear,
         );
     }
     let prom = r.render_prometheus();
@@ -127,21 +74,12 @@ fn a_scrape_holds_no_quantile_gauge_and_counts_branches_and_steps() {
         Duration::from_millis(9_000),
         &[("time_to_200", Duration::from_millis(5))],
         None,
-        ChaosTag::Clear,
     );
     let failed = CallOutcome::Step {
         at: FailedAt { who: "alice", goal: Some(("bye", 1)), barrier: "established" },
         cause: scenario_harness::StepError::timeout("alice", None, "a datagram"),
     };
-    r.record(
-        "basic_call",
-        &failed,
-        &failed.case(None),
-        Duration::from_millis(9_000),
-        &[],
-        None,
-        ChaosTag::Clear,
-    );
+    r.record("basic_call", &failed, &failed.case(None), Duration::from_millis(9_000), &[], None);
     let prom = r.render_prometheus();
     assert!(!prom.contains("loadgen_e2e_seconds"), "{prom}");
     assert!(!prom.contains("loadgen_checkpoint_seconds"), "{prom}");
@@ -221,7 +159,7 @@ fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
     };
     let record = |o: &CallOutcome| {
         let sample = RenderedSample { html: None, detail: o.detail(), e2e_ms: 1.0 };
-        r.record("s", o, &o.case(None), Duration::ZERO, &[], Some(sample), ChaosTag::Clear);
+        r.record("s", o, &o.case(None), Duration::ZERO, &[], Some(sample));
     };
     record(&failed());
     let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
@@ -241,15 +179,7 @@ fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
 fn the_index_counts_an_accepted_reject_as_ok() {
     let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
     let reject = CallOutcome::Ok { branch: "rejected" };
-    r.record(
-        "limited",
-        &reject,
-        &reject.case(None),
-        Duration::from_millis(3),
-        &[],
-        None,
-        ChaosTag::Clear,
-    );
+    r.record("limited", &reject, &reject.case(None), Duration::from_millis(3), &[], None);
     let idx = r.build_index(
         LoadRunMeta {
             started_ms: 0,
@@ -285,24 +215,16 @@ fn case_splits_sample_buckets_within_a_class() {
     assert_ne!(case_a, case_b, "different rules → different cases");
 
     // Fill rule A's bucket (cap 1), then rule B must STILL want a sample.
-    r.record(
-        "reinvite",
-        &unacked,
-        &case_a,
-        Duration::from_millis(1),
-        &[],
-        mk("a"),
-        ChaosTag::Clear,
-    );
+    r.record("reinvite", &unacked, &case_a, Duration::from_millis(1), &[], mk("a"));
     assert!(
-        !r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_a, ChaosTag::Clear),
+        !r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_a),
         "rule A bucket full at cap"
     );
     assert!(
-        r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_b, ChaosTag::Clear),
+        r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_b),
         "rule B keeps its own bucket"
     );
-    r.record("reinvite", &cseq, &case_b, Duration::from_millis(1), &[], mk("b"), ChaosTag::Clear);
+    r.record("reinvite", &cseq, &case_b, Duration::from_millis(1), &[], mk("b"));
     assert_eq!(r.sample_count("reinvite", &ResultClass::RfcAuditFail), 2);
 
     // The machine-readable index carries the case on counts AND samples,
@@ -355,7 +277,6 @@ fn writes_and_parses_the_machine_readable_index() {
         Duration::from_millis(3),
         &[("ringing", Duration::from_millis(1))],
         mk("ok"),
-        ChaosTag::Clear,
     );
     let check_fail = CallOutcome::CheckFail(vec![e2e_model::CheckVerdict {
         on: "alice.invite".to_string(),
@@ -367,15 +288,7 @@ fn writes_and_parses_the_machine_readable_index() {
         detail: "from.userInfo mismatch".to_string(),
     }]);
     let check_case = check_fail.case(None);
-    r.record(
-        "reinvite",
-        &check_fail,
-        &check_case,
-        Duration::from_millis(5),
-        &[],
-        mk("check fail"),
-        ChaosTag::Clear,
-    );
+    r.record("reinvite", &check_fail, &check_case, Duration::from_millis(5), &[], mk("check fail"));
     r.record_ringing(Some(true));
     r.record_ringing(Some(false));
     r.record_checks("reinvite", true);
@@ -447,7 +360,6 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
         Duration::from_millis(3),
         &[],
         None,
-        ChaosTag::Clear,
     );
 
     let out = std::env::temp_dir().join(format!("loadgen-snapshot-race-{}", std::process::id()));

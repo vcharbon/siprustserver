@@ -556,38 +556,6 @@ async fn a_cooling_number_is_redrawn_from_the_pool() {
     settle(&rig, &reporter).await;
 }
 
-/// A call refused because its only number is cooling after a failure near a
-/// fault is chaos collateral like the failure itself: tagged `near`.
-#[tokio::test(start_paused = true)]
-#[ignore = "slow lane: loadgen"]
-async fn a_cooling_rejection_near_a_fault_is_excused() {
-    let rig =
-        rig(7510, Layout::Shared, Correlation::from_user(), B2buaSut::route_all_with_refer, None)
-            .await;
-    let reporter = reporter();
-    let chaos = Arc::new(loadgen::ChaosLog::new(rig.transport.clock.clone()));
-    chaos.record("kill_worker", None);
-    let fixed = case(r#""input": { "core": { "from": "sip:+15550123456@pool.example" } }"#);
-    let driver = Driver::new(
-        cfg(rig.b2bua.addr, 2.0, 3, 0, 0xC4A0),
-        vec![broken(false).with_case(Some(fixed))],
-        reporter.clone(),
-        rig.transport.clone(),
-    )
-    .with_chaos(chaos);
-    driver.run().await;
-
-    let rejected = reporter.count("failing_build", &ResultClass::Rejected);
-    let report = reporter.render_prometheus();
-    assert!(rejected >= 3, "the cooling number was not refused:\n{report}");
-    assert_eq!(
-        reporter.count_tagged("failing_build", &ResultClass::Rejected, loadgen::ChaosTag::Near),
-        rejected,
-        "a cooling rejection within the fault's hold must be excused:\n{report}"
-    );
-    settle(&rig, &reporter).await;
-}
-
 /// A cooled number is usable again once `RELEASE_HOLD` has passed, and a call
 /// that ended ok leaves its number free for the very next call.
 #[tokio::test(start_paused = true)]

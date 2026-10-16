@@ -53,7 +53,6 @@ pub mod app;
 mod call_rtt;
 pub mod case;
 pub mod catalogue;
-pub mod chaos;
 pub mod class;
 pub mod ctx;
 pub mod driver;
@@ -70,7 +69,6 @@ pub mod waiver;
 
 pub use case::{DwellOverrides, LoadCase, ResolvedCall};
 pub use catalogue::CATALOGUE;
-pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
 pub use driver::{CallConfig, CallTuning, Driver, DriverCfg, MuxTransport};

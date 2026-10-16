@@ -1,21 +1,15 @@
-//! The metrics socket: a minimal HTTP/1.1 server for `/metrics`, the chaos
-//! markers, the live rate and the on-demand flamegraph.
+//! The metrics socket: a minimal HTTP/1.1 server for `/metrics`, the live
+//! rate, the drain and the on-demand flamegraph.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::chaos::ChaosLog;
 use crate::rate::RateHandle;
 
 /// A minimal HTTP/1.1 server (hand-rolled over `TcpListener` — no hyper
 /// dependency). Routes:
 ///
 /// - **`GET /metrics`** (and any other GET) → `render()`, the Prometheus surface.
-/// - **`POST /chaos?type=<kind>&target=<who>[&ts=<ms>]`** (when a [`ChaosLog`] is
-///   attached) → records a fault marker so finished calls get auto-classified
-///   near/clear. With `ts` (Unix epoch ms of the actual kill, supplied by the
-///   chaos driver) the marker is back-dated to the kill instant — robust to
-///   port-forward latency on the flag path; without it it lands at receipt instant.
 /// - **`POST /rate?cps=<float>`** (when a [`RateHandle`] is attached) → re-targets
 ///   the offered call rate live (clamped to `>= 0`; `0` pauses new-call admission).
 ///   The governor re-anchors its grid on the next slot. Responds with the applied
@@ -33,11 +27,10 @@ use crate::rate::RateHandle;
 pub async fn serve_metrics(
     addr: SocketAddr,
     render: Arc<dyn Fn() -> String + Send + Sync>,
-    chaos: Option<Arc<ChaosLog>>,
     rate: Option<RateHandle>,
 ) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_metrics_on(listener, render, chaos, rate).await
+    serve_metrics_on(listener, render, rate).await
 }
 
 /// [`serve_metrics`] over an already-bound listener. Callers that need the
@@ -46,14 +39,12 @@ pub async fn serve_metrics(
 pub async fn serve_metrics_on(
     listener: tokio::net::TcpListener,
     render: Arc<dyn Fn() -> String + Send + Sync>,
-    chaos: Option<Arc<ChaosLog>>,
     rate: Option<RateHandle>,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let (mut sock, _) = listener.accept().await?;
         let render = render.clone();
-        let chaos = chaos.clone();
         let rate = rate.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
@@ -86,30 +77,7 @@ pub async fn serve_metrics_on(
                 return;
             }
 
-            let (status, body) = if method == "POST" && path == "/chaos" {
-                let body = if let Some(log) = &chaos {
-                    let kind = query_get(&query, "type").unwrap_or_else(|| "unknown".to_string());
-                    let target = query_get(&query, "target");
-                    // `ts` (Unix epoch ms, captured by the chaos script at the
-                    // instant of the kill) back-dates the marker so PF latency does
-                    // not shift it; without it we fall back to the receipt instant.
-                    match query_get(&query, "ts").and_then(|s| s.parse::<u64>().ok()) {
-                        Some(ts) => {
-                            log.record_at(kind.clone(), target.clone(), ts);
-                            format!(
-                                "ok: recorded chaos marker type={kind} target={target:?} ts={ts}\n"
-                            )
-                        }
-                        None => {
-                            log.record(kind.clone(), target.clone());
-                            format!("ok: recorded chaos marker type={kind} target={target:?}\n")
-                        }
-                    }
-                } else {
-                    "ok: no chaos log attached\n".to_string()
-                };
-                ("200 OK", body)
-            } else if method == "POST" && path == "/drain" {
+            let (status, body) = if method == "POST" && path == "/drain" {
                 match &rate {
                     None => ("404 Not Found", "no rate handle attached\n".to_string()),
                     Some(h) => {
@@ -163,8 +131,8 @@ fn parse_request_line(buf: &[u8]) -> (String, String, String) {
     (method, path, query)
 }
 
-/// Pull `key`'s value out of a raw `a=b&c=d` query string (no percent-decoding —
-/// the chaos flags carry simple alnum/`-` values: `kill_worker`, `b2bua-worker-1`).
+/// Pull `key`'s value out of a raw `a=b&c=d` query string (no percent-decoding:
+/// the values are numbers).
 fn query_get(query: &str, key: &str) -> Option<String> {
     query.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;

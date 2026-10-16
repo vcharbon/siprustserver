@@ -10,4 +10,3 @@ bench/*/results/
 # SUT build, and its container-owned files break the build-context sender with
 # permission-denied. The image only needs the Rust workspace.
 deploy/observability/
-deploy/k8s/results/

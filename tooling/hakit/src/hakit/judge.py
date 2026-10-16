@@ -6,7 +6,9 @@ charged to the first budget entry that matches it; a key no entry names allows
 0. A counted impact (`cdr_mismatch` by kind, a product's class) is charged to
 its window's allowance for the class and kind; a missing CDR whose call ended
 just before a window opened, within the sink's in-flight span, belongs to that
-window. One outside every window is `unattributed`.
+window. A counted impact outside every window of a call whose lifetime
+overlapped windows takes no budget: it carries those windows, like an
+in-dialog impact. One outside every window is `unattributed`.
 An in-dialog impact takes no budget: it carries every window whose inject fell
 inside the call's lifetime before the impact or that holds the impact's
 instant, and with none it is `unattributed`. A slow setup measured across a generator stall is no impact:
@@ -196,10 +198,16 @@ def judge(
 
     for imp in counted:
         w = _counted_window(windows, imp, cdr_in_flight_ms)
-        if w is None:
-            outside[(imp.cls, "", 0, imp.reason or "", False)].append(imp)
-        else:
+        if w is not None:
             counted_in_window[w.event].append(imp)
+            continue
+        overlapped = [w.event for w in windows if w.opened_at_ms <= imp.at_ms and imp.started_at_ms <= w.closed_at_ms]
+        if not overlapped:
+            outside[(imp.cls, "", 0, imp.reason or "", False)].append(imp)
+            continue
+        entry = {"class": imp.cls, "stream": imp.stream, "call_id": imp.call_id, "at_ms": imp.at_ms}
+        entry |= {"candidate_windows": overlapped, "reason": imp.reason or ""}
+        in_dialog.append({**entry, "detail": imp.detail} if imp.detail else entry)
 
     for lat in latencies:
         w = _holding(windows, lat.at_ms)

@@ -1,8 +1,8 @@
 //! The load generator's catalogued metric families: completed calls and
 //! their latency per scenario, the accepted branch or failed step of each,
 //! the SIP round trips per scenario and exchange,
-//! the demux's canaries, the simulated loss, the
-//! chaos markers, the offered rate and the process's RSS. [`CATALOGUE`] lists
+//! the demux's canaries, the simulated loss, the offered rate and the
+//! process's RSS. [`CATALOGUE`] lists
 //! them in `/metrics` order.
 
 use metric_catalogue::{Catalogue, Dim, Family, Labels};
@@ -44,9 +44,6 @@ pub const BRANCH: Dim = Dim::new("branch", &[]);
 /// observed gets its own series.
 pub const STEP: Dim = Dim::new("step", &[]);
 
-/// Whether a chaos marker fell within the call's lifetime.
-pub const CHAOS: Dim = Dim::new("chaos", &["clear", "near"]);
-
 /// A scenario's named checkpoint: each one observed gets its own series.
 pub const CHECKPOINT: Dim = Dim::new("checkpoint", &[]);
 
@@ -75,8 +72,8 @@ pub const ORPHAN_METHOD: Dim = Dim::new("method", &ORPHAN_METHOD_VALUES);
 
 pub const CALLS: Family = Family::counter(
     "loadgen_calls_total",
-    Labels::Product(&[STREAM, SHAPE, CLASS, CHAOS]),
-    "Completed load calls by shape, result class, and chaos proximity.",
+    Labels::Product(&[STREAM, SHAPE, CLASS]),
+    "Completed load calls by shape and result class.",
 )
 .semi_open();
 
@@ -221,20 +218,6 @@ pub const DROP: Family = Family::counter(
 )
 .semi_open();
 
-pub const CHAOS_MARKERS: Family = Family::counter(
-    "loadgen_chaos_markers_total",
-    Labels::Product(&[STREAM]),
-    "Chaos markers recorded by the loadgen.",
-)
-.semi_open();
-
-pub const CHAOS_MARKERS_RETAINED: Family = Family::gauge(
-    "loadgen_chaos_markers_retained",
-    Labels::Product(&[STREAM, Dim::new("kind", &[])]),
-    "Chaos markers currently retained, by kind.",
-)
-.semi_open();
-
 pub const TARGET_CPS: Family = Family::gauge(
     "loadgen_target_cps",
     Labels::Product(&[STREAM]),
@@ -339,8 +322,6 @@ pub const CATALOGUE: Catalogue = Catalogue {
         MUX_INBOX_DROP,
         MUX_DELIVERED,
         DROP,
-        CHAOS_MARKERS,
-        CHAOS_MARKERS_RETAINED,
         TARGET_CPS,
         PROCESS_RESIDENT_MEMORY,
         OUTCOME_RECORDS,
@@ -358,7 +339,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::chaos::ChaosLog;
     use crate::mux::{Correlation, EndpointSpec, MuxCore, Role};
     use crate::rate::RateHandle;
     use crate::report::{Reporter, ReporterCfg};
@@ -384,19 +364,18 @@ mod tests {
         let reporter = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
         reporter.declare_scenarios(["basic_call"]);
         reporter.record_rtts("basic_call", &[(Exchange::Invite100, Duration::from_millis(2))]);
-        let chaos = ChaosLog::new(sip_clock::Clock::test_at(0));
         let file = std::env::temp_dir().join(format!("loadgen-cat-{}.jsonl", std::process::id()));
         let outcomes =
             crate::outcome::OutcomeSink::new("r", "loadgen", "main", &file, None).unwrap();
         let rate = RateHandle::new(5.0);
-        let text = crate::app::metrics_body(&reporter, &core, &chaos, &rate, &outcomes);
+        let text = crate::app::metrics_body(&reporter, &core, &rate, &outcomes);
         outcomes.close();
         let _ = std::fs::remove_file(&file);
         if let Err(mismatches) = CATALOGUE.check(&text) {
             panic!("{mismatches:#?}\n{text}");
         }
         assert!(text.contains(
-            "loadgen_calls_total{stream=\"main\",shape=\"basic_call\",class=\"ok\",chaos=\"clear\"} 0\n"
+            "loadgen_calls_total{stream=\"main\",shape=\"basic_call\",class=\"ok\"} 0\n"
         ));
         assert!(
             text.contains(

@@ -13,15 +13,13 @@ A failover/kill failure is **not** automatically a SUT bug.
 - **Protected:** ringing and established calls. A **confirmed call dropping**
   is always a genuine bug.
 - **Accepted collateral:** a call whose dialog state changed **within the
-  acceptance window (default 200 ms, `LOADGEN_CHAOS_PHASE_TOL_MS`) of a kill**
-  may take a small impact — the forked-b-leg confirm race (a call confirming
-  AT the kill).
+  acceptance window (default 200 ms) of a kill** may take a small impact —
+  the forked-b-leg confirm race (a call confirming AT the kill).
 - Any failure whose state change was **outside** the window is genuine.
 
-The loadgen is chaos-aware and auto-buckets accepted collateral (`POST /chaos`
-+ per-call phase markers) as `chaos="near"` vs genuine `chaos="clear"`.
-**Triage `chaos="clear"`.** See
-[crates/loadgen/README.md](../../crates/loadgen/README.md).
+The HA tooling attributes every impact to the incident window it fell in and
+judges it against that window's budget (`tooling/hakit`, ADR-0049 §3.5): what
+a kill may cost is the budget, an impact outside every window is a finding.
 
 ## Known non-SUT artifact: host clock skew (endurance on a VM host)
 

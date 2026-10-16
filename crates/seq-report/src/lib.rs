@@ -244,7 +244,7 @@ pub struct SeqDoc {
     /// `Some` only when `at_ms` is real wall-clock-aligned time (the load driver's
     /// `Clock::system()` recording) — the renderers then show an ABSOLUTE UTC
     /// time alongside the relative `T+…` stamp, so a flow correlates to external
-    /// events (e.g. a chaos kill instant). `None` for virtual-clock docs (the
+    /// events (e.g. an incident window). `None` for virtual-clock docs (the
     /// paused-runtime harness/failover views), which stay relative-only.
     ///
     /// `#[serde(default)]` so docs persisted before this field deserialize as
@@ -325,7 +325,7 @@ impl Item<'_> {
 /// — the absolute companion to [`format_relative`]. UTC (suffix `Z`) so it is
 /// unambiguous regardless of the reader's timezone; dependency-free (no chrono).
 /// Used by the renderers when a doc is wall-clock-aligned so a callflow's frames
-/// (and any chaos-marker band) carry a real time that correlates to external
+/// (and any lifecycle band) carry a real time that correlates to external
 /// events. Date is omitted — a single callflow never spans midnight.
 pub fn format_epoch_utc(epoch_ms: i64) -> String {
     let ms = epoch_ms.rem_euclid(1000);

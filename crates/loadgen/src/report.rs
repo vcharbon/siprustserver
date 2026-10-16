@@ -25,7 +25,6 @@ use e2e_model::{
     SampleGroup,
 };
 
-use crate::chaos::ChaosTag;
 use crate::class::{CallOutcome, ResultClass};
 use crate::hist::Hist;
 use crate::mux::Exchange;
@@ -74,14 +73,12 @@ impl Default for ReporterCfg {
     }
 }
 
-// (scenario, class label, case, chaos near/clear) — the chaos dimension
-// auto-splits a failure class into kill-collateral (`near`) vs genuine
-// (`clear`) sub-buckets; the case dimension ([`CallOutcome::case`]) keeps
+// (scenario, class label, case) — the case dimension ([`CallOutcome::case`]) keeps
 // distinct failure modes of one class apart (which RFC rule, which failed
 // check, which agent/phase), so the first-N sample capture holds N of EACH
 // case instead of N copies of whichever error appeared first. Empty case =
 // un-refined (Ok).
-type Bucket = (ScenarioId, String, String, ChaosTag);
+type Bucket = (ScenarioId, String, String);
 
 /// How many calls of its scenario a bucket under cap keeps recording after its
 /// last sample: the sampling gate chases the bucket's next occurrence that
@@ -100,12 +97,12 @@ struct BucketTally {
 /// The run-dir-relative path of one sample page — THE single place the on-disk
 /// layout is spelled, used by both `finalize` (the writer) and `build_index`
 /// (the machine-readable listing) so the two can never disagree. An empty case
-/// uses the `scenario/class/chaos` layout.
-fn sample_rel(scenario: &str, class: &str, case: &str, chaos: &str, i: usize) -> String {
+/// uses the `scenario/class` layout.
+fn sample_rel(scenario: &str, class: &str, case: &str, i: usize) -> String {
     if case.is_empty() {
-        format!("callflows/{scenario}/{class}/{chaos}/{i}.html")
+        format!("callflows/{scenario}/{class}/{i}.html")
     } else {
-        format!("callflows/{scenario}/{class}/{case}/{chaos}/{i}.html")
+        format!("callflows/{scenario}/{class}/{case}/{i}.html")
     }
 }
 
@@ -259,7 +256,7 @@ impl Reporter {
         }
         let mut g = self.inner.lock().unwrap();
         let mut saw_bucket = false;
-        for ((s, _, _, _), tally) in g.sample_taken.iter_mut() {
+        for ((s, _, _), tally) in g.sample_taken.iter_mut() {
             if *s == scenario {
                 saw_bucket = true;
                 if tally.taken < self.cfg.sample_cap && tally.chased < CHASE_CALLS {
@@ -271,20 +268,13 @@ impl Reporter {
         !saw_bucket // nothing recorded for this scenario yet → record
     }
 
-    /// Whether a sample is still wanted for `(scenario, class, case, chaos)`
+    /// Whether a sample is still wanted for `(scenario, class, case)`
     /// (bucket < cap) — a cheap pre-check so the caller can skip the expensive
-    /// HTML render when the bucket is already full. The case and chaos
-    /// sub-buckets are independent, so each distinct failure mode — and its
-    /// near/clear split — gets up to `sample_cap` flows.
-    pub fn wants_sample(
-        &self,
-        scenario: ScenarioId,
-        class: &ResultClass,
-        case: &str,
-        chaos: ChaosTag,
-    ) -> bool {
+    /// HTML render when the bucket is already full. The case sub-buckets are
+    /// independent, so each distinct failure mode gets up to `sample_cap` flows.
+    pub fn wants_sample(&self, scenario: ScenarioId, class: &ResultClass, case: &str) -> bool {
         let g = self.inner.lock().unwrap();
-        let key = (scenario, class.label(), case.to_string(), chaos);
+        let key = (scenario, class.label(), case.to_string());
         g.sample_taken.get(&key).map_or(0, |t| t.taken) < self.cfg.sample_cap
     }
 
@@ -302,12 +292,11 @@ impl Reporter {
         e2e: Duration,
         checkpoints: &[(&'static str, Duration)],
         sample: Option<RenderedSample>,
-        chaos: ChaosTag,
     ) {
         let class = ResultClass::from(outcome);
         let label = class.label();
         let mut g = self.inner.lock().unwrap();
-        *g.counts.entry((scenario, label.clone(), case.to_string(), chaos)).or_default() += 1;
+        *g.counts.entry((scenario, label.clone(), case.to_string())).or_default() += 1;
         match outcome {
             CallOutcome::Ok { branch } => *g.branches.entry((scenario, branch)).or_default() += 1,
             CallOutcome::Step { at, .. } => {
@@ -326,7 +315,7 @@ impl Reporter {
                 .record(d.as_secs_f64() * 1000.0);
         }
         if let Some(sample) = sample {
-            let key = (scenario, label, case.to_string(), chaos);
+            let key = (scenario, label, case.to_string());
             let tally = g.sample_taken.entry(key.clone()).or_default();
             if tally.taken < self.cfg.sample_cap {
                 *tally = BucketTally { taken: tally.taken + 1, chased: 0 };
@@ -398,27 +387,25 @@ impl Reporter {
         use std::fmt::Write as _;
         let g = self.inner.lock().unwrap();
 
-        // Each sample's callflow HTML, split by case (which failure mode) and
-        // chaos sub-bucket (kill-collateral `near` apart from genuine `clear`).
+        // Each sample's callflow HTML, split by case (which failure mode).
         let mut pages: Vec<(String, Arc<str>)> = Vec::new();
         let mut links: BTreeMap<Bucket, Vec<String>> = BTreeMap::new();
-        for ((scenario, class, case, chaos), samples) in &g.samples {
-            let chaos_label = chaos.label();
+        for ((scenario, class, case), samples) in &g.samples {
             for (i, s) in samples.iter().enumerate() {
-                let rel = sample_rel(scenario, class, case, chaos_label, i);
+                let rel = sample_rel(scenario, class, case, i);
                 let html = match &s.html {
                     Some(html) => html.clone(),
                     // No rendered flow (sample taken on a non-recording call) —
                     // a stub so the detail is still linked.
                     None => Arc::from(format!(
-                        "<html><body><h3>{scenario} / {class} / {case} / {chaos_label} #{i}</h3><p>{}</p>\
+                        "<html><body><h3>{scenario} / {class} / {case} #{i}</h3><p>{}</p>\
                          <p>e2e: {:.1} ms</p></body></html>",
                         s.detail.as_deref().unwrap_or("(no detail)"),
                         s.e2e_ms
                     )),
                 };
                 pages.push((rel.clone(), html));
-                links.entry((scenario, class.clone(), case.clone(), *chaos)).or_default().push(rel);
+                links.entry((scenario, class.clone(), case.clone())).or_default().push(rel);
             }
         }
 
@@ -427,23 +414,20 @@ impl Reporter {
         idx.push_str(
             "<html><head><meta charset=\"utf-8\"><title>loadgen report</title>\
             <style>body{font-family:sans-serif}table{border-collapse:collapse}\
-            td,th{border:1px solid #ccc;padding:4px 8px}.ok{color:#070}.nok{color:#a00}\
-            .near{color:#a60;font-weight:bold}</style>\
+            td,th{border:1px solid #ccc;padding:4px 8px}.ok{color:#070}.nok{color:#a00}</style>\
             </head><body><h1>loadgen report</h1>",
         );
-        idx.push_str("<h2>Results by scenario × class × case × chaos</h2>\
-            <p>chaos=<b>clear</b> are the genuine results to triage; chaos=<b>near</b> are \
-            within the chaos tolerance of an injected fault (likely acceptable kill collateral). \
-            The <b>case</b> column splits a class into its distinct failure modes (RFC rule id, \
+        idx.push_str(
+            "<h2>Results by scenario × class × case</h2>\
+            <p>The <b>case</b> column splits a class into its distinct failure modes (RFC rule id, \
             failed check, failed step) — each keeps its own first-N samples.</p>\
             <table>\
-            <tr><th>scenario</th><th>class</th><th>case</th><th>chaos</th><th>count</th><th>samples</th></tr>");
-        for ((scenario, class, case, chaos), n) in &g.counts {
+            <tr><th>scenario</th><th>class</th><th>case</th><th>count</th><th>samples</th></tr>",
+        );
+        for ((scenario, class, case), n) in &g.counts {
             let cls = if ResultClass::label_is_ok(class) { "ok" } else { "nok" };
-            let chaos_label = chaos.label();
-            let chaos_cls = if chaos_label == "near" { "near" } else { "" };
             let sample_links = links
-                .get(&(scenario, class.clone(), case.clone(), *chaos))
+                .get(&(scenario, class.clone(), case.clone()))
                 .map(|ls| {
                     ls.iter()
                         .enumerate()
@@ -454,7 +438,7 @@ impl Reporter {
                 .unwrap_or_default();
             idx.push_str(&format!(
                 "<tr><td>{scenario}</td><td class=\"{cls}\">{class}</td><td>{case}</td>\
-                 <td class=\"{chaos_cls}\">{chaos_label}</td><td>{n}</td><td>{sample_links}</td></tr>"
+                 <td>{n}</td><td>{sample_links}</td></tr>"
             ));
         }
         idx.push_str("</table><h2>Latency (ms)</h2><table>\
@@ -482,12 +466,12 @@ impl Reporter {
         // summary.md (writing into a String cannot fail).
         let mut md = String::new();
         let _ = writeln!(md, "# loadgen summary\n");
-        let _ = writeln!(md, "## Results by scenario × class × case × chaos\n");
-        let _ = writeln!(md, "(chaos=clear → genuine results to triage; chaos=near → within tolerance of an injected fault; case = the class's distinct failure mode)\n");
-        let _ = writeln!(md, "| scenario | class | case | chaos | count |");
-        let _ = writeln!(md, "|---|---|---|---|---|");
-        for ((scenario, class, case, chaos), n) in &g.counts {
-            let _ = writeln!(md, "| {scenario} | {class} | {case} | {} | {n} |", chaos.label());
+        let _ = writeln!(md, "## Results by scenario × class × case\n");
+        let _ = writeln!(md, "(case = the class's distinct failure mode)\n");
+        let _ = writeln!(md, "| scenario | class | case | count |");
+        let _ = writeln!(md, "|---|---|---|---|");
+        for ((scenario, class, case), n) in &g.counts {
+            let _ = writeln!(md, "| {scenario} | {class} | {case} | {n} |");
         }
         let _ = writeln!(md, "\n## Latency (ms)\n");
         let _ = writeln!(md, "| scenario | n | mean | p50 | p90 | p99 | max |");
@@ -521,11 +505,10 @@ impl Reporter {
         let counts = g
             .counts
             .iter()
-            .map(|((scenario, class, case, chaos), n)| CountRow {
+            .map(|((scenario, class, case), n)| CountRow {
                 scenario: scenario.to_string(),
                 class: class.clone(),
                 case: case.clone(),
-                chaos: chaos.label().to_string(),
                 count: *n,
                 ok: ResultClass::label_is_ok(class),
             })
@@ -568,22 +551,19 @@ impl Reporter {
             })
             .collect();
 
-        // The stored-sample links, keyed by their `(scenario, class, case,
-        // chaos)` bucket — the SAME layout `finalize` writes to disk
+        // The stored-sample links, keyed by their `(scenario, class, case)`
+        // bucket — the SAME layout `finalize` writes to disk
         // (`sample_rel` is the single path authority).
         let samples = g
             .samples
             .iter()
-            .map(|((scenario, class, case, chaos), stored)| {
-                let chaos_label = chaos.label();
-                let pages = (0..stored.len())
-                    .map(|i| sample_rel(scenario, class, case, chaos_label, i))
-                    .collect();
+            .map(|((scenario, class, case), stored)| {
+                let pages =
+                    (0..stored.len()).map(|i| sample_rel(scenario, class, case, i)).collect();
                 SampleGroup {
                     scenario: scenario.to_string(),
                     class: class.clone(),
                     case: case.clone(),
-                    chaos: chaos_label.to_string(),
                     pages,
                 }
             })
@@ -663,8 +643,8 @@ impl Reporter {
 
     // -- Test/inspection accessors -----------------------------------------
 
-    /// Total count for a `(scenario, class)` bucket, summed across all case and
-    /// chaos sub-buckets (for tests / summaries).
+    /// Total count for a `(scenario, class)` bucket, summed across all case
+    /// sub-buckets (for tests / summaries).
     pub fn count(&self, scenario: ScenarioId, class: &ResultClass) -> u64 {
         let label = class.label();
         self.inner
@@ -672,28 +652,13 @@ impl Reporter {
             .unwrap()
             .counts
             .iter()
-            .filter(|((s, c, _, _), _)| *s == scenario && *c == label)
-            .map(|(_, n)| *n)
-            .sum()
-    }
-
-    /// Count for a `(scenario, class, chaos)` sub-bucket — e.g. the genuine
-    /// (`Clear`) failures, isolated from kill collateral — summed across the
-    /// class's case sub-buckets.
-    pub fn count_tagged(&self, scenario: ScenarioId, class: &ResultClass, chaos: ChaosTag) -> u64 {
-        let label = class.label();
-        self.inner
-            .lock()
-            .unwrap()
-            .counts
-            .iter()
-            .filter(|((s, c, _, ch), _)| *s == scenario && *c == label && *ch == chaos)
+            .filter(|((s, c, _), _)| *s == scenario && *c == label)
             .map(|(_, n)| *n)
             .sum()
     }
 
     /// Number of stored samples for a `(scenario, class)` bucket, across all
-    /// case and chaos sub-buckets.
+    /// case sub-buckets.
     pub fn sample_count(&self, scenario: ScenarioId, class: &ResultClass) -> u32 {
         let label = class.label();
         self.inner
@@ -701,7 +666,7 @@ impl Reporter {
             .unwrap()
             .sample_taken
             .iter()
-            .filter(|((s, c, _, _), _)| *s == scenario && *c == label)
+            .filter(|((s, c, _), _)| *s == scenario && *c == label)
             .map(|(_, t)| t.taken)
             .sum()
     }

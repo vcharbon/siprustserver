@@ -137,7 +137,7 @@
       }
     },
     "in_dialog": {
-      "description": "Every impact of the classes that take no budget, each a finding, with the windows whose inject fell inside the call's lifetime before the failure. One with no candidate window is listed in `unattributed` instead.",
+      "description": "Every impact of the classes that take no budget, each a finding, with the windows whose inject fell inside the call's lifetime before the failure; and every counted impact (a CDR mismatch) outside every window of a call whose lifetime overlapped windows, with those windows. One with no candidate window is listed in `unattributed` instead.",
       "type": "array",
       "items": {
         "type": "object",
@@ -148,6 +148,7 @@
           "stream": { "type": "string" },
           "call_id": { "type": "string" },
           "at_ms": { "type": "number" },
+          "reason": { "description": "A counted impact's kind (a CDR mismatch's).", "type": "string" },
           "detail": { "type": "string" },
           "candidate_windows": {
             "type": "array",

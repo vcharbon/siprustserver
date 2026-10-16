@@ -30,6 +30,7 @@ from .loadgen import LoadgenStream
 from .model import Incident
 from .pod_loadgen import PodLoadgenStream
 from .profile import Profile, Stream
+from .reconcile import integrity
 from .schedule import PlannedEvent
 from .sipp_driver import SippStream
 from .vlogs import VictoriaLogs
@@ -229,13 +230,25 @@ class StreamSet:
             self._settle(f, wait)
             f.drained = f.drained and f.gen.clean_exit(f.exit_code)
 
-    def remove_all(self) -> None:
+    def remove_all(self) -> list[Json]:
+        """Remove every generator and collect its working directory; an
+        integrity finding per firing whose files stayed in the scratch (its
+        stat file, hence its stalls, is then missing from the run directory
+        until `hakit cleanup` copies it out)."""
         for fs in self.firings.values():
             for f in fs:
                 self._remove(f)
-        collected = all(f.collected for fs in self.firings.values() for f in fs)
-        if self.lab.generator_scratch and collected:
+        left = [(name, f) for name, fs in self.firings.items() for f in fs if not f.collected]
+        if self.lab.generator_scratch and not left:
             self.executor.run(["rm", "-r", "--", str(Path(self.lab.generator_scratch) / self.run)], timeout_s=120)
+        return [
+            integrity(
+                "generator_failure",
+                f"its files stayed in the generator scratch {f.workdir.work}: `hakit cleanup` copies them out",
+                stream=name,
+            )
+            for name, f in left
+        ]
 
     def docs(self) -> list[Json]:
         """`streams.json`: per stream its firings summed. An abandoned stream is

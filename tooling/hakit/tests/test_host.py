@@ -88,12 +88,33 @@ def test_the_sampler_keeps_each_second_and_pushes_the_interval_it_closes(tmp_pat
     assert 'hakit_host_swap_pages_per_second{run="r",direction="in"} 0 ' in body
 
 
+def test_by_default_swap_in_is_stress_and_a_passing_io_stall_is_not() -> None:
+    """Swap-in means a generator's own pages may be on disk; a 10 % io full
+    share is the host's disk writeback, which a tmpfs-backed generator does not
+    wait on; 20 % is a sustained stall."""
+    proc = FakeProc()
+    fake = FakeExecutor([proc.rule])
+    a = read_sample(fake, T0)
+    proc.total[("io", "full")] += 100_000  # 10 % of 1 s
+    b = read_sample(fake, T0 + 1000)
+    proc.total[("io", "full")] += 200_000  # 20 %
+    c = read_sample(fake, T0 + 2000)
+    proc.pswpin += 50
+    d = read_sample(fake, T0 + 3000)
+    assert a is not None and b is not None and c is not None and d is not None
+    calm, io_stall, swapping = intervals([a, b, c, d])
+    assert not calm.stressed(Thresholds())
+    assert io_stall.stressed(Thresholds()) and swapping.stressed(Thresholds())
+
+
 def test_preflight_refuses_a_host_under_stress_and_names_what() -> None:
     proc = FakeProc()
     proc.avg10[("io", "full")] = 7.5
     fake = FakeExecutor([proc.rule])
+    assert preflight_errors(fake, FakeClock(), Thresholds()) == []
+    proc.avg10[("io", "full")] = 22.5
     errs = preflight_errors(fake, FakeClock(), Thresholds())
-    assert errs == ["io full pressure avg10 7.5 % is at or above 5 %"]
+    assert errs == ["io full pressure avg10 22.5 % is at or above 20 %"]
     proc.avg10[("io", "full")] = 0.5
     assert preflight_errors(fake, FakeClock(), Thresholds()) == []
     # No PSI: nothing to refuse.

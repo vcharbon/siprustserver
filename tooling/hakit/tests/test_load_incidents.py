@@ -168,7 +168,16 @@ def test_every_twin_keeps_the_error_entries_worth_reading_for_the_whole_run(tmp_
     twins = [a for a in runs if a[a.index("--name") + 1].endswith("-exporter")]
     assert len(twins) == 2
     for t in twins:
-        assert "SIPP_ERROR_KEPT_FILE=/stats/errors.kept.log" in t and f"SIPP_ERROR_KEPT_BYTES={256 << 20}" in t
+        assert "SIPP_ERROR_KEPT_FILE=/stats/errors.kept.log" in t and f"SIPP_ERROR_KEPT_BYTES={64 << 20}" in t
+
+
+def test_every_twin_labels_its_series_with_when_its_stream_starts(tmp_path: Path) -> None:
+    """A dashboard keeps load-incident streams out of the headline on this label."""
+    _, fake = run(tmp_path, [])
+    runs = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:2] == ["docker", "run"]]
+    twins = {a[a.index("--name") + 1]: a for a in runs if a[a.index("--name") + 1].endswith("-exporter")}
+    assert "SIPP_START=incident" in twins["hakit-burst-exporter"]
+    assert all("SIPP_START=run" in a for n, a in twins.items() if n != "hakit-burst-exporter")
 
 
 def test_heal_ships_the_firings_records_before_removing_it_and_healed_is_its_exit(tmp_path: Path) -> None:

@@ -193,6 +193,18 @@ def test_a_reject_shaped_treatment_timing_out_after_the_window_is_charged_to_it(
     assert j.unattributed == []
 
 
+def test_an_answered_calls_late_unexpected_ending_stays_with_the_window_that_holds_it() -> None:
+    # Sent into the first window and answered in the second: the setup rule
+    # for a call pending in a window covers no answered call.
+    w1 = window("001-kill_worker", T0 + 60_000, T0 + 85_000)
+    w2 = window("002-kill_worker", T0 + 88_000, T0 + 100_000)
+    odd = record("a", T0 + 60_040, "transferred", setup=30_000, answered=30_000, ended=40_000)
+    per, in_dialog, unatt = run([odd], [w1, w2])
+    assert per["001-kill_worker"] == [] and per["002-kill_worker"] == []
+    assert [(i["class"], i["candidate_windows"]) for i in in_dialog] == [("unexpected_ending", ["002-kill_worker"])]
+    assert unatt == []
+
+
 def test_a_setup_no_hop_answered_takes_no_setup_latency() -> None:
     # The generator's giving up is no latency of the system under test: the
     # call is a failed setup, never also a slow one.

@@ -13,8 +13,7 @@ use crate::Agent;
 /// **checkpoints** ("keywords") a scenario marks at points whose latency we want
 /// to track (e.g. `time_to_200`), and the **phase markers** a scenario stamps as
 /// it advances (connected, re-invited, transferred, post-PRACK, …) so a NOK
-/// sample can say WHICH phase was live and the chaos correlation can be
-/// phase-aware. `Mutex` (not `RefCell`) so it is `Sync` — the `async-trait`
+/// sample can say WHICH phase was live. `Mutex` (not `RefCell`) so it is `Sync` — the `async-trait`
 /// scenario future borrows `&CallCtx` across awaits.
 pub struct CallCtx {
     t0: Instant,
@@ -128,16 +127,15 @@ impl CallCtx {
         self.checkpoints.lock().unwrap().push((name, self.t0.elapsed()));
     }
 
-    /// The instant the call started (its first INVITE) — the lower bound of the
-    /// lifetime window the chaos correlation classifies against.
+    /// The instant the call started (its first INVITE).
     pub fn start_instant(&self) -> Instant {
         self.t0
     }
 
     /// Mark that the call reached a named lifecycle phase (e.g. `"connected"`,
     /// `"reinvited"`, `"transferred"`, `"pracked"`), stamping the instant. Cheap
-    /// and unconditional; the driver folds these into the NOK sample banner and
-    /// uses them for phase-aware chaos correlation. `name` is `'static` to keep
+    /// and unconditional; the driver folds these into the NOK sample banner.
+    /// `name` is `'static` to keep
     /// cardinality bounded (a fixed phase vocabulary, like checkpoints).
     pub fn phase(&self, name: &'static str) {
         self.phases.lock().unwrap().push((name, Instant::now()));

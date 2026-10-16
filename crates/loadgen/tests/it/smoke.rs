@@ -311,8 +311,7 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     // The on-disk report renders an OK callflow.
     let out = std::env::temp_dir().join(format!("loadgen-mux-{}", std::process::id()));
     reporter.finalize(&out).unwrap();
-    // No chaos markers in the smoke run → every call is the `clear` sub-bucket.
-    assert!(out.join("callflows/basic_call/ok/clear/0.html").exists(), "no OK callflow HTML");
+    assert!(out.join("callflows/basic_call/ok/0.html").exists(), "no OK callflow HTML");
     let _ = std::fs::remove_dir_all(&out);
 }
 
@@ -597,78 +596,6 @@ async fn loadgen_mux_orphan_observability() {
         samples.iter().any(|s| s.contains("unknown_token")),
         "no unknown_token sample: {samples:?}"
     );
-}
-
-/// The chaos-flag endpoint: a `POST /chaos?type=…&target=…` records one marker
-/// on the loadgen's HTTP server (the same socket as GET `/metrics`), and a GET
-/// still returns the render body. This is the hook the chaos driver hits at the
-/// kill instant so finished calls get auto-classified near/clear.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "slow lane: loadgen"]
-async fn loadgen_chaos_post_records_marker() {
-    use loadgen::{serve_metrics, ChaosLog};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let chaos = Arc::new(ChaosLog::new(Clock::system()));
-    let bind = addr(6490);
-    let render: Arc<dyn Fn() -> String + Send + Sync> =
-        Arc::new(|| "render-body-marker\n".to_string());
-    let srv_chaos = chaos.clone();
-    tokio::spawn(async move {
-        let _ = serve_metrics(bind, render, Some(srv_chaos), None).await;
-    });
-
-    // Retry-connect until the server is bound.
-    let mut stream = loop {
-        match tokio::net::TcpStream::connect(bind).await {
-            Ok(s) => break s,
-            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
-        }
-    };
-    stream
-        .write_all(
-            b"POST /chaos?type=kill_worker&target=b2bua-worker-1 HTTP/1.1\r\nHost: x\r\n\r\n",
-        )
-        .await
-        .unwrap();
-    let mut buf = Vec::new();
-    let _ = stream.read_to_end(&mut buf).await;
-    assert!(
-        String::from_utf8_lossy(&buf).contains("recorded chaos marker"),
-        "POST /chaos should ack: {}",
-        String::from_utf8_lossy(&buf)
-    );
-    assert_eq!(chaos.total(), 1, "exactly one marker recorded");
-
-    // A POST carrying `ts` (Unix epoch ms of the kill) is back-dated: the ack
-    // echoes the ts and a second marker is recorded. The driver supplies this so
-    // port-forward latency on the flag path can't shift the marker off the kill.
-    let kill_ms =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
-            as u64
-            - 1500;
-    let mut s_ts = tokio::net::TcpStream::connect(bind).await.unwrap();
-    s_ts.write_all(
-        format!("POST /chaos?type=kill_worker&target=b2bua-worker-1&ts={kill_ms} HTTP/1.1\r\nHost: x\r\n\r\n")
-            .as_bytes(),
-    )
-    .await
-    .unwrap();
-    let mut bt = Vec::new();
-    let _ = s_ts.read_to_end(&mut bt).await;
-    assert!(
-        String::from_utf8_lossy(&bt).contains(&format!("ts={kill_ms}")),
-        "POST /chaos with ts should ack the timestamp: {}",
-        String::from_utf8_lossy(&bt)
-    );
-    assert_eq!(chaos.total(), 2, "the ts-bearing marker is recorded too");
-
-    // A GET still serves the render body.
-    let mut s2 = tokio::net::TcpStream::connect(bind).await.unwrap();
-    s2.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
-    let mut b2 = Vec::new();
-    let _ = s2.read_to_end(&mut b2).await;
-    assert!(String::from_utf8_lossy(&b2).contains("render-body-marker"), "GET should render");
 }
 
 /// The leg-routing **injection API**: two receivers ("charlie", "dave") share
@@ -2036,7 +1963,7 @@ async fn loadgen_pooled_case_identities_and_dwell_overrides() {
     let out = std::env::temp_dir().join(format!("loadgen-pooled-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     reporter.finalize(&out).unwrap();
-    let page = out.join("callflows/pooled_basic/ok/clear/0.html");
+    let page = out.join("callflows/pooled_basic/ok/0.html");
     let html = std::fs::read_to_string(&page)
         .unwrap_or_else(|e| panic!("no OK sample page at {}: {e}", page.display()));
     assert!(html.contains("binding: case=load-basic-pooled"), "banner missing from sample page");
@@ -2118,7 +2045,7 @@ async fn loadgen_case_checks_pass_and_render_verdicts() {
     let out = std::env::temp_dir().join(format!("loadgen-checks-ok-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     reporter.finalize(&out).unwrap();
-    let html = std::fs::read_to_string(out.join("callflows/basic_call/ok/clear/0.html")).unwrap();
+    let html = std::fs::read_to_string(out.join("callflows/basic_call/ok/0.html")).unwrap();
     assert!(html.contains("check bob.initialInvite from.uri"), "verdict line missing:\n{html}");
     assert!(html.contains("PASS"), "PASS verdicts must render on the OK page");
     assert!(html.contains("check alice.answer to.tag"), "inline-block verdict missing");
@@ -2176,7 +2103,7 @@ async fn loadgen_failing_check_reclassifies_to_check_fail() {
     // The sample path carries the case discriminator (`<on>.<field>` of the
     // failing check), so distinct failing checks keep distinct first-N buckets.
     let html = std::fs::read_to_string(
-        out.join("callflows/basic_call/check_fail/bob.initialInvite.from.userInfo/clear/0.html"),
+        out.join("callflows/basic_call/check_fail/bob.initialInvite.from.userInfo/0.html"),
     )
     .unwrap();
     assert!(html.contains("check bob.initialInvite from.userInfo"), "verdict missing:\n{html}");

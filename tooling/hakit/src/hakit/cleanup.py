@@ -5,9 +5,10 @@ A run interrupted hard (its runner killed, the box rebooted) leaves its open
 events faulted and its generators placing calls. Cleanup heals the events of
 the named run directories, or of every one under the results root, and
 removes each generator labelled with a run whose runner no longer runs,
-whether or not an event of it was open: docker containers and pods alike,
-then copies what that run's docker generators left in the generator scratch
-into its run directory (workdir.py).
+whether or not an event of it was open: docker containers and pods alike.
+Then it copies what every run whose runner is gone left in the generator
+scratch into its run directory (workdir.py), whether or not a generator of
+it was still there.
 """
 
 from __future__ import annotations
@@ -77,6 +78,14 @@ def generator_runs(executor: Executor, lab: Lab) -> set[str]:
     return runs
 
 
+def scratch_runs(executor: Executor, lab: Lab) -> set[str]:
+    """The runs that left a working directory in the generator scratch."""
+    if not lab.generator_scratch:
+        return set()
+    ls = executor.run(["ls", "-1", lab.generator_scratch], timeout_s=30)
+    return {r for r in ls.stdout.split() if r} if ls.rc == 0 else set()
+
+
 def remove_generators(executor: Executor, lab: Lab, run: str) -> None:
     ps = executor.run(["docker", "ps", "-aq", "--filter", f"label={RUN_LABEL}={run}"], timeout_s=30)
     ids = ps.stdout.split()
@@ -103,11 +112,17 @@ def cleanup(
         if not bad and not dry_run:
             (d / "cleaned").write_text("")
     named = {d.name for d in run_dirs}
-    for run in sorted(generator_runs(executor, lab) - live):
+    with_generators = generator_runs(executor, lab) - live
+    for run in sorted(with_generators):
         if named and run not in named:
             continue
         remove_generators(executor, lab, run)
         print(f"hakit: {run}: generators removed")
-        if lab.generator_scratch and collect_tree(executor, Path(lab.generator_scratch) / run, root / run):
+    for run in sorted(scratch_runs(executor, lab) - live):
+        if named and run not in named:
+            continue
+        if not (root / run).is_dir():
+            print(f"hakit: {run}: no run directory under {root}, its generator files stay in {lab.generator_scratch}")
+        elif collect_tree(executor, Path(lab.generator_scratch) / run, root / run):
             print(f"hakit: {run}: generator files copied out of {lab.generator_scratch}")
     return 1 if failed else 0

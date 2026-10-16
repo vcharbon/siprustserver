@@ -13,7 +13,7 @@ from hakit.cli import main
 from hakit.content import ContentError, discover
 from hakit.dashboards import LINK, PHASE_ANNOTATION, TAG, WINDOW_ANNOTATION
 from hakit.grafana import MOUNT_ROOT, compose_override
-from hakit.jsonval import Json, as_list, as_obj
+from hakit.jsonval import Json, ShapeError, as_list, as_obj
 from hakit.paths import BASE_CONTENT
 from hakit.schemas import SchemaSet
 
@@ -105,7 +105,42 @@ def test_an_annotation_with_another_query_is_not_the_block(tmp_path: Path) -> No
     window = copy.deepcopy(WINDOW_ANNOTATION)
     window["expr"] = "sip_chaos_window == 1"
     p = dashboard(tmp_path, "drifted", annotations={"list": [window, copy.deepcopy(PHASE_ANNOTATION)]})
-    assert refusal([tmp_path]) == [f"{p}: no 'Incident window' annotation on {WINDOW_ANNOTATION['expr']}"]
+    assert refusal([tmp_path]) == [
+        f"{p}: no 'Incident window' annotation on {WINDOW_ANNOTATION['expr']}",
+        f"{p}: the annotation 'Incident window' marks the incidents a second time beside the block",
+    ]
+
+
+def test_a_second_annotation_on_the_incident_series_is_refused(tmp_path: Path) -> None:
+    """The block already marks every window: another one draws each twice."""
+    extra: Json = {"name": "Chaos window", "expr": "sip_chaos_window == 1", "titleFormat": "chaos: {{type}}"}
+    block = [copy.deepcopy(WINDOW_ANNOTATION), copy.deepcopy(PHASE_ANNOTATION)]
+    p = dashboard(tmp_path, "twice", annotations={"list": [extra, *block]})
+    assert refusal([tmp_path]) == [f"{p}: the annotation 'Chaos window' marks the incidents a second time beside the block"]
+
+
+def exprs(node: object) -> list[str]:
+    """Every `expr` below `node`, a JSON value."""
+    try:
+        obj = as_obj(node)
+        return [str(v) for k, v in obj.items() if k == "expr"] + [e for v in obj.values() for e in exprs(v)]
+    except ShapeError:
+        pass
+    try:
+        return [e for v in as_list(node) for e in exprs(v)]
+    except ShapeError:
+        return []
+
+
+def test_the_sipp_headline_leaves_out_load_incident_streams_by_their_start() -> None:
+    """A stream's name is the profile's, so no base panel selects on it: the
+    headline excludes the streams a load incident starts, whose cost is their
+    budget's question."""
+    doc = json.loads((BASE_CONTENT / "dashboards" / "sipp-endurance-chaos.json").read_text())
+    all_exprs = exprs(doc["panels"])
+    assert not [e for e in all_exprs if 'role=' in e or 'role!' in e]
+    headline = [e for e in all_exprs if "sipp_successful_calls_total{" in e]
+    assert headline and all('start!="incident"' in e for e in headline)
 
 
 def test_the_block_reads_the_victoriametrics_datasource(tmp_path: Path) -> None:

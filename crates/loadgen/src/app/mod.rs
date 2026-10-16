@@ -12,8 +12,8 @@ use sip_clock::Clock;
 use crate::case::CaseLoader;
 use crate::outcome::OutcomeSink;
 use crate::{
-    serve_metrics, CallConfig, Canaries, ChaosLog, Driver, DriverCfg, EndpointSpec, LoadRunMeta,
-    MuxCore, MuxTransport, RateHandle, Reporter, ReporterCfg, Role, ScenarioInputs,
+    serve_metrics, CallConfig, Canaries, Driver, DriverCfg, EndpointSpec, LoadRunMeta, MuxCore,
+    MuxTransport, RateHandle, Reporter, ReporterCfg, Role, ScenarioInputs,
 };
 
 mod args;
@@ -80,9 +80,8 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     };
 
     // ONE process-wide monotonic-anchored clock, created here and shared with the
-    // mux, every per-call binder, and the chaos log — so all call timelines and
-    // the chaos markers ride a single axis (and loadgen reads no raw SystemTime on
-    // its own timeline). See `sip_clock::Clock`.
+    // mux and every per-call binder — so all call timelines ride a single axis
+    // (and loadgen reads no raw SystemTime on its own timeline). See `sip_clock::Clock`.
     let clock = Clock::system();
 
     // Per-run RNG seed off the shared clock (varies per run; no raw SystemTime).
@@ -176,19 +175,10 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
         overload_reject,
     };
 
-    // Chaos correlation: the marker log the `POST /chaos` endpoint feeds and the
-    // driver classifies each finished call against (near/clear). Shares the run's
-    // clock so a marker's wall-clock lands on the same axis as the sampled frames.
-    let chaos = Arc::new(
-        ChaosLog::new(clock.clone())
-            .with_phase_tolerance(Duration::from_millis(args.chaos_phase_tolerance_ms)),
-    );
-
     reporter.declare_scenarios(scenarios.iter().map(|entry| entry.id));
     let outcomes = Arc::new(outcome_sink(&args, name, clock.now_ms())?);
-    let driver = Driver::new(cfg, scenarios, reporter.clone(), transport)
-        .with_chaos(chaos.clone())
-        .with_outcomes(outcomes.clone());
+    let driver =
+        Driver::new(cfg, scenarios, reporter.clone(), transport).with_outcomes(outcomes.clone());
     // The live rate handle (seeded from `--cps` / the profile): `POST /rate`
     // re-targets it and the governor re-anchors its grid; exported as the
     // `loadgen_target_cps` gauge.
@@ -203,25 +193,19 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
         }
     });
 
-    // Live /metrics: reporter series + mux series + chaos markers + the current
-    // rate target + a process-memory canary (RSS) so the endurance dashboard can
+    // Live /metrics: reporter series + mux series + the current rate target + a process-memory canary (RSS) so the endurance dashboard can
     // watch the load generator itself while full recording is on.
     let metrics_reporter = reporter.clone();
     let metrics_core = core.clone();
-    let metrics_chaos = chaos.clone();
     let metrics_rate = rate.clone();
     let metrics_outcomes = outcomes.clone();
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
-        let (r, c, ch) = (&metrics_reporter, &metrics_core, &metrics_chaos);
-        metrics_body(r, c, ch, &metrics_rate, &metrics_outcomes)
+        metrics_body(&metrics_reporter, &metrics_core, &metrics_rate, &metrics_outcomes)
     });
     let metrics_addr = args.metrics_addr;
-    let server_chaos = chaos.clone();
     let server_rate = rate.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            serve_metrics(metrics_addr, render, Some(server_chaos), Some(server_rate)).await
-        {
+        if let Err(e) = serve_metrics(metrics_addr, render, Some(server_rate)).await {
             eprintln!("[{name}] /metrics server stopped: {e}");
         }
     });
@@ -290,7 +274,7 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     // process is gone.
     std::fs::write(
         args.out_dir.join(FINAL_METRICS_FILE),
-        metrics_body(&reporter, &core, &chaos, &rate, &outcomes),
+        metrics_body(&reporter, &core, &rate, &outcomes),
     )?;
     eprintln!(
         "[{name}] done: {} offered: {} records, {} not placed, {} generator failures{}; \
@@ -331,7 +315,7 @@ fn mux_canaries(core: &MuxCore) -> Canaries {
 }
 
 /// The `/metrics` body, every family of [`crate::CATALOGUE`]: the
-/// reporter's series, the mux's, the chaos markers, the offered-rate target
+/// reporter's series, the mux's, the offered-rate target
 /// (what `POST /rate` last set, `0` while paused) and a process
 /// resident-memory canary — the load generator holds per-call recording
 /// buffers while full recording is on, so the endurance dashboard watches it
@@ -339,14 +323,12 @@ fn mux_canaries(core: &MuxCore) -> Canaries {
 pub fn metrics_body(
     reporter: &Reporter,
     core: &MuxCore,
-    chaos: &ChaosLog,
     rate: &RateHandle,
     outcomes: &OutcomeSink,
 ) -> String {
     let stream = reporter.stream();
     let mut out = reporter.render_prometheus();
     out.push_str(&core.render_prometheus());
-    out.push_str(&chaos.render_prometheus(&stream));
     crate::catalogue::TARGET_CPS.render_rows(&mut out, [([stream.as_str()], rate.cps())]);
     let rss = resident_memory_bytes().map_or("NaN".to_string(), |b| b.to_string());
     crate::catalogue::PROCESS_RESIDENT_MEMORY.render_rows(&mut out, [([stream.as_str()], rss)]);

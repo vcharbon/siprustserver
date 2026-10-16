@@ -115,8 +115,8 @@ struct AnomalyView<'a> {
 }
 
 fn anomaly_views<'a>(doc: &'a SeqDoc, items: &[Item<'_>]) -> Vec<AnomalyView<'a>> {
-    // Message rows only: a lifecycle band may BORROW a frame's seq (the chaos
-    // overlay does) and is not clickable, so it never resolves a link; nor is a
+    // Message rows only: a lifecycle band may BORROW a frame's seq and is not
+    // clickable, so it never resolves a link; nor is a
     // view chip.
     let mut ord_of: HashMap<u64, usize> = HashMap::new();
     for (ord, item) in items.iter().enumerate() {
@@ -484,7 +484,7 @@ pub fn render_embed(doc: &SeqDoc) -> String {
 }
 
 /// The per-row timestamp label: relative `T+…`, plus the absolute UTC instant
-/// when the doc is wall-clock-aligned (so a frame — or a chaos-marker band —
+/// when the doc is wall-clock-aligned (so a frame — or a lifecycle band —
 /// carries a real time that correlates to external events).
 fn ts_label(doc: &SeqDoc, at_ms: i64, base: i64) -> String {
     let rel = format_relative(at_ms - base);

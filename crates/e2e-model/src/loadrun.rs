@@ -25,10 +25,9 @@ use serde::{Deserialize, Serialize};
 pub struct LoadRunIndex {
     /// Run metadata: when it ran and the echoed knobs it ran with.
     pub meta: LoadRunMeta,
-    /// Per-`(scenario, class, chaos)` completed-call counts (the report's main
+    /// Per-`(scenario, class, case)` completed-call counts (the report's main
     /// table). A row's `ok` marks its class as no failure (`ok`: the call ended
-    /// on an accepted branch); `chaos == "near"` is accepted kill collateral,
-    /// `chaos == "clear"` is a genuine result.
+    /// on an accepted branch).
     pub counts: Vec<CountRow>,
     /// Per-scenario end-to-end latency summary (ms).
     pub latency: Vec<LatencyRow>,
@@ -43,7 +42,7 @@ pub struct LoadRunIndex {
     /// The run's health canaries — the cross-call signals a triager scans first.
     pub canaries: Canaries,
     /// Links to the stored sampled callflow pages, grouped by their
-    /// `(scenario, class, chaos)` bucket. Paths are RELATIVE to the run dir.
+    /// `(scenario, class, case)` bucket. Paths are RELATIVE to the run dir.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub samples: Vec<SampleGroup>,
 }
@@ -76,7 +75,7 @@ pub struct LoadRunMeta {
     pub profile: Option<String>,
 }
 
-/// One `(scenario, class, case, chaos)` completed-call count.
+/// One `(scenario, class, case)` completed-call count.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CountRow {
@@ -89,8 +88,6 @@ pub struct CountRow {
     /// Empty = un-refined (`ok` rows, indexes written before the field existed).
     #[serde(default)]
     pub case: String,
-    /// Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral).
-    pub chaos: String,
     pub count: u64,
     /// `true` iff the class is no failure (`ok`). Drives the OK-green / NOK-red
     /// split.
@@ -165,8 +162,7 @@ impl Canaries {
     }
 }
 
-/// The stored sampled callflow pages for one `(scenario, class, case, chaos)`
-/// bucket.
+/// The stored sampled callflow pages for one `(scenario, class, case)` bucket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SampleGroup {
@@ -175,15 +171,14 @@ pub struct SampleGroup {
     /// The case discriminator (see [`CountRow::case`]); empty = un-refined.
     #[serde(default)]
     pub case: String,
-    pub chaos: String,
     /// Run-dir-relative paths to each sample's rendered callflow HTML page
-    /// (e.g. `callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html`;
+    /// (e.g. `callflows/reinvite/check_fail/alice.invite.from.userInfo/0.html`;
     /// no case segment when `case` is empty).
     pub pages: Vec<String>,
 }
 
 impl LoadRunIndex {
-    /// Total completed calls across every `(scenario, class, chaos)` bucket.
+    /// Total completed calls across every `(scenario, class, case)` bucket.
     pub fn total_calls(&self) -> u64 {
         self.counts.iter().map(|c| c.count).sum()
     }
@@ -191,12 +186,6 @@ impl LoadRunIndex {
     /// Completed calls that were NOT `ok` (the NOK total across all buckets).
     pub fn failed_calls(&self) -> u64 {
         self.counts.iter().filter(|c| !c.ok).map(|c| c.count).sum()
-    }
-
-    /// Genuine (chaos=clear) non-ok calls — the triage total that excludes
-    /// accepted kill collateral.
-    pub fn clear_failures(&self) -> u64 {
-        self.counts.iter().filter(|c| !c.ok && c.chaos == "clear").map(|c| c.count).sum()
     }
 }
 
@@ -222,7 +211,6 @@ mod tests {
                     scenario: "basic_call".into(),
                     class: "ok".into(),
                     case: String::new(),
-                    chaos: "clear".into(),
                     count: 1180,
                     ok: true,
                 },
@@ -230,7 +218,6 @@ mod tests {
                     scenario: "reinvite".into(),
                     class: "check_fail".into(),
                     case: "alice.invite.from.userInfo".into(),
-                    chaos: "clear".into(),
                     count: 3,
                     ok: false,
                 },
@@ -238,7 +225,6 @@ mod tests {
                     scenario: "reinvite".into(),
                     class: "timeout".into(),
                     case: "bob@connected".into(),
-                    chaos: "near".into(),
                     count: 2,
                     ok: false,
                 },
@@ -272,9 +258,8 @@ mod tests {
                 scenario: "reinvite".into(),
                 class: "check_fail".into(),
                 case: "alice.invite.from.userInfo".into(),
-                chaos: "clear".into(),
                 pages: vec![
-                    "callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html".into(),
+                    "callflows/reinvite/check_fail/alice.invite.from.userInfo/0.html".into()
                 ],
             }],
         }
@@ -307,13 +292,12 @@ mod tests {
         }
     }
 
-    /// The derived tallies (total / failed / clear-only) sum the buckets right.
+    /// The derived tallies (total / failed) sum the buckets right.
     #[test]
     fn derived_totals() {
         let idx = sample_index();
         assert_eq!(idx.total_calls(), 1185);
         assert_eq!(idx.failed_calls(), 5, "3 check_fail + 2 timeout");
-        assert_eq!(idx.clear_failures(), 3, "the near timeout is excused");
     }
 
     /// The ringing ratio is a rate, and an all-200 run (nothing rang) is 1.0.

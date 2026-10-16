@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use e2e_model::LegSpec;
 use futures::FutureExt;
@@ -27,7 +27,6 @@ use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::call_rtt::CallRtts;
-use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
 use crate::mix_entry::{LoadBody, MixEntry};
@@ -54,8 +53,7 @@ pub struct MuxTransport {
     /// Per-recv wall-clock timeout.
     pub recv_timeout: Duration,
     /// The one process-wide clock every per-call binder records on (created once
-    /// at startup, shared with the chaos log), so all call timelines — and the
-    /// chaos markers — sit on a single monotonic-anchored axis.
+    /// at startup), so all call timelines sit on a single monotonic-anchored axis.
     pub clock: Clock,
 }
 
@@ -141,9 +139,6 @@ pub struct Driver {
     default_tuning: CallTuning,
     tuning: HashMap<String, CallTuning>,
     overload_reject: Option<u16>,
-    /// Optional chaos-marker log: when set, each finished call is classified
-    /// near/clear against the injected-fault markers (the chaos correlation).
-    chaos: Option<Arc<ChaosLog>>,
     /// Where each placed call's outcome record goes; `None` = no records.
     outcomes: Option<Arc<OutcomeSink>>,
 }
@@ -204,7 +199,6 @@ impl Driver {
             default_tuning: cfg.default_tuning,
             tuning: cfg.tuning,
             overload_reject: cfg.overload_reject,
-            chaos: None,
             outcomes: None,
         }
     }
@@ -213,13 +207,6 @@ impl Driver {
     /// the global default.
     fn tuning_for(&self, id: &str) -> CallTuning {
         self.tuning.get(id).copied().unwrap_or(self.default_tuning)
-    }
-
-    /// Attach a [`ChaosLog`] so finished calls are tagged near/clear against the
-    /// injected-fault markers (fed by the `POST /chaos` endpoint).
-    pub fn with_chaos(mut self, chaos: Arc<ChaosLog>) -> Self {
-        self.chaos = Some(chaos);
-        self
     }
 
     /// Write one outcome record per placed call into `sink`, and count the
@@ -290,7 +277,6 @@ impl Driver {
                 self.seed,
                 tuning,
                 self.overload_reject,
-                self.chaos.clone(),
                 self.outcomes.clone(),
                 permit,
             );
@@ -324,7 +310,6 @@ async fn run_one(
     seed_base: u64,
     tuning: CallTuning,
     overload_reject: Option<u16>,
-    chaos: Option<Arc<ChaosLog>>,
     outcomes: Option<Arc<OutcomeSink>>,
     _permit: OwnedSemaphorePermit,
 ) {
@@ -359,7 +344,7 @@ async fn run_one(
                 Ok(key) => key,
                 Err(reason) => {
                     let outcome = CallOutcome::Rejected(reason);
-                    return record_unrun(&reporter, &chaos, &outcomes, id, outcome);
+                    return record_unrun(&reporter, &outcomes, id, outcome);
                 }
             }
         } else {
@@ -401,7 +386,7 @@ async fn run_one(
             }
             Err(e) => match bind_refusal(&e) {
                 CallOutcome::Rejected(_) if draw < draws => continue,
-                outcome => return record_unrun(&reporter, &chaos, &outcomes, id, outcome),
+                outcome => return record_unrun(&reporter, &outcomes, id, outcome),
             },
         }
     };
@@ -553,39 +538,16 @@ async fn run_one(
     // dropped non-PRACK 18x is expected, so it is a rate, not a per-call failure).
     reporter.record_ringing(ctx.ringing());
 
-    // Classify the call near/clear against the injected-fault markers using the
-    // per-phase rule: `Near` iff a fault landed on a dialog-state transition
-    // (±phase_tolerance — no time to propagate, SIP retransmission recovers it) or
-    // mid-setup. A call stably connected across the fault stays `Clear`. No log →
-    // always Clear (the smoke tests + a chaos-less run).
-    //
-    // BUT a protocol-defect class (RfcAuditFail/WrongMethod/Unexpected/…) is NEVER
-    // excused even if a transition coincided with the kill: the post-reboot reclaim
-    // bug CONNECTS near the kill yet desyncs at teardown, so excusing it on the
-    // near-kill connect would HIDE it (neither self-heal path recovers). Only
-    // transient/transport failures (the real kill collateral) are eligible. See
-    // `CallOutcome::chaos_excusable`.
-    let chaos_tag = match chaos.as_ref() {
-        Some(c) if outcome.chaos_excusable() => {
-            c.classify_call(ctx.start_instant(), Instant::now(), &ctx.phases())
-        }
-        _ => ChaosTag::Clear,
-    };
-
     // The bounded case discriminator (which RFC rule / failed check / failed
     // step) — computed once; keys the first-N sample buckets AND the counts
     // split.
     let case = outcome.case(ctx.phases().last().map(|(name, _)| *name));
 
-    let sample = if reporter.wants_sample(id, &class, &case, chaos_tag) {
+    let sample = if reporter.wants_sample(id, &class, &case) {
         let detail = phase_annotated_detail(outcome.detail(), &ctx);
         // Thread the failure reason into the rendered callflow so a sampled NOK
         // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
         let html = if binder.is_recording() {
-            // Pass the chaos markers so a sampled NOK flow renders the kill
-            // instant(s) in its window as Lifecycle bands (absolute UTC, on the
-            // call's wall-clock timeline) — see `ChaosLog::markers`.
-            let markers = chaos.as_ref().map(|c| c.markers()).unwrap_or_default();
             // The banner (the resolved binding — the actual From/To used) shows
             // in the page header on PASS and FAIL alike; the failure detail
             // stays FAIL-only; the case's check verdicts render pass AND fail.
@@ -595,7 +557,6 @@ async fn run_one(
                 class.is_ok(),
                 banner.as_deref(),
                 detail.as_deref(),
-                &markers,
                 &check_notes,
             )
         } else {
@@ -614,7 +575,7 @@ async fn run_one(
         None
     };
 
-    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
+    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample);
     rtts.finish();
     if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
         crate::outcome::write_call(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
@@ -710,12 +671,9 @@ fn bind_refusal(e: &sip_net::BindError) -> CallOutcome {
 }
 
 /// Record a call that never ran (refused before any datagram) and close its
-/// in-flight count. A chaos-excusable outcome is classified against the
-/// markers of the last [`RELEASE_HOLD`](crate::mux::RELEASE_HOLD): a key's
-/// holder may be a call a fault held open that long.
+/// in-flight count.
 fn record_unrun(
     reporter: &Reporter,
-    chaos: &Option<Arc<ChaosLog>>,
     outcomes: &Option<Arc<OutcomeSink>>,
     id: ScenarioId,
     outcome: CallOutcome,
@@ -728,26 +686,18 @@ fn record_unrun(
     }
     let class = ResultClass::from(&outcome);
     let case = outcome.case(None);
-    let now = Instant::now();
-    let chaos_tag = match chaos {
-        Some(c) if outcome.chaos_excusable() => {
-            let since = now.checked_sub(crate::mux::RELEASE_HOLD).unwrap_or(now);
-            c.classify_call(since, now, &[])
-        }
-        _ => ChaosTag::Clear,
-    };
-    let sample = reporter.wants_sample(id, &class, &case, chaos_tag).then(|| RenderedSample {
+    let sample = reporter.wants_sample(id, &class, &case).then(|| RenderedSample {
         html: None,
         detail: outcome.detail(),
         e2e_ms: 0.0,
     });
-    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample, chaos_tag);
+    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample);
     reporter.dec_inflight();
 }
 
 /// Append the call's lifecycle phase trail (`connected@1234ms`, `reinvited@…`) to
 /// a NOK sample's one-line detail, so a sampled failing flow says WHICH phase it
-/// reached before it failed (and, with the chaos correlation, near which fault).
+/// reached before it failed.
 /// `None`/empty detail (an OK call) is left untouched.
 fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<String> {
     let mut detail = detail?;

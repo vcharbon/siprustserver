@@ -219,16 +219,16 @@ describe("a load-run index", () => {
       profile: "endurance baseline"
     },
     counts: [
-      { scenario: "basic_call", class: "ok", case: "", chaos: "clear", count: 1180, ok: true },
-      { scenario: "reinvite", class: "timeout", case: "bob@connected", chaos: "near", count: 2, ok: false },
-      { scenario: "reinvite", class: "check_fail", case: "alice.invite", chaos: "clear", count: 3, ok: false }
+      { scenario: "basic_call", class: "ok", case: "", count: 1180, ok: true },
+      { scenario: "reinvite", class: "timeout", case: "bob@connected", count: 2, ok: false },
+      { scenario: "reinvite", class: "check_fail", case: "alice.invite", count: 3, ok: false }
     ],
     latency: [{ scenario: "basic_call", n: 1180, meanMs: 12.5, p50Ms: 10, p90Ms: 25, p99Ms: 40, maxMs: 88 }],
     checkpoints: [{ scenario: "basic_call", checkpoint: "ringing", n: 1180, p50Ms: 3, p90Ms: 8, p99Ms: 15 }],
     checks: [{ scenario: "reinvite", passed: 7, failed: 3 }],
     canaries: { orphans: 0, shed: 4, drops: 11, ringingExpected: 1185, ringingReceived: 1184 },
     samples: [
-      { scenario: "reinvite", class: "check_fail", case: "alice.invite", chaos: "clear", pages: ["callflows/0.html"] }
+      { scenario: "reinvite", class: "check_fail", case: "alice.invite", pages: ["callflows/0.html"] }
     ]
   }
   const index = LoadRun.decodeLoadRunIndexSync(INDEX)
@@ -240,7 +240,6 @@ describe("a load-run index", () => {
   it("sums the buckets the way the triage view reads them", () => {
     expect(LoadRun.totalCalls(index)).toBe(1185)
     expect(LoadRun.failedCalls(index)).toBe(5)
-    expect(LoadRun.clearFailures(index)).toBe(3)
     expect(LoadRun.ringingRatio(index.canaries)).toBeCloseTo(1184 / 1185, 9)
     expect(LoadRun.ringingRatio({ ...index.canaries, ringingExpected: 0 })).toBe(1)
   })
@@ -248,7 +247,7 @@ describe("a load-run index", () => {
   it("defaults the un-refined case discriminator an older index omitted", () => {
     const older = LoadRun.decodeLoadRunIndexSync({
       ...INDEX,
-      counts: [{ scenario: "basic_call", class: "ok", chaos: "clear", count: 1, ok: true }]
+      counts: [{ scenario: "basic_call", class: "ok", count: 1, ok: true }]
     })
     expect(older.counts[0].case).toBe("")
   })

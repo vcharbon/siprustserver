@@ -276,7 +276,7 @@ class Runner:
         finally:
             restore()
             clear_active(run_dir)
-        streams.remove_all()
+        integrity.add(streams.remove_all())
         if live.capture is not None:
             live.capture.stop()
         records, bad = self.vlogs.export(run, started - 3_600_000, self.clock.now_ms() + 3_600_000)

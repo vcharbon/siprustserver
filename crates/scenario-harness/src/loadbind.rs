@@ -83,8 +83,7 @@ impl AgentBinder {
     /// Build a binder over a **real** UDP network — the load driver's production
     /// mode, driving an external SUT (the kind cluster VIP). `clock` is the
     /// process-wide shared clock (created ONCE at startup, not per call), so every
-    /// call's recording sits on one monotonic-anchored axis; passing it in also
-    /// keeps that axis in lockstep with the chaos-marker log. `record` selects
+    /// call's recording sits on one monotonic-anchored axis. `record` selects
     /// whether this call's trace is captured. `recv_timeout` is real latency, so
     /// set it wide.
     pub fn real(clock: Clock, recv_timeout: Duration, record: bool) -> Self {
@@ -100,8 +99,7 @@ impl AgentBinder {
     /// Build a binder over a caller-supplied network tagged `Live` — the load
     /// driver's mux mode (the network is a per-call `MuxNetwork`). `clock` is the
     /// shared process-wide clock (see [`real`](Self::real)); the driver passes the
-    /// same instance for every call so all timelines and the chaos markers share
-    /// one axis. `record` applies the existing recording layer on top.
+    /// same instance for every call so all timelines share one axis. `record` applies the existing recording layer on top.
     pub fn mux(
         network: Arc<dyn SignalingNetwork>,
         clock: Clock,
@@ -293,11 +291,6 @@ impl AgentBinder {
     /// [`StepError`](crate::StepError)/outcome string); when present on a NOT-passed call it is
     /// surfaced in the rendered page so the sampled callflow explains WHY it
     /// failed, not merely that it did.
-    /// `chaos_markers` are injected-fault instants as `(wall_clock_epoch_ms,
-    /// label)` — the load driver passes the recent `POST /chaos` markers so a
-    /// sampled NOK flow renders each one (that falls in this call's window) as a
-    /// Lifecycle band, making it obvious whether the kill landed during the call.
-    /// Pass `&[]` when there is no chaos correlation.
     /// `checks` are the call's Test-case check verdicts (PASS and FAIL), each
     /// rendered as an entry in the page's anomaly list; pass `&[]` when the call
     /// carries no case checks.
@@ -307,17 +300,16 @@ impl AgentBinder {
         passed: bool,
         banner: Option<&str>,
         detail: Option<&str>,
-        chaos_markers: &[(i64, String)],
         checks: &[CheckNote],
     ) -> Option<String> {
-        let doc = self.seq_doc(title, passed, banner, detail, chaos_markers, checks)?;
+        let doc = self.seq_doc(title, passed, banner, detail, checks)?;
         Some(seq_report::render_html(&doc))
     }
 
     /// Render this call's recorded trace as an SVG sequence diagram (`None` if not
     /// sampled).
     pub fn render_svg(&self, title: &str, passed: bool) -> Option<String> {
-        let doc = self.seq_doc(title, passed, None, None, &[], &[])?;
+        let doc = self.seq_doc(title, passed, None, None, &[])?;
         Some(seq_report::render_svg(&doc))
     }
 
@@ -354,7 +346,7 @@ impl AgentBinder {
     /// plan's report is comparable byte-for-byte with the functional lane's
     /// ([`crate::report::project::normalized_sip_doc`]). `None` if not sampled.
     pub fn normalized_seq_doc(&self, title: &str, passed: bool) -> Option<seq_report::SeqDoc> {
-        let doc = self.seq_doc(title, passed, None, None, &[], &[])?;
+        let doc = self.seq_doc(title, passed, None, None, &[])?;
         Some(crate::report::project::normalize_doc(&doc))
     }
 
@@ -388,7 +380,6 @@ impl AgentBinder {
         passed: bool,
         banner: Option<&str>,
         detail: Option<&str>,
-        chaos_markers: &[(i64, String)],
         checks: &[CheckNote],
     ) -> Option<seq_report::SeqDoc> {
         let (recording, recorder) = (self.recording.as_ref()?, self.recorder.as_ref()?);
@@ -436,12 +427,8 @@ impl AgentBinder {
             });
         }
         // The load binder records on `Clock::system()`, so `sent_ms` is real
-        // wall-clock epoch ms → `wall_clock: true` renders absolute UTC and the
-        // chaos markers (also epoch ms) drop onto the timeline at the kill instant.
-        let overlay = crate::report::project::TimelineOverlay {
-            wall_clock: true,
-            markers: chaos_markers.to_vec(),
-        };
+        // wall-clock epoch ms → `wall_clock: true` renders absolute UTC.
+        let overlay = crate::report::project::TimelineOverlay { wall_clock: true };
         Some(crate::report::project::sip_doc_with_overlay(
             title,
             description.as_deref(),

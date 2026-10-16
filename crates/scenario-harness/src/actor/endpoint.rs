@@ -7,7 +7,7 @@
 //! # Downstream-contract feeding is DECLARATIVE ([`CtxFeed`])
 //!
 //! Phases / checkpoints / the 18x ringing gate key the load report's case
-//! buckets and the chaos classifier's phase-transition proximity (see
+//! buckets (see
 //! `docs/todos/actor-harness-p1-contract-table.md`), and each call body stamps
 //! a DIFFERENT trail (the refer body stamps only `referred`/`transferred` and
 //! never feeds `mark_ringing`; basic stamps `connected`/`bye_200` and does).

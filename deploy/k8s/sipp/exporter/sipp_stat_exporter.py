@@ -47,6 +47,8 @@ Env:
   SIPP_ROLE       (default uac)       -> label role=
   SIPP_JOB        (default "")        -> label sipp_job=   (omitted if empty)
   SIPP_STREAM, SIPP_SHAPE (default "") -> labels stream=, shape= (omitted if empty)
+  SIPP_START      (default "")        -> label start= (`run` or `incident`: when
+                                         the stream starts; omitted if empty)
                                          (NOT `job`: that is reserved and gets
                                          overwritten by the vmagent scrape job)
   EXPORTER_PORT   (default 9035)
@@ -87,6 +89,7 @@ ERROR_KEPT_FILE = os.environ.get("SIPP_ERROR_KEPT_FILE", "")
 ERROR_KEPT_BYTES = int(os.environ.get("SIPP_ERROR_KEPT_BYTES", "0"))
 STREAM = os.environ.get("SIPP_STREAM", "")
 SHAPE = os.environ.get("SIPP_SHAPE", "")
+START = os.environ.get("SIPP_START", "")
 RECORD_FILE = os.environ.get("SIPP_RECORD_FILE", "")
 RECORD_URL = os.environ.get("SIPP_RECORD_URL", "")
 RUN = os.environ.get("SIPP_RUN", "")
@@ -131,6 +134,8 @@ def base_labels():
         pairs.append(("stream", STREAM))
     if SHAPE:
         pairs.append(("shape", SHAPE))
+    if START:
+        pairs.append(("start", START))
     return pairs
 
 

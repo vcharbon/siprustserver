@@ -16,7 +16,7 @@ from kit import budget, write_yaml
 from hakit.cleanup import cleanup
 from hakit.clock import FakeClock
 from hakit.content import Content, discover
-from hakit.dryrun import simulated
+from hakit.dryrun import read_jsonl, simulated
 from hakit.executor import Call, FakeExecutor, ProcResult
 from hakit.jsonval import Json
 from hakit.lab import lab_from_env
@@ -142,6 +142,8 @@ def test_cleanup_copies_out_what_a_crashed_run_left_in_the_scratch(tmp_path: Pat
             return ProcResult(0, "dead-run\n", "")
         if c.argv[:3] == ["docker", "ps", "-aq"]:
             return ProcResult(0, "c1\n", "")
+        if c.argv == ["ls", "-1", SCRATCH]:
+            return ProcResult(0, "dead-run\n", "")
         return None
 
     fake = FakeExecutor([rule])
@@ -151,3 +153,59 @@ def test_cleanup_copies_out_what_a_crashed_run_left_in_the_scratch(tmp_path: Pat
     copy = ["cp", "-a", f"{SCRATCH}/dead-run/.", str(root / "dead-run")]
     assert copy in argvs and ["rm", "-r", "--", f"{SCRATCH}/dead-run"] in argvs
     assert argvs.index(copy) > max(i for i, a in enumerate(argvs) if a[:2] == ["docker", "rm"])
+
+
+def test_a_work_dir_left_uncollected_is_an_integrity_finding(tmp_path: Path) -> None:
+    """Its stat file never reaches the run directory, so its stalls cannot be read."""
+    clock, fake = simulated([lambda c: ProcResult(1, "", "No space left") if c.argv[:2] == ["cp", "-a"] else None],
+                            shapes=["basic"])
+    r = Runner(content(tmp_path), SCHEMAS, lab_from_env({"HAKIT_GENERATOR_SCRATCH": SCRATCH}), fake, clock,
+               tmp_path / "results", say=lambda _m: None)
+    run_dir = r.run("io")
+    found = [i for i in read_jsonl(run_dir / "integrity.jsonl") if i.get("kind") == "generator_failure"]
+    assert sorted(str(i["stream"]) for i in found) == ["basic", "lg"]
+    assert all("stayed in the generator scratch" in str(i["detail"]) for i in found)
+    # The scratch is kept for `hakit cleanup`.
+    assert ["rm", "-r", "--", f"{SCRATCH}/{run_dir.name}"] not in [c.argv for c in fake.calls]
+
+
+def test_cleanup_collects_a_scratch_whose_run_left_no_generator(tmp_path: Path) -> None:
+    root = tmp_path / "results"
+    (root / "gone-run").mkdir(parents=True)
+
+    def rule(c: Call) -> ProcResult | None:
+        if c.argv[:2] == ["ls", "-1"] and c.argv[2] == SCRATCH:
+            return ProcResult(0, "gone-run\n", "")
+        return None
+
+    fake = FakeExecutor([rule])
+    lab = lab_from_env({"HAKIT_GENERATOR_SCRATCH": SCRATCH})
+    assert cleanup(discover([BASE_CONTENT], SCHEMAS), lab, fake, FakeClock(), root, [], dry_run=False) == 0
+    argvs = [c.argv for c in fake.calls if c.kind == "run"]
+    assert ["cp", "-a", f"{SCRATCH}/gone-run/.", str(root / "gone-run")] in argvs
+
+
+def mib(v: str) -> int:
+    return int(v.removesuffix("m").removesuffix("Mi")) << 20
+
+
+# What the exporter twin's python and a SIPp generator's process may hold besides the files.
+EXPORTER_RSS = 64 << 20
+GENERATOR_RSS = 1024 << 20
+
+
+def test_a_twins_kept_error_file_leaves_its_exporter_room_in_its_memory(tmp_path: Path) -> None:
+    """errors.kept.log is written by the twin, so its tmpfs pages are charged to the twin's memory."""
+    _, calls = run(tmp_path, {"HAKIT_GENERATOR_SCRATCH": SCRATCH})
+    twin = docker_runs(calls)["hakit-basic-exporter"]
+    kept = next(int(e.split("=", 1)[1]) for e in twin if e.startswith("SIPP_ERROR_KEPT_BYTES="))
+    assert kept + EXPORTER_RSS <= mib(flag(twin, "--memory"))
+
+
+def test_a_pod_generators_files_leave_its_process_room_in_its_memory(tmp_path: Path) -> None:
+    """A memory-backed emptyDir's pages are charged to the container that writes them."""
+    run_dir, _ = run(tmp_path, {"HAKIT_GENERATOR_SCRATCH": SCRATCH})
+    pod = json.loads((run_dir / "streams" / "pod" / "pod.json").read_text())
+    gen = next(c for c in pod["spec"]["containers"] if c["name"] == "gen")
+    size = pod["spec"]["volumes"][0]["emptyDir"]["sizeLimit"]
+    assert mib(size) + GENERATOR_RSS <= mib(gen["resources"]["limits"]["memory"])

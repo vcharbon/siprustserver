@@ -150,6 +150,33 @@ def test_a_cdr_lost_in_the_sink_just_before_a_window_belongs_to_that_window(tmp_
     assert [(u["reason"], u["call_ids"]) for u in jv.objs(v, "unattributed")] == [("missing", ["early"])]
 
 
+def test_a_mismatch_on_a_call_that_spanned_a_window_and_ended_after_it_carries_every_window_it_overlapped(
+    tmp_path: Path,
+) -> None:
+    """Its CDR may have been changed while the window was open, though the
+    call ended after: like an in-dialog impact, it lists the windows of its
+    lifetime and takes no budget. One after every window stays unattributed."""
+    at = T0 + 100_000  # the window is [+100 s, +145 s]
+    spanned = record("spanned", at - 10_000, ended=110_000)  # ends at +200 s
+    after = record("after", at + 200_000)
+    d = run_dir(
+        tmp_path,
+        [spanned, after],
+        calls=2,
+        events=kill(1, at, budget="worker-kill"),
+        profile={"cdr_join": True, "generator_stall_ms": 3_600_000},
+        cdrs=[cdr("spanned", at - 10_000, 100, 115_000), cdr("after", at + 200_000, 100, 35_000)],
+    )
+    v = compute(d, SCHEMAS)
+    assert SCHEMAS.errors("verdict.v1", v) == []
+    (w,) = jv.objs(v, "windows")
+    assert [(i["class"], i["reason"], i["call_id"], i["candidate_windows"]) for i in jv.objs(v, "in_dialog")] == [
+        ("cdr_mismatch", "differs", "spanned", [w["event"]])
+    ]
+    assert not [r for r in jv.objs(w, "impacts") if r["class"] == "cdr_mismatch"]
+    assert [(u["reason"], u["call_ids"]) for u in jv.objs(v, "unattributed")] == [("differs", ["after"])]
+
+
 def test_a_duration_within_the_kinds_excess_is_allowed(tmp_path: Path) -> None:
     # A BYE retransmitted once on a lossy plane ends the CDR 1.5 s after the
     # caller's end; excess_ms 1500 past the join's 1 s + unit allows it.

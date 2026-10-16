@@ -7,7 +7,8 @@ incident block: the `Incident window` region annotation from
 `sip_chaos_window == 1`, the `Incident phase` point annotation from
 `sip_chaos_event`, both read from the VictoriaMetrics datasource and titled by
 incident (and phase), the tag `hakit`, and the link listing every dashboard so
-tagged with the time range carried.
+tagged with the time range carried. No other annotation reads those two series:
+it would mark every incident a second time.
 """
 
 from __future__ import annotations
@@ -81,6 +82,11 @@ def block_errors(doc: Json) -> list[str]:
             errs.append(f"no {want['name']!r} annotation on {want['expr']}")
         elif not any(_victoriametrics(a) for a in found):
             errs.append(f"the {want['name']!r} annotation reads another datasource than VictoriaMetrics (uid vm)")
+    block = (WINDOW_ANNOTATION, PHASE_ANNOTATION)
+    for a in annotations:
+        on_incidents = any(series in str(a.get("expr", "")) for series in ("sip_chaos_window", "sip_chaos_event"))
+        if on_incidents and not any(_carrying([a], want, _ANNOTATION_KEYS) for want in block):
+            errs.append(f"the annotation {a.get('name')!r} marks the incidents a second time beside the block")
     if TAG not in as_list(doc.get("tags") or []):
         errs.append(f"no tag {TAG!r}")
     links = [as_obj(entry) for entry in as_list(doc.get("links") or [])]

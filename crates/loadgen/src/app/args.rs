@@ -116,8 +116,8 @@ pub struct Args {
     /// Output directory for the on-disk report.
     #[arg(long, default_value = "./loadgen-report")]
     pub out_dir: PathBuf,
-    /// Address to serve the Prometheus /metrics endpoint (GET) and the chaos-flag
-    /// endpoint (`POST /chaos?type=<kind>&target=<who>`) on.
+    /// Address to serve the Prometheus /metrics endpoint (GET), the live rate
+    /// and the drain on.
     #[arg(long, default_value = "0.0.0.0:9300")]
     pub metrics_addr: SocketAddr,
     /// The run id every call-outcome record names and every Call-ID carries
@@ -146,13 +146,6 @@ pub struct Args {
     /// per line, and exit without placing a call.
     #[arg(long, default_value_t = false)]
     pub list_shapes: bool,
-    /// Per-phase chaos tolerance (ms): a call is bucketed `chaos="near"` when an
-    /// injected fault lands within this of a dialog-state transition (connected/
-    /// reinvited/transferred/…) or mid-setup — the "state had no time to propagate,
-    /// SIP retransmission recovers it" window = acceptable kill collateral. A call
-    /// stably connected across the fault stays `chaos="clear"` (a genuine signal).
-    #[arg(long, default_value_t = 200)]
-    pub chaos_phase_tolerance_ms: u64,
     #[arg(long, default_value_t = 60)]
     pub options_hold: u64,
     #[arg(long, default_value_t = 5)]

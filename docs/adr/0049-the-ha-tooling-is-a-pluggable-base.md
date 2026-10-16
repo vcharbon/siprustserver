@@ -392,7 +392,10 @@ made. A run profile joins the two.
    ended outside every window but within the profile's `cdr_in_flight_s`
    before a window opened belongs to that window: its CDR was still in the
    sink when the fault hit; the value is stated from the system under test's
-   publish and confirm timeouts, never fitted. A `differs` whose caller
+   publish and confirm timeouts, never fitted. Any other mismatch outside
+   every window, of a call whose lifetime overlapped windows, takes no
+   budget: it is listed in `in_dialog` with those windows as candidates (the
+   window may have changed the CDR, the call ended after it). A `differs` whose caller
    answer or end instant fell in a generator stall of its stream was measured
    by the generator: it is listed in that stall's `generator_stall` finding,
    never charged. A window allows each kind separately
@@ -561,8 +564,7 @@ made. A run profile joins the two.
    of the teardown only whether a BYE released the dialog is kept.
 
    A record's `ending` comes from what the caller observed, never from an
-   accepted branch's name. loadgen's `near`/`clear` tag and its `POST /chaos`
-   marker play no part in the verdict: attribution is the window's (§3.5).
+   accepted branch's name. Attribution is the window's (§3.5).
 4. **Transport.** A record reaches VictoriaLogs as one line on
    `/insert/jsonline` with `_stream_fields=run,source,stream`, in one shape
    whatever the producer: every field of the record at top level, the record
@@ -674,21 +676,33 @@ made. A run profile joins the two.
    `/dev/shm/hakit` by default), its files copied into the run directory
    once its containers are removed, every generator container runs with no
    swap and as the runner's user, and a pod generator's directory is
-   memory-backed.
+   memory-backed. A tmpfs page is charged to the memory of the container
+   that wrote it, so each limit holds the files its container writes beside
+   its process: the SIPp UAC its record file (about 0.5 KB a call) and the
+   kept tails of its stat and error files, the exporter twin its
+   `errors.kept.log` (64 MiB at most in 256 MiB), a pod generator its
+   emptyDir (512 MiB at most in 1536 MiB). A firing whose files stay in the
+   scratch is a `generator_failure`, and `hakit cleanup` copies out the
+   scratch of every run whose runner is gone.
 5. **Before the load.** The runner records the host (free memory, swap, disk,
    load) and refuses the run outside the profile's `preflight` limits; it
    refuses to start while the system under test holds calls (a
    `leftover_calls` finding), while an event of an earlier run is open, or
    while the host is under stress: io or memory full pressure (avg10) or the
    swap-in rate at or above the profile's `preflight` thresholds
-   (`max_io_full_pct` 5, `max_memory_full_pct` 5, `max_swapin_pages_s` 50 by
-   default; stated, not fitted).
-6. **During the load.** The runner samples the host every second, from the
-   run's start to its verdict: `/proc/pressure/{cpu,memory,io}` (`some` and
-   `full`, avg10 and the stall totals) and `/proc/vmstat` (`pswpin`,
-   `pswpout`) into `host.jsonl`, pushed as `hakit_host_pressure_ratio` (the
-   share of the interval stalled, from the totals, so a sample a blocking
-   step delayed loses nothing) and `hakit_host_swap_pages_per_second`. An
+   (`max_swapin_pages_s` 50, `max_memory_full_pct` 5, `max_io_full_pct` 20
+   by default; stated, not fitted). Swap-in is the trigger: a generator
+   waits on each fault of its own pages, and memory full pressure is reclaim
+   every allocating task runs. A tmpfs-backed generator does not wait on the
+   host's disk, so io full pressure counts only as a sustained stall risk.
+6. **During the load.** The runner samples the host every second while it
+   waits between steps, from the run's start to its verdict:
+   `/proc/pressure/{cpu,memory,io}` (`some` and `full`, avg10 and the stall
+   totals) and `/proc/vmstat` (`pswpin`, `pswpout`) into `host.jsonl`,
+   pushed as `hakit_host_pressure_ratio` (the share of the interval stalled,
+   from the totals: a step that blocks delays the next sample, and the
+   longer interval still counts every stall in it, averaged over its span)
+   and `hakit_host_swap_pages_per_second`. An
    interval at or above a `preflight` threshold is under stress (§3.12).
    Every series the run reads live is checked for
    freshness every scrape interval (15 s): each stream's records in

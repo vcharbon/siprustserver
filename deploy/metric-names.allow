@@ -11,8 +11,6 @@
 docker/Dockerfile: limiter_netcut
 ../tooling/hakit/content/dashboards/call-limiter.json: limiter_kill
 ../tooling/hakit/content/dashboards/call-limiter.json: limiter_netcut
-../tooling/hakit/content/dashboards/sipp-endurance-chaos.json: limiter_kill
-../tooling/hakit/content/dashboards/sipp-endurance-chaos.json: limiter_netcut
 
 # Prose shorthand for b2bua_active_calls, jemalloc_resident_bytes and
 # process_resident_memory_bytes.

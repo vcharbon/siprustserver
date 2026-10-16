@@ -94,31 +94,6 @@ impl ResultClass {
     pub fn label_is_ok(label: &str) -> bool {
         label == "ok"
     }
-
-    /// Whether a failure of this class may be auto-excused as `chaos="near"`
-    /// (acceptable kill collateral) when the **per-phase** rule also holds (a
-    /// dialog-state transition occurred within the phase tolerance of the fault).
-    ///
-    /// The accepted constraint: *a call whose dialog state changed within
-    /// ~200 ms of the kill may take a small impact — established and ringing
-    /// calls are what we protect.* So a SIP **protocol** symptom of a
-    /// concurrent-with-the-kill state change (a `RfcAuditFail` CSeq desync, a
-    /// `WrongMethod` phantom CANCEL, an `Unexpected` 481) IS excusable — those are
-    /// exactly the forked-b-leg confirm-race collateral, which only ever hits a
-    /// call confirming *at* the kill (established calls flushed their state and
-    /// reclaim clean). The per-phase classifier gates it on the near-kill
-    /// transition, so a *stably-established* call that fails far from any kill
-    /// still lands in `clear`.
-    ///
-    /// Only the **timing-independent** classes are never excused, because their
-    /// cause is unrelated to dialog timing and should always be seen: `Panic` (a
-    /// code panic), `Unparseable` (wire corruption) and `Rejected` (a key
-    /// refused before any datagram). `CheckFail` IS excusable
-    /// like the other protocol/content symptoms — a call rerouted mid-kill can
-    /// legitimately show a different wire shape than the case's oracle expects.
-    pub fn chaos_excusable(&self) -> bool {
-        !matches!(self, ResultClass::Panic | ResultClass::Unparseable | ResultClass::Rejected)
-    }
 }
 
 impl std::fmt::Display for ResultClass {
@@ -180,18 +155,6 @@ impl CallOutcome {
     /// failure (a failed or RFC-dirty call already explains itself).
     pub fn is_checkable(&self) -> bool {
         matches!(self, CallOutcome::Ok { .. })
-    }
-
-    /// Whether this outcome may be excused as chaos collateral:
-    /// [`ResultClass::chaos_excusable`], except that a key-contention rejection
-    /// is excusable — `key_in_flight` (the holder may be a call a fault keeps
-    /// open) and `key_cooling` (the previous call may have failed on a fault) —
-    /// while a missing or unusable key is not.
-    pub fn chaos_excusable(&self) -> bool {
-        match self {
-            CallOutcome::Rejected(reason) => matches!(*reason, "key_in_flight" | "key_cooling"),
-            other => ResultClass::from(other).chaos_excusable(),
-        }
     }
 
     /// A human-readable one-line detail for the error sample (None for Ok).
@@ -277,26 +240,6 @@ fn slug(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A key held by a concurrent call, or cooling after a failed one, may be
-    /// a fault's doing, so those rejections are chaos-excusable; a missing or
-    /// unusable key is not.
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn only_key_contention_rejections_are_chaos_excusable() {
-        for reason in ["key_in_flight", "key_cooling"] {
-            assert!(CallOutcome::Rejected(reason).chaos_excusable(), "{reason}");
-        }
-        for reason in ["no_from", "userless_from"] {
-            assert!(!CallOutcome::Rejected(reason).chaos_excusable(), "{reason}");
-        }
-        assert!(!CallOutcome::Panic("p".into()).chaos_excusable());
-        let timeout = CallOutcome::Step {
-            at: FailedAt::at_barrier("established"),
-            cause: StepError::timeout("established", None, "a datagram"),
-        };
-        assert!(timeout.chaos_excusable());
-    }
 
     fn wrong_status(got: u16) -> CallOutcome {
         CallOutcome::Step {

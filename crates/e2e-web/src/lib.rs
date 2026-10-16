@@ -839,7 +839,7 @@ fn read_load_index(st: &AppState, run: &str) -> Option<model::LoadRunIndex> {
 /// List load runs newest-first. A load run is any immediate subdirectory of the
 /// load-runs root that holds a `load-result.json`. HTML lists them (link +
 /// started time + call/failure tallies); JSON mirrors `{run, startedMs,
-/// finished, totalCalls, clearFailures}`.
+/// finished, totalCalls, failedCalls}`.
 async fn load_runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let mut runs: Vec<(String, model::LoadRunIndex)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&st.load_runs_root) {
@@ -865,7 +865,7 @@ async fn load_runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) ->
                     "startedMs": idx.meta.started_ms,
                     "finished": idx.meta.finished,
                     "totalCalls": idx.total_calls(),
-                    "clearFailures": idx.clear_failures(),
+                    "failedCalls": idx.failed_calls(),
                 })
             })
             .collect();
@@ -883,15 +883,15 @@ async fn load_runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) ->
                 p .pending { "No load runs found under " code { (st.load_runs_root.display()) } "." }
             } @else {
                 table {
-                    tr { th { "run" } th { "started" } th { "calls" } th { "genuine failures" } th { "state" } }
+                    tr { th { "run" } th { "started" } th { "calls" } th { "failures" } th { "state" } }
                     @for (name, idx) in &runs {
                         tr {
                             td { a href={ "/load/" (name) } { (name) } }
                             td { (fmt_epoch_ms(idx.meta.started_ms)) }
                             td { (idx.total_calls()) }
                             td {
-                                @if idx.clear_failures() == 0 { span .pass { "0" } }
-                                @else { span .fail { (idx.clear_failures()) } }
+                                @if idx.failed_calls() == 0 { span .pass { "0" } }
+                                @else { span .fail { (idx.failed_calls()) } }
                             }
                             td {
                                 @if idx.meta.finished { "finished" }
@@ -937,19 +937,17 @@ async fn load_run_detail(
                 @if m.finished { "finished " (fmt_epoch_ms(m.finished_ms)) }
                 @else { span .pending { "running (snapshot at " (fmt_epoch_ms(m.finished_ms)) ")" } }
                 " · " b { (idx.total_calls()) } " call(s), "
-                @if idx.clear_failures() == 0 { span .pass { "0 genuine failures" } }
-                @else { span .fail { (idx.clear_failures()) " genuine failure(s)" } }
+                @if idx.failed_calls() == 0 { span .pass { "0 failures" } }
+                @else { span .fail { (idx.failed_calls()) " failure(s)" } }
             }
 
-            h2 { "Results by scenario × class × case × chaos" }
+            h2 { "Results by scenario × class × case" }
             p .muted {
-                "chaos=" b { "clear" } " are the genuine results to triage; chaos=" b { "near" }
-                " are within the tolerance of an injected fault (accepted kill collateral). "
                 "case splits a class into its distinct failure modes (RFC rule, failed check, "
                 "failed step), each with its own first-N samples."
             }
             table {
-                tr { th { "scenario" } th { "class" } th { "case" } th { "chaos" } th { "count" } th { "samples" } }
+                tr { th { "scenario" } th { "class" } th { "case" } th { "count" } th { "samples" } }
                 @for row in &idx.counts {
                     tr {
                         td { (row.scenario) }
@@ -958,12 +956,8 @@ async fn load_run_detail(
                             @else { span .fail { (row.class) } }
                         }
                         td { code { (row.case) } }
-                        td {
-                            @if row.chaos == "near" { span .crash { "near" } }
-                            @else { (row.chaos) }
-                        }
                         td { (row.count) }
-                        td { (sample_links(&run, &idx, &row.scenario, &row.class, &row.case, &row.chaos)) }
+                        td { (sample_links(&run, &idx, &row.scenario, &row.class, &row.case)) }
                     }
                 }
             }
@@ -1053,7 +1047,7 @@ fn canary_row(label: &str, value: u64) -> Markup {
     }
 }
 
-/// The sample-page links for a `(scenario, class, case, chaos)` count row: the
+/// The sample-page links for a `(scenario, class, case)` count row: the
 /// stored callflow pages, each served through `/load/{run}/files/…`.
 fn sample_links(
     run: &str,
@@ -1061,12 +1055,9 @@ fn sample_links(
     scenario: &str,
     class: &str,
     case: &str,
-    chaos: &str,
 ) -> Markup {
-    let group = idx
-        .samples
-        .iter()
-        .find(|g| g.scenario == scenario && g.class == class && g.case == case && g.chaos == chaos);
+    let group =
+        idx.samples.iter().find(|g| g.scenario == scenario && g.class == class && g.case == case);
     html! {
         @if let Some(group) = group {
             @for (i, page) in group.pages.iter().enumerate() {

@@ -120,7 +120,7 @@ async fn post_rate_retargets_the_running_server() {
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body\n".to_string());
     let srv_rate = rate.clone();
     tokio::spawn(async move {
-        let _ = serve_metrics_on(listener, render, None, Some(srv_rate)).await;
+        let _ = serve_metrics_on(listener, render, Some(srv_rate)).await;
     });
 
     // Retry-connect + one HTTP round-trip helper.
@@ -180,7 +180,7 @@ async fn post_drain_closes_the_window_of_the_running_server() {
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body\n".to_string());
     let srv_rate = rate.clone();
     tokio::spawn(async move {
-        let _ = serve_metrics_on(listener, render, None, Some(srv_rate)).await;
+        let _ = serve_metrics_on(listener, render, Some(srv_rate)).await;
     });
     let mut stream = tokio::net::TcpStream::connect(bind).await.unwrap();
     stream.write_all(b"POST /drain HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
