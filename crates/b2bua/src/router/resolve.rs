@@ -262,7 +262,8 @@ pub(super) enum InitialInvite {
 /// replicated call whose incoming leg it names when it carries that call's
 /// INVITE CSeq and its top-Via branch names that call's own server
 /// transaction ([`names_server_branch`]); any other is foreign. An INVITE
-/// whose cookie names this node, or none, is this node's own.
+/// whose cookie names this node, or none, is this node's own, as is every
+/// INVITE of a node that does not replicate: it backs up no primary.
 pub(super) async fn initial_invite_copy(
     ctx: &RouterCtx,
     event: &CallEvent,
@@ -277,7 +278,7 @@ pub(super) async fn initial_invite_copy(
     if ctx.unborn.holds(derived, cseq) || ctx.state.peek(derived).is_some() {
         return InitialInvite::Own;
     }
-    if foreign_primary(req, &ctx.config.self_ordinal).is_none() {
+    if !ctx.state.replicates() || foreign_primary(req, &ctx.config.self_ordinal).is_none() {
         return InitialInvite::Own;
     }
     let call_id = req.call_id().as_str();

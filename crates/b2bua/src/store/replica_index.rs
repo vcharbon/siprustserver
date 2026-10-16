@@ -8,6 +8,11 @@ use call::{IndexHit, IndexLookup, Probe};
 use super::{CallState, CallStore, StoreError};
 
 impl CallState {
+    /// Whether this node replicates: it holds other primaries' replicas.
+    pub fn replicates(&self) -> bool {
+        self.repl_store().is_some()
+    }
+
     /// The call of an in-dialog request or a CANCEL that states no `callRef`
     /// of ours, and the namespace that matched, counted as a takeover
     /// resolution. A request routed per RFC 3261 §12.2.1.1 carries our
