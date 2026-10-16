@@ -41,7 +41,8 @@ fn records_reach_the_file_and_the_counters() {
 }
 
 /// With a VictoriaLogs target, the records go out as one jsonline POST whose
-/// lines carry `_time` (the record's end) and `_msg`.
+/// lines carry `_time` (the record's end), the record verbatim in `_msg`, and
+/// its stream and grouping fields.
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn records_are_pushed_to_victorialogs() {
@@ -71,7 +72,11 @@ fn records_are_pushed_to_victorialogs() {
     let dir = scratch("push");
     let sink =
         OutcomeSink::new("r1", "loadgen", "main", &dir.join("r.jsonl"), Some(target)).unwrap();
-    sink.write(json!({ "shape": "basic_call", "ending": "answered", "ended_at_ms": 1234 }));
+    let record = json!({
+        "run": "r1", "source": "loadgen", "stream": "main", "call_id": "c1",
+        "shape": "basic_call", "ending": "answered", "ended_at_ms": 1234, "legs": [{ "role": "bob" }],
+    });
+    sink.write(record.clone());
     sink.close();
     let (head, body) = server.join().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -81,10 +86,12 @@ fn records_are_pushed_to_victorialogs() {
     );
     assert!(head.contains("Content-Type: application/stream+json"), "{head}");
     let line: Value = serde_json::from_str(body.trim_end()).unwrap();
-    assert_eq!(
-        (line["_time"].clone(), line["_msg"].clone()),
-        (json!(1234), json!("basic_call answered"))
-    );
+    assert_eq!(line["_time"], json!(1234));
+    let shipped: Value = serde_json::from_str(line["_msg"].as_str().unwrap()).unwrap();
+    assert_eq!(shipped, record, "the record travels whole in `_msg`");
+    for field in ["run", "source", "stream", "shape", "ending", "call_id"] {
+        assert_eq!(line[field], record[field], "{field} beside it");
+    }
 }
 
 #[test]
@@ -156,4 +163,24 @@ fn a_blackholed_endpoint_drops_and_counts_within_the_close_bound() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     assert!(failed >= 1, "{text}");
+}
+
+/// loadgen ships the one line shape every producer ships (ADR-0049 §4.4), the
+/// one the tooling's shared fixture states and the SIPp record twin is tested
+/// against: every record field at top level, the record whole in `_msg`.
+#[test]
+fn a_records_line_has_the_shared_shape() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tooling/hakit/tests/fixtures/shipped-record.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let record = fixture["record"].clone();
+    let line: Value = serde_json::from_str(&logs_line(record.clone())).unwrap();
+    let mut fields: Vec<&str> = line.as_object().unwrap().keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    let want: Vec<&str> =
+        fixture["fields"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+    assert_eq!(fields, want);
+    let shipped: Value = serde_json::from_str(line["_msg"].as_str().unwrap()).unwrap();
+    assert_eq!(shipped, record, "the record travels whole in `_msg`");
+    assert_eq!(line["_time"], record["ended_at_ms"]);
 }

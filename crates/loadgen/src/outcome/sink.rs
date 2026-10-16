@@ -348,17 +348,20 @@ fn push_loop(rx: Receiver<String>, target: LogsTarget, counts: &Counts) {
     }
 }
 
-/// The VictoriaLogs line of a record: the record, its `_time` (its end), and a
-/// `_msg` naming the shape and ending.
-fn logs_line(mut record: Value) -> String {
-    let msg = format!(
-        "{} {}",
-        record["shape"].as_str().unwrap_or(""),
-        record["ending"].as_str().unwrap_or("")
-    );
-    record["_time"] = record["ended_at_ms"].clone();
-    record["_msg"] = Value::String(msg);
-    record.to_string()
+/// The VictoriaLogs line of a record, as every producer ships one (ADR-0049
+/// §4.4): every field of the record at top level, the record verbatim in
+/// `_msg` (a reader gets it back whole, types and nesting kept), and `_time`
+/// its end.
+pub(super) fn logs_line(record: Value) -> String {
+    let msg = record.to_string();
+    let time = record["ended_at_ms"].clone();
+    let mut line = match record {
+        Value::Object(fields) => fields,
+        _ => serde_json::Map::new(),
+    };
+    line.insert("_msg".to_string(), Value::String(msg));
+    line.insert("_time".to_string(), time);
+    Value::Object(line).to_string()
 }
 
 /// One HTTP/1.1 POST of `body`, every step bounded by [`POST_TIMEOUT`] and

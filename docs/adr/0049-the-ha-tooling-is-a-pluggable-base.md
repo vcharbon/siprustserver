@@ -510,8 +510,11 @@ made. A run profile joins the two.
    accepted branch's name. loadgen's `near`/`clear` tag and its `POST /chaos`
    marker play no part in the verdict: attribution is the window's (§3.5).
 4. **Transport.** A record reaches VictoriaLogs as one line on
-   `/insert/jsonline` with `_stream_fields=run,source,stream` and `_time` set
-   from `ended_at_ms`. VictoriaLogs is the live view. At the end of a run the
+   `/insert/jsonline` with `_stream_fields=run,source,stream`, in one shape
+   whatever the producer: every field of the record at top level, the record
+   verbatim in `_msg`, and `_time` set from `ended_at_ms`
+   (`tooling/hakit/tests/fixtures/shipped-record.json`, which each producer's
+   tests check). VictoriaLogs is the live view. At the end of a run the
    runner exports the run's records into the run directory, and the verdict
    reads that copy, so a verdict can be recomputed after VictoriaLogs
    retention has dropped the run.
