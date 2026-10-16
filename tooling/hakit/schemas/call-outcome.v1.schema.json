@@ -88,7 +88,7 @@
         { "type": "null" },
         { "enum": ["timeout", "transport", "protocol"] },
         { "type": "string", "pattern": "^[1-6][0-9]{2}$" },
-        { "type": "string", "pattern": "^[A-Za-z0-9.+-]+;cause=[0-9]+$" }
+        { "type": "string", "pattern": "^[a-z0-9.+-]+;cause=[0-9]+$" }
       ]
     },
     "ending": {

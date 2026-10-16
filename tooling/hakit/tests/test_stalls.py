@@ -210,7 +210,10 @@ def test_the_sipp_call_limit_covers_every_call_at_its_worst() -> None:
     from hakit.profile import Stream
     from hakit.sipp_driver import SippStream, worst_call_s
 
-    s = Stream("basic", "sipp", "run", "basic", "uac.xml", 20, 32, 5, 20, None, {}, [(60, 50)])
-    stream = SippStream("r", s, 0, Path("uac.xml"), Path("."), lab_from_env({}), None)  # type: ignore[arg-type]
+    from hakit.paths import BASE_CONTENT
+
+    s = Stream("basic", "sipp", "run", "basic", "uac-basic-hold.xml", 20, 32, 5, 20, None, {}, [(60, 50)])
+    scenario = BASE_CONTENT / "scenarios" / "uac-basic-hold.xml"
+    stream = SippStream("r", s, 0, scenario, Path("."), lab_from_env({}), None)  # type: ignore[arg-type]
     assert worst_call_s(s) == 96
     assert stream.max_concurrent() == 50 * 96 + 10

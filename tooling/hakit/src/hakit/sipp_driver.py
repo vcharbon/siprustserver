@@ -127,7 +127,7 @@ class SippStream:
         s = self.stream
         if s.max_concurrent is not None:
             return s.max_concurrent
-        return int(math.ceil(s.peak_cps * worst_call_s(s))) + 10
+        return int(math.ceil(s.peak_cps * worst_call_s(s, key_defaults(self.scenario)))) + 10
 
     def sipp_argv(self) -> list[str]:
         s = self.stream
