@@ -116,10 +116,12 @@ def _substituted(root: ET.Element) -> list[str]:
 
 
 def key_defaults(path: Path) -> dict[str, str]:
-    """The `-key` defaults a scenario declares in its comments, one
-    `hakit-key: <name>=<value>` line each; a launcher passes them before the
-    stream's own params, so a param overrides its default."""
-    return dict(_DEFAULT.findall(path.read_text(encoding="latin-1")))
+    """The `-key` defaults a scenario declares in its header comment (before
+    `<scenario>`), one `hakit-key: <name>=<value>` line each; a launcher
+    passes them before the stream's own params, so a param overrides its
+    default."""
+    header = path.read_text(encoding="latin-1").split("<scenario", 1)[0]
+    return dict(_DEFAULT.findall(header))
 
 
 def scenario_keys(path: Path) -> set[str]:
@@ -162,15 +164,55 @@ def _matches(step: Step, attr: str, value: str) -> bool:
     return pat == value
 
 
-def _bounded(group: list[Step], before: Step | None) -> bool:
+def _bounded(group: list[Step]) -> bool:
+    """A wait is bounded by its own timer only: a pending send's
+    retransmissions stop on any final, an INVITE provisional or an
+    ACK/CANCEL/BYE/PRACK taken by a later recv, another transaction's included."""
     entries = [group[0]] + [s for s in group[1:] if s.labels]
-    if all(s.get("timeout") and s.get("ontimeout") for s in entries):
-        return True
-    if before is None or before.tag != "send" or not before.get("retrans") or not before.get("ontimeout"):
-        return False
-    # A provisional stops the retransmissions of an INVITE, never those of
-    # another request (RFC 3261 section 17.1.2.2).
-    return not (before.el.text or "").strip().startswith("INVITE ")
+    return all(s.get("timeout") and s.get("ontimeout") for s in entries)
+
+
+def request_method(step: Step) -> str | None:
+    """The method of a send that is a request, else None."""
+    if step.tag != "send":
+        return None
+    first = (step.el.text or "").strip().split(" ", 1)[0]
+    return None if not first or first.startswith("SIP/") else first
+
+
+def _method_errors(sc: Scenario) -> list[str]:
+    """A `<recv response>` without `response_txn` takes only the responses to
+    the methods of the sends placed before it in the file (SIPp's per-recv
+    method list), so a request must flow into a wait one of whose response
+    recvs comes after a send of its method; otherwise its responses go to the
+    handler."""
+    groups = _group_of(sc)
+    sent_before: list[set[str]] = []
+    seen: set[str] = set()
+    for st in sc.steps:
+        sent_before.append(set(seen))
+        m = request_method(st)
+        if m is not None and not st.get("start_txn") and not st.get("ack_txn"):
+            seen.add(m)
+    errs: list[str] = []
+    for st in sc.steps:
+        m = request_method(st)
+        if m is None or m == "ACK":
+            continue
+        nxt = sc.target(st.get("next"))
+        target = nxt if nxt is not None else st.index + 1
+        if target >= len(sc.steps) or sc.steps[target].tag != "recv":
+            continue
+        txn = st.get("start_txn")
+        takes = [
+            r
+            for r in groups[target]
+            if r.get("response") and (r.get("response_txn") == txn if txn else (r.get("response_txn") or m in sent_before[r.index]))
+        ]
+        if not takes:
+            article = "an" if m[0] in "AEIOU" else "a"
+            errs.append(f"step {st.index}: {article} {m} flows into a wait whose recvs take no {m} response")
+    return errs
 
 
 def _unconditional_next(s: Step) -> bool:
@@ -241,8 +283,15 @@ def _record_errors(sc: Scenario) -> list[str]:
     return sorted(errors)
 
 
+# SIPp 3.7 refuses a scenario file longer than this (xp_parser.c XP_MAX_FILE_LEN).
+MAX_FILE_BYTES = 65536
+
+
 def lint(path: Path) -> list[str]:
     """The rule violations of one scenario file, each naming the file."""
+    size = path.stat().st_size
+    if size > MAX_FILE_BYTES:
+        return [f"{path}: {size} bytes, over the {MAX_FILE_BYTES} SIPp 3.7 loads"]
     try:
         sc = parse(path)
     except ET.ParseError as e:
@@ -292,9 +341,9 @@ def _uac_errors(sc: Scenario) -> list[str]:
     for g in _groups(sc):
         if g[0].index == hstart:
             continue
-        before = sc.steps[g[0].index - 1] if g[0].index > 0 else None
-        if not _bounded(g, before):
-            errs.append(f"step {g[0].index}: the wait is bounded by no timeout and no retransmitted send")
+        if not _bounded(g):
+            errs.append(f"step {g[0].index}: the wait is bounded by no timeout of its own")
+    errs.extend(_method_errors(sc))
     if not any(s.writes_record() for s in sc.steps):
         errs.append("no step writes a call-outcome record")
     else:
