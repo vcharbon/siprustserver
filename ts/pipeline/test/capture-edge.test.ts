@@ -160,6 +160,13 @@ describe("the capture edge: a leg terminated inside the capture", () => {
     expect(details(doc([callerLeg(msgs)], [{ legs: [0] }]))).toEqual([])
   })
 
+  it("a BYE glare: each side's BYE crossed the other's, neither answered nor retransmitted", () => {
+    const callee = (ms: number): Flows.Msg =>
+      msg({ callId: BASE_CALL_ID, seq: 7, method: "BYE", src: SUT_INGRESS, dst: UPSTREAM, hop: 0, ts_ms: ms, toTag: "callee" })
+    const msgs = [...callerMsgs("left-open"), req("BYE", 2, 5_000, "callee"), callee(5_001)]
+    expect(details(family(msgs, 5_010))).toEqual([])
+  })
+
   it("a non-2xx final nobody ACKed, whatever the distance to the end", () => {
     const msgs = [req("INVITE", 1, 0), res(486, "INVITE", 1, 300)]
     expect(details(family(msgs, 300 + SILENCE_MS - 1))).toEqual([])
@@ -212,6 +219,36 @@ describe("the capture edge: a leg the file cut through", () => {
     expect(details(family(msgs, 8_000 + TAIL_MS))).toEqual([])
   })
 
+  it("a challenged BYE whose authenticated retry is still being retransmitted", () => {
+    // The 407 finals the first BYE's transaction, not the retry's.
+    const msgs = [
+      ...callerMsgs("left-open"),
+      req("BYE", 2, 5_000, "callee"),
+      res(407, "BYE", 2, 5_005),
+      req("BYE", 3, 5_010, "callee"),
+      { ...req("BYE", 3, 5_510, "callee"), retx: true },
+      { ...req("BYE", 3, 6_510, "callee"), retx: true }
+    ]
+    const found = details(family(msgs, 7_000))
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/its BYE \(msg 5\) drew no final and was retransmitted.*bye-unanswered-at-edge/)
+  })
+
+  it("a fresh 2xx to the attempt, whatever non-2xx another branch answered after it", () => {
+    // RFC 3261 §16.7: a 2xx forwarded on one branch establishes the dialog however the others end.
+    const msgs = [req("INVITE", 1, 0), res(200, "INVITE", 1, 300, "a"), req("ACK", 1, 305, "a"), res(486, "INVITE", 1, 310, "b")]
+    const found = details(family(msgs, 310 + 10 * SILENCE_MS))
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/took the 200 \(msg 1\) answering its INVITE \(msg 0\) and no BYE closed the dialog: dialog-left-open/)
+  })
+
+  it("an INVITE retried after a non-2xx and never answered, inside the give-up silence", () => {
+    const msgs = [req("INVITE", 1, 0), res(486, "INVITE", 1, 300), req("INVITE", 2, 400)]
+    const found = details(family(msgs, 1_000))
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/its INVITE \(msg 2\) drew no final.*gave-up-at-edge/)
+  })
+
   it("a non-INVITE leg whose last request drew no final, inside the give-up silence", () => {
     const options = [req("OPTIONS", 1, 0)]
     expect(details(family(options, SILENCE_MS - 1))[0]).toMatch(/its OPTIONS \(msg 0\) drew no final.*gave-up-at-edge/)
@@ -260,8 +297,68 @@ describe("the capture edge: a leg the system under test dialled", () => {
     )
   })
 
-  it("is judged where the caller-side dialog failed, so no BYE closed it", () => {
-    expect(edge(twoLegs("rejected", "left-open", 20_000), BOTH)?.legs).toEqual([1])
+  it("is judged where one caller-side dialog of several failed, so no BYE closed it", () => {
+    const SECOND_CALLER_CALL_ID = "second-caller-0001@198.51.100.4"
+    const flows = doc(
+      [
+        callerLeg(callerMsgs("torn-down")),
+        leg(SECOND_CALLER_CALL_ID, [{ a: UPSTREAM, b: SUT_INGRESS }], dialogMsgs({
+          callId: SECOND_CALLER_CALL_ID, hop: 0, from: UPSTREAM, to: SUT_INGRESS, at_ms: 5, toTag: "second", end: "rejected"
+        })),
+        dialledLeg(dialledMsgs("left-open")),
+        clockLeg(20_000)
+      ],
+      [{ legs: [0, 1, 2] }, { legs: [3] }]
+    )
+    const finding = edge(flows, [{ leg: 0, hop: 0 }, { leg: 1, hop: 0 }, { leg: 2, hop: 0 }])
+    expect(finding?.legs).toEqual([2])
+    expect(finding?.evidence?.[0]?.detail).toMatch(/dialog-left-open/)
+  })
+
+  it("is judged where the caller-side dialog was cancelled and the dialled leg's CANCEL drew no final", () => {
+    const dialled = [
+      ...dialledMsgs("unanswered").slice(0, 1),
+      msg({ callId: DERIVED_CALL_ID, seq: 1, method: "INVITE", status: 180, src: FAR, dst: SUT_EGRESS, hop: 0, ts_ms: 100, toTag: "far" }),
+      msg({ callId: DERIVED_CALL_ID, seq: 1, method: "CANCEL", src: SUT_EGRESS, dst: FAR, hop: 0, ts_ms: 410 }),
+      msg({ callId: DERIVED_CALL_ID, seq: 1, method: "CANCEL", status: 200, src: FAR, dst: SUT_EGRESS, hop: 0, ts_ms: 415 })
+    ]
+    const flows = doc([callerLeg(callerMsgs("cancelled")), dialledLeg(dialled), clockLeg(2_000)], [{ legs: [0, 1] }, { legs: [2] }])
+    const finding = edge(flows, BOTH)
+    expect(finding?.legs).toEqual([1])
+    expect(finding?.evidence?.[0]?.detail).toMatch(/was cancelled \(msg 2\) and drew no final.*gave-up-at-edge/)
+  })
+
+  it("is judged where the SUT dialled it after the BYE that closed the caller-side dialog", () => {
+    // The caller's BYE at 5 s and its 200; the SUT dials out at 6 s and the file ends at 6.1 s.
+    const dialled = [msg({ callId: DERIVED_CALL_ID, seq: 1, method: "INVITE", src: SUT_EGRESS, dst: FAR, hop: 0, ts_ms: 6_000 })]
+    const flows = doc([callerLeg(callerMsgs("torn-down")), dialledLeg(dialled), clockLeg(6_100)], [{ legs: [0, 1] }, { legs: [2] }])
+    const finding = edge(flows, BOTH)
+    expect(finding?.legs).toEqual([1])
+    expect(finding?.evidence?.[0]?.detail).toMatch(/its INVITE \(msg 0\) drew no final.*gave-up-at-edge/)
+  })
+
+  it("is no exemption for a leg the case holds only dialled vantages of", () => {
+    const finding = edge(twoLegs("torn-down", "left-open", 20_000), [{ leg: 1, hop: 0 }])
+    expect(finding?.legs).toEqual([1])
+  })
+
+  it("is no exemption for a leg that is also a caller-side one: the SUT relayed it on one Call-ID", () => {
+    // Hop 0 is the caller's dialog into the SUT, hop 1 the SUT's own out to the far end. The
+    // caller's BYE closed hop 0 and is retried at the edge.
+    const msgs = [
+      req("INVITE", 1, 0),
+      msg({ callId: BASE_CALL_ID, seq: 1, method: "INVITE", src: SUT_EGRESS, dst: FAR, hop: 1, ts_ms: 10 }),
+      msg({ callId: BASE_CALL_ID, seq: 1, method: "INVITE", status: 200, src: FAR, dst: SUT_EGRESS, hop: 1, ts_ms: 800, toTag: "callee" }),
+      res(200, "INVITE", 1, 900),
+      req("ACK", 1, 905, "callee"),
+      req("BYE", 2, 5_000, "callee"),
+      { ...req("BYE", 2, 5_500, "callee"), retx: true }
+    ]
+    const relayed = leg(BASE_CALL_ID, [{ a: UPSTREAM, b: SUT_INGRESS }, { a: SUT_EGRESS, b: FAR }], msgs)
+    const flows = doc([relayed, clockLeg(6_000)], [{ legs: [0] }, { legs: [1] }])
+    const found = details(flows, [{ leg: 0, hop: 0 }, { leg: 0, hop: 1 }])
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatch(/its BYE \(msg 5\) drew no final and was retransmitted.*bye-unanswered-at-edge/)
   })
 
   it("is no exemption for a second caller-side dialog the capture left open", () => {
