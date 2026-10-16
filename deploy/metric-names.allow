@@ -49,6 +49,7 @@ k8s/endurance.sh: b2bua_active
 # SIPp's -trace_err and -trace_stat options and the files they name.
 k8s/lib/sipext-gen.sh: trace_*
 k8s/run.sh: trace_err
+helm/kind-lab.sh: trace_err
 k8s/sipp/: trace_*
 
 # Identifiers of the HA tooling runner (tooling/hakit/src: fields, functions,
