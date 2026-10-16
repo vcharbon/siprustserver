@@ -150,6 +150,12 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
                 errs.append(f"{where}: stream {s.name!r}: scenario {s.scenario!r} reads keys no param sets: {missing}")
         if s.driver == "loadgen":
             errs.extend(f"{where}: stream {s.name!r}: {e}" for e in loadgen.param_errors(s))
+        if s.steps and s.start != "run":
+            errs.append(f"{where}: stream {s.name!r}: a load incident's stream has no rate steps")
+        if s.placement == "pod" and s.driver != "loadgen":
+            errs.append(
+                f"{where}: stream {s.name!r}: only a loadgen stream runs as a pod; a SIPp UAC's callees answer on the generator network"
+            )
     deadline = max((s.setup_deadline_s for s in profile.streams), default=0.0)
     teardown = max((_teardown_s(s, content) for s in profile.streams), default=0.0)
     if profile.drain_s < teardown:

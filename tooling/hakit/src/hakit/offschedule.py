@@ -57,7 +57,7 @@ def clear_active(run_dir: Path) -> None:
     (run_dir / ACTIVE).unlink(missing_ok=True)
 
 
-def _alive(pid: int) -> bool:
+def pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -77,7 +77,7 @@ def active_runs(results: Path) -> list[Path]:
             pid = int((d / ACTIVE).read_text().strip())
         except ValueError:
             continue
-        if _alive(pid):
+        if pid_alive(pid):
             out.append(d)
     return out
 

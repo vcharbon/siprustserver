@@ -2,12 +2,14 @@
 
 The defaults describe the base's own kind lab (`deploy/k8s/lib/net-env.sh`):
 the generators run as docker containers on the external SIP bridge and dial
-the front proxy's virtual address; the host observability stack serves
-VictoriaMetrics and VictoriaLogs.
+the front proxy's virtual address, or as pods on the edge nodes for a stream
+placed in the cluster; the host observability stack serves VictoriaMetrics and
+VictoriaLogs, which the pods reach through the kind bridge's gateway.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -23,6 +25,10 @@ class Lab:
     vlogs_url: str
     # VictoriaLogs as a generator container reaches it on the generator network.
     vlogs_url_from_generators: str
+    # VictoriaLogs as a pod reaches it, and the nodes a pod-placed generator
+    # runs on (a label selector; empty: any schedulable node).
+    vlogs_url_from_pods: str
+    pod_node_selector: str
     sipp_image: str
     sipp_network: str
     sip_target: str
@@ -78,6 +84,29 @@ def lab_capabilities(lab: Lab, executor: Executor) -> list[str]:
     return caps
 
 
+_IPV4 = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+
+def resolve_target(lab: Lab, executor: Executor, target: str | None) -> tuple[str | None, str | None]:
+    """A stream's `host:port` with its host an IPv4 address: the lab's SIP
+    target without one, a Service name resolved to its cluster IP. The
+    address, or the reason it could not be resolved."""
+    if target is None:
+        return lab.sip_target, None
+    host, _, port = target.rpartition(":")
+    if _IPV4.match(host):
+        return target, None
+    res = executor.run(
+        ["kubectl", "--context", lab.kube_context, "-n", lab.namespace, "get", "service", host]
+        + ["-o", "jsonpath={.spec.clusterIP}"],
+        timeout_s=30,
+    )
+    ip = res.stdout.strip()
+    if res.rc != 0 or not _IPV4.match(ip):
+        return None, f"target {target}: Service {host!r} has no cluster IP: {res.stderr.strip()[:200]}"
+    return f"{ip}:{port}", None
+
+
 def lab_from_env(env: Mapping[str, str]) -> Lab:
     g = env.get
     return Lab(
@@ -87,6 +116,8 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
         vm_url=g("HAKIT_VM_URL", "http://127.0.0.1:8428"),
         vlogs_url=g("HAKIT_VLOGS_URL", "http://127.0.0.1:9428"),
         vlogs_url_from_generators=g("HAKIT_VLOGS_URL_GENERATORS", "http://victorialogs:9428"),
+        vlogs_url_from_pods=g("HAKIT_VLOGS_URL_PODS", "http://172.20.0.1:9428"),
+        pod_node_selector=g("HAKIT_POD_NODE_SELECTOR", "tier=edge"),
         sipp_image=g("HAKIT_SIPP_IMAGE", "sipp:dev"),
         sipp_network=g("HAKIT_SIPP_NETWORK", "sipext"),
         sip_target=g("HAKIT_SIP_TARGET", "192.168.60.250:5060"),

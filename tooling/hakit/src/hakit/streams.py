@@ -26,6 +26,7 @@ from .jsonval import Json
 from .lab import Lab
 from .loadgen import LoadgenStream
 from .model import Incident
+from .pod_loadgen import PodLoadgenStream
 from .profile import Profile, Stream
 from .schedule import PlannedEvent
 from .sipp_driver import SippStream
@@ -85,6 +86,8 @@ class StreamSet:
 
     def _generator(self, stream: Stream, sdir: Path, tag: str) -> Generator:
         sdir.mkdir(parents=True)
+        if stream.driver == "loadgen" and stream.placement == "pod":
+            return PodLoadgenStream(self.run, stream, self._slot(stream), sdir, self.lab, self.executor, call_id_tag=tag)
         if stream.driver == "loadgen":
             return LoadgenStream(self.run, stream, self._slot(stream), sdir, self.lab, self.executor, call_id_tag=tag)
         shape = self.content.shapes[stream.shape]
@@ -107,6 +110,11 @@ class StreamSet:
             if err is not None:
                 return err
         return None
+
+    def set_rate(self, name: str, cps: float) -> bool | None:
+        """Change the rate of the running generator of `name`; None when none runs."""
+        f = self.active.get(name)
+        return None if f is None else f.gen.set_rate(cps)
 
     def live(self) -> list[Generator]:
         """The generators due to be running: a stream is out of this list from the
@@ -282,11 +290,12 @@ class StreamLoad:
 
 class RemoveLoad:
     """The load steps of `hakit cleanup`: a crashed run's stream generator is
-    removed; nothing is started."""
+    removed, a container or a pod; nothing is started."""
 
-    def __init__(self, executor: Executor, run: str) -> None:
+    def __init__(self, executor: Executor, run: str, lab: Lab) -> None:
         self.executor = executor
         self.run = run
+        self.lab = lab
 
     def start(self, inc: Incident, ev: PlannedEvent) -> tuple[bool, Json]:
         return False, {"error": "cleanup starts no stream"}
@@ -301,4 +310,12 @@ class RemoveLoad:
             rm = self.executor.run(["docker", "rm", "-f", *ids], timeout_s=60)
             if rm.rc != 0:
                 return False, {"stream": ev.spec.stream, "error": rm.stderr.strip()[:200]}
+        selector = f"hakit-run={self.run},hakit-stream={ev.spec.stream}"
+        pods = self.executor.run(
+            ["kubectl", "--context", self.lab.kube_context, "-n", self.lab.namespace, "delete", "pods", "-l", selector]
+            + ["--grace-period=0", "--force", "--ignore-not-found"],
+            timeout_s=120,
+        )
+        if pods.rc != 0:
+            return False, {"stream": ev.spec.stream, "error": pods.stderr.strip()[:200]}
         return True, {"stream": ev.spec.stream, "stop": "remove", "removed": len(ids)}

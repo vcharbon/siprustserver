@@ -1,31 +1,26 @@
 """The judgement of a capacity ramp's steps: which steps are clean, the ramp's two
 limits over them, and the worker CPU fitted per opened and per rejected call.
-Pure functions over step rows (one JSON object per step).
+Pure functions over step rows (one JSON object per step, `ramp_table.py`
+builds them from a run's records and the worker's series).
 
 A step is clean when every call the worker accepted completed within the setup
 bound, whatever it shed:
-  - the ramp's SIPp saw no other failure and no dead-call or out-of-call message;
-  - the background SIPp streams saw no failure, their 503s aside, and no
-    out-of-call message (their dead-call messages are a steady background on
-    healthy steps and are left out);
-  - the loadgen saw no failure: every class but ok is one, a 503 included
-    (only a run declaring its overload refusal accepts it, as class ok);
-  - the SIPp setup p99 is within the bound;
+  - the stepped streams saw no failure but a 503 refusal: every other call that
+    is no success (by the classifier) is one;
+  - the other streams saw no failure, their 503s aside;
+  - the stepped streams' setup p99 is within the bound;
   - the worker's counts match what the callers saw, within TOL_REL of the count
-    plus TOL_ABS cps: accepted = calls completed (ramp SIPp, background SIPp,
-    loadgen ok but refused for overload) and rejected = refusals seen (ramp
-    SIPp shed, background SIPp, loadgen status_503 and refused for overload).
-    A 503 the call path authors after accepting a call counts as a failure at
-    the caller and as accepted at the worker, so it breaks the match.
+    plus TOL_ABS cps: accepted = calls completed and rejected = 503 refusals
+    seen, over every stream. A 503 the call path authors after accepting a
+    call counts as a failure at the caller and as accepted at the worker, so
+    it breaks the match.
 A step missing any of these is not judged.
 
-Row fields: `label`; `sipp_split` {cps, n} of completed, shed_503, other_fail,
-dead_call, out_of_call; `soak_sipp` {completed_cps, failed, shed_503,
-shed_503_cps, out_of_call}; `loadgen_ok_cps`, `loadgen_503_cps`,
-`loadgen_refused_overload_cps`, `loadgen_not_ok` {class: n};
-`sipp_setup_ms_q` {"0.99": "<200" | ">=1000"}; `worker_accepted_cps`,
-`worker_cancelled_cps`, `worker_rejected_cps`, `worker_cpu_cores`,
-`worker_throttled_s`, `worker_cpu_limit_cores`.
+Row fields: `label`; `stepped` {cps, n} of completed, shed_503, other_fail;
+`background` {completed_cps, failed, shed_503, shed_503_cps};
+`setup_p99_ms`; `worker_accepted_cps`, `worker_cancelled_cps`,
+`worker_rejected_cps`, `worker_cpu_cores`, `worker_throttled_s`,
+`worker_cpu_limit_cores`.
 """
 
 from __future__ import annotations
@@ -55,70 +50,44 @@ def _num(r: Mapping[str, object] | None, key: str) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
-def p99_ms(r: Json) -> float | None:
-    """The SIPp setup p99's repartition bound in ms ("<200" -> 200, ">=1000" -> inf)."""
-    q = _obj(r, "sipp_setup_ms_q") or {}
-    b = q.get("0.99")
-    if not isinstance(b, str) or not b:
-        return None
-    return math.inf if b.startswith(">=") else float(b.lstrip("<"))
-
-
 def completed_cps(r: Json | None) -> float | None:
-    """Calls completed through the worker; None without the ramp's split."""
-    cps = _obj(_obj(r, "sipp_split"), "cps")
-    done = _num(cps, "completed")
+    """Calls completed through the worker, every stream; None without the stepped split."""
+    done = _num(_obj(_obj(r, "stepped"), "cps"), "completed")
     if done is None:
         return None
-    return done + (_num(_obj(r, "soak_sipp"), "completed_cps") or 0.0) + (_num(r, "loadgen_ok_cps") or 0.0)
+    return done + (_num(_obj(r, "background"), "completed_cps") or 0.0)
 
 
 def shed_seen_cps(r: Json) -> float | None:
-    """Refusals the callers saw; None when a source's 503s cannot be told from its failures."""
-    shed = _num(_obj(_obj(r, "sipp_split"), "cps"), "shed_503")
+    """The 503 refusals the callers saw; None without the stepped split."""
+    shed = _num(_obj(_obj(r, "stepped"), "cps"), "shed_503")
     if shed is None:
         return None
-    soak = _obj(r, "soak_sipp")
-    if soak and _num(soak, "shed_503_cps") is None:
-        return None
-    return (
-        shed
-        + (_num(soak, "shed_503_cps") or 0.0)
-        + (_num(r, "loadgen_503_cps") or 0.0)
-        + (_num(r, "loadgen_refused_overload_cps") or 0.0)
-    )
+    return shed + (_num(_obj(r, "background"), "shed_503_cps") or 0.0)
 
 
 def judge(r: Json, p99_bound: float) -> tuple[bool | None, str]:
     """(clean, why): clean is None when the step cannot be judged."""
-    n = _obj(_obj(r, "sipp_split"), "n")
+    n = _obj(_obj(r, "stepped"), "n")
     other = _num(n, "other_fail")
     if n is None or other is None:
-        return None, "no SIPp split"
+        return None, "no stepped stream records"
     acc, rej = _num(r, "worker_accepted_cps"), _num(r, "worker_rejected_cps")
     if acc is None or rej is None:
         return None, "no new-call counts"
-    p99 = p99_ms(r)
+    p99 = _num(r, "setup_p99_ms")
     if p99 is None:
         return None, "no setup p99"
     why: list[str] = []
     if other >= 0.5:
-        why.append(f"SIPp other failures {other:.0f}")
-    stray = (_num(n, "dead_call") or 0) + (_num(n, "out_of_call") or 0)
-    if stray >= 0.5:
-        why.append(f"SIPp dead-call/out-of-call messages {stray:.0f}")
-    soak = _obj(r, "soak_sipp")
-    if soak:
-        sfail = (_num(soak, "failed") or 0) - (_num(soak, "shed_503") or 0)
-        if sfail >= 0.5:
-            why.append(f"background SIPp failures {sfail:.0f}")
-        if (_num(soak, "out_of_call") or 0) >= 0.5:
-            why.append(f"background SIPp out-of-call messages {_num(soak, 'out_of_call'):.0f}")
-    lgf = {k: v for k, v in (_obj(r, "loadgen_not_ok") or {}).items() if isinstance(v, (int, float))}
-    if lgf:
-        why.append("loadgen " + ", ".join(f"{k} {v:.0f}" for k, v in lgf.items()))
+        why.append(f"stepped failures {other:.0f}")
+    bg = _obj(r, "background")
+    if bg:
+        bfail = (_num(bg, "failed") or 0) - (_num(bg, "shed_503") or 0)
+        if bfail >= 0.5:
+            why.append(f"background failures {bfail:.0f}")
     if p99 > p99_bound:
-        why.append(f"setup p99 {(_obj(r, 'sipp_setup_ms_q') or {}).get('0.99')} ms")
+        why.append(f"setup p99 {p99:.0f} ms")
     for what, worker, seen in (("accepted", acc, completed_cps(r)), ("rejected", rej, shed_seen_cps(r))):
         if seen is None:
             return None, f"no caller-side count of the {what} calls"

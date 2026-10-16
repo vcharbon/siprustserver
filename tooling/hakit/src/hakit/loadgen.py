@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .executor import Executor
 from .generator import Tally
-from .lab import Lab
+from .lab import Lab, resolve_target
 from .model import Scalar
 from .profile import Stream
 
@@ -147,14 +147,16 @@ class LoadgenStream:
             return s.max_concurrent
         return int(math.ceil(s.peak_cps * worst_call_s(s))) + 10
 
-    def argv(self) -> list[str]:
+    def argv(self, target: str | None = None, bind_ip: str | None = None, records_url: str | None = None) -> list[str]:
+        """The binary's command line: by default for a container on the
+        generator network at the stream's slot address."""
         s = self.stream
         argv = [
             str(s.params["command"]),
             "--target",
-            self.lab.sip_target,
+            target or self.lab.sip_target,
             "--bind-ip",
-            self.ip,
+            bind_ip or self.ip,
             "--base-port",
             str(BASE_PORT),
             "--scenario",
@@ -178,7 +180,7 @@ class LoadgenStream:
             "--records-file",
             "/stats/records.jsonl",
             "--records-url",
-            self.lab.vlogs_url_from_generators,
+            records_url or self.lab.vlogs_url_from_generators,
             "--out-dir",
             "/stats",
             "--metrics-addr",
@@ -207,12 +209,15 @@ class LoadgenStream:
         return None
 
     def start(self) -> str | None:
+        target, err = resolve_target(self.lab, self.executor, self.stream.target)
+        if target is None:
+            return f"loadgen of {self.stream.name} did not start: {err}"
         labels = ["--label", f"hakit-run={self.run}", "--label", f"hakit-stream={self.stream.name}"]
         self.remove()
         res = self.executor.run(
             ["docker", "run", "-d", "--name", self.name, *labels]
             + ["--network", self.lab.sipp_network, "--ip", self.ip, "--cpus", "4", "--memory", "1536m"]
-            + ["-v", f"{self.dir}:/stats", str(self.stream.params["image"]), *self.argv()],
+            + ["-v", f"{self.dir}:/stats", str(self.stream.params["image"]), *self.argv(target=target)],
             timeout_s=60,
         )
         if res.rc != 0:
@@ -242,6 +247,11 @@ class LoadgenStream:
 
     def kill(self) -> bool:
         return self.executor.run(["docker", "kill", self.name], timeout_s=30).rc == 0
+
+    def set_rate(self, cps: float) -> bool:
+        """loadgen's `POST /rate?cps=`."""
+        res = self.executor.http("POST", f"http://{self.ip}:{METRICS_PORT}/rate?cps={cps:g}", b"", timeout_s=10)
+        return res.status == 200
 
     def tally(self) -> Tally:
         """The counters of the last `/metrics` body, which loadgen leaves in the

@@ -9,7 +9,7 @@ from pathlib import Path
 from kit import budget, fault_incident, write_yaml
 
 from hakit import jsonval as jv
-from hakit.cli import manual_events
+from hakit.cleanup import manual_events
 from hakit.clock import FakeClock
 from hakit.content import Content, discover
 from hakit.dryrun import simulated

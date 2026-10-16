@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "budget.v1.schema.json",
-  "$comment": "minor 2",
+  "$comment": "minor 3",
   "title": "budget.v1",
   "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
   "type": "object",
@@ -43,12 +43,20 @@
       "not": { "required": ["max_calls", "max_seconds"] }
     },
     "cdr_mismatch": {
+      "description": "CDR mismatches in the window: `max_calls`, or `max_seconds` of the summed offered rate of the run's `run` streams (calls end at the rate they start), optionally beyond the window's outage.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_calls"],
       "properties": {
-        "max_calls": { "type": "integer", "minimum": 0 }
-      }
+        "max_calls": { "type": "integer", "minimum": 0 },
+        "max_seconds": { "type": "number", "minimum": 0 },
+        "over_outage": {
+          "description": "max_seconds counts beyond the window's outage, from its first inject to its last recovered.",
+          "type": "boolean"
+        }
+      },
+      "if": { "properties": { "over_outage": { "const": true } }, "required": ["over_outage"] },
+      "then": { "required": ["max_seconds"] },
+      "oneOf": [{ "required": ["max_calls"] }, { "required": ["max_seconds"] }]
     },
     "recovery": {
       "description": "How traffic comes back after `healed`. Without `max_s`, it must be back before the window closes.",

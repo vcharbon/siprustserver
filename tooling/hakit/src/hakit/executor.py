@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Protocol
 
 
+OCTETS = "application/octet-stream"
+
+
 @dataclass(frozen=True)
 class ProcResult:
     rc: int
@@ -43,7 +46,9 @@ class Executor(Protocol):
         timeout_s: float = 60,
     ) -> ProcResult: ...
 
-    def http(self, method: str, url: str, body: bytes | None = None, timeout_s: float = 10) -> HttpResult: ...
+    def http(
+        self, method: str, url: str, body: bytes | None = None, timeout_s: float = 10, content_type: str = OCTETS
+    ) -> HttpResult: ...
 
     def read_text(self, path: Path) -> str | None: ...
 
@@ -103,9 +108,11 @@ class RealExecutor:
             proc.wait()
             raise
 
-    def http(self, method: str, url: str, body: bytes | None = None, timeout_s: float = 10) -> HttpResult:
+    def http(
+        self, method: str, url: str, body: bytes | None = None, timeout_s: float = 10, content_type: str = OCTETS
+    ) -> HttpResult:
         # Never urllib's default form content type: a form body is parsed, not ingested.
-        headers = {"Content-Type": "application/octet-stream"} if body is not None else {}
+        headers = {"Content-Type": content_type} if body is not None else {}
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -173,7 +180,9 @@ class FakeExecutor:
         got = self._answer(Call(kind="run", argv=list(argv), env=dict(env or {})))
         return got if isinstance(got, ProcResult) else ProcResult(rc=0, stdout="", stderr="")
 
-    def http(self, method: str, url: str, body: bytes | None = None, timeout_s: float = 10) -> HttpResult:
+    def http(
+        self, method: str, url: str, body: bytes | None = None, timeout_s: float = 10, content_type: str = OCTETS
+    ) -> HttpResult:
         got = self._answer(Call(kind="http", url=url, method=method, body=body))
         return got if isinstance(got, HttpResult) else HttpResult(status=204, body="")
 

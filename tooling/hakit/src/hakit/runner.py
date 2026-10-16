@@ -25,6 +25,7 @@ from .events import KEEPALIVE_MS, EventJournal
 from .executor import Executor
 from .freshness import Freshness
 from .incident_exec import EventRunner
+from .jsonl import JsonlLog, write_jsonl
 from .jsonval import Json
 from .lab import Lab, lab_capabilities
 from .loadgen import LoadgenStream
@@ -33,6 +34,7 @@ from .offschedule import OffSchedule, clear_active, mark_active
 from .paths import REPO_ROOT
 from .preflight import earlier_open_events, host_facts, limit_errors
 from .profile import Profile
+from .rate_steps import RateSteps
 from .schedule import PlannedEvent, plan
 from .schemas import SchemaSet
 from .streams import StreamLoad, StreamSet
@@ -47,7 +49,18 @@ class RunRefused(Exception):
     pass
 
 
+def _say(line: str) -> None:
+    """A progress line, flushed: a detached run's log is read while it runs."""
+    print(line, flush=True)
+
+
 def _terminate(signum: int, _frame: object) -> None:
+    """The first SIGTERM or SIGHUP ignores every later one, so the heal and the
+    generators' removal it starts are never cut short: a signal sent to the
+    run's process group reaches the runner a second time through a wrapper
+    that forwards it."""
+    for s in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, signal.SIG_IGN)
     raise SystemExit(128 + signum)
 
 
@@ -103,6 +116,7 @@ class _Live:
     off: OffSchedule | None = None
     fresh: Freshness | None = None
     capture: Captures | None = None
+    steps: RateSteps | None = None
 
 
 class Runner:
@@ -114,7 +128,7 @@ class Runner:
         executor: Executor,
         clock: Clock,
         results: Path,
-        say: Callable[[str], None] = print,
+        say: Callable[[str], None] = _say,
     ) -> None:
         self.content = content
         self.schemas = schemas
@@ -185,10 +199,12 @@ class Runner:
         journal = EventJournal(run, run_dir, self.clock, self.vm)
         streams = StreamSet(run, run_dir, profile, self.content, self.lab, self.executor, self.clock, self.vlogs, started)
         live = _Live(streams)
-        integrity: list[Json] = []
+        # Appended as found, so `hakit probe` reads them while the run runs.
+        integrity = JsonlLog(run_dir / "integrity.jsonl")
+        steps_log = JsonlLog(run_dir / "steps.jsonl")
 
         def wait_until(target_ms: int) -> None:
-            self._wait(target_ms, journal, live, integrity, run)
+            self._wait(target_ms, journal, live, integrity, steps_log)
 
         load = StreamLoad(streams, self.clock, wait_until)
         events = EventRunner(run, run_dir, self.lab, self.executor, self.clock, journal, wait_until, load)
@@ -213,7 +229,10 @@ class Runner:
                     self.say(f"hakit: stream {s.name} up ({s.cps:g} cps, shape {s.shape})")
             load_start = self.clock.now_ms()
             live.load_start_ms = load_start
+            meta = json.loads((run_dir / "run-meta.json").read_text())
+            _dump(run_dir / "run-meta.json", {**meta, "load_started_at_ms": load_start})
             live.fresh = self._freshness(run, profile, started)
+            live.steps = RateSteps.of(profile)
             live.loading = True
             for ev in plan(profile, self.content.incidents):
                 wait_until(load_start + int(ev.at_s * 1000))
@@ -225,7 +244,7 @@ class Runner:
                 if outcome.failed:
                     self.say(f"hakit: event {ev.event_id} failed; see events/{ev.event_id}/")
                 if outcome.heal_failed:
-                    integrity.append(_left_faulted(ev.event_id, self.clock.now_ms()))
+                    integrity.add([_left_faulted(ev.event_id, self.clock.now_ms())])
                     self.say(f"hakit: event {ev.event_id} could not be healed: the schedule stops, the load drains")
                     break
             else:
@@ -233,7 +252,7 @@ class Runner:
             live.loading = False
             streams.drain(self.clock.now_ms() + int(profile.drain_s * 1000), wait_until)
             stream_docs = streams.docs()
-            integrity += _undrained(stream_docs)
+            integrity.add(_undrained(stream_docs))
             close = journal.next_close_ms()
             while close is not None:
                 wait_until(close)
@@ -254,16 +273,13 @@ class Runner:
         if live.capture is not None:
             live.capture.stop()
         records, bad = self.vlogs.export(run, started - 3_600_000, self.clock.now_ms() + 3_600_000)
-        with (run_dir / "records.jsonl").open("w") as fh:
-            fh.writelines(json.dumps(r) + "\n" for r in records)
-        unreadable: list[Json] = [{"kind": "generator_failure", "detail": f"unreadable record line: {b}"} for b in bad]
-        integrity += unreadable
+        write_jsonl(run_dir / "records.jsonl", records)
+        integrity.add({"kind": "generator_failure", "detail": f"unreadable record line: {b}"} for b in bad)
         if profile.cdr_join:
-            integrity += collect_cdrs(self.vlogs, self.vm, self.lab, self.clock, run, run_dir, started)
+            integrity.add(collect_cdrs(self.vlogs, self.vm, self.lab, self.clock, run, run_dir, started))
         run_counts(self.content.classes, run_dir, self.executor)
         _dump(run_dir / "streams.json", stream_docs)
-        with (run_dir / "integrity.jsonl").open("w") as fh:
-            fh.writelines(json.dumps(i) + "\n" for i in integrity)
+        write_jsonl(run_dir / "integrity.jsonl", integrity.items)
         meta = json.loads((run_dir / "run-meta.json").read_text())
         meta["ended_at_ms"] = self.clock.now_ms()
         meta["load_started_at_ms"] = live.load_start_ms
@@ -317,33 +333,40 @@ class Runner:
         streams = [(s.name, s.cps, max(s.setup_deadline_s, s.ring_s + s.hold_s)) for s in profile.streams if s.start == "run"]
         return Freshness(run, self.vm, self.vlogs, self.clock, streams, self.lab.live_series, started)
 
-    def _wait(self, target_ms: int, journal: EventJournal, live: _Live, integrity: list[Json], run: str) -> None:
+    def _wait(self, target_ms: int, journal: EventJournal, live: _Live, integrity: JsonlLog, steps_log: JsonlLog) -> None:
         while True:
             journal.tick()
             for event, opened, _closed in journal.take_closed():
                 if live.capture is not None:
                     live.capture.keep(event, opened)
             if live.loading:
+                if live.steps is not None:
+                    lines, refused = live.steps.apply_due(live.load_start_ms, self.clock.now_ms(), live.streams.set_rate)
+                    steps_log.add(lines)
+                    integrity.add(refused)
                 for s in live.streams.live():
                     key = f"{s.stream.name}{s.call_id_tag}"
                     if key not in live.died and not s.running():
                         at = self.clock.now_ms()
                         live.died.add(key)
-                        integrity.append(
-                            {"kind": "stream_died", "stream": s.stream.name, "at_ms": at, "detail": "generator exited"}
+                        integrity.add(
+                            [{"kind": "stream_died", "stream": s.stream.name, "at_ms": at, "detail": "generator exited"}]
                         )
                         if live.off is not None:
                             live.off.detected("stream_died")
                 if live.fresh is not None:
-                    integrity += live.fresh.tick()
+                    integrity.add(live.fresh.tick())
                 if live.off is not None:
                     live.off.poll()
             now = self.clock.now_ms()
             if now >= target_ms:
                 return
             step = min(target_ms - now, KEEPALIVE_MS)
-            close = journal.next_close_ms()
-            if close is not None and close > now:
-                step = min(step, close - now)
+            wake = [journal.next_close_ms()]
+            if live.loading and live.steps is not None:
+                wake.append(live.steps.next_ms(live.load_start_ms))
+            for at in wake:
+                if at is not None and at > now:
+                    step = min(step, at - now)
             self.clock.sleep(step / 1000)
 

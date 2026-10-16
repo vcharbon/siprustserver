@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "profile.v1.schema.json",
-  "$comment": "minor 4",
+  "$comment": "minor 5",
   "title": "profile.v1",
   "description": "A file `profiles/<name>.yaml`: one run. The load streams, the schedule of incident events, the budget of each event's window, and the defaults of an event the schedule did not fire. Impact outside every window is `unattributed`. ADR-0049.",
   "type": "object",
@@ -192,8 +192,18 @@
           "type": "string"
         },
         "cps": { "type": "number", "exclusiveMinimum": 0 },
+        "placement": {
+          "description": "Where the generator runs. `docker`: a container on the generator network. `pod`: a pod in the lab's namespace, for a system under test the generator network cannot reach (a `loadgen` stream only: it plays its own callee legs).",
+          "enum": ["docker", "pod"],
+          "default": "docker"
+        },
+        "target": {
+          "description": "`host:port` the stream's calls go to, instead of the lab's SIP target. A host that is not an IPv4 address names a Service of the lab's namespace, resolved to its cluster IP when the stream starts.",
+          "type": "string",
+          "pattern": "^[a-z0-9.-]+:[0-9]+$"
+        },
         "steps": {
-          "description": "Rate changes during the run (a capacity ramp): from `at_s` on, the stream offers `cps`.",
+          "description": "Rate changes during the run (a capacity ramp), on a `run` stream: from `at_s` on, the stream offers `cps`. The runner applies each at its instant and logs it in the run's `steps.jsonl`.",
           "type": "array",
           "items": {
             "type": "object",

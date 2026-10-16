@@ -3,13 +3,14 @@
 The simulated lab answers what a healthy one would: every executable exits 0
 with no facts, a generator runs until it is drained, places no call, the
 system under test holds no call, a loadgen image registers every shape of the
-search path, and the API server serves every resource
-definition asked for (Chaos Mesh's included). Each effect is recorded, and the timeline
+search path, the API server serves every resource definition asked for (Chaos
+Mesh's included), and every Service a stream targets has a cluster IP. Each effect is recorded, and the timeline
 printed from the run's own `events.jsonl`.
 """
 
 from __future__ import annotations
 
+import json
 import urllib.parse
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from pathlib import Path
 from .clock import FakeClock
 from .executor import Call, FakeExecutor, HttpResult, ProcResult, Rule
 from .jsonl import read_jsonl
+from .jsonval import as_obj
 from .loadgen import FINAL_METRICS
 
 STAT_HEADER = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated\n"
@@ -30,11 +32,48 @@ class SimulatedLab:
 
     def __init__(self, clock: FakeClock, shapes: Sequence[str] = ()) -> None:
         self.drained: set[str] = set()
+        # Pod-placed generators by pod name: their stream.
+        self.pods: dict[str, str] = {}
         self.clock = clock
         self.t0 = clock.now_ms()
         self.shapes = list(shapes)
 
+    def pod_rule(self, call: Call) -> ProcResult | None:
+        """Pod-placed generators: a created pod runs until drained or deleted;
+        its `/stats` holds the counters of the stream it is labelled with."""
+        a = call.argv
+        if call.kind != "run" or a[:1] != ["kubectl"]:
+            return None
+        if "service" in a:
+            return ProcResult(0, "10.96.0.10", "")
+        if "create" in a and "-f" in a and "--raw" not in a:
+            doc = as_obj(json.loads(Path(a[a.index("-f") + 1]).read_text()))
+            meta = as_obj(doc["metadata"])
+            name = str(meta["name"])
+            self.pods[name] = str(as_obj(meta["labels"])["hakit-stream"])
+            self.drained.discard(name)
+            return ProcResult(0, "", "")
+        if "--raw" in a and a[a.index("--raw") + 1].endswith("/proxy/drain"):
+            self.drained.add(a[a.index("--raw") + 1].split("/pods/")[1].split(":")[0])
+            return ProcResult(0, "", "")
+        if "delete" in a and "pod" in a:
+            self.drained.add(a[a.index("pod") + 1])
+            return ProcResult(0, "", "")
+        if "get" in a and "pod" in a and "json" in a:
+            name = a[a.index("pod") + 1]
+            state = '{"terminated":{"exitCode":0}}' if name in self.drained else '{"running":{}}'
+            return ProcResult(0, f'{{"status":{{"containerStatuses":[{{"name":"gen","state":{state}}}]}}}}', "")
+        if "exec" in a and a[-1] == f"/stats/{FINAL_METRICS}":
+            stream = self.pods.get(a[a.index("exec") + 1], "")
+            return ProcResult(0, f'loadgen_calls_offered_total{{stream="{stream}",shape="s"}} 0\n', "")
+        if "exec" in a and a[-2:] == ["-1", "/stats"]:
+            return ProcResult(0, f"{FINAL_METRICS}\nrecords.jsonl\n", "")
+        return None
+
     def rule(self, call: Call) -> ProcResult | HttpResult | str | None:
+        pod = self.pod_rule(call)
+        if pod is not None:
+            return pod
         if call.kind == "run" and call.argv[:2] == ["docker", "run"] and "--list-shapes" in call.argv:
             return ProcResult(0, "".join(f"{s}\n" for s in self.shapes), "")
         if call.kind == "read" and call.path is not None and call.path.name == FINAL_METRICS:

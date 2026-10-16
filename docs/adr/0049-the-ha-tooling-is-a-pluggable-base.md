@@ -128,7 +128,9 @@ tolerated (§3).
 6. **Heal always runs.** The runner calls `heal` after a failed `inject`, on
    its own interruption, and from `hakit cleanup` for every event a crashed
    run left open. So `heal` is idempotent and correct after a partial
-   `inject` or none.
+   `inject` or none. The first SIGTERM or SIGHUP makes the runner ignore
+   every later one while it heals and removes its generators: a signal to its
+   process group reaches it a second time through a wrapper that forwards it.
 7. **Backends.** The fault mechanism is the executable's choice: the shell
    primitives of `pod-faults.sh` (node stop, cgroup freeze, netem delay and
    loss, TCP reset), a Chaos Mesh resource it creates and deletes, `kubectl`.
@@ -241,7 +243,7 @@ made. A run profile joins the two.
    | class | from the record | instant | budget |
    |---|---|---|---|
    | `setup_failed` | the shape expects `answered` and the call ended before answer some other way: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0). Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms` | per key |
-   | `unexpected_ending` | any other caller ending not in `expected` (`rejected` with another code, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms` | per key before answer; 0 after answer |
+   | `unexpected_ending` | any other caller ending not in `expected` (`rejected` with another code, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing | per key before answer; 0 after answer |
    | `setup_slow` | from `started_at_ms` to `first_provisional_at_ms` (to `setup_ended_at_ms` when no provisional came) above the threshold; ring time never counts | that instant | count |
    | `dialog_request_failed` | each `failures` entry of kind `dialog_request` | its `at_ms` | 0 |
    | `call_cut` | `ending: cut` | the failure that cut it, else `ended_at_ms` | 0 |
@@ -365,8 +367,11 @@ made. A run profile joins the two.
    An unanswered call without a CDR is no mismatch, unless the profile's
    `cdr_required` names its ending (and optionally its final's code and
    whether that final carried a Retry-After): such a call without a CDR is
-   charged at its `ended_at_ms`. A window allows
-   `cdr_mismatch.max_calls`. What leaves the CDR measurement in doubt is a
+   charged at its `ended_at_ms`. A window allows `cdr_mismatch.max_calls`,
+   or `max_seconds` of the summed offered rate of the run's `run` streams
+   (calls end at the rate they start), with `over_outage` beyond the window's
+   outage as for `setup_failed`: a best-effort sink loses the CDRs of the
+   calls that end while its broker is gone. What leaves the CDR measurement in doubt is a
    `class_failed` integrity finding, never impacts: an export cut with CDRs
    still owed (its missing CDRs are not charged), payloads the consumer could
    not read, observations off the schema, and no observation at all while
@@ -547,8 +552,10 @@ made. A run profile joins the two.
    caller requests the treatment (`request`: the R-URI user part and header
    fields, with `${name}` placeholders the consumer fills), the callee-side
    legs it opens (`legs`: a role, the R-URI prefixes that select it on the
-   generator's callee socket, the leg endings expected), the caller endings
-   that count as success (`expected`) and whether it is `load_safe`.
+   generator's callee socket, the leg endings expected, and with `when` the
+   caller endings under which the treatment opens the leg: a call refused
+   before any leg opens judges none), the caller endings that count as
+   success (`expected`) and whether it is `load_safe`.
 2. The runner, the SIPp injection-file renderer, loadgen and the classifier
    read the same catalog, so the treatment a stream asks for and the ending it
    is judged by cannot drift apart. An expected non-2xx is success: a shape
@@ -572,6 +579,23 @@ made. A run profile joins the two.
    records file and URL) are refused there. Its counters are those of its
    last `/metrics` body, which loadgen leaves in the stream directory as it
    exits (`metrics.prom`).
+5. **Generator placement.** A stream's generator is a docker container on the
+   generator network (`placement: docker`, the default) and dials the lab's
+   SIP target, or the stream's own `target` (`host:port`). A system under
+   test the generator network cannot reach (cells exposed only as ClusterIP
+   Services) takes `placement: pod`: the generator is a pod in the lab's
+   namespace on the nodes of `HAKIT_POD_NODE_SELECTOR`, under the same
+   contract. Its `gen` container is the binary bound to the pod's own
+   address, its records shipped to VictoriaLogs as the pods reach it
+   (`HAKIT_VLOGS_URL_PODS`); its `keeper` container (a POSIX shell of the same
+   image) outlives the binary so the `/stats` both share is read after it
+   exited; the drain is `POST /drain` and a rate step `POST /rate` through the
+   API server's pod proxy; every file of `/stats` and the binary's log are
+   copied into the stream directory before the pod goes; the pod is annotated
+   for the in-cluster scrape. A `target` host that is not an IPv4 address
+   names a Service of the namespace, resolved to its cluster IP when the
+   stream starts. Only a loadgen stream runs as a pod: it plays its own
+   callee legs, where a SIPp UAC's callees answer on the generator network.
 
 ### 6. The runner
 
@@ -580,9 +604,12 @@ made. A run profile joins the two.
    validator, pinned). pyright strict and pytest run in the verify gates.
 2. **Subcommands.** `hakit validate`, `hakit up [--profile P]` (the cluster
    and the charts, §7), `hakit run <profile>`, `hakit fire <incident>` (one
-   manual event in the running run), `hakit cleanup` (heal every open event),
-   `hakit verdict <run-dir>`, `hakit pcap <run-dir> <call-id>` (one call's
-   packets out of the run's capture). `--dry-run` applies to all of them.
+   manual event in the running run), `hakit cleanup` (heal every open event of
+   a run whose runner is gone, and remove the generators, containers and
+   pods, of every such run), `hakit verdict <run-dir>`, `hakit pcap <run-dir>
+   <call-id>` (one call's packets out of the run's capture), `hakit mark` (the
+   `sip_soak_*` state and Grafana annotations of a workflow supervising a
+   run), and the readers (§6.7). `--dry-run` applies to all of them.
 3. **Injected clock and executor.** Every wait goes through a clock and every
    effect (an executable, `kubectl`, `helm`, `docker`, an HTTP push or query)
    through an executor. `--dry-run` runs the whole profile on a fake clock and
@@ -591,8 +618,11 @@ made. A run profile joins the two.
    search path that way in seconds.
 4. **The run directory.** `$HAKIT_RESULTS/<run>/`, the run id
    `<profile>-<UTC yyyymmddThhmmssZ>`: the resolved profile, `run-meta.json`
-   (the tree that ran, the host facts), `events.jsonl`, `events/<event>/`,
-   the exported records, `cdrs.jsonl`, `verdict.json`, `summary.md`, and with
+   (the tree that ran, the host facts, the load's start once it started),
+   `events.jsonl`, `events/<event>/`, `integrity.jsonl` (each finding appended
+   as the runner finds it, the file rewritten whole at the end),
+   `steps.jsonl` (the rate steps applied), the exported records,
+   `cdrs.jsonl`, `verdict.json`, `summary.md`, and with
    a profile's `capture` the packet rings (`pcap/ring/<source>/`, on the
    callers' bridge and in the nodes it names) and, at each window's close, the
    ring files written since it opened (`pcap/windows/<event>/`). The run
@@ -612,6 +642,10 @@ made. A run profile joins the two.
    stream's rate) is a `series_stale` integrity finding with the instant it
    was last fresh. A generator that exits
    before its stream is due to stop is `stream_died`, and a `detected` event.
+   A `run` stream's rate `steps` are applied at their instants (SIPp's remote
+   control `cset rate`, loadgen's `POST /rate`) and logged in `steps.jsonl`;
+   a step the generator refuses is a `generator_failure`. A load incident's
+   stream takes no steps.
 7. **The fault primitives stay shell** behind the incident contract. The
    readers that judge a soak today move into the package with their product
    terms made parameters, and are wired to the verdict where they overlap.
@@ -623,9 +657,17 @@ made. A run profile joins the two.
    gauges after the drain and one CDR outcome per call, on samples outside
    the verdict's windows, and exits non-zero on a `fail` or `na`; `chart` draws a range query with the
    run's windows and phases; `logs` reads every container incarnation's lines
-   back from VictoriaLogs; `obs-check` checks the series of named scopes; the
-   capacity ramp's step judgement and CPU fit are pure functions over step
-   rows.
+   back from VictoriaLogs; `obs-check` checks the series of named scopes;
+   `probe` is the live snapshot of a run, running or ended: each window's
+   live status from `events.jsonl`, the integrity findings appended so far,
+   the records of the recent span classified and judged provisionally
+   against the windows (a window not yet extended to the instant traffic was
+   back, calls in flight missing), a second final after an INVITE's 2xx, the
+   system under test's live calls, the generators' offered rate by stream,
+   the restarts and a product's bounds, then the anomalies; `ramp-table`
+   builds a capacity ramp's step rows from a run's `steps` (the records of
+   each step's calls, the worker's counters and CPU from VictoriaMetrics),
+   and its step judgement, limits and CPU fit are pure functions over them.
 
 ### 7. Deployment, dashboards and metrics
 
@@ -640,7 +682,9 @@ made. A run profile joins the two.
    host stack by value. `hakit up` installs it on every lab.
 3. **The host stack stays.** VictoriaMetrics, VictoriaLogs and Grafana run in
    the host compose stack (`deploy/observability/stack/`), so the history of
-   a run survives the teardown of its cluster.
+   a run survives the teardown of its cluster. It scrapes the docker
+   generators at their slot addresses (the SIPp exporter twins and the
+   loadgen streams); a pod-placed generator is scraped in the cluster.
 4. **Lab values come from the runner.** `hakit up` passes the kind-specific
    values (`--set` and values files the profile names). No manifest is
    rendered by `envsubst`.

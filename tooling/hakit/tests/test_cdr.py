@@ -98,6 +98,36 @@ def test_the_verdict_charges_mismatches_to_their_window_and_outside_as_unattribu
     assert (u["class"], u["count"], u["call_ids"], "stream" in u) == ("cdr_mismatch", 1, ["out"], False)
 
 
+def test_a_mismatch_allowance_in_seconds_reads_the_run_rate_beyond_the_outage(tmp_path: Path) -> None:
+    # The window's outage is its inject to its recovered: 5 s. At 0.2 cps,
+    # (5 s + 5 s) allows 2 mismatches; a third is a finding.
+    budget: Json = {
+        "schema": "budget.v1",
+        "name": "sink",
+        "description": "d",
+        "cdr_mismatch": {"max_seconds": 5, "over_outage": True},
+    }
+    billed = record("billed", T0)
+    lost = [record(f"l{i}", T0 + 100_000 + i * 1_000, ended=1_000) for i in range(3)]
+
+    def rows(sub: str, n: int) -> list[tuple[object, object, object]]:
+        d = run_dir(
+            tmp_path / sub,
+            [billed, *lost[:n]],
+            calls=n + 1,
+            events=kill(1, T0 + 100_000, budget="sink"),
+            budgets=[budget],
+            profile={"cdr_join": True, "generator_stall_ms": 3_600_000},
+            cdrs=[cdr("billed", T0, 100, 30_000)],
+            cps=0.2,
+        )
+        (w,) = jv.objs(compute(d, SCHEMAS), "windows")
+        return [(r["count"], r["allowed"], r["finding"]) for r in jv.objs(w, "impacts")]
+
+    assert rows("two", 2) == [(2, 2.0, False)]
+    assert rows("three", 3) == [(3, 2.0, True)]
+
+
 def test_cdrs_off_the_schema_or_missing_make_the_run_invalid(tmp_path: Path) -> None:
     on: Json = {"cdr_join": True, "generator_stall_ms": 3_600_000}
     d = run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=on, cdrs=[{**cdr("a", T0, 100, 30_000), "disposition": "?"}])

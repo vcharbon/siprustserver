@@ -1,4 +1,4 @@
-"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2), pcap, the readers,
+"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2), pcap, mark, the readers,
 and inject and sipp-keys, the injection file of a catalog shape and the key defaults of a
 scenario for a SIPp launcher outside the runner."""
 
@@ -9,35 +9,32 @@ import json
 import os
 import sys
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from . import content_cli
 from .check import all_profile_errors
+from .cleanup import cleanup
 from .clock import RealClock
 from .content import Content, ContentError, discover
 from .dryrun import simulated, timeline
 from .executor import RealExecutor
-from .incident_exec import EventRunner
 from . import jsonval as jv
 from .jsonval import as_obj
 from .injection import InjectionError, render
 from .lab import lab_from_env, parse_callees
+from .marks import mark
 from .offschedule import active_runs, defaults_spec, request_fire
 from .paths import results_root, search_path
-from .preflight import open_events
-from .profile import Profile, parse_profile
+from .profile import parse_profile
 from .readers import cli as readers
 from .runner import Runner, RunRefused
 from .scenario_lint import key_defaults, lint_all
-from .schedule import PlannedEvent, plan, plan_event
 from .schemas import SchemaSet
 from .jsonl import read_jsonl
 from .pcap import extract as extract_call
-from .streams import RemoveLoad
-from .vm import VictoriaMetrics
-from .events import EventJournal
 
 # How long `hakit fire` waits for the runner, which takes requests between two
 # waits: after an executable step, at most an inject timeout.
@@ -126,42 +123,8 @@ def cmd_verdict(schemas: SchemaSet, content: Content, env: Mapping[str, str], ru
 
 
 def cmd_cleanup(content: Content, env: Mapping[str, str], run_dirs: Sequence[Path], dry_run: bool) -> int:
-    lab = lab_from_env(env)
     clock, executor = simulated() if dry_run else (RealClock(), RealExecutor())
-    root = results_root(env)
-    dirs = list(run_dirs) or ([d for d in sorted(root.iterdir()) if d.is_dir()] if root.is_dir() else [])
-    failed = 0
-    for d in dirs:
-        ids = open_events(d)
-        if not ids:
-            continue
-        run = d.name
-        profile = parse_profile(as_obj(json.loads((d / "profile.json").read_text())))
-        journal = EventJournal(run, d, clock, VictoriaMetrics(executor, lab.vm_url))
-        stepper = EventRunner(run, d, lab, executor, clock, journal, lambda _t: None, RemoveLoad(executor, run))
-        for ev in plan(profile, content.incidents) + manual_events(profile, content, ids):
-            if ev.event_id in ids:
-                bad = stepper.heal_only(ev, [content.incidents[n] for n in ev.spec.incidents])
-                print(f"hakit: {run}/{ev.event_id} healed" + (f", failed: {bad}" if bad else ""))
-                failed += len(bad)
-        ps = executor.run(["docker", "ps", "-aq", "--filter", f"label=hakit-run={run}"], timeout_s=30)
-        ids_c = ps.stdout.split()
-        if ids_c:
-            executor.run(["docker", "rm", "-f", *ids_c], timeout_s=60)
-        if not failed and not dry_run:
-            (d / "cleaned").write_text("")
-    return 1 if failed else 0
-
-
-def manual_events(profile: Profile, content: Content, ids: Sequence[str]) -> list[PlannedEvent]:
-    """The manual events among `ids` (`m<seq>-<incident>`), planned from the profile's defaults."""
-    out: list[PlannedEvent] = []
-    for event in ids:
-        seq, _, incident = event.removeprefix("m").partition("-")
-        spec = defaults_spec(profile, incident) if event.startswith("m") and seq.isdigit() else None
-        if spec is not None and incident in content.incidents:
-            out.append(plan_event(int(seq), 0, spec, profile, content.incidents, prefix="m"))
-    return out
+    return cleanup(content, lab_from_env(env), executor, clock, results_root(env), run_dirs, dry_run)
 
 
 def cmd_fire(content: Content, env: Mapping[str, str], incident: str, run_dir: Path | None, dry_run: bool) -> int:
@@ -216,6 +179,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_keys.add_argument("scenario")
     p_clean = sub.add_parser("cleanup", help="heal every event a crashed run left open")
     p_clean.add_argument("run_dirs", type=Path, nargs="*")
+    p_mark = sub.add_parser("mark", help="push the state of a workflow supervising a run (phase, progress, finding, annotate)")
+    p_mark.add_argument("kind", choices=["phase", "progress", "finding", "annotate"])
+    p_mark.add_argument("values", nargs="+")
     content_cli.add_parsers(sub)
     readers.add_parsers(sub)
     args = ap.parse_args(argv)
@@ -243,6 +209,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_pcap(Path(args.run_dir), str(args.call_id), None if args.out is None else Path(args.out))
     if cmd in readers.COMMANDS:
         return readers.run(cmd, args, env, RealExecutor())
+    if cmd == "mark":
+        lab = lab_from_env(env)
+        grafana = env.get("HAKIT_GRAFANA_URL", "http://127.0.0.1:3333")
+        values = [str(v) for v in args.values]
+        return mark(RealExecutor(), lab.vm_url, grafana, str(args.kind), values, int(time.time() * 1000))
     if cmd == "fire":
         run = None if args.run is None else Path(args.run)
         return cmd_fire(content, env, str(args.incident), run, dry)

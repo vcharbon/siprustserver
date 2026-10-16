@@ -147,6 +147,22 @@ class SetupSlowAllowance:
 
 
 @dataclass(frozen=True)
+class CountAllowance:
+    """A counted class's allowance (`cdr_mismatch`): `max_calls`, or
+    `max_seconds` of an offered rate, optionally beyond the window's outage."""
+
+    max_calls: int | None = 0
+    max_seconds: float | None = None
+    over_outage: bool = False
+
+    def allowed(self, cps: float, outage_s: float = 0.0) -> float:
+        if self.max_calls is not None:
+            return float(self.max_calls)
+        extra = outage_s if self.over_outage else 0.0
+        return ((self.max_seconds or 0.0) + extra) * cps
+
+
+@dataclass(frozen=True)
 class RecoveryRule:
     """How a window's traffic counts as back (ADR-0049 §3.6); `max_s` None means
     back before the incident's maximum."""
@@ -165,7 +181,7 @@ class Budget:
     unexpected_ending: list[Allowance]
     setup_slow: SetupSlowAllowance
     raw: Json = field(compare=False)
-    cdr_mismatch_max: int = 0
+    cdr_mismatch: CountAllowance = CountAllowance()
     recovery: RecoveryRule = RecoveryRule()
     classes: dict[str, float] = field(default_factory=lambda: {})
 
@@ -191,6 +207,16 @@ def _allowances(d: Json, key: str) -> list[Allowance]:
     return out
 
 
+def _count_allowance(d: Json) -> CountAllowance:
+    seconds = jv.opt_number(d, "max_seconds")
+    calls = jv.opt_int(d, "max_calls")
+    return CountAllowance(
+        max_calls=calls if calls is not None or seconds is not None else 0,
+        max_seconds=seconds,
+        over_outage=jv.boolean(d, "over_outage"),
+    )
+
+
 def parse_budget(d: Json) -> Budget:
     slow = jv.obj(d, "setup_slow")
     rec = jv.obj(d, "recovery")
@@ -205,7 +231,7 @@ def parse_budget(d: Json) -> Budget:
             over_outage=jv.boolean(slow, "over_outage"),
         ),
         raw=d,
-        cdr_mismatch_max=jv.opt_int(jv.obj(d, "cdr_mismatch"), "max_calls") or 0,
+        cdr_mismatch=_count_allowance(jv.obj(d, "cdr_mismatch")),
         recovery=RecoveryRule(
             max_s=jv.opt_number(rec, "max_s"),
             tolerance=jv.number(rec, "tolerance", 0.1),
@@ -229,6 +255,8 @@ class Leg:
     role: str
     ruri_prefixes: list[str]
     expected: list[ExpectedEnding]
+    # The caller endings under which the leg opens; None: every expected one.
+    when: list[ExpectedEnding] | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +312,7 @@ def parse_catalog(d: Json) -> Catalog:
                         role=jv.string(leg, "role"),
                         ruri_prefixes=jv.strings(leg, "ruri_prefixes"),
                         expected=_endings(jv.objs(leg, "expected")),
+                        when=_endings(jv.objs(leg, "when")) if "when" in leg else None,
                     )
                     for leg in jv.objs(s, "legs")
                 ],

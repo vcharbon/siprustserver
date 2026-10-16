@@ -257,10 +257,15 @@ def test_cleanup_removes_a_crashed_runs_stream_by_its_labels(tmp_path: Path) -> 
         return ProcResult(0, "abc\ndef\n", "") if call.argv[:3] == ["docker", "ps", "-aq"] else None
 
     fake = FakeExecutor([listed])
-    ok, facts = RemoveLoad(fake, "run-1").stop(c.incidents["spike"], ev, interrupted=True)
+    ok, facts = RemoveLoad(fake, "run-1", lab_from_env({})).stop(c.incidents["spike"], ev, interrupted=True)
     assert ok and facts["removed"] == 2
     assert fake.calls[0].argv == ["docker", "ps", "-aq", "--filter", "label=hakit-run=run-1", "--filter", "label=hakit-stream=burst"]
     assert fake.calls[1].argv == ["docker", "rm", "-f", "abc", "def"]
+    # A pod-placed generator of the stream goes the same way.
+    assert fake.calls[2].argv == [
+        "kubectl", "--context", "kind-sip-e2e", "-n", "sip-test", "delete", "pods",
+        "-l", "hakit-run=run-1,hakit-stream=burst", "--grace-period=0", "--force", "--ignore-not-found",
+    ]  # fmt: skip
 
 
 def errors_of(tmp_path: Path, events: list[Json], streams: list[Json] | None = None, extra: Incident | None = None) -> list[str]:

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .executor import Executor
 from .generator import Tally
-from .lab import Lab
+from .lab import Lab, resolve_target
 from .paths import SIPP_EXPORTER_DIR
 from .profile import Stream
 from .scenario_lint import key_defaults
@@ -35,6 +35,8 @@ ERROR_KEPT_FILE = "/stats/errors.kept.log"
 ERROR_KEPT_BYTES = 256 * 1024 * 1024
 # Margin of the global `-recv_timeout` above every timeout of the scenario.
 RECV_BACKSTOP_MARGIN_S = 60
+# SIPp's remote control port, where a rate step is sent.
+CONTROL_PORT = 8888
 # The `-key`s every stream passes; a scenario's other keys come from the stream's params.
 DRIVER_KEYS = ("run", "stream", "shape", "hold_ms", "setup_ms")
 
@@ -130,11 +132,11 @@ class SippStream:
             return s.max_concurrent
         return int(math.ceil(s.peak_cps * worst_call_s(s, key_defaults(self.scenario)))) + 10
 
-    def sipp_argv(self) -> list[str]:
+    def sipp_argv(self, target: str | None = None) -> list[str]:
         s = self.stream
         argv = [
             "sipp",
-            self.lab.sip_target,
+            target or self.lab.sip_target,
             "-sf",
             f"/scenarios/{self.scenario.name}",
             "-inf",
@@ -179,6 +181,8 @@ class SippStream:
             "/stats/stat.csv",
             "-fd",
             "1",
+            "-cp",
+            str(CONTROL_PORT),
         ]
         for k, v in sorted(key_defaults(self.scenario).items()):
             if k not in DRIVER_KEYS:
@@ -189,6 +193,9 @@ class SippStream:
 
     def start(self) -> str | None:
         """Start the twin then the UAC; an error text when either refused to start."""
+        target, err = resolve_target(self.lab, self.executor, self.stream.target)
+        if target is None:
+            return f"SIPp UAC of {self.stream.name} did not start: {err}"
         ip = self.lab.sipp_ip(self.slot)
         labels = ["--label", f"hakit-run={self.run}", "--label", f"hakit-stream={self.stream.name}"]
         self.remove()
@@ -212,7 +219,7 @@ class SippStream:
             ["docker", "run", "-d", "--name", self.uac, *labels]
             + ["--network", f"container:{self.twin}", "--cpus", "8", "--memory", "1536m"]
             + ["-v", f"{self.scenario.parent}:/scenarios:ro", "-v", f"{self.dir}:/stats", "-w", "/stats"]
-            + [self.lab.sipp_image, *self.sipp_argv()],
+            + [self.lab.sipp_image, *self.sipp_argv(target)],
             timeout_s=60,
         )
         if uac.rc != 0:
@@ -241,6 +248,16 @@ class SippStream:
 
     def kill(self) -> bool:
         return self.executor.run(["docker", "kill", self.uac], timeout_s=30).rc == 0
+
+    def set_rate(self, cps: float) -> bool:
+        """SIPp's remote control: `cset rate <cps>` on its control port, sent
+        from the twin, which shares the UAC's network namespace."""
+        send = (
+            "import socket, sys; "
+            "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(sys.argv[1].encode(), (sys.argv[2], int(sys.argv[3])))"
+        )
+        argv = ["docker", "exec", self.twin, "python3", "-c", send, f"cset rate {cps:g}", self.lab.sipp_ip(self.slot)]
+        return self.executor.run([*argv, str(CONTROL_PORT)], timeout_s=30).rc == 0
 
     def counters(self) -> Counters:
         return parse_stat_csv(self.executor.read_text(self.dir / "stat.csv"))

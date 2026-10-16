@@ -194,6 +194,7 @@ def compute(run_dir: Path, schemas: SchemaSet) -> Json:
         cps,
         counted=cdr_impacts + class_impacts,
         stall_of=lambda lat: stall_of(stalls, lat.stream, lat.at_ms - lat.ms, lat.at_ms),
+        run_cps=sum(jv.number(s, "cps") for s in streams_doc if s.get("start", "run") == "run"),
     )
     for lat, st in judged.stalled:
         stalled[st].append(lat.call_id)

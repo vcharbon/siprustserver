@@ -94,6 +94,23 @@ def test_a_termination_signal_heals_the_open_event(tmp_path: Path) -> None:
     assert signal.getsignal(signal.SIGTERM) == before
 
 
+def test_a_second_termination_signal_does_not_cut_the_cleanup_short(tmp_path: Path) -> None:
+    # A signal to the run's process group reaches the runner twice when a
+    # wrapper forwards it: the second lands while the event heals.
+    def terminate(c: Call) -> ProcResult | None:
+        if is_step(c, "inject") or is_step(c, "heal"):
+            os.kill(os.getpid(), signal.SIGTERM)
+        return None
+
+    before = signal.getsignal(signal.SIGTERM)
+    r, fake = runner(tmp_path, [terminate])
+    with pytest.raises(SystemExit):
+        r.run(SMOKE)
+    assert any(is_step(c, "heal") for c in fake.calls)
+    assert fake.calls[-1].argv[:3] == ["docker", "rm", "-f"]
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
 def test_a_silent_victoriametrics_refuses_the_run(tmp_path: Path) -> None:
     def silent(c: Call) -> HttpResult | None:
         return HttpResult(0, "connection refused") if c.kind == "http" and "/api/v1/query?" in c.url else None

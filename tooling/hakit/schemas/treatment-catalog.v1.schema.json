@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "treatment-catalog.v1.schema.json",
-  "$comment": "minor 1",
+  "$comment": "minor 2",
   "title": "treatment-catalog.v1",
   "description": "The call treatments a system under test offers, by shape id: how a caller requests each one, the callee-side legs it opens, and the endings that count as success. Read by the runner, the SIPp injection-file renderer, loadgen and the classifier. ADR-0049.",
   "type": "object",
@@ -98,6 +98,12 @@
         },
         "expected": {
           "description": "The leg endings that count as success. A primary route the treatment fails over from expects `rejected` with its code.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/ending" }
+        },
+        "when": {
+          "description": "The caller endings under which the treatment opens this leg (a call the treatment refuses before any leg opens none); absent, every expected caller ending. Under another caller ending the leg is not judged.",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/ending" }

@@ -105,6 +105,52 @@ def test_a_leg_that_never_opened_or_ended_otherwise_is_an_unexpected_ending() ->
     assert classify(r, FAILOVER).success
 
 
+def test_a_leg_the_treatment_opens_only_for_some_endings_is_judged_only_under_them() -> None:
+    # Answered, or refused 486 before any leg opens (a limiter at its cap).
+    answered = ExpectedEnding("answered", None, None)
+    limited = Shape(
+        "limited",
+        "c",
+        None,
+        [],
+        [Leg("callee", ["1"], [answered], when=[answered])],
+        [answered, ExpectedEnding("rejected", 486, None)],
+        True,
+    )
+    refused = rejected("r", T0, 486, "486")
+    refused["legs"] = []
+    assert classify(refused, limited).success
+    up = record("a", T0)
+    up["legs"] = []
+    (imp,) = classify(up, limited).impacts
+    assert (imp.cls, imp.reason) == ("unexpected_ending", "leg:callee")
+
+
+def test_a_leg_missing_from_an_answered_call_is_charged_at_the_calls_end() -> None:
+    # A transfer target opened mid-call: a fault after the answer is among the
+    # impact's candidates only if its instant is the call's end.
+    answered = ExpectedEnding("answered", None, None)
+    transfer = Shape(
+        "transfer",
+        "c",
+        None,
+        [],
+        [Leg("callee", ["1"], [answered]), Leg("target", ["2"], [answered], when=[answered])],
+        [answered],
+        True,
+    )
+    r = record("a", T0, ended=30_000)
+    r["legs"] = [{"role": "callee", "ending": "answered", "final_code": 200}]
+    (imp,) = classify(r, transfer).impacts
+    assert (imp.reason, imp.at_ms, imp.answered) == ("leg:target", T0 + 30_000, True)
+    # A refused call is judged at its setup's end, and the `when` of a later
+    # leg reads the caller's ending, never an earlier leg's.
+    refused = rejected("r", T0, 486, "486")
+    refused["legs"] = [{"role": "callee", "ending": "answered", "final_code": 200}]
+    two_ends = Shape("t2", "c", None, [], transfer.legs, [answered, ExpectedEnding("rejected", 486, None)], True)
+    assert [i.reason for i in classify(refused, two_ends).impacts] == []
+
+
 def test_an_answer_that_withholds_early_media_fails_when_the_caller_saw_some() -> None:
     quiet = Shape("quiet", "c", None, [], [], [ExpectedEnding("answered", None, False)], True)
     assert classify(record("a", T0), quiet).success

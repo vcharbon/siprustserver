@@ -76,11 +76,19 @@ def _expected(options: list[ExpectedEnding], ending: str, code: int | None, earl
 
 
 def _leg_impacts(r: Json, shape: Shape, base: Impact) -> list[Impact]:
+    """A leg judged under the caller's ending. On an answered call a leg is
+    known missing or wrong only once the call is over: its impact is at the
+    call's end, so a fault in the middle of the call is among its candidates."""
     if not shape.legs or "legs" not in r:
         return []
     seen = {jv.string(leg, "role"): leg for leg in jv.objs(r, "legs")}
+    caller = (jv.string(r, "ending"), jv.opt_int(r, "final_code"), jv.boolean(r, "early_media"))
+    if base.answered:
+        base = replace(base, at_ms=jv.number(r, "ended_at_ms"))
     out: list[Impact] = []
     for leg in shape.legs:
+        if leg.when is not None and not _expected(leg.when, *caller):
+            continue
         got = seen.get(leg.role)
         if got is None:
             out.append(replace(base, code=0, reason=f"leg:{leg.role}", detail="leg never opened", retry_after=False))

@@ -91,9 +91,9 @@ def outage_s(w: Window) -> float:
     return max(0.0, (end - start) / 1000.0)
 
 
-def _counted_allowance(budget: Budget, cls: str) -> float:
+def _counted_allowance(budget: Budget, cls: str, run_cps: float, outage: float) -> float:
     if cls == CDR_MISMATCH:
-        return float(budget.cdr_mismatch_max)
+        return budget.cdr_mismatch.allowed(run_cps, outage)
     return budget.classes.get(cls, 0.0)
 
 
@@ -119,7 +119,10 @@ def judge(
     cps: dict[str, float],
     counted: Sequence[Impact] = (),
     stall_of: StallOf = lambda _lat: None,
+    run_cps: float = 0.0,
 ) -> Judged:
+    """`run_cps` is the summed offered rate of the streams that run for the
+    whole load, the rate a counted allowance in seconds reads."""
     in_window: dict[str, list[Impact]] = defaultdict(list)
     counted_in_window: dict[str, list[Impact]] = defaultdict(list)
     slow_in_window: dict[str, list[SetupLatency]] = defaultdict(list)
@@ -196,7 +199,7 @@ def judge(
         for imp in counted_in_window.get(w.event, []):
             by_class[imp.cls].append(imp)
         for cls, items in sorted(by_class.items()):
-            rows.append(_row(cls, "", items, _counted_allowance(budget, cls), 0.0))
+            rows.append(_row(cls, "", items, _counted_allowance(budget, cls, run_cps, out_s), 0.0))
         per_window[w.event] = rows
 
     unattributed: list[Json] = []

@@ -23,6 +23,11 @@ class Stream:
     max_concurrent: int | None
     params: dict[str, Scalar]
     steps: list[tuple[float, float]] = field(default_factory=lambda: [])
+    # `docker` on the generator network, or `pod` in the lab's namespace.
+    placement: str = "docker"
+    # `host:port` the calls go to instead of the lab's SIP target; a host that
+    # is not an IPv4 address names a Service of the lab's namespace.
+    target: str | None = None
 
     def cps_at(self, load_s: float) -> float:
         """The offered rate `load_s` seconds after the load started."""
@@ -164,6 +169,8 @@ def _stream(d: Json) -> Stream:
         max_concurrent=mc,
         params=jv.scalars(d, "params"),
         steps=sorted((jv.number(s, "at_s"), jv.number(s, "cps")) for s in jv.objs(d, "steps")),
+        placement=jv.string(d, "placement", "docker"),
+        target=jv.opt_string(d, "target"),
     )
 
 
