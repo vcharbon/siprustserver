@@ -86,10 +86,11 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     let mut res = resolve(ctx, &event);
     let mut lookup = Lookup::Answered;
-    // An initial INVITE the proxy placed here as another primary's backup: a
-    // copy of a call this node holds the answered record of is that call's,
-    // answered from the record; any other belongs to that primary and is
-    // dropped, its transaction relinquished unanswered — never a second call.
+    // An initial INVITE copying a call this node holds the answered record of
+    // is that call's, answered from the record; one placed here as another
+    // primary's backup and copying none belongs to that primary and gets no
+    // final (its 100 Trying went out on receipt), its transaction
+    // relinquished — never a second call.
     match initial_invite_copy(ctx, &event, &res).await {
         InitialInvite::Own => {}
         InitialInvite::CopyOf(hit) => res.copy_of(hit, &event),

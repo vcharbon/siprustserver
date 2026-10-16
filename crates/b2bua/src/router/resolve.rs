@@ -255,14 +255,16 @@ pub(super) enum InitialInvite {
     Foreign,
 }
 
-/// **A copy of another primary's initial INVITE.** The front proxy places an
-/// INVITE's retransmission on the cookie's backup when it reads the primary
-/// dead, the cookie it repeats naming that primary. Such an INVITE, with
-/// nothing here under its own `callRef`, is a copy (RFC 3261 §17.2.3) of the
-/// replicated call whose incoming leg it names when it carries that call's
-/// INVITE CSeq and its top-Via branch names that call's own server
-/// transaction ([`names_server_branch`]); any other is foreign. An INVITE
-/// whose cookie names this node, or none, is this node's own, as is every
+/// **A copy of a replicated call's initial INVITE.** An INVITE with no To-tag,
+/// with nothing here under its own `callRef`, reaching a node that
+/// replicates, is a copy (RFC 3261 §17.2.3) of the replicated call whose
+/// incoming leg it names when it carries that call's INVITE CSeq and its
+/// top-Via branch names that call's own server transaction
+/// ([`names_server_branch`]) — the caller retransmitting to the backup of a
+/// dead primary, through the cookie or through a fresh selection — whatever
+/// worker the cookie names. Failing that, an INVITE whose cookie names
+/// another primary is that primary's (the proxy re-placed its
+/// retransmission): foreign. Any other is this node's own, as is every
 /// INVITE of a node that does not replicate: it backs up no primary.
 pub(super) async fn initial_invite_copy(
     ctx: &RouterCtx,
@@ -275,27 +277,37 @@ pub(super) async fn initial_invite_copy(
     let CallEvent::Sip { message, .. } = event else { return InitialInvite::Own };
     let SipMessage::Request(req) = message.as_ref() else { return InitialInvite::Own };
     let cseq = req.cseq().seq();
-    if ctx.unborn.holds(derived, cseq) || ctx.state.peek(derived).is_some() {
+    if !ctx.state.replicates()
+        || ctx.unborn.holds(derived, cseq)
+        || ctx.state.peek(derived).is_some()
+    {
         return InitialInvite::Own;
     }
-    if !ctx.state.replicates() || foreign_primary(req, &ctx.config.self_ordinal).is_none() {
-        return InitialInvite::Own;
+    if let Some(hit) = replicated_call_copied(ctx, req).await {
+        ctx.state.note_takeover_resolved(&hit);
+        return InitialInvite::CopyOf(hit);
     }
+    match foreign_primary(req, &ctx.config.self_ordinal) {
+        Some(_) => InitialInvite::Foreign,
+        None => InitialInvite::Own,
+    }
+}
+
+/// The replicated call `req` is a copy of the initial INVITE of: its
+/// incoming leg is `req`'s, its INVITE CSeq `req`'s, and `req`'s top-Via
+/// branch names its own server transaction.
+async fn replicated_call_copied(
+    ctx: &RouterCtx,
+    req: &sip_message::SipRequest,
+) -> Option<IndexHit> {
     let call_id = req.call_id().as_str();
     let from_tag = req.from().tag().unwrap_or("");
     let lookup = IndexLookup::Invite { call_id, from_tag };
-    let Ok(Some(hit)) = ctx.state.replica_index_hit(lookup).await else {
-        return InitialInvite::Foreign;
-    };
-    let Ok((call, _)) = ctx.state.peek_replica(&hit.call_ref).await else {
-        return InitialInvite::Foreign;
-    };
+    let hit = ctx.state.replica_index_hit(lookup).await.ok()??;
+    let (call, _) = ctx.state.peek_replica(&hit.call_ref).await.ok()?;
     let branch = req.top_via().branch().unwrap_or_default();
-    if call.a_leg_invite.cseq != cseq || !names_server_branch(&call, branch) {
-        return InitialInvite::Foreign;
-    }
-    ctx.state.note_takeover_resolved(&hit);
-    InitialInvite::CopyOf(hit)
+    (call.a_leg_invite.cseq == req.cseq().seq() && names_server_branch(&call, branch))
+        .then_some(hit)
 }
 
 /// The index lookup for a request that carries no `callRef` of ours: a CANCEL

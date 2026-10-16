@@ -150,10 +150,10 @@ plain_counters! {
     // An initial INVITE the front proxy placed here as another primary's
     // backup (its cookie names that primary) that is no copy of a replica
     // this node holds: the primary owns its transaction, so it is dropped
-    // unanswered rather than placed as a second call.
+    // with no final rather than placed as a second call.
     FOREIGN_INVITE_COPY_DROPPED = (
         "b2bua_foreign_invite_copies_dropped_total",
-        "initial INVITEs whose stickiness cookie names another worker as primary and that copy no replica this node holds, dropped unanswered: the primary owns the transaction, so placing them would dial a second call",
+        "initial INVITEs whose stickiness cookie names another worker as primary and that copy no replica this node holds, dropped with no final (the transaction layer's 100 Trying went out on receipt; the transaction is then relinquished): the primary owns the transaction, so placing them would dial a second call",
     ) => foreign_invite_copy_dropped, bump_foreign_invite_copy_dropped, foreign_invite_copies_dropped_total;
     // Another incarnation's event: a timer fire, transaction timeout,
     // callout result or late message of an earlier call on the same

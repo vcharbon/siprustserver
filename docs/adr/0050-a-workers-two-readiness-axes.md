@@ -88,10 +88,18 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    worker view, is dropped and counted
    (`sip_proxy_no_target_dropped_total{kind}`), never answered `503`: the
    sender's retransmission reaches the next view. A worker that receives a
-   copy of a replicated call's initial INVITE (the call's CSeq and branch,
-   its cookie naming another primary) answers it from the replica, and drops
-   a copy it holds no replica for (`b2bua_foreign_invite_copies_dropped_total`):
-   the primary still owns that transaction.
+   copy of a replicated call's initial INVITE (the call's CSeq, and a branch
+   naming the call's server transaction whose 2xx the record holds) answers
+   it from the replica, whichever worker the cookie names. An initial INVITE
+   whose cookie names another primary and that copies no such record gets no
+   final (`b2bua_foreign_invite_copies_dropped_total`; the transaction
+   layer's 100 Trying has already gone out): the primary still owns that
+   transaction, and a final from this worker would end the caller's.
+   Accepted residuals:
+   - a copy of a routed but unanswered call is dropped, not taken over: the
+     departure sweep or the callee's next response hands the call over;
+   - an INVITE that never replicated, from a primary that really died, gets
+     no final from the backup; the caller's transaction timers end it.
 6. **New calls.** A new dialog goes to an `Alive` accepting worker. When none
    accepts, it goes to an `Alive` refusing one (the fallback of ADR-0043 §12),
    which answers it with its own refusal and writes its call record. The proxy

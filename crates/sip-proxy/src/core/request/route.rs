@@ -315,14 +315,18 @@ impl ProxyCore {
             .requesting_rport();
         draft = draft.push_front(via_with_cookie(pushed, via_cookie.as_ref()));
 
-        // Remember the target and both cookies, so a retransmit of THIS
-        // request repeats the forward. Short TTL: retransmits stop at Timer B/F.
+        // Remember where the request's first copy went and both cookies, so a
+        // retransmit of THIS request repeats the forward. A retransmission
+        // forwarded elsewhere never rewrites that first target: every later
+        // copy, and the CANCEL, is judged from where the transaction lives
+        // (ADR-0050 §4). Short TTL: retransmits stop at Timer B/F.
+        let went = rtx_hit.as_ref().map_or_else(|| target.clone(), |found| found.target.clone());
         if method != Method::Cancel {
             if let Some(k) = &rtx_key {
                 self.cancel_lru.remember(
                     k,
                     CancelEntry {
-                        target: target.clone(),
+                        target: went.clone(),
                         branch: our_branch.clone(),
                         stickiness: None,
                         minted: minted_cookie.clone(),
@@ -348,7 +352,7 @@ impl ProxyCore {
             let stickiness =
                 if c.worker_outbound { None } else { carried.or(minted_cookie.clone()) };
             let entry = CancelEntry {
-                target: target.clone(),
+                target: went,
                 branch: our_branch,
                 stickiness,
                 minted: None,
