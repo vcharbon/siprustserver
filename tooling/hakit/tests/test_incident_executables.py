@@ -61,6 +61,10 @@ def test_a_held_kill_taints_then_crashes_then_deletes_the_pod(tmp_path: Path) ->
     f = facts(sb.run("inject"))
     taint, kill, delete = sb.index("taint nodes n1 n2"), sb.index("task kill -s SIGKILL c1"), sb.index("delete pod w-0")
     assert 0 <= taint < kill < delete
+    # The delete follows the signal at once: the death is proven after it, so
+    # the kubelet's next relist finds no pod to restart in place.
+    inspects = [i for i, c in enumerate(sb.calls()) if "crictl inspect" in c.line and "c1" in c.line]
+    assert inspects[-1] > delete
     assert f["held_nodes"] == ["n1", "n2"] and f["containers"] == ["w-0/worker"] and f["restarts_at_delete"] == 0
 
 

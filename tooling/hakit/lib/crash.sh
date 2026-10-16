@@ -49,21 +49,35 @@ hk_crash_prepare() {
   [ -s "$HAKIT_EVENT_DIR/crashed" ] || hk_die "no container to crash"
 }
 
-# SIGKILL every recorded container's task, then wait (at most
-# HK_CRASH_WAIT_S, 10 s) until the runtime reports each exited or gone; a
-# state that cannot be read is not a death. Facts: the pods, their
-# containers, the signal instant and the instant every one was proven dead.
-hk_crash_kill() {
-  local wait_s="${HK_CRASH_WAIT_S:-10}" pod node cname cid at deadline dead state crashed
+# SIGKILL every recorded container's task; the signal instant goes to
+# `killed_at_ms`.
+hk_crash_signal() {
+  local node cid state crashed
   crashed="$(cat "$HAKIT_EVENT_DIR/crashed")"
-  at="$(hk_now_ms)"
+  hk_now_ms > "$HAKIT_EVENT_DIR/killed_at_ms"
   while read -r _ _ node _ cid _; do
     if ! docker exec "$node" ctr -n k8s.io task kill -s SIGKILL "$cid" >&2; then
       state="$(hk_container_state "$node" "$cid")"
       [ "$state" != running ] || hk_die "SIGKILL of container $cid on $node failed"
     fi
   done <<<"$crashed"
-  echo "$at" > "$HAKIT_EVENT_DIR/killed_at_ms"
+}
+
+# SIGKILL every recorded container's task, then wait until each is proven dead
+# (hk_crash_dead).
+hk_crash_kill() {
+  hk_crash_signal
+  hk_crash_dead
+}
+
+# Wait (at most HK_CRASH_WAIT_S, 10 s) until the runtime reports every
+# signalled container exited or gone; a state that cannot be read is not a
+# death. Facts: the pods, their containers, the signal instant and the
+# instant every one was proven dead.
+hk_crash_dead() {
+  local wait_s="${HK_CRASH_WAIT_S:-10}" pod node cname cid at deadline dead state crashed
+  crashed="$(cat "$HAKIT_EVENT_DIR/crashed")"
+  at="$(cat "$HAKIT_EVENT_DIR/killed_at_ms")"
   deadline=$(( $(date +%s) + wait_s ))
   while read -r pod _ node cname cid _; do
     while :; do
