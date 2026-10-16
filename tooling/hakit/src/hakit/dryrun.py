@@ -1,8 +1,9 @@
 """`--dry-run`: the whole profile on a fake clock against a simulated lab.
 
 The simulated lab answers what a healthy one would: every executable exits 0
-with no facts, a generator runs until it is drained, places no call, and the
-system under test holds no call. Each effect is recorded, and the timeline
+with no facts, a generator runs until it is drained, places no call, the
+system under test holds no call, and the API server serves every resource
+definition asked for (Chaos Mesh's included). Each effect is recorded, and the timeline
 printed from the run's own `events.jsonl`.
 """
 
@@ -33,6 +34,8 @@ class SimulatedLab:
         if call.kind == "run" and call.argv[:2] == ["docker", "run"] and "--name" in call.argv:
             self.drained.discard(call.argv[call.argv.index("--name") + 1])
             return None
+        if call.kind == "run" and call.argv[:1] == ["kubectl"] and "crd" in call.argv:
+            return ProcResult(0, f"customresourcedefinition.apiextensions.k8s.io/{call.argv[-3]}\n", "")
         if call.kind == "run" and call.argv[:2] == ["docker", "kill"]:
             self.drained.add(call.argv[-1])
             return ProcResult(0, "", "")

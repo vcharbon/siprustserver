@@ -24,7 +24,7 @@ from hakit.runner import Runner
 from hakit.schedule import plan
 from hakit.schemas import SchemaSet
 from hakit.streams import RemoveLoad
-from hakit.verdict import read_jsonl
+from hakit.jsonl import read_jsonl
 
 SCHEMAS = SchemaSet.load()
 SOFT = ["docker", "kill", "--signal", "USR1", "hakit-burst"]
@@ -171,7 +171,7 @@ def test_every_twin_keeps_the_error_entries_worth_reading_for_the_whole_run(tmp_
         assert "SIPP_ERROR_KEPT_FILE=/stats/errors.kept.log" in t and f"SIPP_ERROR_KEPT_BYTES={256 << 20}" in t
 
 
-def test_heal_waits_until_victorialogs_holds_the_firings_records(tmp_path: Path) -> None:
+def test_heal_ships_the_firings_records_before_removing_it_and_healed_is_its_exit(tmp_path: Path) -> None:
     seen = {"counts": 0}
 
     def records(c: Call) -> str | HttpResult | None:
@@ -182,13 +182,37 @@ def test_heal_waits_until_victorialogs_holds_the_firings_records(tmp_path: Path)
             return HttpResult(200, '{"n":"%d"}\n' % (0 if seen["counts"] < 3 else 2))
         return None
 
-    run_dir, _ = run(tmp_path, [records])
+    run_dir, fake = run(tmp_path, [records])
     at = phase_at(run_dir, "001-spike")
-    assert at["healed"] - at["heal"] == 2 * 2000  # two counts short of the two records, 2 s apart
     heal_facts = next(
         as_obj(e["facts"]) for e in read_jsonl(run_dir / "events.jsonl") if e.get("kind") == "facts" and e.get("executable") == "heal"
     )
+    assert at["healed"] == heal_facts["exited_at_ms"] == at["heal"]  # the simulated UAC exits at the signal
     assert (heal_facts["records"], heal_facts["shipped_records"]) == (2, 2)
+    calls = fake.calls
+    usr1 = next(i for i, c in enumerate(calls) if c.kind == "run" and c.argv == SOFT)
+    rm = next(i for i, c in enumerate(calls) if i > usr1 and c.kind == "run" and c.argv[:3] == ["docker", "rm", "-f"] and "hakit-burst" in c.argv)
+    between = calls[usr1:rm]
+    assert any(c.kind == "read" and c.path is not None and c.path.name == "records.jsonl" for c in between)
+    assert sum(1 for c in between if c.kind == "http" and "stats" in c.url and "burst" in c.url) == 3
+
+
+def test_a_refused_drain_signal_fails_the_heal_once_and_kills_the_uac(tmp_path: Path) -> None:
+    def refuse(c: Call) -> ProcResult | None:
+        return ProcResult(1, "", "no such container") if c.kind == "run" and c.argv == SOFT else None
+
+    run_dir, fake = run(tmp_path, [refuse])
+    at = phase_at(run_dir, "001-spike")
+    assert "failed" in at and "healed" not in at
+    argvs = [c.argv for c in fake.calls if c.kind == "run"]
+    assert argvs.count(SOFT) == 1 and HARD in argvs
+    assert at["failed"] - at["heal"] < 120_000  # failed fast, not at heal_s
+
+
+def test_streams_json_carries_each_streams_call_limit(tmp_path: Path) -> None:
+    run_dir, _ = run(tmp_path, [])
+    docs = {str(d["stream"]): d for d in json.loads((run_dir / "streams.json").read_text())}
+    assert isinstance(docs["basic"]["call_limit"], int) and isinstance(docs["burst"]["call_limit"], int)
 
 
 def test_an_incident_stream_that_exits_before_its_heal_is_a_stream_died(tmp_path: Path) -> None:

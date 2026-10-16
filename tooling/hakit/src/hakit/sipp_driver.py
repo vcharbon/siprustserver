@@ -211,11 +211,14 @@ class SippStream:
         except ValueError:
             return None
 
-    def drain(self) -> None:
-        self.executor.run(["docker", "kill", "--signal", "USR1", self.uac], timeout_s=30)
+    def drain(self) -> bool:
+        """Signal SIPp to place no new call and exit once its calls end; whether
+        docker delivered the signal. Never sent twice: a second SIGUSR1 makes
+        SIPp exit at once."""
+        return self.executor.run(["docker", "kill", "--signal", "USR1", self.uac], timeout_s=30).rc == 0
 
-    def kill(self) -> None:
-        self.executor.run(["docker", "kill", self.uac], timeout_s=30)
+    def kill(self) -> bool:
+        return self.executor.run(["docker", "kill", self.uac], timeout_s=30).rc == 0
 
     def counters(self) -> Counters:
         return parse_stat_csv(self.executor.read_text(self.dir / "stat.csv"))

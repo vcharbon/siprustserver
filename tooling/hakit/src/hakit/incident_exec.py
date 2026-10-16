@@ -33,7 +33,9 @@ type Waiter = Callable[[int], None]
 
 class LoadSteps(Protocol):
     """The inject and heal of a load incident: start and stop the profile stream
-    its event names. Each returns whether the step succeeded and its facts."""
+    its event names. Each returns whether the step succeeded and its facts;
+    a stop's `exited_at_ms` fact is the instant its generator exited, which
+    `healed` takes (ADR-0049 §2.8)."""
 
     def start(self, inc: Incident, ev: PlannedEvent) -> tuple[bool, Json]: ...
 
@@ -45,6 +47,8 @@ class EventOutcome:
     opened_at_ms: int
     failed: bool
     last_recovered_ms: int | None
+    # A heal failed twice: the system under test may still be faulted.
+    heal_failed: bool = False
 
 
 def _params(inc: Incident, ev: PlannedEvent) -> dict[str, Scalar]:
@@ -138,20 +142,45 @@ class EventRunner:
             return -1, None
 
     def _simple(
-        self, inc: Incident, ev: PlannedEvent, step: str, done: str, timeout_s: float, interrupted: bool = False
+        self,
+        inc: Incident,
+        ev: PlannedEvent,
+        step: str,
+        done: str,
+        timeout_s: float,
+        interrupted: bool = False,
+        quiet: bool = False,
     ) -> bool:
+        """Run one step and journal its outcome phase; with `quiet` a failure
+        journals no `failed` (the caller retries)."""
         if inc.kind == "load":
             ok, load_facts = (
                 self.load.start(inc, ev) if step == "inject" else self.load.stop(inc, ev, interrupted)
             )
             self.journal.facts(ev.event_id, inc.name, step, load_facts)
-            self.journal.phase(ev.event_id, inc.name, done if ok else "failed")
+            exited = load_facts.get("exited_at_ms")
+            at = int(exited) if ok and isinstance(exited, (int, float)) else None
+            if ok or not quiet:
+                self.journal.phase(ev.event_id, inc.name, done if ok else "failed", at)
             return ok
         rc, facts = self.step(inc, ev, step, timeout_s)
         if facts is not None:
             self.journal.facts(ev.event_id, inc.name, step, facts)
-        self.journal.phase(ev.event_id, inc.name, done if rc == 0 else "failed")
+        if rc == 0 or not quiet:
+            self.journal.phase(ev.event_id, inc.name, done if rc == 0 else "failed")
         return rc == 0
+
+    def _heal(self, inc: Incident, ev: PlannedEvent, interrupted: bool = False) -> bool:
+        """Heal once more after a failed fault heal; the retry is in the
+        incident's facts (`hakit` / `heal_retry`), and only a second failure is
+        `failed`. A load stop is not retried: its generator is gone either way,
+        and a stop that failed lost the calls it was draining."""
+        if inc.kind == "load":
+            return self._simple(inc, ev, "heal", "healed", inc.timeouts.heal_s, interrupted)
+        if self._simple(inc, ev, "heal", "healed", inc.timeouts.heal_s, interrupted, quiet=True):
+            return True
+        self.journal.facts(ev.event_id, inc.name, "hakit", {"heal_retry": {"at_ms": self.clock.now_ms()}})
+        return self._simple(inc, ev, "heal", "healed", inc.timeouts.heal_s, interrupted)
 
     def _probe(self, inc: Incident, ev: PlannedEvent) -> bool:
         if inc.executable("probe") is None:
@@ -185,10 +214,12 @@ class EventRunner:
                 break
         if not failed:
             self.wait_until(self.clock.now_ms() + int(ev.duration_s * 1000))
+        heal_failed = False
         for inc in reversed(attempted):
             self.journal.phase(ev.event_id, inc.name, "heal")
-            if not self._simple(inc, ev, "heal", "healed", inc.timeouts.heal_s):
+            if not self._heal(inc, ev):
                 failed = True
+                heal_failed = heal_failed or inc.kind == "fault"
         last: int | None = None
         if not failed:
             for inc in incs:
@@ -199,7 +230,7 @@ class EventRunner:
         settle_ms = int(ev.settle_s * 1000)
         close = opened + int(max_s * 1000) + settle_ms if failed or last is None else last + settle_ms
         self.journal.close_at(ev.event_id, close)
-        return EventOutcome(opened_at_ms=opened, failed=failed, last_recovered_ms=last)
+        return EventOutcome(opened_at_ms=opened, failed=failed, last_recovered_ms=last, heal_failed=heal_failed)
 
     def heal_only(self, ev: PlannedEvent, incs: list[Incident]) -> list[str]:
         """Heal every incident of an event left open (an interrupted run, `hakit
@@ -207,6 +238,6 @@ class EventRunner:
         failed: list[str] = []
         for inc in reversed(incs):
             self.journal.phase(ev.event_id, inc.name, "heal")
-            if not self._simple(inc, ev, "heal", "healed", inc.timeouts.heal_s, interrupted=True):
+            if not self._heal(inc, ev, interrupted=True):
                 failed.append(inc.name)
         return failed

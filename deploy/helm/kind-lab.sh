@@ -13,7 +13,8 @@
 #   kind-lab.sh chaos-mesh           Chaos Mesh alone (chaos-mesh-values-kind.yaml)
 #   kind-lab.sh down                 the cluster and the sipext plane
 #
-# Env: CHAOS_MESH_VERSION=2.8.4 (the pinned chart and images)
+# Env: CHAOS_MESH_VERSION=2.8.4 (the pinned chart and images); CHAOS_MESH=0
+# skips it (the runner then sees no `chaos-mesh` capability)
 # The host stack (VictoriaMetrics :8428, VictoriaLogs :9428, Grafana :3333) is
 # deploy/observability's docker compose stack, outside the cluster: `deploy`
 # needs it up and never starts it.
@@ -82,7 +83,7 @@ lab_deploy() {
   require_host_stack
   helm_release siprust-observability "$HELM_DIR/siprust-observability" "$OBS_NS" \
     --set "clusterName=kind-$CLUSTER"
-  chaos_mesh_release
+  if [ "${CHAOS_MESH:-1}" = 1 ]; then chaos_mesh_release; else log "Chaos Mesh skipped (CHAOS_MESH=0)"; fi
   # The UAS containers first: the first one is the workers' scripted callee.
   sipp_uas_up
   helm_release siprust "$HELM_DIR/siprust" "$NS" "$@"

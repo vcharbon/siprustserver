@@ -77,6 +77,14 @@ class Preflight:
 
 
 @dataclass(frozen=True)
+class Capture:
+    file_mb: int
+    files: int
+    filter: str
+    nodes: str | None
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     duration_s: float
@@ -85,6 +93,7 @@ class Profile:
     setup_slow_ms: float
     generator_stall_ms: float
     cdr_join: bool
+    capture: Capture | None
     catalogs: list[str]
     preflight: Preflight
     streams: list[Stream]
@@ -94,6 +103,17 @@ class Profile:
 
     def stream(self, name: str) -> Stream | None:
         return next((s for s in self.streams if s.name == name), None)
+
+
+def _capture(d: Json | None) -> Capture | None:
+    if d is None:
+        return None
+    return Capture(
+        file_mb=jv.opt_int(d, "file_mb") or 100,
+        files=jv.opt_int(d, "files") or 20,
+        filter=jv.string(d, "filter", "udp and portrange 5060-5100"),
+        nodes=jv.opt_string(d, "nodes"),
+    )
 
 
 def _event(d: Json) -> EventSpec:
@@ -150,6 +170,7 @@ def parse_profile(d: Json) -> Profile:
         setup_slow_ms=jv.number(d, "setup_slow_ms"),
         generator_stall_ms=jv.number(d, "generator_stall_ms", 500),
         cdr_join=jv.boolean(d, "cdr_join"),
+        capture=_capture(jv.opt_obj(d, "capture")),
         catalogs=jv.strings(d, "catalogs"),
         preflight=Preflight(
             min_free_memory_gib=jv.opt_number(pf, "min_free_memory_gib"),

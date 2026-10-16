@@ -1,7 +1,8 @@
 schema: incident.v1
 name: pod_freeze
 description: >-
-  Freeze one pod (pick one) or every pod (pick all) of any selector for
+  Freeze one pod (pick one) or every pod (pick all) of any selector, its
+  pod-level cgroup so every container stops, for
   duration_s: a hung component whose sockets stay open and answer nothing. A
   freeze longer than the pod's liveness budget also restarts its container;
   heal reports such restarts.

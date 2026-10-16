@@ -1,7 +1,7 @@
 """Every effect of the runner goes through an executor (ADR-0049 §6.3).
 
-`RealExecutor` runs processes (in their own process group, killed whole on a
-timeout), HTTP requests and host reads. `FakeExecutor` records each call and
+`RealExecutor` runs processes (in their own process group, ended whole on a
+timeout: SIGTERM, then SIGKILL after a grace), HTTP requests and host reads. `FakeExecutor` records each call and
 answers from scripted rules, so a whole profile replays on a fake clock.
 """
 
@@ -50,14 +50,20 @@ class Executor(Protocol):
     def disk_free_bytes(self, path: Path) -> int: ...
 
 
-def _kill_group(pid: int) -> None:
+def _kill_group(pid: int, sig: signal.Signals = signal.SIGKILL) -> None:
     try:
-        os.killpg(pid, signal.SIGKILL)
+        os.killpg(pid, sig)
     except ProcessLookupError:
         pass
 
 
 class RealExecutor:
+    """A step that overruns its timeout gets SIGTERM on its process group and
+    `term_grace_s` to end (an executable stops what it started), then SIGKILL."""
+
+    def __init__(self, term_grace_s: float = 5.0) -> None:
+        self.term_grace_s = term_grace_s
+
     def run(
         self,
         argv: list[str],
@@ -85,9 +91,13 @@ class RealExecutor:
             out, err = proc.communicate(timeout=timeout_s)
             return ProcResult(rc=proc.returncode, stdout=out, stderr=err)
         except subprocess.TimeoutExpired:
-            _kill_group(proc.pid)
-            out, err = proc.communicate()
-            return ProcResult(rc=-9, stdout=out, stderr=err, timed_out=True)
+            _kill_group(proc.pid, signal.SIGTERM)
+            try:
+                out, err = proc.communicate(timeout=self.term_grace_s)
+            except subprocess.TimeoutExpired:
+                _kill_group(proc.pid)
+                out, err = proc.communicate()
+            return ProcResult(rc=proc.returncode, stdout=out, stderr=err, timed_out=True)
         except BaseException:
             _kill_group(proc.pid)
             proc.wait()

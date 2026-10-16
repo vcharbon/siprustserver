@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .capture import CaptureFailed, Captures
 from .check import profile_errors
 from .classes import run_counts
 from .clock import Clock
@@ -25,7 +26,7 @@ from .executor import Executor
 from .freshness import Freshness
 from .incident_exec import EventRunner
 from .jsonval import Json
-from .lab import Lab
+from .lab import Lab, lab_capabilities
 from .model import Incident
 from .offschedule import OffSchedule, clear_active, mark_active
 from .paths import REPO_ROOT
@@ -60,6 +61,17 @@ def _raise_on_termination() -> Callable[[], None]:
     return restore
 
 
+def _left_faulted(event: str, at_ms: int) -> Json:
+    """The integrity finding of a heal that failed twice: no later window is
+    judged on a system under test that may still be faulted."""
+    return {
+        "kind": "incident_failed",
+        "event": event,
+        "at_ms": at_ms,
+        "detail": "its heal failed twice: the schedule stopped and the load drained there",
+    }
+
+
 def _dump(p: Path, doc: object) -> None:
     p.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
@@ -73,6 +85,7 @@ class _Live:
     load_start_ms: int = 0
     off: OffSchedule | None = None
     fresh: Freshness | None = None
+    capture: Captures | None = None
 
 
 class Runner:
@@ -96,7 +109,7 @@ class Runner:
         self.vm = VictoriaMetrics(executor, lab.vm_url)
         self.vlogs = VictoriaLogs(executor, lab.vlogs_url)
 
-    def refusals(self, profile: Profile) -> list[str]:
+    def refusals(self, profile: Profile, capabilities: list[str]) -> list[str]:
         errs = profile_errors(profile, self.content)
         for s in profile.streams:
             if s.driver != "sipp":
@@ -104,12 +117,12 @@ class Runner:
         for ev in plan(profile, self.content.incidents):
             for name in ev.spec.incidents:
                 inc = self.content.incidents[name]
-                missing = sorted(set(inc.requires) - set(self.lab.capabilities))
+                missing = sorted(set(inc.requires) - set(capabilities))
                 if missing:
                     errs.append(f"incident {name!r} requires {missing}, which the lab lacks")
         if len(profile.streams) > self.lab.sipp_ip_slots:
             errs.append(f"{len(profile.streams)} streams exceed the lab's {self.lab.sipp_ip_slots} generator slots")
-        if profile.cdr_join and "cdr" not in self.lab.capabilities:
+        if profile.cdr_join and "cdr" not in capabilities:
             errs.append("cdr_join needs the lab capability `cdr` (a CDR consumer shipping observations)")
         return errs
 
@@ -117,7 +130,7 @@ class Runner:
         profile = self.content.profiles.get(profile_name)
         if profile is None:
             raise RunRefused(f"profile {profile_name!r} is not on the search path")
-        errs = self.refusals(profile)
+        errs = self.refusals(profile, lab_capabilities(self.lab, self.executor))
         if errs:
             raise RunRefused("\n".join(errs))
         stale = earlier_open_events(self.results)
@@ -157,6 +170,12 @@ class Runner:
         mark_active(run_dir)
         restore = _raise_on_termination()
         try:
+            if profile.capture is not None:
+                live.capture = Captures(run, run_dir, profile.capture, self.lab, self.executor)
+                try:
+                    live.capture.start()
+                except CaptureFailed as e:
+                    raise RunRefused(str(e)) from e
             err = streams.start_run_streams()
             if err is not None:
                 raise RunRefused(err)
@@ -176,7 +195,12 @@ class Runner:
                 live.event = None
                 if outcome.failed:
                     self.say(f"hakit: event {ev.event_id} failed; see events/{ev.event_id}/")
-            wait_until(load_start + int(profile.duration_s * 1000))
+                if outcome.heal_failed:
+                    integrity.append(_left_faulted(ev.event_id, self.clock.now_ms()))
+                    self.say(f"hakit: event {ev.event_id} could not be healed: the schedule stops, the load drains")
+                    break
+            else:
+                wait_until(load_start + int(profile.duration_s * 1000))
             live.loading = False
             streams.drain(self.clock.now_ms() + int(profile.drain_s * 1000), wait_until)
             stream_docs = streams.docs()
@@ -190,11 +214,15 @@ class Runner:
                 ev, incs = in_progress
                 events.heal_only(ev, incs)
             streams.remove_all()
+            if live.capture is not None:
+                live.capture.stop()
             raise
         finally:
             restore()
             clear_active(run_dir)
         streams.remove_all()
+        if live.capture is not None:
+            live.capture.stop()
         records, bad = self.vlogs.export(run, started - 3_600_000, self.clock.now_ms() + 3_600_000)
         with (run_dir / "records.jsonl").open("w") as fh:
             fh.writelines(json.dumps(r) + "\n" for r in records)
@@ -257,6 +285,9 @@ class Runner:
     def _wait(self, target_ms: int, journal: EventJournal, live: _Live, integrity: list[Json], run: str) -> None:
         while True:
             journal.tick()
+            for event, opened, _closed in journal.take_closed():
+                if live.capture is not None:
+                    live.capture.keep(event, opened)
             if live.loading:
                 for s in live.streams.live():
                     key = f"{s.stream.name}{s.call_id_tag}"

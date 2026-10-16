@@ -1,4 +1,4 @@
-"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2), and the readers."""
+"""The `hakit` command line: validate, run, fire, verdict, cleanup (ADR-0049 §6.2), pcap, and the readers."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from .runner import Runner, RunRefused
 from .schedule import PlannedEvent, plan, plan_event
 from .schemas import SchemaSet
 from .jsonl import read_jsonl
+from .pcap import extract as extract_call
 from .streams import RemoveLoad
 from .vm import VictoriaMetrics
 from .events import EventJournal
@@ -150,6 +151,15 @@ def cmd_fire(content: Content, env: Mapping[str, str], incident: str, run_dir: P
     return 2
 
 
+def cmd_pcap(run_dir: Path, call_id: str, out: Path | None) -> int:
+    written = extract_call(run_dir, call_id, out or run_dir / "pcap" / "calls")
+    for w in written:
+        print(f"hakit: {w}")
+    if not written:
+        print(f"hakit: no packet of {call_id} under {run_dir / 'pcap'}", file=sys.stderr)
+    return 0 if written else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="hakit", description="Pluggable HA tooling base (ADR-0049).")
     ap.add_argument("--dry-run", action="store_true", help="fake clock and simulated lab; no effect leaves the runner")
@@ -162,6 +172,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_fire = sub.add_parser("fire", help="fire one manual event in the running run")
     p_fire.add_argument("incident")
     p_fire.add_argument("--run", type=Path, help="the run directory, when several runs are running")
+    p_pcap = sub.add_parser("pcap", help="one call's packets out of a run's capture, by Call-ID")
+    p_pcap.add_argument("run_dir", type=Path)
+    p_pcap.add_argument("call_id")
+    p_pcap.add_argument("-o", "--out", type=Path, help="the output directory (default: <run_dir>/pcap/calls)")
     p_clean = sub.add_parser("cleanup", help="heal every event a crashed run left open")
     p_clean.add_argument("run_dirs", type=Path, nargs="*")
     readers.add_parsers(sub)
@@ -180,6 +194,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_run(schemas, content, env, str(args.profile), dry)
     if cmd == "verdict":
         return cmd_verdict(schemas, content, env, Path(args.run_dir))
+    if cmd == "pcap":
+        return cmd_pcap(Path(args.run_dir), str(args.call_id), None if args.out is None else Path(args.out))
     if cmd in readers.COMMANDS:
         return readers.run(cmd, args, env, RealExecutor())
     if cmd == "fire":

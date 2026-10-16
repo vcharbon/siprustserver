@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .executor import Executor
+
 
 @dataclass(frozen=True)
 class Lab:
@@ -59,12 +61,29 @@ def _callees(raw: str) -> list[tuple[str, int]]:
     return out
 
 
+# Capabilities read from the lab itself, never declared: a capability whose
+# backend is missing would fail its incidents at inject instead of refusing
+# the profile.
+DERIVED = ("chaos-mesh",)
+CHAOS_MESH_CRD = "networkchaos.chaos-mesh.org"
+
+
+def lab_capabilities(lab: Lab, executor: Executor) -> list[str]:
+    """The declared capabilities plus those the lab shows: `chaos-mesh` when
+    the API server serves Chaos Mesh's resources."""
+    caps = list(lab.capabilities)
+    res = executor.run(["kubectl", "--context", lab.kube_context, "get", "crd", CHAOS_MESH_CRD, "-o", "name"], timeout_s=30)
+    if res.rc == 0 and res.stdout.strip():
+        caps.append("chaos-mesh")
+    return caps
+
+
 def lab_from_env(env: Mapping[str, str]) -> Lab:
     g = env.get
     return Lab(
         kube_context=g("HAKIT_KUBE_CONTEXT", "kind-sip-e2e"),
         namespace=g("HAKIT_NAMESPACE", "sip-test"),
-        capabilities=[c for c in g("HAKIT_LAB_CAPABILITIES", "kind,docker,chaos-mesh").split(",") if c],
+        capabilities=[c for c in g("HAKIT_LAB_CAPABILITIES", "kind,docker").split(",") if c and c not in DERIVED],
         vm_url=g("HAKIT_VM_URL", "http://127.0.0.1:8428"),
         vlogs_url=g("HAKIT_VLOGS_URL", "http://127.0.0.1:9428"),
         vlogs_url_from_generators=g("HAKIT_VLOGS_URL_GENERATORS", "http://victorialogs:9428"),

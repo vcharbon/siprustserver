@@ -27,6 +27,7 @@ class OpenWindow:
     incidents: list[str]
     closes_at_ms: int | None = None
     last_push_ms: int = 0
+    opened_ms: int = 0
 
 
 class EventJournal:
@@ -38,6 +39,8 @@ class EventJournal:
         self.open: dict[str, OpenWindow] = {}
         self.sources: dict[str, str] = {}
         self.push_failed: dict[str, int] = {}
+        # (event, opened, closed) of every window closed since the last `take_closed`.
+        self.closed: list[tuple[str, int, int]] = []
 
     def _push(self, event: str, lines: list[str]) -> None:
         if lines and not self.vm.push(lines):
@@ -51,12 +54,14 @@ class EventJournal:
         self.sources[event] = source
         self._append(event_line(event, source, incidents, budget, settle_s, max_s))
 
-    def phase(self, event: str, step: str, phase: str) -> int:
-        at = self.clock.now_ms()
+    def phase(self, event: str, step: str, phase: str, at_ms: int | None = None) -> int:
+        """Journal and push a phase, at `at_ms` when the step measured its own
+        instant (a load stream's exit), else now."""
+        at = self.clock.now_ms() if at_ms is None else at_ms
         self._append(phase_line(event, step, phase, at))
         lines = [chaos_event(step, phase, self.sources.get(event, "schedule"), self.run, at)]
         if phase == "inject" and event not in self.open:
-            w = OpenWindow(event, step.split("+"), last_push_ms=at)
+            w = OpenWindow(event, step.split("+"), last_push_ms=at, opened_ms=at)
             self.open[event] = w
             lines += [chaos_window(i, self.run, 1, at) for i in w.incidents]
         self._push(event, lines)
@@ -78,12 +83,18 @@ class EventJournal:
             if w.closes_at_ms is not None and now >= w.closes_at_ms:
                 self._push(ev, [chaos_window(i, self.run, 0, w.closes_at_ms) for i in w.incidents])
                 del self.open[ev]
+                self.closed.append((ev, w.opened_ms, w.closes_at_ms))
                 failed = self.push_failed.pop(ev, 0)
                 if failed:
                     self.facts(ev, "hakit", "vm_push", {"failed": failed})
             elif now - w.last_push_ms >= KEEPALIVE_MS:
                 self._push(ev, [chaos_window(i, self.run, 1, now) for i in w.incidents])
                 w.last_push_ms = now
+
+    def take_closed(self) -> list[tuple[str, int, int]]:
+        """The windows closed since the last call: (event, opened, closed)."""
+        out, self.closed = self.closed, []
+        return out
 
     def next_close_ms(self) -> int | None:
         closes = [w.closes_at_ms for w in self.open.values() if w.closes_at_ms is not None]

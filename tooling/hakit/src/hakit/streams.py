@@ -127,8 +127,10 @@ class StreamSet:
 
     def stop_incident(self, name: str, mode: str, deadline_ms: int, wait: Waiter) -> tuple[bool, Json]:
         """End the running firing of `name`: `drain`, `abandon`, or `remove` (an
-        interrupted run: the pair is removed at once). The firing's facts; false
-        when a drain did not finish by `deadline_ms` (the UAC is then killed)."""
+        interrupted run: the pair is removed at once). The firing's facts, its
+        exit instant among them; false when docker refused the signal or a
+        drain did not finish by `deadline_ms` (the UAC is then killed). The
+        records are shipped and the counter read before the pair is removed."""
         f = self.active.pop(name, None)
         if f is None:
             return True, {"stream": name, "stop": mode, "running": False}
@@ -137,24 +139,23 @@ class StreamSet:
             return True, {"stream": name, "stop": mode}
         stopped_at = self.clock.now_ms()
         f.stop = mode
-        if mode == "abandon":
-            f.gen.kill()
-        else:
-            f.gen.drain()
-        while f.gen.running() and self.clock.now_ms() < deadline_ms:
+        signalled = f.gen.kill() if mode == "abandon" else f.gen.drain()
+        while signalled and f.gen.running() and self.clock.now_ms() < deadline_ms:
             wait(min(deadline_ms, self.clock.now_ms() + POLL_MS))
-        f.drained = mode == "drain" and not f.gen.running()
-        ok = f.drained or mode == "abandon"
+        exited_at = self.clock.now_ms()
+        f.drained = signalled and mode == "drain" and not f.gen.running()
+        ok = f.drained or (signalled and mode == "abandon")
         if not ok:
             f.gen.kill()
-        teardown_ms = self.clock.now_ms() - stopped_at
         shipped = self._settle(f, wait)
         f.gen.remove()
         facts: Json = {
             "stream": name,
             "stop": mode,
+            "signalled": signalled,
             "drained": f.drained,
-            "teardown_ms": teardown_ms,
+            "exited_at_ms": exited_at,
+            "teardown_ms": exited_at - stopped_at,
             "calls": f.calls,
             "records": f.local,
             "shipped_records": shipped,
@@ -186,12 +187,11 @@ class StreamSet:
         each, killing a UAC still running at `deadline_ms`."""
         running = list(self.active.values())
         self.active.clear()
-        for f in running:
-            f.gen.drain()
-        while any(f.gen.running() for f in running) and self.clock.now_ms() < deadline_ms:
+        signalled = [f for f in running if f.gen.drain()]
+        while any(f.gen.running() for f in signalled) and self.clock.now_ms() < deadline_ms:
             wait(min(deadline_ms, self.clock.now_ms() + POLL_MS))
         for f in running:
-            f.drained = not f.gen.running()
+            f.drained = f in signalled and not f.gen.running()
             if not f.drained:
                 f.gen.kill()
             self._settle(f, wait)
@@ -217,6 +217,7 @@ class StreamSet:
                     "shape": s.shape,
                     "start": s.start,
                     "cps": s.cps,
+                    "call_limit": fs[0].gen.max_concurrent() if fs else None,
                     "calls": calls,
                     "not_placed": 0,
                     "reconciled": not abandon,

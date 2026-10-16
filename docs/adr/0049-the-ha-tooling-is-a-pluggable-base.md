@@ -113,7 +113,7 @@ tolerated (§3).
    | `HAKIT_KUBE_CONTEXT` | the kube context of the lab |
    | `HAKIT_DURATION_S` | the hold of this event |
    | `HAKIT_PARAM_<NAME>` | each parameter, the name upper-cased |
-   | `HAKIT_LIB` | the directory of the base's shell fault primitives (`pod-faults.sh`) |
+   | `HAKIT_LIB` | the directory of the base's shell fault primitives (`tooling/hakit/lib/`: `pod-faults.sh` and the incident helpers) |
    | `HAKIT_VM_IMPORT` | the metrics push endpoint, for an executable that publishes its own facts |
 
 4. **Output.** stdout is empty or one JSON object of facts (the pod picked,
@@ -132,14 +132,27 @@ tolerated (§3).
    primitives of `pod-faults.sh` (node stop, cgroup freeze, netem delay and
    loss, TCP reset), a Chaos Mesh resource it creates and deletes, `kubectl`.
    An incident that needs a backend names it in `requires`, and the runner
-   refuses the profile before the run if the lab lacks it. The base uses
-   Chaos Mesh (`chaos-mesh`, installed on the kind lab by
-   `deploy/helm/kind-lab.sh`) for what the shell primitives cannot do
-   precisely: a partition between selectors, a volume's IO latency, a clock
-   shift. Its resource's `AllInjected` condition is the applied proof and its
+   refuses the profile before the run if the lab lacks it. A capability whose
+   backend the lab can show is read from the lab, never declared: `chaos-mesh`
+   is there when the API server serves `networkchaos.chaos-mesh.org`. The base
+   uses Chaos Mesh (installed on the kind lab by `deploy/helm/kind-lab.sh`,
+   unless `CHAOS_MESH=0`) for what the shell primitives cannot do precisely: a
+   partition between pods, a volume's IO latency, a clock shift. Its resource
+   is named after the run, event and incident and created, never applied over
+   one that exists; its `AllInjected` condition is the applied proof and its
    deletion through Chaos Mesh's finalizer the undone proof. Chaos Mesh
    refuses host-network pods, so a network fault on the front proxy stays
-   netem; so does a fault restricted to one port (`sip_loss`).
+   netem, refused unless the profile allows it (`allow_host_network`: a
+   host-network pod's netns is its node's); so does a fault restricted to one
+   port (`sip_loss`). A step concludes only from a positive answer: a read
+   that fails is a failed step (a not-yet in a probe), never an empty answer.
+   A crash kills the container's task by its id and proves it dead by the
+   runtime's state; a heal proves its fault gone, and again a second later.
+   A step that overruns its timeout gets SIGTERM on its process group and a
+   grace to stop what it started, then SIGKILL. A fault heal that fails is
+   retried once; one that fails twice stops the schedule there, drains the
+   load and makes the run `invalid`, so no later window is judged on a system
+   under test that may still be faulted.
 8. **Load incidents.** A load incident points at a profile stream with
    `start: incident` (the event's `stream`). The runner, never an executable,
    launches that stream at `inject` and stops it at `heal`, so the stream has
@@ -156,8 +169,10 @@ tolerated (§3).
    Each firing is its own generator, its Call-IDs tagged with the event; at
    heal its records are shipped and its counter read before it is removed,
    and the stream's entry sums its firings. `healed` is the instant the
-   generator exited, so the window holds the drained calls. A drain that
-   overruns the incident's `heal_s` kills the generator and fails the step;
+   generator exited, so the window holds the drained calls. A drain signal
+   docker refuses, or a drain that overruns the incident's `heal_s`, kills
+   the generator and fails the step (the signal is never sent twice: a second
+   `SIGUSR1` makes SIPp exit at once);
    the runner refuses a profile whose stream needs longer to drain than the
    `heal_s` of the load incident that stops it, and a stream stopped both
    ways.
@@ -182,13 +197,13 @@ tolerated (§3).
     | `pod_kill` | fault | crash one pod of any selector | `limiter_kill` |
     | `force_delete` | fault | force-delete one pod through the API, its processes left running: two incarnations at once | `kill_worker`'s former mechanism |
     | `pod_restart` | fault | delete one pod of any selector with its grace period | `limiter_restart` |
-    | `pod_freeze` | fault | cgroup-freeze one pod for `duration_s` | `limiter_freeze`, `broker_freeze` |
+    | `pod_freeze` | fault | freeze one pod's pod-level cgroup for `duration_s` | `limiter_freeze`, `broker_freeze` |
     | `net_delay` | fault | netem delay on one pod for `duration_s` | `limiter_slow` |
     | `net_loss` | fault | netem loss on one pod for `duration_s` | `limiter_netcut` |
     | `tcp_reset` | fault | reset new TCP connections to one pod's port for `duration_s` | `limiter_reject` |
     | `cpu_starve` | fault | cap the CPU of one pod (pick `one`) or all (pick `all`) for `duration_s` | `cpu_starve`, `cpu_starve_all` |
-    | `node_stop` | fault | stop the node that hosts a pod of the selector, start it at heal | `infra_node_kill` |
-    | `partition` | fault | cut the network between two selectors for `duration_s` (Chaos Mesh); by default the workers among themselves, the replication link | (new) |
+    | `node_stop` | fault | stop the nodes `node_selector` names, or the node that hosts a pod of the selector; start them at heal | `infra_node_kill` |
+    | `partition` | fault | cut the network between the targets and their peers for `duration_s` (Chaos Mesh); by default one worker from the others, the replication link | (new) |
     | `sip_loss` | fault | netem loss, duplication and delay on one pod's SIP datagrams only, for `duration_s` | (new) |
     | `io_stall` | fault | delay the file operations of one pod's volume for `duration_s` (Chaos Mesh) | (new) |
     | `clock_skew` | fault | shift one pod's wall clock for `duration_s` (Chaos Mesh) | (new) |
@@ -511,7 +526,8 @@ made. A run profile joins the two.
 2. **Subcommands.** `hakit validate`, `hakit up [--profile P]` (the cluster
    and the charts, §7), `hakit run <profile>`, `hakit fire <incident>` (one
    manual event in the running run), `hakit cleanup` (heal every open event),
-   `hakit verdict <run-dir>`. `--dry-run` applies to all of them.
+   `hakit verdict <run-dir>`, `hakit pcap <run-dir> <call-id>` (one call's
+   packets out of the run's capture). `--dry-run` applies to all of them.
 3. **Injected clock and executor.** Every wait goes through a clock and every
    effect (an executable, `kubectl`, `helm`, `docker`, an HTTP push or query)
    through an executor. `--dry-run` runs the whole profile on a fake clock and
@@ -521,7 +537,10 @@ made. A run profile joins the two.
 4. **The run directory.** `$HAKIT_RESULTS/<run>/`, the run id
    `<profile>-<UTC yyyymmddThhmmssZ>`: the resolved profile, `run-meta.json`
    (the tree that ran, the host facts), `events.jsonl`, `events/<event>/`,
-   the exported records, `cdrs.jsonl`, `verdict.json`, `summary.md`. The run
+   the exported records, `cdrs.jsonl`, `verdict.json`, `summary.md`, and with
+   a profile's `capture` the packet rings (`pcap/ring/<source>/`, on the
+   callers' bridge and in the nodes it names) and, at each window's close, the
+   ring files written since it opened (`pcap/windows/<event>/`). The run
    id is also the nonce the generators put in their Call-IDs, so two runs
    never share one.
 5. **Before the load.** The runner records the host (free memory, swap, disk,

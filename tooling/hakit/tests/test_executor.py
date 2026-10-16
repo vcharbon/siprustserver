@@ -36,9 +36,23 @@ def test_a_post_is_never_a_form() -> None:
     assert seen["type"] == "application/octet-stream"
 
 
-def test_a_step_overrunning_its_timeout_is_killed_with_its_children() -> None:
+def test_a_step_overrunning_its_timeout_is_ended_with_its_children() -> None:
     t0 = time.monotonic()
     res = RealExecutor().run(["sh", "-c", "sleep 30 & sleep 30"], timeout_s=0.5)
+    assert res.timed_out and res.rc == -15
+    assert time.monotonic() - t0 < 5
+
+
+def test_an_overrunning_step_gets_sigterm_and_a_grace_to_stop_what_it_started(tmp_path: Path) -> None:
+    mark = tmp_path / "stopped"
+    script = f"trap 'echo cleaned > {mark}; exit 3' TERM; while :; do sleep 0.05; done"
+    res = RealExecutor(term_grace_s=5).run(["bash", "-c", script], timeout_s=0.5)
+    assert res.timed_out and res.rc == 3 and mark.read_text() == "cleaned\n"
+
+
+def test_a_step_ignoring_sigterm_is_killed_after_the_grace() -> None:
+    t0 = time.monotonic()
+    res = RealExecutor(term_grace_s=0.5).run(["bash", "-c", "trap '' TERM; while :; do sleep 0.05; done"], timeout_s=0.5)
     assert res.timed_out and res.rc == -9
     assert time.monotonic() - t0 < 5
 

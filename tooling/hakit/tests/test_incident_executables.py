@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from exe_kit import Rule, Sandbox, crash_rules, facts, failed, live, pod_rules
+from exe_kit import Rule, Sandbox, crash_rules, facts, failed, live
 
 WORKERS = live("app=b2bua-worker", "w-0 u0 n1 True\n")
 PARK = (

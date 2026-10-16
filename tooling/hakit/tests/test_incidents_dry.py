@@ -20,7 +20,7 @@ from hakit.lab import lab_from_env
 from hakit.paths import BASE_CONTENT, FAULT_LIB
 from hakit.runner import Runner
 from hakit.schemas import SchemaSet
-from hakit.verdict import read_jsonl
+from hakit.jsonl import read_jsonl
 
 SCHEMAS = SchemaSet.load()
 BASE = discover([BASE_CONTENT], SCHEMAS)

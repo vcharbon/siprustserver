@@ -10,13 +10,15 @@ from pathlib import Path
 
 from exe_kit import Rule, Sandbox, facts, failed, live
 
+from hakit import jsonval as jv
+from hakit.jsonval import Json, as_obj
+
 NAME = "hakit-" + hashlib.sha1(b"r-1/001-partition/partition").hexdigest()[:10] + "-partition"
 
 
-def created(sb: Sandbox) -> dict[str, object]:
-    (doc,) = [json.loads(c.stdin) for c in sb.calls() if c.argv[-3:] == ["create", "-f", "-"]]
-    assert isinstance(doc, dict)
-    return {str(k): v for k, v in doc.items()}
+def created(sb: Sandbox) -> Json:
+    (doc,) = [as_obj(json.loads(c.stdin)) for c in sb.calls() if c.argv[-3:] == ["create", "-f", "-"]]
+    return doc
 
 
 def partition(tmp_path: Path, workers: str, **params: str) -> Sandbox:
@@ -43,19 +45,18 @@ def test_partition_cuts_the_target_from_the_other_pods_never_from_itself(tmp_pat
     f = facts(sb.run("inject"))
     doc = created(sb)
     assert doc["metadata"] == {"name": NAME, "namespace": "ns", "labels": {"hakit.io/run": "r-1"}}
-    spec = doc["spec"]
-    assert isinstance(spec, dict)
-    (target,) = spec["selector"]["pods"]["ns"]  # type: ignore[index]
-    peers = spec["target"]["selector"]["pods"]["ns"]  # type: ignore[index]
+    spec = as_obj(doc["spec"])
+    (target,) = jv.strings(jv.obj(jv.obj(spec, "selector"), "pods"), "ns")
+    peers = jv.strings(jv.obj(jv.obj(jv.obj(spec, "target"), "selector"), "pods"), "ns")
     assert target not in peers and sorted([target, *peers]) == ["w-0", "w-1", "w-2"]
     assert (spec["action"], spec["direction"], spec["mode"]) == ("partition", "both", "all")
-    assert sorted(f["peers"]) == sorted(peers)  # type: ignore[arg-type]
+    assert sorted(jv.strings(f, "peers")) == sorted(peers)
 
 
 def test_partition_with_a_peer_selector_cuts_the_target_from_those_pods(tmp_path: Path) -> None:
     sb = partition(tmp_path, "w-0 u0 n1 True\n", peer_selector="app=other")
     facts(sb.run("inject"))
-    spec = created(sb)["spec"]
+    spec = as_obj(created(sb)["spec"])
     assert spec["target"] == {"mode": "all", "selector": {"namespaces": ["ns"], "labelSelectors": {"app": "other"}}}  # type: ignore[index]
 
 
@@ -119,8 +120,7 @@ def test_io_stall_delays_the_volume_it_names(tmp_path: Path) -> None:
     facts(sb.run("inject"))
     doc = created(sb)
     assert doc["kind"] == "IOChaos"
-    spec = doc["spec"]
-    assert isinstance(spec, dict)
+    spec = as_obj(doc["spec"])
     assert {k: spec[k] for k in ("action", "volumePath", "path", "delay", "percent", "containerNames")} == {
         "action": "latency", "volumePath": "/var/lib/rabbitmq", "path": "/var/lib/rabbitmq/**",
         "delay": "250ms", "percent": 100, "containerNames": ["rabbitmq"]}
