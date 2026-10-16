@@ -241,6 +241,103 @@ describe("a leg in causal order, or one that only lost a message, is not misorde
     expect(details(callerOnly(msgs))).toEqual([])
   })
 
+  it("a re-INVITE glare: both sides re-INVITE, each draws a 491 and its ACK", () => {
+    const sutRes = (status: number, method: string, seq: number, ms: number) =>
+      response({
+        callId: CALLER_CALL_ID,
+        seq,
+        status,
+        reason: "Testing",
+        cseqMethod: method,
+        src: CALLER,
+        dst: SUT,
+        ts_ms: ms,
+        fromTag: TAG,
+        toTag: `from-${CALLER_CALL_ID}`
+      })
+    const invite2 = `z9hG4bK-${CALLER_CALL_ID}-2-INVITE`
+    const msgs = [
+      ...answered(),
+      req("INVITE", 2, 5_000, { toTag: TAG }),
+      sutReq("INVITE", 2, 5_001),
+      res(491, "INVITE", 2, 5_002, { toTag: TAG }),
+      sutRes(491, "INVITE", 2, 5_003),
+      req("ACK", 2, 5_004, { toTag: TAG, branch: invite2 }),
+      request({
+        callId: CALLER_CALL_ID,
+        seq: 2,
+        method: "ACK",
+        src: SUT,
+        dst: CALLER,
+        ts_ms: 5_005,
+        fromTag: TAG,
+        toTag: `from-${CALLER_CALL_ID}`,
+        branch: invite2
+      }),
+      ...teardown(3, 9_000)
+    ]
+    expect(details(callerOnly(msgs))).toEqual([])
+  })
+
+  it("forked 183s sharing one RSeq, each PRACKed on its own fork", () => {
+    const reliable = ["RSeq: 1", "Require: 100rel"]
+    const msgs = [
+      req("INVITE", 1, 0, { headers: ["Supported: 100rel"] }),
+      res(183, "INVITE", 1, 100, { toTag: "fork-a", headers: reliable }),
+      res(183, "INVITE", 1, 110, { toTag: "fork-b", headers: reliable }),
+      req("PRACK", 2, 120, { toTag: "fork-b", headers: ["RAck: 1 1 INVITE"] }),
+      req("PRACK", 3, 121, { toTag: "fork-a", headers: ["RAck: 1 1 INVITE"] }),
+      res(200, "PRACK", 2, 125, { toTag: "fork-b" }),
+      res(200, "PRACK", 3, 126, { toTag: "fork-a" }),
+      res(200, "INVITE", 1, 1_000, { toTag: "fork-b" }),
+      req("ACK", 1, 1_005, { toTag: "fork-b" }),
+      req("BYE", 4, 9_000, { toTag: "fork-b" }),
+      res(200, "BYE", 4, 9_005, { toTag: "fork-b" })
+    ]
+    expect(details(callerOnly(msgs))).toEqual([])
+  })
+
+  it("forked 200s, each ACKed under its own To-tag, the second dialog closed at once", () => {
+    const msgs = [
+      req("INVITE", 1, 0),
+      res(100, "INVITE", 1, 5),
+      res(200, "INVITE", 1, 1_000, { toTag: "fork-b" }),
+      res(200, "INVITE", 1, 1_001, { toTag: "fork-a" }),
+      req("ACK", 1, 1_002, { toTag: "fork-b", branch: "z9hG4bK-ack-fork-b" }),
+      req("ACK", 1, 1_003, { toTag: "fork-a", branch: "z9hG4bK-ack-fork-a" }),
+      req("BYE", 2, 1_004, { toTag: "fork-a" }),
+      res(200, "BYE", 2, 1_010, { toTag: "fork-a" }),
+      req("BYE", 3, 9_000, { toTag: "fork-b" }),
+      res(200, "BYE", 3, 9_005, { toTag: "fork-b" })
+    ]
+    expect(details(callerOnly(msgs))).toEqual([])
+  })
+
+  it("a CANCEL crossing the 200: the 2xx wins, the CANCEL draws a 481", () => {
+    const msgs = [
+      req("INVITE", 1, 0),
+      res(100, "INVITE", 1, 5),
+      req("CANCEL", 1, 900),
+      res(200, "INVITE", 1, 901, { toTag: TAG }),
+      res(481, "CANCEL", 1, 902, { toTag: TAG }),
+      req("ACK", 1, 905, { toTag: TAG }),
+      ...teardown(2, 9_000)
+    ]
+    expect(details(callerOnly(msgs))).toEqual([])
+  })
+
+  it("the 487 captured before the 200 to the CANCEL that asked for it", () => {
+    const msgs = [
+      req("INVITE", 1, 0),
+      res(100, "INVITE", 1, 5),
+      req("CANCEL", 1, 900),
+      res(487, "INVITE", 1, 901, { toTag: TAG }),
+      res(200, "CANCEL", 1, 902, { toTag: TAG }),
+      req("ACK", 1, 905, { toTag: TAG, branch: `z9hG4bK-${CALLER_CALL_ID}-1-INVITE` })
+    ]
+    expect(details(callerOnly(msgs))).toEqual([])
+  })
+
   it("an in-dialog request of an earlier dialog, before a later INVITE of the same Call-ID and From-tag", () => {
     const msgs = [
       req("BYE", 2, 0, { toTag: "earlier-tag" }),

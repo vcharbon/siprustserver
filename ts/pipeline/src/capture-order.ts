@@ -26,11 +26,12 @@
  *   dialog-opening INVITE and the To-tag a captured response to that INVITE
  *   carries, the INVITE captured only after it (§12.1).
  *
- * Each signature fires only where the message followed IS captured: a leg that
- * lost it is incomplete, not misordered, and the rules naming the loss judge
- * it. For the same reason an in-dialog request captured after its INVITE and
- * before the first response carrying its tag is not judged, because a lost
- * provisional cannot be told from a late one.
+ * Each signature needs the message followed in the capture: a leg that lost it
+ * is left to the rules naming the loss. A lost original whose retransmission
+ * crosses the reaction to it cannot be told from an inversion, so it reads as
+ * misordered and is dropped too, as a capture fault, never repaired. An
+ * in-dialog request captured after its INVITE and before the first response
+ * carrying its tag is not judged: a lost provisional cannot be told from a late one.
  */
 import type { Flows } from "@sip/contracts"
 import type { CaseRule, RefusalInput } from "./case-rules.js"
