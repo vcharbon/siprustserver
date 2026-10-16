@@ -9,6 +9,7 @@ VictoriaLogs, which the pods reach through the kind bridge's gateway.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -47,6 +48,9 @@ class Lab:
     # A tmpfs directory a docker generator works in, copied into the run
     # directory at its end (workdir.py); empty: the run directory itself.
     generator_scratch: str
+    # The `uid:gid` a docker generator runs as: the runner's own, so the
+    # files it writes can be collected and removed.
+    generator_user: str
 
     @property
     def vm_import_url(self) -> str:
@@ -133,4 +137,5 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
         cdr_consumed_query=g("HAKIT_CDR_CONSUMED_QUERY", "sum(increase(cdr_consumed_total[{span}s]))"),
         cdr_unread_query=g("HAKIT_CDR_UNREAD_QUERY", "sum(increase(cdr_observations_unread_total[{span}s]))"),
         generator_scratch=g("HAKIT_GENERATOR_SCRATCH", "/dev/shm/hakit"),
+        generator_user=g("HAKIT_GENERATOR_USER", f"{os.getuid()}:{os.getgid()}"),
     )

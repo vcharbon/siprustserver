@@ -8,6 +8,7 @@ what a crashed run left there."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from kit import budget, write_yaml
@@ -79,6 +80,17 @@ def test_every_generator_container_runs_with_no_swap(tmp_path: Path) -> None:
         assert flag(argv, "--memory-swap") == flag(argv, "--memory"), name
 
 
+def test_every_generator_container_runs_as_the_runner_so_its_files_can_be_collected(tmp_path: Path) -> None:
+    """A file a container writes as root in the scratch could not be removed
+    once copied out."""
+    _, calls = run(tmp_path, {"HAKIT_GENERATOR_SCRATCH": SCRATCH})
+    runs = docker_runs(calls)
+    for name in ("hakit-basic", "hakit-basic-exporter", "hakit-lg"):
+        assert flag(runs[name], "--user") == f"{os.getuid()}:{os.getgid()}", name
+    _, calls = run(tmp_path / "other", {"HAKIT_GENERATOR_SCRATCH": SCRATCH, "HAKIT_GENERATOR_USER": "123:45"})
+    assert flag(docker_runs(calls)["hakit-lg"], "--user") == "123:45"
+
+
 def test_docker_generators_write_into_the_scratch_and_never_into_the_run_dir(tmp_path: Path) -> None:
     run_dir, calls = run(tmp_path, {"HAKIT_GENERATOR_SCRATCH": SCRATCH})
     runs = docker_runs(calls)
@@ -101,6 +113,8 @@ def test_a_work_dir_is_copied_into_its_stream_dir_after_its_containers_go(tmp_pa
     assert argvs.count(copy) == 1 and argvs.count(drop) == 1
     last_rm = max(i for i, a in enumerate(argvs) if a[:3] == ["docker", "rm", "-f"] and "hakit-basic" in a)
     assert last_rm < argvs.index(copy) < argvs.index(drop)
+    # Once every work dir is collected, the run's own scratch directory goes.
+    assert argvs.index(drop) < argvs.index(["rm", "-r", "--", f"{SCRATCH}/{run_dir.name}"])
     # A pod generator copies its files out itself: no work dir of its own.
     assert not any(a[:1] in (["cp"], ["rm"]) and any("/streams/pod" in x for x in a) for a in argvs)
     assert json.loads((run_dir / "verdict.json").read_text())["status"] in ("pass", "fail", "invalid")

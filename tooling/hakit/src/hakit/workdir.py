@@ -36,11 +36,11 @@ class WorkDir:
         for p in inputs:
             executor.run(["cp", str(p), str(self.work)], timeout_s=30)
 
-    def collect(self, executor: Executor) -> None:
+    def collect(self, executor: Executor) -> bool:
         """Copy the working directory into the stream directory and drop it;
-        called once the generator's containers are gone."""
-        if self.scratch:
-            collect_tree(executor, self.work, self.keep)
+        called once the generator's containers are gone. False when the copy
+        failed: the working directory is kept for `hakit cleanup`."""
+        return not self.scratch or collect_tree(executor, self.work, self.keep)
 
 
 def collect_tree(executor: Executor, src: Path, dst: Path) -> bool:

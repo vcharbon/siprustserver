@@ -201,7 +201,7 @@ class SippStream:
         labels = ["--label", f"hakit-run={self.run}", "--label", f"hakit-stream={self.stream.name}"]
         self.remove()
         twin = self.executor.run(
-            ["docker", "run", "-d", "--name", self.twin, *labels]
+            ["docker", "run", "-d", "--name", self.twin, "--user", self.lab.generator_user, *labels]
             + ["--network", self.lab.sipp_network, "--ip", ip, "--cpus", "0.5", "--memory", "256m", "--memory-swap", "256m"]
             + ["-v", f"{self.dir}:/stats", "-v", f"{SIPP_EXPORTER_DIR}:/exporter:ro"]
             + ["-e", "SIPP_STAT_FILE=/stats/stat.csv", "-e", f"SIPP_SCENARIO={self.scenario.name}"]
@@ -217,7 +217,7 @@ class SippStream:
         if twin.rc != 0:
             return f"exporter twin of {self.stream.name} did not start: {twin.stderr.strip()[:300]}"
         uac = self.executor.run(
-            ["docker", "run", "-d", "--name", self.uac, *labels]
+            ["docker", "run", "-d", "--name", self.uac, "--user", self.lab.generator_user, *labels]
             + ["--network", f"container:{self.twin}", "--cpus", "8", "--memory", "1536m", "--memory-swap", "1536m"]
             + ["-v", f"{self.scenario.parent}:/scenarios:ro", "-v", f"{self.dir}:/stats", "-w", "/stats"]
             + [self.lab.sipp_image, *self.sipp_argv(target)],

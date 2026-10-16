@@ -112,8 +112,7 @@ class StreamSet:
         """Remove the firing's generator, then collect its working directory once."""
         f.gen.remove()
         if not f.collected:
-            f.workdir.collect(self.executor)
-            f.collected = True
+            f.collected = f.workdir.collect(self.executor)
 
     def start_run_streams(self) -> str | None:
         """Start every `run` stream; the refusal of the first that does not start."""
@@ -234,6 +233,9 @@ class StreamSet:
         for fs in self.firings.values():
             for f in fs:
                 self._remove(f)
+        collected = all(f.collected for fs in self.firings.values() for f in fs)
+        if self.lab.generator_scratch and collected:
+            self.executor.run(["rm", "-r", "--", str(Path(self.lab.generator_scratch) / self.run)], timeout_s=120)
 
     def docs(self) -> list[Json]:
         """`streams.json`: per stream its firings summed. An abandoned stream is

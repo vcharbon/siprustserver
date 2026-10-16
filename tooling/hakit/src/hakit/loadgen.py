@@ -215,7 +215,7 @@ class LoadgenStream:
         labels = ["--label", f"hakit-run={self.run}", "--label", f"hakit-stream={self.stream.name}"]
         self.remove()
         res = self.executor.run(
-            ["docker", "run", "-d", "--name", self.name, *labels]
+            ["docker", "run", "-d", "--name", self.name, "--user", self.lab.generator_user, *labels]
             + ["--network", self.lab.sipp_network, "--ip", self.ip, "--cpus", "4", "--memory", "1536m", "--memory-swap", "1536m"]
             + ["-v", f"{self.dir}:/stats", str(self.stream.params["image"]), *self.argv(target=target)],
             timeout_s=60,

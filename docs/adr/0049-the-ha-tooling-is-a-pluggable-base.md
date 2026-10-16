@@ -666,7 +666,8 @@ made. A run profile joins the two.
    docker generator works in `$HAKIT_GENERATOR_SCRATCH/<run>/` (tmpfs,
    `/dev/shm/hakit` by default), its files copied into the run directory
    once its containers are removed, every generator container runs with no
-   swap, and a pod generator's directory is memory-backed.
+   swap and as the runner's user, and a pod generator's directory is
+   memory-backed.
 5. **Before the load.** The runner records the host (free memory, swap, disk,
    load) and refuses the run outside the profile's `preflight` limits; it
    refuses to start while the system under test holds calls (a
