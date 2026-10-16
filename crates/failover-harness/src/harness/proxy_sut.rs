@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use observe::NodeScope;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
-use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
+use sip_proxy::registry::{Acceptance, WorkerHealth, WorkerRegistry};
 use sip_proxy::{ProxyAddr, ProxyMetrics};
 use tokio::task::JoinHandle;
 
@@ -21,10 +21,10 @@ pub struct ProxySut {
     pub(super) metrics: Arc<ProxyMetrics>,
     pub(super) task: JoinHandle<()>,
     /// The real OPTIONS health-probe loop (ADR-0012). `Some` when the proxy was
-    /// stood up via [`FailoverHarness::spawn_proxy_with_health_probe`]: health is
-    /// then driven by actual probe replies (200→Alive, 503 not-ready→NotReady)
-    /// instead of `set_health`, so a rebooted worker's Unknown→NotReady→Alive
-    /// lifecycle — the state the response-path reverse-failover branches on — is
+    /// stood up via [`FailoverHarness::spawn_proxy_with_health_probe`]: health
+    /// and acceptance are then driven by actual probe replies (ADR-0050 §3)
+    /// instead of `set_health`, so a rebooted worker's Unknown→Alive lifecycle
+    /// — the state the response-path reverse-failover branches on — is
     /// exercised for real. Aborted on drop.
     ///
     /// [`FailoverHarness::spawn_proxy_with_health_probe`]: super::FailoverHarness::spawn_proxy_with_health_probe
@@ -58,6 +58,16 @@ impl ProxySut {
         self.node.enter(|| self.registry.set_health(ordinal, health));
     }
 
+    /// Mark a worker's acceptance of new calls (e.g. `Refuse` on a drain).
+    pub fn set_acceptance(&self, ordinal: &str, acceptance: Acceptance) {
+        self.node.enter(|| self.registry.set_acceptance(ordinal, acceptance));
+    }
+
+    /// The proxy's CURRENT acceptance view of a worker.
+    pub fn acceptance(&self, ordinal: &str) -> Option<Acceptance> {
+        self.registry.resolve(ordinal).map(|w| w.acceptance)
+    }
+
     /// Re-learn a worker's address — the proxy's k8s-EndpointSlice path. On reboot
     /// a pod returns at a NEW IP, and in-dialog routing only follows it once the
     /// registry resolves the worker ordinal (carried in the signed Record-Route
@@ -82,11 +92,11 @@ impl ProxySut {
     /// [`set_health`](Self::set_health) to state a judged health.
     pub fn add_worker(&self, ordinal: &str, addr: SocketAddr) {
         let entry = sip_proxy::registry::WorkerEntry {
-            id: ordinal.to_string(),
-            address: ProxyAddr::new(addr.ip().to_string(), addr.port()),
             health: WorkerHealth::Unknown,
-            draining_since: None,
-            first_seen_at_ms: None,
+            ..sip_proxy::registry::WorkerEntry::alive(
+                ordinal,
+                ProxyAddr::new(addr.ip().to_string(), addr.port()),
+            )
         };
         self.node.enter(|| self.registry.add(entry));
     }

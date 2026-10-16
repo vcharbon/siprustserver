@@ -17,7 +17,9 @@ use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
 use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry};
 use crate::headers::via_with_cookie;
-use crate::observability::metrics::{Direction, Face, MessageResult, RoutingDecisionKind};
+use crate::observability::metrics::{
+    Direction, Face, MessageResult, NoTargetDrop, RoutingDecisionKind,
+};
 use crate::self_gate::BypassKind;
 use crate::strategy::SelectOpts;
 
@@ -246,8 +248,14 @@ impl ProxyCore {
             // (an ELU band flip, a worker join/leave) would forward the SAME
             // §16.11 branch to a DIFFERENT worker — one INVITE transaction
             // split across two B2BUAs (double call), with the CANCEL entry
-            // then overwritten to point at the second one.
-            Ok((found.target.clone(), RoutingDecisionKind::SelectNew, None))
+            // then overwritten to point at the second one. A first copy's
+            // worker read not alive since is replaced by where the cookie it
+            // minted places the call: its backup holds the replicated call.
+            let went = found.target.clone();
+            match self.follow_live_hop(went, found.minted.as_ref(), msg).await {
+                Some(target) => Ok((target, RoutingDecisionKind::SelectNew, None)),
+                None => Err(self.drop_without_target(NoTargetDrop::Initial)),
+            }
         } else {
             let admit_as_new = self.admits_as_new(msg, face, None);
             let opts = SelectOpts { admit_as_new, ..SelectOpts::default() };

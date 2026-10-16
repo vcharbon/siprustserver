@@ -1,6 +1,7 @@
 //! The proxy's probe answers (ADR-0012 D4, ADR-0046 D4): `/readyz` is fit for
-//! traffic only with at least one `Alive` worker, every recv shard turning,
-//! and no drain latched; `/healthz` is live while every recv shard turns.
+//! traffic only with at least one `Alive` worker, whatever its acceptance of
+//! new calls (ADR-0050 §11), every recv shard turning, and no drain latched;
+//! `/healthz` is live while every recv shard turns.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use probe_http::{LiveFn, ProbeState, ReadyFn};
 use sip_clock::Clock;
 use sip_proxy::liveness::ShardPulse;
-use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
+use sip_proxy::registry::WorkerRegistry;
 
 /// Draining once SIGTERM latched; else NotReady while a recv shard is
 /// stalled or no worker is `Alive`; else Ready.
@@ -21,7 +22,7 @@ pub fn probe_state(
         ProbeState::Draining
     } else if shard_stalled {
         ProbeState::NotReady
-    } else if registry.snapshot().iter().any(|w| w.health == WorkerHealth::Alive) {
+    } else if registry.snapshot().iter().any(|w| w.is_alive()) {
         ProbeState::Ready
     } else {
         ProbeState::NotReady

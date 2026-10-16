@@ -21,10 +21,7 @@ use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::{
-    LoadBalancerConfig, LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
-    RoutingStrategy,
-};
+use sip_proxy::{LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics, RoutingStrategy};
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
 
@@ -604,7 +601,6 @@ async fn spawn_lb_proxy(
         observer,
         Arc::new(ProxyMetrics::new()),
         Clock::test_at(0),
-        LoadBalancerConfig::default(),
     ));
 
     // The LB is a real `ProxyCore` — role-tag its bind `{Proxy}` so the RFC

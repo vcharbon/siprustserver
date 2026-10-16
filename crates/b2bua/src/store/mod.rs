@@ -11,6 +11,7 @@ mod call_store;
 mod faults;
 mod memory;
 mod poison;
+mod replica_index;
 mod resident;
 mod scan;
 #[cfg(test)]
@@ -880,50 +881,6 @@ impl CallState {
             }
         }
         None
-    }
-
-    /// **Acting-backup dialog resolution.** The call of an in-dialog request or
-    /// a CANCEL that states no `callRef` of ours, and the namespace that
-    /// matched, read from the replicating store's SIP index (the puller's
-    /// `put_call` writes `idx:<key>` → callRef) in the [`IndexLookup::probes`]
-    /// order the live index uses. A request routed per RFC 3261 §12.2.1.1
-    /// carries our Contact, `callRef` included, as its Request-URI, and a
-    /// strict router's §16.4 rewrite restores it; only an element that
-    /// rewrites the Request-URI leaves the call to be found by dialog identity.
-    /// The router awaits this read when the live index
-    /// ([`resolve_from_sip_key_sync`](Self::resolve_from_sip_key_sync)) misses,
-    /// as it does on a backup that never served the call. `Ok(None)` with no
-    /// replicating store or no replica; `Err` when a read failed, so the store
-    /// cannot say whether the dialog exists.
-    pub async fn resolve_from_replica_index(
-        &self,
-        lookup: IndexLookup<'_>,
-    ) -> Result<Option<IndexHit>, StoreError> {
-        let Some(repl) = self.repl_store() else { return Ok(None) };
-        let mut key = lookup.key_buffer();
-        let mut hit = None;
-        for probe in lookup.probes() {
-            match *probe {
-                Probe::Resolve(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    hit = repl.get_index(&key).await?.map(|call_ref| IndexHit { call_ref, kind });
-                    if hit.is_some() {
-                        break;
-                    }
-                }
-                Probe::Refuse(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    if repl.get_index(&key).await?.is_some() {
-                        break;
-                    }
-                }
-            }
-        }
-        if let Some(hit) = &hit {
-            self.metrics.bump_repl_takeover_resolved();
-            self.note_takeover(&hit.call_ref, "resolved");
-        }
-        Ok(hit)
     }
 
     /// Acquire the per-callRef serialization lock (held across a handler run).

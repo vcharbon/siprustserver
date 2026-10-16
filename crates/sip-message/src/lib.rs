@@ -44,6 +44,7 @@ pub mod sniff;
 pub mod template;
 pub mod template_match;
 pub mod trace_sample;
+pub mod worker_report;
 
 /// The body and image type the public surface hands out and takes back.
 pub use bytes::Bytes;

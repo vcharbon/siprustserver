@@ -1,8 +1,11 @@
-//! [`LoadBalancerStrategy`] — port of `strategies/LoadBalancer.ts`.
+//! [`LoadBalancerStrategy`] — port of `strategies/LoadBalancer.ts`, on a
+//! worker's two readiness axes (ADR-0050): liveness routes in-dialog
+//! requests, acceptance places new calls.
 //!
-//! - `select_for_new_dialog`: Call-ID → snapshot the registry → filter `Alive`
-//!   (a new dialog takes the `NotReady` workers when none is `Alive`; and, for
-//!   non-emergency new dialogs, drop `above_critical`-band workers) →
+//! - `select_for_new_dialog`: Call-ID → snapshot the registry → the `Alive`
+//!   workers that accept new calls, or every `Alive` one when none accepts (a
+//!   refusing worker answers the call itself and writes its record, §6) → for
+//!   non-emergency new dialogs, drop `above_critical`-band workers →
 //!   `rendezvous_select` → spend one token from the winner's per-worker AIMD
 //!   bucket → address. `NoTarget` when the candidate set is empty;
 //!   `RateCapExhausted` when the winner's bucket is empty (→ 503 + Retry-After).
@@ -11,7 +14,8 @@
 //!   (bootstrap-friendly). Port of TS LoadBalancer.ts:335-348.
 //! - `encode_stickiness`: recover the target's `WorkerId` (= `w_pri`) by
 //!   address, a departed-address tombstone included, pick the HRW winner among
-//!   the other alive workers (= `w_bak`), and sign
+//!   the other `Alive` workers that accept new calls, else among the other
+//!   `Alive` ones (= `w_bak`, §7), and sign
 //!   `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>` (HMAC-SHA256 truncated to 128
 //!   bits, base64url) into `{w_pri,w_bak,e,v,kid,sig}`. A dialog a departed
 //!   worker originates is thus pinned to its ordinal, and its INVITE responses
@@ -19,13 +23,12 @@
 //!   dialog's life: the core carries the cookie on its own Via too, so it
 //!   outlives the tombstone (ADR-0031 D4). An address neither live nor
 //!   tombstoned gets no cookie.
-//! - `decode_stickiness`: verify the MAC, then route over the live registry per
-//!   the matrix below (alive / ACK-CANCEL exemption / fresh-pod guard / draining
-//!   grace / dead-or-not-ready → backup). It resolves the primary by ORDINAL, so
-//!   a departed-address tombstone (address-keyed, always `Dead` — see
-//!   `registry::tombstone`) never reaches it: an ordinal that left membership
-//!   resolves to nothing and takes the backup, and the ACK/CANCEL exemption,
-//!   which only spares an `Alive` primary, cannot apply to either.
+//! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive`,
+//!   else `w_bak` while it is `Alive`, else `Unroutable` (§4, §5); acceptance
+//!   is never read. It resolves the primary by ORDINAL, so a departed-address
+//!   tombstone (address-keyed, always `Dead` — see `registry::tombstone`)
+//!   never reaches it: an ordinal that left membership resolves to nothing and
+//!   takes the backup.
 
 use std::sync::Arc;
 
@@ -38,19 +41,15 @@ use sip_message::SipMessage;
 use crate::addr::ProxyAddr;
 use crate::load_observer::{EluBand, WorkerLoadObserver};
 use crate::observability::metrics::ProxyMetrics;
-use crate::registry::{WorkerHealth, WorkerRegistry};
+use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
-use crate::strategy::{
-    DecodeResult, Promotion, RouteParams, RoutingStrategy, SelectError, SelectOpts,
-};
+use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
 
 use super::rendezvous::{rendezvous_select, RendezvousCandidate};
 
 mod cookie;
 
 const COOKIE_VERSION: &str = "3";
-const DEFAULT_DRAIN_GRACE_MS: u64 = 5_000;
-const DEFAULT_FRESH_POD_GUARD_MS: u64 = 20_000;
 
 /// Emergency RPH classification (RFC 4412) — delegates to the single
 /// implementation in [`sip_message::emergency`].
@@ -68,10 +67,6 @@ fn is_in_dialog(msg: &SipMessage) -> bool {
         SipMessage::Request(r) => r.to().tag().is_some_and(|t| !t.is_empty()),
         SipMessage::Response(_) => false,
     }
-}
-
-fn is_ack_or_cancel(msg: &SipMessage) -> bool {
-    matches!(msg, SipMessage::Request(r) if r.method() == "ACK" || r.method() == "CANCEL")
 }
 
 fn call_id_of(msg: &SipMessage) -> Option<&str> {
@@ -100,19 +95,14 @@ fn build_stickiness_input(
         .into_bytes()
 }
 
-/// Config for the LB (source defaults).
-#[derive(Debug, Clone, Copy)]
-pub struct LoadBalancerConfig {
-    pub drain_grace_ms: u64,
-    pub fresh_pod_guard_ms: u64,
-}
-
-impl Default for LoadBalancerConfig {
-    fn default() -> Self {
-        Self {
-            drain_grace_ms: DEFAULT_DRAIN_GRACE_MS,
-            fresh_pod_guard_ms: DEFAULT_FRESH_POD_GUARD_MS,
-        }
+/// The workers a new call may be placed on: those `Alive` and accepting new
+/// calls, or, when none accepts, every `Alive` one (ADR-0050 §6, §7).
+fn placeable<'w>(workers: impl Iterator<Item = &'w WorkerEntry> + Clone) -> Vec<&'w WorkerEntry> {
+    let accepting: Vec<_> = workers.clone().filter(|w| w.accepts_new_calls()).collect();
+    if accepting.is_empty() {
+        workers.filter(|w| w.is_alive()).collect()
+    } else {
+        accepting
     }
 }
 
@@ -123,7 +113,6 @@ pub struct LoadBalancerStrategy {
     observer: Arc<WorkerLoadObserver>,
     metrics: Arc<ProxyMetrics>,
     clock: Clock,
-    config: LoadBalancerConfig,
 }
 
 impl LoadBalancerStrategy {
@@ -133,27 +122,16 @@ impl LoadBalancerStrategy {
         observer: Arc<WorkerLoadObserver>,
         metrics: Arc<ProxyMetrics>,
         clock: Clock,
-        config: LoadBalancerConfig,
     ) -> Self {
-        Self { registry, hmac, observer, metrics, clock, config }
+        Self { registry, hmac, observer, metrics, clock }
     }
 
-    fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
-    }
-
-    /// Resolve `w_bak` → `ForwardBackup` when the named backup is alive;
-    /// otherwise `Unknown` (core falls back to a fresh selection).
-    fn try_backup(&self, backup_id: &str, is_emergency: bool) -> DecodeResult {
-        if backup_id.is_empty() {
-            return DecodeResult::Unknown { is_emergency };
+    /// The address of worker `id` while it is `Alive`.
+    fn alive_address(&self, id: &str) -> Option<ProxyAddr> {
+        if id.is_empty() {
+            return None;
         }
-        match self.registry.resolve(backup_id) {
-            Some(bak) if bak.health == WorkerHealth::Alive => {
-                DecodeResult::ForwardBackup { target: bak.address, is_emergency, promotion: None }
-            }
-            _ => DecodeResult::Unknown { is_emergency },
-        }
+        self.registry.resolve(id).filter(WorkerEntry::is_alive).map(|w| w.address)
     }
 }
 
@@ -173,14 +151,9 @@ impl RoutingStrategy for LoadBalancerStrategy {
         let in_dialog = is_in_dialog(msg) && !opts.admit_as_new;
         let snapshot = self.registry.snapshot();
 
-        // A new dialog falls back to the not-ready workers only while no
-        // worker is alive (ADR-0043): not-ready still serves calls.
-        let alive: Vec<_> = snapshot.iter().filter(|w| w.health == WorkerHealth::Alive).collect();
-        let alive = if alive.is_empty() && !in_dialog {
-            snapshot.iter().filter(|w| w.health == WorkerHealth::NotReady).collect()
-        } else {
-            alive
-        };
+        // The accepting workers, or every alive one when none accepts: a
+        // refusing worker answers the call itself (ADR-0050 §6).
+        let alive = placeable(snapshot.iter());
         let candidates: Vec<_> = if is_emergency || in_dialog {
             alive.clone()
         } else {
@@ -256,63 +229,13 @@ impl RoutingStrategy for LoadBalancerStrategy {
             }
         };
 
-        // MAC verified — resolve the primary.
-        let Some(primary) = self.registry.resolve(w_pri) else {
-            return self.try_backup(w_bak, is_emergency);
-        };
-
-        // ACK/CANCEL exemption: an alive primary owns its in-flight UAS state.
-        let forward = |fresh_primary| DecodeResult::Forward {
-            target: primary.address.clone(),
-            is_emergency,
-            fresh_primary,
-        };
-        if primary.health == WorkerHealth::Alive && is_ack_or_cancel(msg) {
-            return forward(false);
+        // MAC verified: liveness alone places it, never a fresh selection.
+        if let Some(target) = self.alive_address(w_pri) {
+            return DecodeResult::Forward { target, is_emergency };
         }
-        if primary.health == WorkerHealth::Alive {
-            // Fresh-pod guard: a respawned pod whose Ready raced ahead of its
-            // first OPTIONS round-trip routes to the backup that still holds the
-            // call.
-            if let Some(first_seen) = primary.first_seen_at_ms {
-                let age = self.now_ms().saturating_sub(first_seen);
-                if age < self.config.fresh_pod_guard_ms {
-                    return match self.try_backup(w_bak, is_emergency) {
-                        DecodeResult::ForwardBackup { target, is_emergency, .. } => {
-                            DecodeResult::ForwardBackup {
-                                target,
-                                is_emergency,
-                                promotion: Some(Promotion::FreshPod),
-                            }
-                        }
-                        // No usable backup: the fresh primary is the only place left.
-                        _ => forward(true),
-                    };
-                }
-            }
-            return forward(false);
-        }
-        if primary.health == WorkerHealth::Draining {
-            if let Some(since) = primary.draining_since {
-                if self.now_ms().saturating_sub(since) <= self.config.drain_grace_ms {
-                    // Pre-grace: in-flight re-INVITE/UPDATE/INFO completes on the primary.
-                    return forward(false);
-                }
-            }
-            return self.try_backup(w_bak, is_emergency);
-        }
-        // dead / unknown / not-ready → backup.
-        match self.try_backup(w_bak, is_emergency) {
-            DecodeResult::ForwardBackup { target, is_emergency, .. }
-                if primary.health == WorkerHealth::NotReady =>
-            {
-                DecodeResult::ForwardBackup {
-                    target,
-                    is_emergency,
-                    promotion: Some(Promotion::NotReady),
-                }
-            }
-            other => other,
+        match self.alive_address(w_bak) {
+            Some(target) => DecodeResult::ForwardBackup { target, is_emergency },
+            None => DecodeResult::Unroutable,
         }
     }
 
@@ -321,9 +244,8 @@ impl RoutingStrategy for LoadBalancerStrategy {
         // A departed-address tombstone answers as the ordinal last bound there.
         let primary = self.registry.lookup_by_address(target)?;
         let snapshot = self.registry.snapshot();
-        let backup_keys: Vec<WorkerKey> = snapshot
-            .iter()
-            .filter(|w| w.health == WorkerHealth::Alive && w.id != primary.id)
+        let backup_keys: Vec<WorkerKey> = placeable(snapshot.iter().filter(|w| w.id != primary.id))
+            .into_iter()
             .map(|w| WorkerKey(w.id.clone()))
             .collect();
         let backup_id =

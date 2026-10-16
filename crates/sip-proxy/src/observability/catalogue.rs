@@ -8,13 +8,12 @@ use sip_message::method::Method;
 use sip_message::status::STACK_CODES;
 
 use super::metrics::{
-    CancelLookup, Direction, Face, HmacFailureReason, MessageResult, RoutingDecisionKind,
-    UntrustedClaim,
+    CancelLookup, Direction, Face, HmacFailureReason, MessageResult, NoTargetDrop,
+    RoutingDecisionKind, UntrustedClaim,
 };
 use super::peer_failures::{PeerFailureKind, PeerScope};
 use crate::resolver::{outcome, refresh_outcome};
 use crate::self_gate::ShedReason;
-use crate::strategy::Promotion;
 
 /// `direction:result`, every direction then every result.
 const MESSAGE_LABELS: [&str; 6] = [
@@ -68,12 +67,13 @@ const UNTRUSTED_CLAIM_VALUES: [&str; 5] =
 
 const CANCEL_LOOKUP_VALUES: [&str; 2] = label_values!(CancelLookup::ALL, CancelLookup::as_str);
 
-const PROMOTION_VALUES: [&str; 2] = label_values!(Promotion::ALL, Promotion::as_str);
+const NO_TARGET_DROP_VALUES: [&str; 3] = label_values!(NoTargetDrop::ALL, NoTargetDrop::as_str);
 
 /// Every locally decided reject: the routing path's own, the load
 /// balancer's selection failures, the self gate's.
-const REJECT_REASONS: [&str; 14] = [
+const REJECT_REASONS: [&str; 15] = [
     "drop_unforwardable",
+    "no_target_dropped",
     "non_request",
     "ack_not_answered",
     "ack_max_forwards_exhausted",
@@ -92,7 +92,7 @@ const REJECT_REASONS: [&str; 14] = [
 const SHED_REASON_VALUES: [&str; 2] = label_values!(ShedReason::ALL, ShedReason::label);
 
 /// A worker's health state, in the order the registry counts them.
-pub const HEALTH_STATES: [&str; 5] = ["alive", "draining", "not-ready", "unknown", "dead"];
+pub const HEALTH_STATES: [&str; 3] = ["alive", "unknown", "dead"];
 
 /// A peer: no value declared; each one observed gets its own series.
 pub const PEER: Dim = Dim::new("peer", &[]);
@@ -128,7 +128,7 @@ assert_exposition_order!(
 );
 assert_exposition_order!(HmacFailureReason: Missing, Decode, Mismatch);
 assert_exposition_order!(CancelLookup: Hit, Miss);
-assert_exposition_order!(Promotion: FreshPod, NotReady);
+assert_exposition_order!(NoTargetDrop: InDialog, Cancel, Initial);
 assert_exposition_order!(ShedReason: IntakeAge, Cps);
 assert_exposition_order!(PeerScope: Internal, External);
 assert_exposition_order!(
@@ -200,16 +200,10 @@ pub const CANCEL_LOOKUPS: Family = Family::counter(
     "CANCEL messages, retransmissions included, by whether their INVITE's hop was remembered (hit: the CANCEL follows it; miss: routed on its own).",
 );
 
-pub const DECODE_FORWARD_PROMOTIONS: Family = Family::counter(
-    "sip_proxy_decode_forward_promotions_total",
-    Labels::Product(&[Dim::new("reason", &PROMOTION_VALUES)]),
-    "Requests routed by the stickiness cookie (in-dialog requests and a CANCEL following its INVITE's cookie, retransmissions included) sent to the cookie's backup although the primary is up: alive inside its fresh-pod guard window (fresh_pod) or not ready (not_ready). A dead, unknown, departed or draining-past-grace primary is not counted here (sip_routing_decision_total kind=decode_forward_backup counts every backup forward).",
-);
-
-pub const FRESH_POD_FORWARDS: Family = Family::counter(
-    "sip_proxy_fresh_pod_forwards_total",
-    Labels::None,
-    "Requests routed by the stickiness cookie (in-dialog requests and a CANCEL following its INVITE's cookie, retransmissions included) forwarded to a primary inside its fresh-pod guard window because the cookie names no usable backup.",
+pub const NO_TARGET_DROPPED: Family = Family::counter(
+    "sip_proxy_no_target_dropped_total",
+    Labels::Product(&[Dim::new("kind", &NO_TARGET_DROP_VALUES)]),
+    "Requests dropped unanswered because neither the primary nor the backup of the stickiness cookie placing them is alive: an in-dialog request (in_dialog), a CANCEL following its INVITE's cookie (cancel), a retransmitted out-of-dialog request following the cookie its first copy minted (initial); retransmissions included. The sender's retransmission meets the next worker view.",
 );
 
 pub const ROUTING_DURATION_SECONDS: Family =
@@ -423,8 +417,7 @@ pub const PROXY: &[Family] = &[
     REJECTS,
     HMAC_FAILURES,
     CANCEL_LOOKUPS,
-    DECODE_FORWARD_PROMOTIONS,
-    FRESH_POD_FORWARDS,
+    NO_TARGET_DROPPED,
     ROUTING_DURATION_SECONDS,
     RECORD_ROUTE_INSERTED,
     PENDING_INVITE_LRU_SIZE,

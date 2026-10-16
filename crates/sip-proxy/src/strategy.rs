@@ -13,7 +13,7 @@
 //!   Record-Route URI it inserts for dialog-creating requests (§16.6.5).
 //! - [`decode_stickiness`](RoutingStrategy::decode_stickiness) — given the parsed
 //!   params off the top-Route URI (which the core just stripped per §16.4),
-//!   recover the downstream target. Four outcomes, see [`DecodeResult`].
+//!   recover the downstream target. Five outcomes, see [`DecodeResult`].
 
 use std::collections::BTreeMap;
 
@@ -32,41 +32,20 @@ pub type RouteParams = BTreeMap<String, String>;
 /// dispatch without casts (port of the `DecodeResult` ADT).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeResult {
-    /// Forward straight to that address. `fresh_primary`: the address is a
-    /// primary inside its fresh-pod guard window, taken because the cookie
-    /// names no usable backup.
-    Forward { target: ProxyAddr, is_emergency: bool, fresh_primary: bool },
-    /// Routed to the cookie's backup instead of the primary. The core
-    /// forwards exactly like `Forward` but counts a distinct
-    /// `decode_forward_backup` decision for HA observability. `promotion`:
-    /// the primary is up and passed over for this reason.
-    ForwardBackup { target: ProxyAddr, is_emergency: bool, promotion: Option<Promotion> },
+    /// Forward straight to that address.
+    Forward { target: ProxyAddr, is_emergency: bool },
+    /// Routed to the cookie's backup: the primary is absent or not alive. The
+    /// core forwards exactly like `Forward` but counts a distinct
+    /// `decode_forward_backup` decision for HA observability.
+    ForwardBackup { target: ProxyAddr, is_emergency: bool },
     /// Synthesize a response (e.g. 403 on HMAC tamper).
     Reject { status: u16, reason: String },
     /// Stickiness couldn't be parsed; core falls back to `select_for_new_dialog`.
     Unknown { is_emergency: bool },
-}
-
-/// Why a decode passed over a primary that is up for the cookie's backup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Promotion {
-    /// The primary is alive but still inside its fresh-pod guard window.
-    FreshPod,
-    /// The primary answers its probes as not ready.
-    NotReady,
-}
-
-impl Promotion {
-    /// Every reason, in declaration order.
-    pub const ALL: [Promotion; 2] = [Promotion::FreshPod, Promotion::NotReady];
-
-    /// The reason's metrics label.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Promotion::FreshPod => "fresh_pod",
-            Promotion::NotReady => "not_ready",
-        }
-    }
+    /// The cookie verified, and neither worker it names is alive: the request
+    /// is dropped and counted, never answered and never placed afresh
+    /// (ADR-0050 §5). The sender's retransmission meets the next view.
+    Unroutable,
 }
 
 /// `select_for_new_dialog` failure. The core maps each to a distinct 503.

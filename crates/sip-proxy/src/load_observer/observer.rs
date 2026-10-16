@@ -274,10 +274,12 @@ impl WorkerLoadObserver {
         self.workers.lock().unwrap().get(worker_id).map(|s| s.band)
     }
 
-    /// Periodic sweep — call every ~`options_interval_ms`. Each worker whose last
-    /// payload is older than `payload_stale_ms` gets one conservative
-    /// multiplicative decrease (floored), a re-armed cooldown, and
-    /// `payload_missing_count++`.
+    /// Periodic sweep — call every ~`options_interval_ms`. Each worker `alive`
+    /// names whose last payload is older than `payload_stale_ms` gets one
+    /// conservative multiplicative decrease (floored), a re-armed cooldown, and
+    /// `payload_missing_count++`. A worker not alive is left as it is: no new
+    /// call reaches it, and every `200` it answers once back carries a payload
+    /// (ADR-0050 §6).
     ///
     /// Returns the number of workers floored this sweep, so the caller can feed a
     /// coarse `stale_decrease` aggregate counter — the observer itself stays pure
@@ -285,13 +287,13 @@ impl WorkerLoadObserver {
     /// `bucket_empty` rejection is counted at the strategy boundary, not here.
     /// The per-worker smoking gun is the snapshot's
     /// `last_action = StaleDecrease` + `payload_missing_count`.
-    pub fn sweep_stale(&self, now_ms: i64) -> u64 {
+    pub fn sweep_stale(&self, now_ms: i64, alive: impl Fn(&str) -> bool) -> u64 {
         let c = &self.config;
         let mut workers = self.workers.lock().unwrap();
         let mut floored = 0u64;
-        for state in workers.values_mut() {
+        for (worker_id, state) in workers.iter_mut() {
             let age = now_ms - state.last_payload_at_ms;
-            if age <= c.payload_stale_ms {
+            if age <= c.payload_stale_ms || !alive(worker_id) {
                 continue;
             }
             state.set_cap(c.cap_floor_cps.max(state.cap() * c.aimd_decrease_factor), now_ms);

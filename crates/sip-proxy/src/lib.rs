@@ -50,6 +50,6 @@ pub use addr::ProxyAddr;
 pub use core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
 pub use face::{FaceCidrs, Ipv4Cidr};
 pub use observability::ProxyMetrics;
-pub use strategies::{ForwardAllStrategy, LoadBalancerConfig, LoadBalancerStrategy};
+pub use strategies::{ForwardAllStrategy, LoadBalancerStrategy};
 pub use strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
 pub use trace::ProxyTraces;

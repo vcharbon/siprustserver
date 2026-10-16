@@ -15,7 +15,7 @@ use sip_message::SipMessage;
 use super::admit;
 use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
-use super::resolve::{replica_takeover, resolve};
+use super::resolve::{replica_takeover, replicated_initial_invite, resolve};
 use super::responses::build_options_health_response;
 use super::turn::Turn;
 use super::unroutable::Lookup;
@@ -66,9 +66,8 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         }
     }
 
-    // Out-of-dialog OPTIONS keepalive: self-report readiness (ADR-0011 X6).
-    // The front proxy probe keys on the status + Reason header text
-    // (`sip-proxy::health::probe::classify_503`).
+    // Out-of-dialog OPTIONS keepalive: self-report readiness (ADR-0011 X6) on
+    // its two axes (ADR-0050 §2), read by the front proxy's health probe.
     if let CallEvent::Sip { message, src, .. } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() == "OPTIONS" && req.to().tag().is_none() {
@@ -87,6 +86,12 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     let mut res = resolve(ctx, &event);
     let mut lookup = Lookup::Answered;
+    // A copy of the initial INVITE of a call this node backs up, sent here
+    // because its primary died, is that call's: taken over, it is answered
+    // from the record, never placed as a second call.
+    if let Some(hit) = replicated_initial_invite(ctx, &event, &res).await {
+        res.copy_of(hit, &event);
+    }
     if res.call_ref.is_none() {
         // Acting-backup takeover BACKSTOP. The normal in-dialog key is the R-URI
         // `callref` param the B2BUA Contact stamps and the proxy preserves under
@@ -134,6 +139,13 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     }
 
     let Some(class) = DispatchClass::of(&event) else { return };
+    // A copy of a replicated call's INVITE opens no call: it queues as a
+    // request of that call.
+    let class = if class.is_new_call() && !res.initial_invite {
+        DispatchClass::InDialogInvite
+    } else {
+        class
+    };
     // A new INVITE is judged unless it is a copy of a call already here (live,
     // or admitted and not born yet, on the same CSeq). The check and the offer
     // run with no await between them.

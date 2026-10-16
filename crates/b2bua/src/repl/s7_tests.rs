@@ -3,10 +3,10 @@
 //! Two layers:
 //! - **Responder path** — drive [`build_options_health_response`] (the exact
 //!   function `router::on_event`'s out-of-dialog OPTIONS branch calls) over a
-//!   [`Readiness`] whose source flips, asserting the emitted status + `Reason`
-//!   header text matches the contract `sip-proxy::health::probe::classify_503`
-//!   keys on (`crates/sip-proxy/src/health/probe.rs:175-180`): a 200 → Alive, a
-//!   503 whose Reason contains `not-ready` → NotReady, any other 503 → Draining.
+//!   [`Readiness`] whose source flips, asserting the emitted status and the
+//!   `X-Readiness` / `X-Incarnation` / `X-Overload` headers the proxy's health
+//!   probe reads (ADR-0050 §2): `200` while the node serves dialogs, with its
+//!   acceptance of new calls; `503` while it is not ready.
 //! - **Supervisor-fed transition** — under a paused runtime, a `Readiness` over
 //!   a real [`ReplicationSupervisor`] flips NotReady → Ready as its peers
 //!   bootstrap + catch up (advance BETWEEN frames per the fake-clock hazards).
@@ -22,6 +22,7 @@ use sip_message::generators::{
     OutOfDialogMethod,
 };
 use sip_message::header::{self, Uri, Via};
+use sip_message::worker_report::{self, Readiness as WorkerReadiness};
 use sip_message::HeaderName;
 use sip_message::SipRequest;
 use sip_message::SipStr;
@@ -83,8 +84,9 @@ fn options_probe() -> SipRequest {
     generate_out_of_dialog_request(OutOfDialogMethod::Options, &opts)
 }
 
-fn reason_of(resp: &sip_message::SipResponse) -> Option<String> {
-    resp.raw(HeaderName::Reason).next().map(str::to_string)
+/// The acceptance of new calls a self-report states, if any.
+fn readiness_of(resp: &sip_message::SipResponse) -> Option<WorkerReadiness> {
+    worker_report::readiness(resp)
 }
 
 /// The `X-Overload` band signal a self-report carries, if any.
@@ -92,58 +94,50 @@ fn x_overload(resp: &sip_message::SipResponse) -> Option<&str> {
     resp.raw(HeaderName::from("X-Overload")).next()
 }
 
-/// A zero-state overload signal for the responder calls below. These tests pin
-/// the readiness *status* + `Reason` wire contract, not the `X-Overload` header
-/// (that is covered in `router::tests` / `overload::tests`); a fresh signal
+/// A zero-state overload signal for the responder calls below; a fresh signal
 /// emits the constant `v=1; elu=0.000; gc=0.000; adm=0` on the 200 path.
 fn ov() -> OverloadSignal {
     OverloadSignal::live()
 }
 
-/// The full transition the proxy probe observes as a node boots and drains.
+fn refusing(cause: &str) -> Option<WorkerReadiness> {
+    Some(WorkerReadiness::refuse(cause))
+}
+
+/// The full transition the proxy probe observes as a node boots and drains:
+/// `503` with nothing but its incarnation, then `200` accepting, then `200`
+/// refusing with `cause=draining`, each stating the same incarnation.
 #[test]
 fn options_reports_not_ready_then_ready_then_draining() {
     let src = FlagSource::new(false, false);
-    let r = Readiness::new(src.clone());
+    let r = Readiness::new(src.clone()).with_incarnation(1_792_155_573_698);
     let id_gen = IdGen::seeded(0x57);
     let req = options_probe();
 
-    // NotReady → 503 + Reason text contains "not-ready" (probe → NotReady).
     let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(resp.to().tag().is_some(), "503 to out-of-dialog OPTIONS needs a To-tag");
-    let reason = reason_of(&resp).expect("NotReady carries a Reason header");
-    assert!(
-        reason.to_ascii_lowercase().contains("not-ready"),
-        "Reason {reason:?} must contain the 'not-ready' token classify_503 keys on"
-    );
+    assert_eq!(readiness_of(&resp), None, "a node serving nothing states no acceptance");
+    assert_eq!(x_overload(&resp), None, "nor a load payload");
+    assert_eq!(worker_report::incarnation(&resp), Some(1_792_155_573_698));
 
-    // Gate opens → 200 OK (probe → Alive). No Reason header.
     src.set(true, true);
     let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert!(resp.to().tag().is_some(), "200 to out-of-dialog OPTIONS needs a To-tag");
-    assert!(reason_of(&resp).is_none());
+    assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
+    assert_eq!(worker_report::incarnation(&resp), Some(1_792_155_573_698));
 
-    // SIGTERM → Draining → 503 + Reason "draining" + Retry-After: 0.
     r.set_draining();
     let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
-    assert_eq!(resp.status(), 503);
-    assert!(resp.to().tag().is_some());
-    let reason = reason_of(&resp).expect("Draining carries a Reason header");
-    assert!(
-        reason.to_ascii_lowercase().contains("draining"),
-        "Reason {reason:?} must contain 'draining'"
-    );
-    assert!(
-        !reason.to_ascii_lowercase().contains("not-ready"),
-        "draining must NOT key as not-ready in classify_503"
-    );
-    assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("0"));
+    assert_eq!(resp.status(), 200, "a draining node still serves its dialogs");
+    assert_eq!(readiness_of(&resp), refusing("draining"));
+    assert!(x_overload(&resp).is_some(), "with its load payload");
+    assert_eq!(worker_report::incarnation(&resp), Some(1_792_155_573_698));
 }
 
 /// Once Ready, a transient peer blip (source goes non-current) keeps OPTIONS at
-/// 200 (latch); a subsequent SIGTERM still flips to 503 draining.
+/// 200 accepting (latch); a subsequent SIGTERM refuses new calls.
 #[test]
 fn options_latches_ready_across_blip_then_drains() {
     let src = FlagSource::new(true, true);
@@ -160,58 +154,41 @@ fn options_latches_ready_across_blip_then_drains() {
     src.set(false, false);
     let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200, "latched Ready must not flap to NotReady");
-    assert!(reason_of(&resp).is_none());
+    assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
 
     // Draining still wins over the latched Ready.
     r.set_draining();
     let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
-    assert_eq!(resp.status(), 503);
-    assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
+    assert_eq!(resp.status(), 200);
+    assert_eq!(readiness_of(&resp), refusing("draining"));
 }
 
-/// The exact Reason header text aligns with `sip-proxy`'s `classify_503`
-/// contract (probe.rs:175-180 lower-cases + substring-matches `not-ready`;
-/// anything else → Draining). We re-implement that match here and assert the
-/// emitted headers classify as intended (classify_503 is private cross-crate).
+/// A gating backend's open breaker refuses new calls on a `200` that keeps
+/// the load payload; the breaker closing accepts again.
 #[test]
-fn emitted_reason_aligns_with_proxy_classify_503() {
-    // Mirror of sip-proxy::health::probe::classify_503.
-    #[derive(Debug, PartialEq)]
-    enum Health {
-        NotReady,
-        Draining,
-    }
-    fn classify_503(reason: Option<&str>) -> Health {
-        match reason {
-            Some(r) if r.to_ascii_lowercase().contains("not-ready") => Health::NotReady,
-            _ => Health::Draining,
-        }
-    }
-
-    let id_gen = IdGen::seeded(1);
+fn an_open_backend_breaker_refuses_new_calls_on_a_200() {
+    let r = Readiness::always_ready();
+    let (breaker, open) = tokio::sync::watch::channel(true);
+    r.gate_options_on(open);
+    let id_gen = IdGen::seeded(9);
     let req = options_probe();
 
-    let not_ready = Readiness::new(FlagSource::new(false, false));
-    let resp =
-        build_options_health_response(&not_ready, &ov(), &id_gen, &req, &CapabilitySet::default());
-    assert_eq!(resp.status(), 503);
-    assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::NotReady);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    assert_eq!(resp.status(), 200);
+    assert_eq!(readiness_of(&resp), refusing("backend"));
+    assert!(x_overload(&resp).is_some(), "a refusing node keeps its load payload");
 
-    let draining = Readiness::always_ready();
-    draining.set_draining();
-    let resp =
-        build_options_health_response(&draining, &ov(), &id_gen, &req, &CapabilitySet::default());
-    assert_eq!(resp.status(), 503);
-    assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::Draining);
+    breaker.send_replace(false);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
 }
 
-/// The OPTIONS-200 self-report carries the worker load signal as `X-Overload:
-/// v=1; elu=…; gc=…; adm=…` (the schema
-/// `sip_proxy::load_observer::parse_x_overload_header` consumes — that real
-/// cross-crate parse is exercised end-to-end in `b2bua-harness`), and the `adm`
-/// counter the responder publishes tracks
-/// `OverloadSignal::increment_non_emergency_admitted`. The 503 paths do NOT carry
-/// it (a 503 already removes the node from new-dialog selection).
+/// Every OPTIONS-200 self-report carries the worker load signal as
+/// `X-Overload: v=1; elu=…; gc=…; adm=…` (the schema
+/// `sip_proxy::load_observer::parse_x_overload_header` consumes), a refusing
+/// node's included, and the `adm` counter tracks
+/// `OverloadSignal::increment_non_emergency_admitted`. The 503 of a node that
+/// serves nothing yet carries none.
 #[test]
 fn options_200_stamps_x_overload_503_does_not() {
     let id_gen = IdGen::seeded(0x08);
@@ -237,7 +214,7 @@ fn options_200_stamps_x_overload_503_does_not() {
         "adm must track increment_non_emergency_admitted"
     );
 
-    // NotReady (503) and Draining (503) carry NO X-Overload.
+    // NotReady (503) carries NO X-Overload; Draining (200) does.
     let not_ready = Readiness::new(FlagSource::new(false, false));
     let resp = build_options_health_response(
         &not_ready,
@@ -261,10 +238,11 @@ fn options_200_stamps_x_overload_503_does_not() {
         &req,
         &CapabilitySet::default(),
     );
-    assert_eq!(resp.status(), 503);
-    assert!(
-        x_overload(&resp).is_none(),
-        "a 503 (draining) self-report must not carry the band signal"
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        x_overload(&resp),
+        Some("v=1; elu=0.000; gc=0.000; adm=2"),
+        "a draining node keeps stating its load"
     );
 }
 
@@ -291,7 +269,7 @@ fn addr(n: u16) -> SocketAddr {
 
 /// A `Readiness` over a real [`ReplicationSupervisor`] reports NotReady until
 /// its sole peer bootstraps + catches up, then latches Ready — driving the
-/// OPTIONS responder 503(not-ready) → 200 → 503(draining).
+/// OPTIONS responder 503 → 200 accepting → 200 refusing (draining).
 #[tokio::test(start_paused = true)]
 async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     let clock = Clock::test_at(0);
@@ -338,7 +316,7 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     let resp =
         build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503, "before catch-up: NotReady");
-    assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("not-ready"));
+    assert_eq!(readiness_of(&resp), None);
 
     // Drive bootstrap + tail to current.
     tick(300).await;
@@ -351,21 +329,20 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     let resp =
         build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
-    assert!(reason_of(&resp).is_none());
+    assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
 
-    // SIGTERM → 503 draining + Retry-After: 0.
+    // SIGTERM → still serving, refusing new calls.
     readiness.set_draining();
     let resp =
         build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
-    assert_eq!(resp.status(), 503);
-    assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
-    assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("0"));
+    assert_eq!(resp.status(), 200);
+    assert_eq!(readiness_of(&resp), refusing("draining"));
 }
 
 /// A worker whose own endpoint leaves the membership it pulls from observes its
 /// withdrawal from routing (ADR-0031 D6): the supervisor latches `is_withdrawn`,
 /// wakes its watch, raises the `withdrawn_running` gauge, and the readiness
-/// latch it feeds answers OPTIONS `503 draining` without any SIGTERM. Boot-time
+/// latch it feeds refuses new calls (`cause=draining`) without any SIGTERM. Boot-time
 /// absence is not a withdrawal: the latch waits for the first routable sighting.
 #[tokio::test(start_paused = true)]
 async fn own_endpoint_withdrawn_latches_without_sigterm() {
@@ -415,8 +392,8 @@ async fn own_endpoint_withdrawn_latches_without_sigterm() {
         &options_probe(),
         &CapabilitySet::default(),
     );
-    assert_eq!(resp.status(), 503);
-    assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
+    assert_eq!(resp.status(), 200);
+    assert_eq!(readiness_of(&resp), refusing("draining"));
 
     // Sticky: a re-publication does not un-withdraw.
     membership.add(Peer::new("A", "A"));
@@ -518,7 +495,7 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
         &CapabilitySet::default(),
     );
     assert_eq!(resp.status(), 200, "peerless-after-departure node serves Ready");
-    assert!(reason_of(&resp).is_none());
+    assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
 }
 
 /// The node capability advertisement on the OPTIONS health 200 (RFC 3261

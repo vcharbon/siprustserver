@@ -400,7 +400,7 @@ async fn inject_failover(
         }
         Fault::Drain => {
             fh.mark(primary_ord, None, "failover", "drain begin");
-            proxy.set_health(primary_ord, WorkerHealth::Draining);
+            proxy.set_acceptance(primary_ord, crate::Acceptance::Refuse);
             fh.advance(Duration::from_secs(6)).await;
             // "stop b2b" — the pod terminates after its grace window.
             fh.mark(primary_ord, None, "crash", "drain → terminate");
@@ -426,15 +426,15 @@ async fn reboot_and_reclaim(
     // SIP address (new pod IP). `reboot` hard-asserts the node is pristine.
     fh.mark(primary_ord, None, "reboot", "restart empty, higher gen, new pod IP");
     let new_addr = primary.reboot().await;
-    // The proxy re-learns the rebooted pod's NEW address (the k8s-EndpointSlice
-    // path) so cookie-routed in-dialog traffic follows it; record it for the
-    // report + the CSeq-audit exclusion. NOTE: we do NOT `set_health(Alive)` — the
-    // REAL health probe drives it. The rebooted worker answers 503 not-ready while
-    // its replication drains, so the proxy observes Unknown→NotReady→Alive exactly
-    // as in production. This is what makes the reclaimed call's keepalive-200
-    // round-trip while the worker is non-Alive (the response-path guard under test).
+    // The proxy re-learns the rebooted pod's NEW address, a fresh `Unknown`
+    // endpoint as in production (ADR-0012 D4), so cookie-routed in-dialog
+    // traffic follows it once the REAL health probe reads it Alive: the worker
+    // answers 503 while its replication drains, so the reclaimed call's
+    // keepalive-200 round-trips while it is non-Alive (the response-path guard
+    // under test).
     fh.note_worker_rebound(primary_ord, new_addr);
     proxy.set_address(primary_ord, new_addr);
+    proxy.set_health(primary_ord, WorkerHealth::Unknown);
     // k8s re-publishes the restarted pod's endpoint (a StatefulSet restart is
     // observed as Removed-then-Added) → the survivor re-spawns its puller to the
     // peer (fresh forward replication). Pairs with the `simulate_peer_removed` the

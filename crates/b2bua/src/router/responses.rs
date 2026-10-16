@@ -6,11 +6,14 @@
 
 use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
 use sip_message::types::SipHeader;
+use sip_message::worker_report::{
+    incarnation_value, Readiness as WorkerReadiness, X_INCARNATION, X_READINESS,
+};
 use sip_message::{SipRequest, SipResponse};
 use sip_txn::IdGen;
 
 use crate::overload::OverloadSignal;
-use crate::repl::{Readiness, ReadinessState};
+use crate::repl::{OptionsReport, Readiness};
 
 /// Build a plain extension header.
 fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
@@ -112,27 +115,20 @@ pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> 
 }
 
 /// Build the self-reported readiness reply to an out-of-dialog OPTIONS
-/// keepalive. Every reply mints a local To-tag: RFC 3261 §8.2.6.2 requires
-/// a To-tag on any response > 100 to an out-of-dialog request (the 2xx path
-/// always did; the 503 path needs it too). The status + `Reason` header text is the
-/// contract `sip-proxy::health::probe::classify_503` keys on:
-///   - `Ready`    → `200 OK` + `X-Overload: v=1; elu=…; gc=…; adm=…`.
-///   - `NotReady` → `503` + `Reason: SIP;cause=503;text="not-ready"`, also
-///     while a gating backend's breaker is open ([`Readiness::options_state`]).
-///   - `Draining` → `503` + `Reason: SIP;cause=503;text="draining"` +
-///     `Retry-After: 0`.
+/// keepalive, on the two axes of [`Readiness::options_report`] (ADR-0050 §2).
+/// Every reply mints a local To-tag (RFC 3261 §8.2.6.2) and states the
+/// process's boot generation (`X-Incarnation`), so a proxy tells a restart
+/// at the same address from the process it last read:
+///   - serving dialogs (Ready, Draining) → `200 OK` with the capabilities
+///     (§11.2), `X-Overload: v=1; elu=…; gc=…; adm=…` and `X-Readiness:
+///     new=accept`, or `new=refuse; cause=…` while it refuses new calls;
+///   - NotReady → `503` and nothing more: it serves nothing yet.
 ///
-/// `capabilities` is the node's advertised `Allow`/`Supported`/`Accept` set
-/// (§11.2) — node-scoped, since an out-of-dialog OPTIONS names no call, and
-/// the one message this stack answers on its own behalf; `B2buaConfig`
-/// declares it, defaulting to the stack set.
-///
-/// The `X-Overload` worker load signal rides the **200 path only**: it is the
-/// live signal the proxy's ELU-band AIMD
-/// (`sip_proxy::load_observer::parse_x_overload_header`) consumes to steer (and,
-/// at `AboveCritical`, exclude) a *serving* worker. A 503 already removes the
-/// node from new-dialog selection, so the band signal is not stamped there
-/// (pinned by `options_200_stamps_x_overload_503_does_not`).
+/// `capabilities` is the node's advertised `Allow`/`Supported`/`Accept` set —
+/// node-scoped, since an out-of-dialog OPTIONS names no call; `B2buaConfig`
+/// declares it, defaulting to the stack set. The `X-Overload` payload rides
+/// every `200`, a refusing node's included, so the proxy's stale-payload sweep
+/// never floors a node that answers (ADR-0050 §6).
 pub(crate) fn build_options_health_response(
     readiness: &Readiness,
     overload: &OverloadSignal,
@@ -140,31 +136,31 @@ pub(crate) fn build_options_health_response(
     req: &sip_message::SipRequest,
     capabilities: &CapabilitySet,
 ) -> sip_message::SipResponse {
-    let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) = match readiness
-        .options_state()
-    {
-        ReadinessState::Ready => (
-            200,
-            "OK",
-            // RFC 3261 §11.2: an OPTIONS 200 SHOULD advertise capabilities so the
-            // querier learns method/extension/body support, not just liveness.
-            // Plus the worker load signal the proxy's AIMD band reads.
-            capabilities
-                .lines()
-                .into_iter()
-                .map(|(name, value)| hdr(name.as_wire_str(), value))
-                .chain([hdr("X-Overload", overload.x_overload_header_value())])
-                .collect(),
-        ),
-        ReadinessState::NotReady => {
-            (503, "Service Unavailable", vec![hdr("Reason", "SIP;cause=503;text=\"not-ready\"")])
-        }
-        ReadinessState::Draining => (
-            503,
-            "Service Unavailable",
-            vec![hdr("Reason", "SIP;cause=503;text=\"draining\""), hdr("Retry-After", "0")],
-        ),
-    };
+    let incarnation = hdr(X_INCARNATION, incarnation_value(readiness.incarnation()));
+    let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) =
+        match readiness.options_report() {
+            OptionsReport::Serving(refusal) => {
+                let report = match refusal {
+                    None => WorkerReadiness::accept(),
+                    Some(refusal) => WorkerReadiness::refuse(refusal.cause()),
+                };
+                (
+                    200,
+                    "OK",
+                    capabilities
+                        .lines()
+                        .into_iter()
+                        .map(|(name, value)| hdr(name.as_wire_str(), value))
+                        .chain([
+                            hdr("X-Overload", overload.x_overload_header_value()),
+                            hdr(X_READINESS, report.header_value()),
+                            incarnation,
+                        ])
+                        .collect(),
+                )
+            }
+            OptionsReport::NotReady => (503, "Service Unavailable", vec![incarnation]),
+        };
 
     generate_response(
         req,

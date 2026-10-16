@@ -6,10 +6,16 @@
 //! window (each reap = one miss; `threshold` consecutive misses → `Dead`),
 //! prune per-worker state for departed/recreated workers, then fan one OPTIONS
 //! client transaction out to every registered worker. Replies arrive as
-//! transaction events and correlate by Via branch; a 200 → `Alive`, a
-//! `503 + Reason: …not-ready…` → `NotReady`, any other 503 → `Draining`. Each
-//! reply's `X-Overload` payload feeds the [`WorkerLoadObserver`]. Health is
-//! written through the [`WorkerRegistryControl`] seam.
+//! transaction events and correlate by Via branch, and are read on the two
+//! axes of ADR-0050 §3 ([`read_answer`]): a `200` makes the worker `Alive`
+//! and sets its acceptance from `X-Readiness` (absent reads `accept`); a
+//! `503` sets acceptance to `refuse` and leaves health as it was; any other
+//! final makes it `Alive` and keeps acceptance. An answer naming another
+//! `X-Incarnation` than the last one read is a new process at the same
+//! address: the worker is reset to `Unknown` and its miss count and overload
+//! band cleared before the answer applies. Each reply's `X-Overload` payload
+//! feeds the [`WorkerLoadObserver`]. Health and acceptance are written through
+//! the [`WorkerRegistryControl`] seam.
 //!
 //! Why the transaction layer: a fan-out of ONE datagram per worker per tick
 //! turns a single lost packet into a full miss, and two losses in ~2.5 s
@@ -62,6 +68,7 @@ use sip_message::generators::{
 use sip_message::header::{self, ParamValue, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
+use sip_message::worker_report::{self, NewCalls, Readiness};
 use sip_message::{SipMessage, SipRequest, SipStr};
 use sip_net::UdpEndpoint;
 use sip_txn::{
@@ -73,7 +80,7 @@ use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
-use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use crate::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
 
 /// Probe cadence (source defaults: 1 s interval, 1.5 s reply window, 2 misses
 /// → dead). `interval_ms` is the tick period; `timeout_ms` is each probe's own
@@ -110,6 +117,32 @@ struct ProbeState {
     /// Last address each worker was seen at — detects a host move (recreated
     /// pod) so its miss count and overload band reset.
     last_addr: HashMap<String, ProxyAddr>,
+    /// The `X-Incarnation` each worker last answered with — detects a restart
+    /// at the same address.
+    incarnation: HashMap<String, u64>,
+}
+
+/// What one OPTIONS answer says about a worker (ADR-0050 §3): the health it
+/// sets, `None` to leave it, and the acceptance it sets, `None` to keep it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnswerReading {
+    pub health: Option<WorkerHealth>,
+    pub acceptance: Option<Acceptance>,
+}
+
+/// Read one OPTIONS answer: its status and its `X-Readiness`, if any.
+pub fn read_answer(status: u16, readiness: Option<&Readiness>) -> AnswerReading {
+    match status {
+        200 => AnswerReading {
+            health: Some(WorkerHealth::Alive),
+            acceptance: Some(match readiness.map(|r| r.new) {
+                Some(NewCalls::Refuse) => Acceptance::Refuse,
+                Some(NewCalls::Accept) | None => Acceptance::Accept,
+            }),
+        },
+        503 => AnswerReading { health: None, acceptance: Some(Acceptance::Refuse) },
+        _ => AnswerReading { health: Some(WorkerHealth::Alive), acceptance: None },
+    }
 }
 
 /// The per-probe `call_ref` stamped as the Via `cr=` custom param — the
@@ -251,6 +284,7 @@ impl HealthProbe {
         for w in &snapshot {
             if state.last_addr.get(&w.id).is_some_and(|prev| prev != &w.address) {
                 state.misses.remove(&w.id);
+                state.incarnation.remove(&w.id);
                 self.observer.reset(&w.id);
             }
             state.last_addr.insert(w.id.clone(), w.address.clone());
@@ -258,6 +292,7 @@ impl HealthProbe {
         let live = |id: &str| snapshot.iter().any(|w| w.id == id);
         state.last_addr.retain(|id, _| live(id));
         state.misses.retain(|id, _| live(id));
+        state.incarnation.retain(|id, _| live(id));
         self.observer.retain(live);
 
         // ── Fan out one OPTIONS client transaction per worker ────────────
@@ -279,6 +314,9 @@ impl HealthProbe {
     }
 
     async fn handle_reply(&self, resp: SipResponse, state: &mut ProbeState) {
+        if resp.status() < 200 {
+            return;
+        }
         let Some(branch) = resp.via().first().branch().map(str::to_owned) else { return };
         let Some(p) = state.pending.remove(&branch[..]) else { return };
 
@@ -303,15 +341,32 @@ impl HealthProbe {
             return;
         }
 
+        // A new process at the same address is judged from scratch: nothing
+        // routes on the health the previous one earned (ADR-0050 §8).
+        if let Some(gen) = worker_report::incarnation(&resp) {
+            let previous = state.incarnation.insert(p.worker_id.clone(), gen);
+            if previous.is_some_and(|prev| prev != gen) {
+                tracing::info!(
+                    node = observe::node(),
+                    worker = %p.worker_id,
+                    from = previous,
+                    to = gen,
+                    "worker incarnation changed"
+                );
+                self.control.set_health(&p.worker_id, WorkerHealth::Unknown);
+                self.observer.reset(&p.worker_id);
+            }
+        }
         state.misses.insert(p.worker_id.clone(), 0);
 
-        let reason = resp.raw(sip_message::HeaderName::Reason).next();
-        let health = match resp.status() {
-            200 => WorkerHealth::Alive,
-            503 => classify_503(reason),
-            _ => WorkerHealth::Alive,
-        };
-        self.control.set_health(&p.worker_id, health);
+        let readiness = worker_report::readiness(&resp);
+        let reading = read_answer(resp.status(), readiness.as_ref());
+        if let Some(acceptance) = reading.acceptance {
+            self.control.set_acceptance(&p.worker_id, acceptance);
+        }
+        if let Some(health) = reading.health {
+            self.control.set_health(&p.worker_id, health);
+        }
 
         // Feed the AIMD observer with the self-reported overload payload. The
         // observer is decoupled from the clock (it takes `now_ms` explicitly),
@@ -393,25 +448,46 @@ impl HealthProbe {
     }
 }
 
-fn classify_503(reason: Option<&str>) -> WorkerHealth {
-    match reason {
-        Some(r) if r.to_ascii_lowercase().contains("not-ready") => WorkerHealth::NotReady,
-        _ => WorkerHealth::Draining,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// ADR-0050 §3: the status sets health, `X-Readiness` acceptance.
     #[test]
-    fn classify_503_distinguishes_not_ready() {
+    fn an_answer_reads_on_two_axes() {
+        let read = |status, r: Option<Readiness>| read_answer(status, r.as_ref());
+        let alive = Some(WorkerHealth::Alive);
+        let (accept, refuse) = (Some(Acceptance::Accept), Some(Acceptance::Refuse));
         assert_eq!(
-            classify_503(Some("SIP;cause=503;text=\"not-ready (boot drain)\"")),
-            WorkerHealth::NotReady
+            read(200, Some(Readiness::accept())),
+            AnswerReading { health: alive, acceptance: accept }
         );
-        assert_eq!(classify_503(Some("SIP;cause=503;text=\"draining\"")), WorkerHealth::Draining);
-        assert_eq!(classify_503(None), WorkerHealth::Draining);
+        assert_eq!(
+            read(200, Some(Readiness::refuse("backend"))),
+            AnswerReading { health: alive, acceptance: refuse }
+        );
+        assert_eq!(
+            read(200, None),
+            AnswerReading { health: alive, acceptance: accept },
+            "absent reads accept"
+        );
+        assert_eq!(
+            read(503, None),
+            AnswerReading { health: None, acceptance: refuse },
+            "health as it was"
+        );
+        assert_eq!(
+            read(503, Some(Readiness::accept())),
+            AnswerReading { health: None, acceptance: refuse },
+            "a 503 refuses whatever it states"
+        );
+        for status in [404, 486, 500, 603] {
+            assert_eq!(
+                read(status, None),
+                AnswerReading { health: alive, acceptance: None },
+                "{status}"
+            );
+        }
     }
 
     #[test]

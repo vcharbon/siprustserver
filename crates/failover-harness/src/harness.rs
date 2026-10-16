@@ -57,6 +57,7 @@ use topology::{Peer, SimulatedMembership};
 use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
 use crate::views::{Belief, Incarnation, ViewLedger};
 
+mod backend_gate;
 mod membership;
 mod proxy_sut;
 mod repl_faults;
@@ -1233,12 +1234,11 @@ impl FailoverHarness {
     }
 
     /// Like [`spawn_proxy`](Self::spawn_proxy) but with the REAL OPTIONS health
-    /// probe running on `probe_addr` (ADR-0012). Health is then driven by actual
-    /// probe replies from the workers — `200`→`Alive`, `503` with Reason
-    /// `not-ready`→`NotReady` — NOT by `set_health`. This makes the harness
-    /// faithful to the production active/passive LB proxy: a freshly-rebooted
-    /// worker is observed `Unknown`→`NotReady`→`Alive` as its replication drains,
-    /// so the reclaimed call's first keepalive-200 round-trips while the worker is
+    /// probe running on `probe_addr` (ADR-0012): health and acceptance follow
+    /// the workers' probe replies (ADR-0050 §3), not `set_health`, as on the
+    /// production LB proxy. A freshly-rebooted worker stays `Unknown` while it
+    /// answers `503` and reads `Alive` once its replication drained, so the
+    /// reclaimed call's first keepalive-200 round-trips while the worker is
     /// genuinely non-`Alive` — exercising the response-path reverse-failover guard
     /// (`core/response.rs`) the code ties to the long-call-on-reboot teardown.
     pub async fn spawn_proxy_with_health_probe(

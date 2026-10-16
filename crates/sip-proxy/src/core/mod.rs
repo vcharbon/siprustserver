@@ -17,10 +17,10 @@ mod departed_originator_tests;
 #[cfg(test)]
 mod dual_face_tests;
 mod face_pick;
+#[cfg(test)]
+mod liveness_routing_tests;
 mod request;
 mod response;
-#[cfg(test)]
-mod stickiness_metric_tests;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;

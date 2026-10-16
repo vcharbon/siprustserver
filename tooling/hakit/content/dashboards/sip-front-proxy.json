@@ -81,10 +81,10 @@
       "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 2 }] } } }
     },
     {
-      "id": 3, "type": "stat", "title": "Workers dead / draining / not-ready",
+      "id": 3, "type": "stat", "title": "Workers dead / unknown",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "max(sip_worker_health{health=\"dead\", pod=~\"$pod\"}) + max(sip_worker_health{health=\"draining\", pod=~\"$pod\"}) + max(sip_worker_health{health=\"not-ready\", pod=~\"$pod\"})", "refId": "A" }],
+      "targets": [{ "expr": "max(sip_worker_health{health=\"dead\", pod=~\"$pod\"}) + max(sip_worker_health{health=\"unknown\", pod=~\"$pod\"})", "refId": "A" }],
       "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 }] } } }
     },
     {
@@ -97,7 +97,7 @@
     },
     {
       "id": 5, "type": "timeseries", "title": "Worker health by state",
-      "description": "`sip_worker_health` gauge — number of upstream workers in each health band (alive / draining / not-ready / unknown / dead).",
+      "description": "`sip_worker_health` gauge — number of upstream workers in each health band (alive / unknown / dead).",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [{ "expr": "max by (health) (sip_worker_health{pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{health}}" }],
@@ -189,14 +189,13 @@
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 }, "collapsed": false
     },
     {
-      "id": 31, "type": "timeseries", "title": "CANCEL lookups, backup promotions, fresh-pod forwards / sec",
-      "description": "`sip_proxy_cancel_lookups_total{outcome}`: a CANCEL that found its INVITE's hop (hit) or was routed on its own (miss). `sip_proxy_decode_forward_promotions_total{reason}`: in-dialog requests sent to the cookie's backup although the primary is up (fresh_pod: inside its fresh-pod guard; not_ready). `sip_proxy_fresh_pod_forwards_total`: in-dialog requests sent to a primary inside its fresh-pod guard because the cookie names no usable backup.",
+      "id": 31, "type": "timeseries", "title": "CANCEL lookups, no-target drops / sec",
+      "description": "`sip_proxy_cancel_lookups_total{outcome}`: a CANCEL that found its INVITE's hop (hit) or was routed on its own (miss). `sip_proxy_no_target_dropped_total{kind}`: requests dropped unanswered because neither the primary nor the backup of the cookie placing them is alive (in_dialog, cancel, initial).",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum by (outcome) (rate(sip_proxy_cancel_lookups_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "CANCEL lookup {{outcome}}" },
-        { "expr": "sum by (reason) (rate(sip_proxy_decode_forward_promotions_total{pod=~\"$pod\"}[1m])) > 0", "refId": "B", "legendFormat": "promoted to backup: {{reason}}" },
-        { "expr": "sum(rate(sip_proxy_fresh_pod_forwards_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "fresh-pod forward (no backup)" }
+        { "expr": "sum by (kind) (rate(sip_proxy_no_target_dropped_total{pod=~\"$pod\"}[1m])) > 0", "refId": "B", "legendFormat": "no target, dropped: {{kind}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }

@@ -98,7 +98,7 @@ impl Belief {
         match self {
             Belief::Absent | Belief::PeerParked | Belief::Withdrawn | Belief::Departed => "absent",
             Belief::Registered(WorkerHealth::Dead) | Belief::Dead { .. } => "dead",
-            Belief::Registered(WorkerHealth::Draining) | Belief::Draining { .. } => "draining",
+            Belief::Draining { .. } => "draining",
             Belief::Registered(_)
             | Belief::PeerActive
             | Belief::PeerKept

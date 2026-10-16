@@ -25,10 +25,7 @@ use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::{
-    LoadBalancerConfig, LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
-    RoutingStrategy,
-};
+use sip_proxy::{LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics, RoutingStrategy};
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
 
@@ -115,7 +112,6 @@ pub fn spawn_proxy_core_with(
         observer.clone(),
         Arc::new(ProxyMetrics::new()),
         clock.clone(),
-        LoadBalancerConfig::default(),
     ));
 
     let metrics = Arc::new(ProxyMetrics::new());

@@ -19,7 +19,7 @@ use arc_swap::ArcSwap;
 
 use crate::addr::ProxyAddr;
 
-use super::{WorkerEntry, WorkerHealth, WorkerId};
+use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerId};
 
 /// How long a departed address keeps answering `Dead`. Timer H = 64·T1 = 32 s,
 /// the longest an INVITE server transaction at that address can still produce a
@@ -108,8 +108,7 @@ impl Tombstones {
             id: t.id.clone(),
             address: addr.clone(),
             health: WorkerHealth::Dead,
-            draining_since: None,
-            first_seen_at_ms: None,
+            acceptance: Acceptance::Refuse,
         })
     }
 }

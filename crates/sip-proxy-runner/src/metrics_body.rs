@@ -32,9 +32,7 @@ pub fn body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sip_proxy::observability::metrics::CancelLookup;
-    use sip_proxy::strategy::Promotion;
-    use sip_proxy::{DecodeResult, ProxyAddr};
+    use sip_proxy::observability::metrics::{CancelLookup, NoTargetDrop};
 
     /// The body holds its catalogue exactly, with and without a gate, with
     /// recorded counts.
@@ -42,17 +40,7 @@ mod tests {
     fn the_body_holds_its_catalogue_exactly() {
         let metrics = ProxyMetrics::new();
         metrics.record_cancel_lookup(CancelLookup::Miss);
-        let target = ProxyAddr::new("10.0.0.1", 5060);
-        metrics.record_request_decode(&DecodeResult::ForwardBackup {
-            target: target.clone(),
-            is_emergency: false,
-            promotion: Some(Promotion::NotReady),
-        });
-        metrics.record_request_decode(&DecodeResult::Forward {
-            target,
-            is_emergency: false,
-            fresh_primary: true,
-        });
+        metrics.record_no_target_dropped(NoTargetDrop::InDialog);
         let gate = ProxySelfGateMetrics {
             elu_ewma: 0.25,
             gc_fraction: 0.0,

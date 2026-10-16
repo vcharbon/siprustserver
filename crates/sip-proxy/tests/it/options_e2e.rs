@@ -1,10 +1,11 @@
 //! OPTIONS end-to-end — port of
 //! `tests/sip-front-proxy/integration/options-end-to-end.test.ts`, retargeted to
-//! a **simulated B2BUA responder** (the real B2BUA OPTIONS handler is unported).
-//! A real [`HealthProbe`] fans OPTIONS at a worker; the responder answers 200 /
-//! 503+Reason / silence; the probe drives the worker's health through the
-//! control seam: 200 → Alive, 503 draining → Draining, 503 not-ready →
-//! NotReady, repeated silence → Dead.
+//! a **simulated B2BUA responder**. A real [`HealthProbe`] fans OPTIONS at a
+//! worker; the responder answers as a worker does in each of its states
+//! (ADR-0050 §2) or stays silent; the probe drives the worker's health and
+//! acceptance through the control seam (§3): a `200` → `Alive` with the
+//! acceptance its `X-Readiness` states, a `503` → refusing, health as it was,
+//! repeated silence → `Dead`, a new `X-Incarnation` → `Unknown` first.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,27 +15,43 @@ use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipHeader;
+use sip_message::worker_report::{incarnation_value, Readiness, X_INCARNATION, X_READINESS};
 use sip_message::{serialize, SipMessage, SipParser};
 use sip_net::UdpEndpoint;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
-use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use sip_proxy::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
+use sip_proxy::strategy::{RoutingStrategy, SelectOpts};
 use sip_proxy::ProxyAddr;
 use sip_txn::IdGen;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
-    Ok200,
-    Draining503,
-    NotReady503,
+    /// Serving and accepting new calls.
+    Accepting,
+    /// Serving, refusing new calls (`cause=backend`).
+    Refusing,
+    /// Not yet bootstrapped.
+    NotReady,
     Silent,
 }
 
-/// Spawn a simulated B2BUA that answers OPTIONS per the shared `mode`.
+/// What the simulated worker answers with, and the process it names.
+#[derive(Clone, Copy)]
+struct Worker {
+    mode: Mode,
+    incarnation: u64,
+}
+
+fn hdr(name: &str, value: String) -> SipHeader {
+    SipHeader { name: name.to_string().into(), value: value.into() }
+}
+
+/// Spawn a simulated B2BUA that answers OPTIONS per the shared `worker`.
 fn spawn_responder(
     ep: Box<dyn UdpEndpoint>,
-    mode: Arc<Mutex<Mode>>,
+    worker: Arc<Mutex<Worker>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let parser = CustomParser::new();
@@ -43,36 +60,23 @@ fn spawn_responder(
             if req.method() != "OPTIONS" {
                 continue;
             }
-            let m = *mode.lock().unwrap();
-            let (status, reason, extra): (u16, &str, Vec<SipHeader>) = match m {
+            let w = *worker.lock().unwrap();
+            let incarnation = hdr(X_INCARNATION, incarnation_value(w.incarnation));
+            let serving = |readiness: Readiness| {
+                crate::common::options_capabilities()
+                    .into_iter()
+                    .chain([
+                        hdr("X-Overload", "v=1; elu=0.2; gc=0.0; adm=3".to_string()),
+                        hdr(X_READINESS, readiness.header_value()),
+                        incarnation.clone(),
+                    ])
+                    .collect()
+            };
+            let (status, reason, extra): (u16, &str, Vec<SipHeader>) = match w.mode {
                 Mode::Silent => continue,
-                Mode::Ok200 => (
-                    200,
-                    "OK",
-                    crate::common::options_capabilities()
-                        .into_iter()
-                        .chain([SipHeader {
-                            name: "X-Overload".into(),
-                            value: "v=1; elu=0.2; gc=0.0; adm=3".into(),
-                        }])
-                        .collect(),
-                ),
-                Mode::Draining503 => (
-                    503,
-                    "Service Unavailable",
-                    vec![SipHeader {
-                        name: "Reason".into(),
-                        value: "SIP;cause=503;text=\"draining\"".into(),
-                    }],
-                ),
-                Mode::NotReady503 => (
-                    503,
-                    "Service Unavailable",
-                    vec![SipHeader {
-                        name: "Reason".into(),
-                        value: "SIP;cause=503;text=\"not-ready (boot drain)\"".into(),
-                    }],
-                ),
+                Mode::Accepting => (200, "OK", serving(Readiness::accept())),
+                Mode::Refusing => (200, "OK", serving(Readiness::refuse("backend"))),
+                Mode::NotReady => (503, "Service Unavailable", vec![incarnation.clone()]),
             };
             let opts = GenerateResponseOpts {
                 to_tag: Some("uas".into()),
@@ -85,56 +89,162 @@ fn spawn_responder(
     })
 }
 
-#[tokio::test(start_paused = true)]
-async fn probe_drives_worker_health_through_options() {
-    let h = Harness::with_transit_delay("options-e2e", 0);
-    let worker_addr = "127.0.0.1:5071";
-    let (worker_ep, worker_sock) = h.bind_sut("b2b-1", worker_addr).await;
-    let mode = Arc::new(Mutex::new(Mode::Ok200));
-    let _responder = spawn_responder(worker_ep, mode.clone());
+/// A probe at a 30 ms tick over one worker the registry holds `Unknown`.
+struct Probed {
+    h: Harness,
+    registry: Arc<SimulatedWorkerRegistry>,
+    observer: Arc<WorkerLoadObserver>,
+    worker: Arc<Mutex<Worker>>,
+    task: tokio::task::JoinHandle<()>,
+}
 
-    // Worker starts Unknown; the probe must observe it before it is routable.
-    let registry = SimulatedWorkerRegistry::with_clock(
+async fn probed(name: &str, mode: Mode) -> Probed {
+    let h = Harness::with_transit_delay(name, 0);
+    let (worker_ep, worker_sock) = h.bind_sut("b2b-1", "127.0.0.1:5071").await;
+    let worker = Arc::new(Mutex::new(Worker { mode, incarnation: 1 }));
+    let _responder = spawn_responder(worker_ep, worker.clone());
+    let registry = Arc::new(SimulatedWorkerRegistry::with_clock(
         vec![WorkerEntry {
             health: WorkerHealth::Unknown,
             ..WorkerEntry::alive("b2b-1", ProxyAddr::from(worker_sock))
         }],
         Clock::test_at(0),
-    );
-    let registry = Arc::new(registry);
-    let control = registry.control();
+    ));
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
-
     let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
         registry.clone(),
-        control,
+        registry.control(),
         observer.clone(),
         Clock::test_at(0),
         Arc::new(IdGen::seeded(1)),
         HealthProbeConfig { interval_ms: 30, timeout_ms: 40, threshold: 2 },
     );
-    let probe_task = tokio::spawn(probe.run());
+    let task = tokio::spawn(probe.run());
+    Probed { h, registry, observer, worker, task }
+}
 
-    // One tick of 200 OK → Alive, and the X-Overload payload reaches the observer.
-    wait_for_health(&registry, "b2b-1", WorkerHealth::Alive).await;
-    assert!(observer.band_for("b2b-1").is_some(), "X-Overload payload should have been applied");
+/// The worker as the registry holds it.
+fn view(registry: &SimulatedWorkerRegistry) -> (WorkerHealth, Acceptance) {
+    let w = registry.resolve("b2b-1").expect("registered");
+    (w.health, w.acceptance)
+}
 
-    // 503 draining → Draining.
-    *mode.lock().unwrap() = Mode::Draining503;
-    wait_for_health(&registry, "b2b-1", WorkerHealth::Draining).await;
+/// Poll the registry until the worker reads `want` (or fail after ~3 s).
+async fn wait_for_view(registry: &SimulatedWorkerRegistry, want: (WorkerHealth, Acceptance)) {
+    for _ in 0..300 {
+        if view(registry) == want {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("worker never read {want:?} (now {:?})", view(registry));
+}
 
-    // 503 not-ready → NotReady.
-    *mode.lock().unwrap() = Mode::NotReady503;
-    wait_for_health(&registry, "b2b-1", WorkerHealth::NotReady).await;
+#[tokio::test(start_paused = true)]
+async fn probe_drives_worker_health_and_acceptance_through_options() {
+    let p = probed("options-e2e", Mode::Accepting).await;
+    use Acceptance::{Accept, Refuse};
+    use WorkerHealth::{Alive, Dead};
+
+    // 200 accepting → Alive, accepting; the X-Overload payload reaches the observer.
+    wait_for_view(&p.registry, (Alive, Accept)).await;
+    assert!(p.observer.band_for("b2b-1").is_some(), "X-Overload payload should have been applied");
+
+    // 200 refusing → still Alive, refusing.
+    p.worker.lock().unwrap().mode = Mode::Refusing;
+    wait_for_view(&p.registry, (Alive, Refuse)).await;
+    p.worker.lock().unwrap().mode = Mode::Accepting;
+    wait_for_view(&p.registry, (Alive, Accept)).await;
+
+    // 503 → refusing, health as it was.
+    p.worker.lock().unwrap().mode = Mode::NotReady;
+    wait_for_view(&p.registry, (Alive, Refuse)).await;
 
     // Silence past the miss threshold → Dead.
-    *mode.lock().unwrap() = Mode::Silent;
-    wait_for_health(&registry, "b2b-1", WorkerHealth::Dead).await;
+    p.worker.lock().unwrap().mode = Mode::Silent;
+    wait_for_view(&p.registry, (Dead, Refuse)).await;
 
-    probe_task.abort();
-    let _ = h.finish().await;
+    p.task.abort();
+    let _ = p.h.finish().await;
+}
+
+/// A 503 from a worker the proxy never read alive leaves it `Unknown`.
+#[tokio::test(start_paused = true)]
+async fn a_503_leaves_an_unknown_worker_unknown() {
+    let p = probed("options-e2e-503-unknown", Mode::NotReady).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(view(&p.registry), (WorkerHealth::Unknown, Acceptance::Refuse));
+    p.task.abort();
+    let _ = p.h.finish().await;
+}
+
+/// A worker restarted at the same address names a new incarnation: the
+/// proxy reads it `Unknown` again, never on the previous process's `Alive`,
+/// until the new process answers `200` (ADR-0050 §8).
+#[tokio::test(start_paused = true)]
+async fn a_new_incarnation_at_the_same_address_resets_the_worker_to_unknown() {
+    let p = probed("options-e2e-incarnation", Mode::Accepting).await;
+    wait_for_view(&p.registry, (WorkerHealth::Alive, Acceptance::Accept)).await;
+
+    *p.worker.lock().unwrap() = Worker { mode: Mode::NotReady, incarnation: 2 };
+    wait_for_view(&p.registry, (WorkerHealth::Unknown, Acceptance::Refuse)).await;
+
+    p.worker.lock().unwrap().mode = Mode::Accepting;
+    wait_for_view(&p.registry, (WorkerHealth::Alive, Acceptance::Accept)).await;
+    p.task.abort();
+    let _ = p.h.finish().await;
+}
+
+/// A worker refusing new calls keeps sending its load payload: past the
+/// stale-payload window and many sweeps its cap is never floored, and new
+/// calls placed on it (the only alive worker) are never refused by the
+/// proxy's rate cap (ADR-0050 §6).
+#[tokio::test(start_paused = true)]
+async fn a_refusing_worker_is_never_floored_by_the_stale_sweep() {
+    let p = probed("options-e2e-refusing-sweep", Mode::Refusing).await;
+    wait_for_view(&p.registry, (WorkerHealth::Alive, Acceptance::Refuse)).await;
+    let stale_ms = LoadObserverConfig::default().payload_stale_ms;
+    let mut floored = 0;
+    for _ in 0..(3 * stale_ms / 1000) {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let alive = |id: &str| p.registry.resolve(id).is_some_and(|w| w.is_alive());
+        floored += p.observer.sweep_stale(Clock::test_at(0).now_ms(), alive);
+    }
+    assert_eq!(floored, 0, "a worker answering 200 is never floored");
+
+    let strategy = sip_proxy::LoadBalancerStrategy::new(
+        p.registry.clone(),
+        Arc::new(
+            sip_proxy::security::hmac::StaticHmacKeyProvider::new(
+                sip_proxy::security::hmac::HmacKey::new("k1", vec![7u8; 32]),
+                None,
+            )
+            .unwrap(),
+        ),
+        p.observer.clone(),
+        Arc::new(sip_proxy::ProxyMetrics::new()),
+        Clock::test_at(0),
+    );
+    for n in 0..20 {
+        let invite = CustomParser::new()
+            .parse(
+                format!(
+                    "INVITE sip:bob@b SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{n}\r\n\
+                     From: <sip:alice@a>;tag=f\r\nTo: <sip:bob@b>\r\nCall-ID: rf-{n}@h\r\n\
+                     CSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        assert!(
+            strategy.select_for_new_dialog(&invite, SelectOpts::default()).await.is_ok(),
+            "call {n} reaches the refusing worker"
+        );
+    }
+    p.task.abort();
+    let _ = p.h.finish().await;
 }
 
 /// Poll the registry until the worker reaches `want` (or fail after ~3 s).
@@ -159,6 +269,9 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
     fn set_health(&self, worker_id: &str, health: WorkerHealth) {
         self.writes.lock().unwrap().push(health);
         self.inner.set_health(worker_id, health);
+    }
+    fn set_acceptance(&self, worker_id: &str, acceptance: Acceptance) {
+        self.inner.set_acceptance(worker_id, acceptance);
     }
 }
 

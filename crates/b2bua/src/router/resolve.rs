@@ -40,6 +40,14 @@ impl Resolution {
         }
     }
 
+    /// Take the replicated call an initial INVITE is a copy of
+    /// ([`replicated_initial_invite`]): the INVITE is that call's, never a
+    /// new call's.
+    pub(super) fn copy_of(&mut self, hit: IndexHit, event: &CallEvent) {
+        self.found_by_index(hit, event);
+        self.initial_invite = false;
+    }
+
     /// Bind the source leg of an event whose call the SIP index found to the
     /// leg of `call` that owns the matched key ([`IndexLookup::owning_leg`]).
     /// A resolution the event stated a leg for, or whose owning leg `call`
@@ -231,6 +239,39 @@ pub(super) async fn replica_takeover(
         return Ok(None);
     }
     ctx.state.resolve_from_replica_index(request_lookup(req)).await
+}
+
+/// **A copy of a replicated call's initial INVITE.** An INVITE with no To-tag
+/// derives a `callRef` of this node's own; when nothing is here under it and
+/// the replica store holds a routed call (one with an outgoing leg) whose
+/// incoming leg it names, it is a copy of that call's INVITE (RFC 3261
+/// §17.2.3) — the caller retransmitting to a node whose primary died — and
+/// resolves to that call, to be taken over and answered from its record. A
+/// call no decision routed yet has dialled nobody: the copy is placed here as
+/// a new call. `None`: a new call.
+pub(super) async fn replicated_initial_invite(
+    ctx: &RouterCtx,
+    event: &CallEvent,
+    res: &Resolution,
+) -> Option<IndexHit> {
+    let (true, Some(derived)) = (res.initial_invite, res.call_ref.as_deref()) else {
+        return None;
+    };
+    let CallEvent::Sip { message, .. } = event else { return None };
+    let SipMessage::Request(req) = message.as_ref() else { return None };
+    if ctx.unborn.holds(derived, req.cseq().seq()) || ctx.state.peek(derived).is_some() {
+        return None;
+    }
+    let call_id = req.call_id().as_str();
+    let from_tag = req.from().tag().unwrap_or("");
+    let lookup = IndexLookup::Invite { call_id, from_tag };
+    let hit = ctx.state.replica_index_hit(lookup).await.ok()??;
+    let (call, _) = ctx.state.peek_replica(&hit.call_ref).await.ok()?;
+    if call.b_legs.is_empty() {
+        return None;
+    }
+    ctx.state.note_takeover_resolved(&hit);
+    Some(hit)
 }
 
 /// The index lookup for a request that carries no `callRef` of ours: a CANCEL

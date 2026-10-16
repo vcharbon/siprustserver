@@ -14,10 +14,11 @@ use super::catalogue;
 use pool::PoolGauges;
 
 mod face;
+mod no_target;
 mod pool;
 use crate::resolver::{outcome, refresh_outcome};
-use crate::strategy::DecodeResult;
 pub use face::{Face, UntrustedClaim};
+pub use no_target::NoTargetDrop;
 
 /// Inbound vs outbound: the first half of `sip_messages_total`'s
 /// `label="direction:result"`.
@@ -228,10 +229,7 @@ pub struct ProxyMetrics {
     /// proxy-generated 503 is attributable from metrics alone.
     rejects: FixedCounts,
     cancel_lookups: FixedCounts,
-    decode_forward_promotions: FixedCounts,
-    /// Cookie-routed requests forwarded to a primary inside its fresh-pod
-    /// guard window because the cookie names no usable backup.
-    fresh_pod_forwards: AtomicU64,
+    no_target_dropped: FixedCounts,
     overload_rejections: FixedCounts,
     /// Coarse (registry-aggregate) count of `WorkerLoadObserver::sweep_stale`
     /// floor events — an Alive worker whose OPTIONS replies stopped carrying a
@@ -303,8 +301,7 @@ impl Default for ProxyMetrics {
             hmac_failures: Default::default(),
             rejects: FixedCounts::new(&catalogue::REJECTS),
             cancel_lookups: FixedCounts::new(&catalogue::CANCEL_LOOKUPS),
-            decode_forward_promotions: FixedCounts::new(&catalogue::DECODE_FORWARD_PROMOTIONS),
-            fresh_pod_forwards: Default::default(),
+            no_target_dropped: FixedCounts::new(&catalogue::NO_TARGET_DROPPED),
             overload_rejections: FixedCounts::new(&catalogue::OVERLOAD_REJECTIONS),
             overload_stale_decrease: Default::default(),
             lb_emergency_bypassed: Default::default(),
@@ -386,24 +383,6 @@ impl ProxyMetrics {
         self.cancel_lookups.add(&[outcome.as_str()], 1);
     }
 
-    /// Count what one request's cookie decode says about its primary (an
-    /// in-dialog request, or a CANCEL following its INVITE's cookie; each
-    /// retransmission counts): a backup promotion past a primary that is up
-    /// (`sip_proxy_decode_forward_promotions_total{reason}`), or a forward to a
-    /// fresh primary for want of a usable backup
-    /// (`sip_proxy_fresh_pod_forwards_total`). Only the request path calls it.
-    pub fn record_request_decode(&self, decoded: &DecodeResult) {
-        match decoded {
-            DecodeResult::ForwardBackup { promotion: Some(reason), .. } => {
-                self.decode_forward_promotions.add(&[reason.as_str()], 1);
-            }
-            DecodeResult::Forward { fresh_primary: true, .. } => {
-                self.fresh_pod_forwards.fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {}
-        }
-    }
-
     pub fn record_overload_rejection(&self, reason: &str) {
         self.overload_rejections.add(&[reason], 1);
     }
@@ -482,15 +461,8 @@ impl ProxyMetrics {
     /// Set the worker-health gauges from a fleet count. Also derives
     /// `worker_pool_empty` = `1` iff no worker is `Alive` (routable) — the
     /// routing-fatal condition the `/readyz` gate also keys on.
-    pub fn set_worker_health_counts(
-        &self,
-        alive: u64,
-        draining: u64,
-        not_ready: u64,
-        unknown: u64,
-        dead: u64,
-    ) {
-        self.pool.set_health_counts([alive, draining, not_ready, unknown, dead]);
+    pub fn set_worker_health_counts(&self, alive: u64, unknown: u64, dead: u64) {
+        self.pool.set_health_counts([alive, unknown, dead]);
     }
 
     /// Publish the worker discovery's own health: whether its kube client is
@@ -579,8 +551,7 @@ impl ProxyMetrics {
         self.rejects.render(&mut s);
         c::HMAC_FAILURES.render(&mut s, |series| load(&self.hmac_failures[series.at(0)]));
         self.cancel_lookups.render(&mut s);
-        self.decode_forward_promotions.render(&mut s);
-        c::FRESH_POD_FORWARDS.render_value(&mut s, load(&self.fresh_pod_forwards));
+        self.no_target_dropped.render(&mut s);
         // A histogram without finite buckets: the count and the sum.
         let count = load(&self.routing_duration_count);
         let sum = load(&self.routing_duration_sum_us) as f64 / 1_000_000.0;

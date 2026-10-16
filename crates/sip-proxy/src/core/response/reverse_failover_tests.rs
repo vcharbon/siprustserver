@@ -75,11 +75,7 @@ impl RoutingStrategy for BackupStrategy {
         Err(SelectError::NoTarget { reason: "unused".into() })
     }
     async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
-        DecodeResult::ForwardBackup {
-            target: ProxyAddr::new(W2_POD, 5060),
-            is_emergency: false,
-            promotion: None,
-        }
+        DecodeResult::ForwardBackup { target: ProxyAddr::new(W2_POD, 5060), is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
         None
@@ -133,8 +129,7 @@ fn core_with(w1_health: WorkerHealth) -> (ProxyCore, Arc<CapturingEndpoint>) {
             id: "w1".into(),
             address: ProxyAddr::new(W1_POD, 5060),
             health: w1_health,
-            draining_since: None,
-            first_seen_at_ms: None,
+            acceptance: crate::registry::Acceptance::Accept,
         },
         WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
     ]));
@@ -293,7 +288,6 @@ impl RoutingStrategy for CookieBackupStrategy {
             Some(backup) => DecodeResult::ForwardBackup {
                 target: ProxyAddr::new(pod_of(backup), 5060),
                 is_emergency: false,
-                promotion: None,
             },
             None => DecodeResult::Unknown { is_emergency: false },
         }
@@ -314,8 +308,7 @@ fn spiral_core() -> (ProxyCore, Arc<CapturingEndpoint>) {
             id: "w1".into(),
             address: ProxyAddr::new(W1_POD, 5060),
             health: WorkerHealth::Dead,
-            draining_since: None,
-            first_seen_at_ms: None,
+            acceptance: crate::registry::Acceptance::Accept,
         },
         WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
         WorkerEntry::alive("w3", ProxyAddr::new(W3_POD, 5060)),

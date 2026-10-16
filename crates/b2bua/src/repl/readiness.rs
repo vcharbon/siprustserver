@@ -1,11 +1,12 @@
 //! [`Readiness`] — the b2bua readiness state machine (ADR-0011 X6 / ADR-0010
-//! X8). Drives the self-reported OPTIONS health a front proxy probes
-//! (`crates/sip-proxy/src/health/probe.rs`):
+//! X8). Drives the self-reported OPTIONS answer a front proxy probes
+//! (`crates/sip-proxy/src/health/probe.rs`) on two axes (ADR-0050): serving
+//! dialogs, and accepting new calls ([`Readiness::options_report`]):
 //!
-//! - [`ReadinessState::Ready`] → `200 OK`.
-//! - [`ReadinessState::NotReady`] → `503` + `Reason: SIP;cause=503;text="not-ready"`.
-//! - [`ReadinessState::Draining`] → `503` + `Reason: SIP;cause=503;text="draining"`
-//!   + `Retry-After: 0`.
+//! - [`ReadinessState::NotReady`] → `503`: serves nothing yet.
+//! - [`ReadinessState::Ready`] → `200`, `new=accept`, or `new=refuse;
+//!   cause=backend` while a gating backend's breaker is open.
+//! - [`ReadinessState::Draining`] → `200`, `new=refuse; cause=draining`.
 //!
 //! ## Gating
 //! Readiness rides two sticky cluster signals exposed by
@@ -22,10 +23,10 @@
 //! two sources: SIGTERM, and the worker observing its own endpoint withdrawn
 //! from routing (ADR-0031 D6) — whichever comes first.
 //!
-//! ## Backend gate (OPTIONS only)
+//! ## Backend gate (new calls only)
 //! [`Readiness::gate_options_on`] registers a backend's breaker: while one is
-//! open, [`Readiness::options_state`] reports a `Ready` node `NotReady`, and
-//! `Ready` again once all are closed; never latched (ADR-0043).
+//! open, [`Readiness::options_report`] reports a `Ready` node refusing new
+//! calls, and accepting again once all are closed; never latched (ADR-0043).
 //! [`Readiness::state`], which `/ready` reads, ignores the gate.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +46,36 @@ pub enum ReadinessState {
     Ready,
     /// Shutting down (SIGTERM) — terminal; proxy drains traffic away.
     Draining,
+}
+
+/// Why a node that serves dialogs refuses new calls: the `cause` of its
+/// `X-Readiness` (ADR-0050 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// A gating backend's breaker is open.
+    Backend,
+    /// The node is draining (SIGTERM or withdrawal).
+    Draining,
+}
+
+impl Refusal {
+    /// The `cause` text.
+    pub const fn cause(self) -> &'static str {
+        match self {
+            Refusal::Backend => "backend",
+            Refusal::Draining => "draining",
+        }
+    }
+}
+
+/// What a node's answer to its peer proxy's OPTIONS reports (ADR-0050 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionsReport {
+    /// Not yet bootstrapped: serves nothing.
+    NotReady,
+    /// Serves its dialogs; refuses new calls for the reason given, or accepts
+    /// them (`None`).
+    Serving(Option<Refusal>),
 }
 
 /// The two cluster gates readiness reads. Implemented for
@@ -127,11 +158,14 @@ struct ReadinessInner {
 #[derive(Clone)]
 pub struct Readiness {
     inner: Arc<ReadinessInner>,
+    /// The process's boot generation the OPTIONS answer states
+    /// (`X-Incarnation`, ADR-0050 §2).
+    incarnation: u64,
 }
 
 impl Readiness {
     /// Build readiness over a cluster [`ReadinessSource`] (the supervisor),
-    /// belonging to the node the caller serves.
+    /// belonging to the node the caller serves, at incarnation 0.
     pub fn new(source: Arc<dyn ReadinessSource>) -> Self {
         Self {
             inner: Arc::new(ReadinessInner {
@@ -142,13 +176,24 @@ impl Readiness {
                 backends: BackendGate::default(),
                 node: observe::NodeScope::current(),
             }),
+            incarnation: 0,
         }
     }
 
-    /// An unwired node's readiness: always `Ready` (until drained). Keeps the
-    /// always-200 OPTIONS contract for nodes with no replication wired.
+    /// An unwired node's readiness: always `Ready` (until drained).
     pub fn always_ready() -> Self {
         Self::new(Arc::new(AlwaysReadySource))
+    }
+
+    /// This readiness, stating `incarnation` as the process's boot generation.
+    pub fn with_incarnation(mut self, incarnation: u64) -> Self {
+        self.incarnation = incarnation;
+        self
+    }
+
+    /// The process's boot generation.
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
     }
 
     /// Mark the node Draining (SIGTERM). Terminal — never reverts.
@@ -186,19 +231,22 @@ impl Readiness {
         self.inner.draining.load(Ordering::SeqCst)
     }
 
-    /// From now on, `breaker` open (`true`) turns a `Ready` node's OPTIONS
-    /// self-health `NotReady` ([`options_state`](Self::options_state)).
+    /// From now on, `breaker` open (`true`) makes a `Ready` node refuse new
+    /// calls ([`options_report`](Self::options_report)).
     pub fn gate_options_on(&self, breaker: watch::Receiver<bool>) {
         self.inner.backends.add(breaker);
     }
 
-    /// The state the OPTIONS self-health reports: [`state`](Self::state),
-    /// with a `Ready` node reported `NotReady` while a gating backend's
-    /// breaker is open.
-    pub fn options_state(&self) -> ReadinessState {
+    /// What the OPTIONS answer reports, from [`state`](Self::state) and the
+    /// backend gate: the one place the two axes are derived.
+    pub fn options_report(&self) -> OptionsReport {
         match self.state() {
-            ReadinessState::Ready if self.inner.backends.any_open() => ReadinessState::NotReady,
-            state => state,
+            ReadinessState::NotReady => OptionsReport::NotReady,
+            ReadinessState::Draining => OptionsReport::Serving(Some(Refusal::Draining)),
+            ReadinessState::Ready if self.inner.backends.any_open() => {
+                OptionsReport::Serving(Some(Refusal::Backend))
+            }
+            ReadinessState::Ready => OptionsReport::Serving(None),
         }
     }
 
@@ -358,30 +406,55 @@ mod tests {
         assert_eq!(r.state(), ReadinessState::Draining);
     }
 
-    /// A gating backend's open breaker turns OPTIONS not-ready without a
-    /// latch, and `state` (the `/ready` surface) never follows it.
+    /// A gating backend's open breaker refuses new calls without a latch,
+    /// the node still serving; `state` (the `/ready` surface) never follows it.
     #[test]
-    fn an_open_backend_breaker_gates_options_only_and_never_latches() {
+    fn an_open_backend_breaker_refuses_new_calls_only_and_never_latches() {
         let r = Readiness::always_ready();
         let (breaker, open) = watch::channel(false);
         r.gate_options_on(open);
-        assert_eq!(r.options_state(), ReadinessState::Ready);
+        assert_eq!(r.options_report(), OptionsReport::Serving(None));
         breaker.send_replace(true);
-        assert_eq!(r.options_state(), ReadinessState::NotReady, "open: OPTIONS not-ready");
+        assert_eq!(
+            r.options_report(),
+            OptionsReport::Serving(Some(Refusal::Backend)),
+            "open: serving, refusing new calls"
+        );
         assert_eq!(r.state(), ReadinessState::Ready, "/ready unchanged");
         breaker.send_replace(false);
-        assert_eq!(r.options_state(), ReadinessState::Ready, "closed: back, no latch");
+        assert_eq!(r.options_report(), OptionsReport::Serving(None), "closed: back, no latch");
         breaker.send_replace(true);
         r.set_draining();
-        assert_eq!(r.options_state(), ReadinessState::Draining, "draining wins");
+        assert_eq!(
+            r.options_report(),
+            OptionsReport::Serving(Some(Refusal::Draining)),
+            "draining wins"
+        );
     }
 
     /// Before the node is ready, the gate changes nothing.
     #[test]
     fn a_not_ready_node_stays_not_ready_whatever_the_gate() {
         let r = Readiness::new(FlagSource::new(false, false));
-        let (_breaker, open) = watch::channel(false);
+        let (breaker, open) = watch::channel(false);
         r.gate_options_on(open);
-        assert_eq!(r.options_state(), ReadinessState::NotReady);
+        assert_eq!(r.options_report(), OptionsReport::NotReady);
+        breaker.send_replace(true);
+        assert_eq!(r.options_report(), OptionsReport::NotReady);
+    }
+
+    /// Each state's report: NotReady serves nothing, Ready accepts, Draining
+    /// serves and refuses.
+    #[test]
+    fn each_state_reports_its_two_axes() {
+        let src = FlagSource::new(false, false);
+        let r = Readiness::new(src.clone());
+        assert_eq!(r.options_report(), OptionsReport::NotReady);
+        src.set(true, true);
+        assert_eq!(r.options_report(), OptionsReport::Serving(None));
+        r.set_draining();
+        assert_eq!(r.options_report(), OptionsReport::Serving(Some(Refusal::Draining)));
+        assert_eq!(Refusal::Backend.cause(), "backend");
+        assert_eq!(Refusal::Draining.cause(), "draining");
     }
 }

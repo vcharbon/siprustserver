@@ -8,12 +8,15 @@
 use std::sync::Arc;
 
 use super::projection::WorkerSet;
-use super::WorkerHealth;
+use super::{Acceptance, WorkerHealth};
 
 /// The write seam. Suspending allowed (the routing hot path never calls this).
 pub trait WorkerRegistryControl: Send + Sync {
     /// Annotate a worker's health. No-op if the worker is unknown or unchanged.
     fn set_health(&self, id: &str, health: WorkerHealth);
+    /// Annotate a worker's acceptance of new calls. No-op if the worker is
+    /// unknown or unchanged.
+    fn set_acceptance(&self, id: &str, acceptance: Acceptance);
 }
 
 /// Adapter exposing a shared `WorkerSet`'s health annotation as a control seam.
@@ -34,5 +37,8 @@ impl WorkerSetControl {
 impl WorkerRegistryControl for WorkerSetControl {
     fn set_health(&self, id: &str, health: WorkerHealth) {
         self.set.set_health(id, health);
+    }
+    fn set_acceptance(&self, id: &str, acceptance: Acceptance) {
+        self.set.set_acceptance(id, acceptance);
     }
 }

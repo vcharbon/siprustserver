@@ -157,6 +157,10 @@ pub enum IndexLookup<'a> {
     /// In a spiral (§16.3) another call's outgoing leg carries this Call-ID
     /// and From-tag as its own; it is never the CANCEL's target.
     Cancel { call_id: &'a str, from_tag: &'a str },
+    /// An INVITE with no To-tag: the Call-ID and From-tag of the incoming leg
+    /// it opens. A copy of a call's initial INVITE (RFC 3261 §17.2.3) names
+    /// that call's incoming leg; nothing else does.
+    Invite { call_id: &'a str, from_tag: &'a str },
     /// An in-dialog request (its From-tag) or a response (its To-tag): the tag
     /// the remote peer of the dialog owns, on either side of the B2BUA.
     Peer { call_id: &'a str, tag: &'a str },
@@ -180,6 +184,7 @@ pub enum Probe {
 }
 
 const CANCEL_PROBES: [Probe; 2] = [Probe::Resolve(KeyKind::ALeg), Probe::Resolve(KeyKind::BDialog)];
+const INVITE_PROBES: [Probe; 1] = [Probe::Resolve(KeyKind::ALeg)];
 const PEER_PROBES: [Probe; 4] = [
     Probe::Resolve(KeyKind::ALeg),
     Probe::Resolve(KeyKind::BDialog),
@@ -189,13 +194,15 @@ const PEER_PROBES: [Probe; 4] = [
 
 impl IndexLookup<'_> {
     /// The probes that resolve this lookup, in order. A CANCEL never resolves
-    /// by an outgoing leg's Call-ID alone or by its own tag. A peer tag that
+    /// by an outgoing leg's Call-ID alone or by its own tag; an INVITE with no
+    /// To-tag resolves by an incoming leg alone. A peer tag that
     /// is an outgoing leg's own tag stops before the Call-ID-only key: the
     /// message belongs to the incoming leg with that identity, and no such
     /// leg is indexed.
     pub fn probes(&self) -> &'static [Probe] {
         match self {
             IndexLookup::Cancel { .. } => &CANCEL_PROBES,
+            IndexLookup::Invite { .. } => &INVITE_PROBES,
             IndexLookup::Peer { .. } => &PEER_PROBES,
         }
     }
@@ -236,7 +243,8 @@ impl IndexLookup<'_> {
 
     fn identity(&self) -> (&str, &str) {
         match *self {
-            IndexLookup::Cancel { call_id, from_tag } => (call_id, from_tag),
+            IndexLookup::Cancel { call_id, from_tag }
+            | IndexLookup::Invite { call_id, from_tag } => (call_id, from_tag),
             IndexLookup::Peer { call_id, tag } => (call_id, tag),
         }
     }

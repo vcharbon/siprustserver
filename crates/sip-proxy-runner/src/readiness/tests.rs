@@ -58,3 +58,21 @@ async fn an_idle_or_turning_proxy_passes_healthz_and_readyz() {
     assert!(get(s.addr(), "/healthz").await.starts_with("HTTP/1.1 200"));
     assert!(get(s.addr(), "/readyz").await.starts_with("HTTP/1.1 200"));
 }
+
+/// Readiness counts `Alive` workers whatever their acceptance: a cluster
+/// refusing new calls everywhere keeps its proxy ready (ADR-0050 §11).
+#[test]
+fn readiness_ignores_acceptance() {
+    use sip_proxy::registry::{Acceptance, WorkerHealth};
+    let entry = |health, acceptance| WorkerEntry {
+        health,
+        acceptance,
+        ..WorkerEntry::alive("w0", ProxyAddr::new("10.0.0.1", 5060))
+    };
+    let state =
+        |e: WorkerEntry| probe_state(false, false, &StaticWorkerRegistry::from_entries(vec![e]));
+    assert_eq!(state(entry(WorkerHealth::Alive, Acceptance::Refuse)), ProbeState::Ready);
+    assert_eq!(state(entry(WorkerHealth::Alive, Acceptance::Accept)), ProbeState::Ready);
+    assert_eq!(state(entry(WorkerHealth::Unknown, Acceptance::Accept)), ProbeState::NotReady);
+    assert_eq!(state(entry(WorkerHealth::Dead, Acceptance::Accept)), ProbeState::NotReady);
+}

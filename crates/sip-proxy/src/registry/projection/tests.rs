@@ -138,7 +138,6 @@ fn a_member_ready_again_joins_fresh_and_clears_its_tombstone() {
     set.recompose();
     let back = set.resolve("w0").expect("routable again");
     assert_eq!(back.health, WorkerHealth::Unknown, "a returning endpoint awaits its probe");
-    assert!(back.first_seen_at_ms.is_some(), "the fresh-pod guard engages on the join");
     let live = set.lookup_by_address(&addr).unwrap();
     assert_eq!((live.id.as_str(), live.health), ("w0", WorkerHealth::Unknown));
 }
@@ -150,7 +149,7 @@ fn a_terminating_flip_on_a_ready_member_changes_nothing() {
     let before = set.resolve("w0").unwrap();
     sim.set_conditions("w0", true, true);
     set.recompose();
-    assert_eq!(set.resolve("w0").unwrap(), before, "health and first_seen kept");
+    assert_eq!(set.resolve("w0").unwrap(), before, "health and acceptance kept");
     assert_eq!(
         set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).unwrap().health,
         WorkerHealth::Alive,
@@ -161,11 +160,22 @@ fn a_terminating_flip_on_a_ready_member_changes_nothing() {
 #[test]
 fn preset_port_override_survives_recompose() {
     let (set, sim) = ws(&[], 5060);
-    set.preset("w0", "10.0.0.1".to_string(), 5070, WorkerHealth::Alive, None, Some(7));
+    set.preset("w0", "10.0.0.1".to_string(), 5070, WorkerHealth::Alive, Acceptance::Refuse);
     sim.add(Peer::new("w0", "10.0.0.1"));
     set.recompose();
     let w0 = set.resolve("w0").unwrap();
     assert_eq!(w0.address, ProxyAddr::new("10.0.0.1", 5070), "per-worker port_override honoured");
     assert_eq!(w0.health, WorkerHealth::Alive, "preset health honoured");
-    assert_eq!(w0.first_seen_at_ms, Some(7));
+    assert_eq!(w0.acceptance, Acceptance::Refuse, "preset acceptance honoured");
+}
+
+#[test]
+fn acceptance_is_written_apart_from_health_and_survives_a_recompose() {
+    let (set, _sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    assert_eq!(set.resolve("w0").unwrap().acceptance, Acceptance::Accept);
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_acceptance("w0", Acceptance::Refuse);
+    set.recompose();
+    let w0 = set.resolve("w0").unwrap();
+    assert_eq!((w0.health, w0.acceptance), (WorkerHealth::Alive, Acceptance::Refuse));
 }

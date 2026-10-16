@@ -24,7 +24,7 @@ crates/b2bua-harness/tests/it/suppress_18x.rs 818
 crates/b2bua-runner-kit/src/lib.rs 1013
 crates/b2bua-sdk/src/config.rs 892
 crates/b2bua-sdk/src/model.rs 1284
-crates/b2bua/src/b2bua_core.rs 774
+crates/b2bua/src/b2bua_core.rs 756
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 518
 crates/b2bua/src/limiter/release_queue.rs 513
@@ -46,14 +46,14 @@ crates/b2bua/src/rules/defaults/core_rules.rs 2003
 crates/b2bua/src/rules/relay_first_18x.rs 526
 crates/b2bua/src/rules/relay/originate_tests.rs 849
 crates/b2bua/src/rules/relay/sdp_session_tests.rs 963
-crates/b2bua/src/store/mod.rs 1044
+crates/b2bua/src/store/mod.rs 1001
 crates/b2bua/tests/it/rules.rs 5819
 crates/call-limiter/src/store.rs 599
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1186
 crates/call/tests/it/common/mod.rs 1011
 crates/call/tests/it/model_helpers.rs 937
-crates/e2e-core/src/infra.rs 626
+crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1280
 crates/failover-harness/src/harness.rs 2321
@@ -116,8 +116,8 @@ crates/sip-net/src/contracts.rs 870
 crates/sip-pcap/src/bin/sipflow.rs 1059
 crates/sip-pcap/src/flow.rs 820
 crates/sip-pcap/src/flow/tests.rs 1000
-crates/sip-proxy-runner/src/main.rs 762
-crates/sip-proxy/src/observability/metrics.rs 650
+crates/sip-proxy-runner/src/main.rs 761
+crates/sip-proxy/src/observability/metrics.rs 621
 crates/sip-txn/src/layer/client.rs 747
 crates/sip-txn/src/layer/owner.rs 517
 crates/sip-txn/src/layer/server.rs 550

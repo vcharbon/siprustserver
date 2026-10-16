@@ -33,6 +33,7 @@ mod drain;
 mod drain_tests;
 #[cfg(test)]
 mod loops_tests;
+mod readiness;
 #[cfg(test)]
 mod unwired_tests;
 
@@ -226,7 +227,8 @@ impl B2buaCore {
                 // call landing after its cliff) and no go-active handshake — a
                 // rebooting node rebuilds from what it has pulled and keeps pulling.
 
-                let readiness = Readiness::new(Arc::new(supervisor.clone()));
+                let readiness = Readiness::new(Arc::new(supervisor.clone()))
+                    .with_incarnation(setup.incarnation_gen);
                 // The worker's own withdrawal from routing latches Draining
                 // whether or not SIGTERM has arrived (ADR-0031 D6). A watch, not
                 // a handle held by the supervisor: readiness already owns the
@@ -246,8 +248,13 @@ impl B2buaCore {
                 }));
                 (readiness, Some(supervisor), Some((repl_tx, repl_rx)))
             }
-            // Unwired node: always-200 OPTIONS, no replication part at all.
-            None => (Readiness::always_ready(), None, None),
+            // Unwired node: always-200 OPTIONS, no replication part at all; its
+            // boot instant names the process.
+            None => (
+                Readiness::always_ready().with_incarnation(clock.now_ms().max(0) as u64),
+                None,
+                None,
+            ),
         };
         // One `Option` holds both halves of the fail-back channel: the router's
         // receiver exists only alongside the retained sender.
@@ -524,13 +531,6 @@ impl B2buaCore {
         self.supervisor.as_ref()
     }
 
-    /// This core's readiness handle (clone-cheap, shares the latches). Exposed
-    /// so a harness can observe the node's own drain/readiness state after the
-    /// core itself is no longer reachable.
-    pub fn readiness(&self) -> crate::repl::Readiness {
-        self.readiness.clone()
-    }
-
     /// The worker-side overload signal. Callers advance the `adm`
     /// counter on a non-emergency new-dialog admit
     /// ([`OverloadSignal::increment_non_emergency_admitted`]) and read the
@@ -548,24 +548,6 @@ impl B2buaCore {
     /// The memory admission gate (ADR-0037) the running core decides with.
     pub fn capacity(&self) -> &CapacityGate {
         &self.ctx.capacity
-    }
-
-    /// Readiness gate, routed through the SAME latched [`Readiness`] state
-    /// machine the SIP OPTIONS self-report uses (X6 anti-flap). With ready-gated
-    /// EndpointSlice membership, an un-latched predicate would flip back to 503
-    /// on a desired-but-not-yet-current peer and unpublish the node, and a
-    /// simultaneously-restarted cluster would oscillate published↔unpublished.
-    /// The latch makes Ready sticky on both probe surfaces; `Draining` reports
-    /// not-ready (the probe's job during drain is to unpublish).
-    pub fn is_ready(&self) -> bool {
-        self.readiness.state() == crate::repl::ReadinessState::Ready
-    }
-
-    /// The full 3-valued readiness state (`NotReady`/`Ready`/`Draining`). The
-    /// runner maps it onto the HTTP probe's `ProbeState` so `/ready` can report
-    /// `draining` distinctly from `not-ready`, matching the OPTIONS self-report.
-    pub fn readiness_state(&self) -> crate::repl::ReadinessState {
-        self.readiness.state()
     }
 
     /// CRASH: abort the directly-spawned tasks (serve loop + router) and park

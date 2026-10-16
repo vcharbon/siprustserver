@@ -133,35 +133,20 @@ impl FailoverHarness {
     /// live worker's membership re-adds the peer.
     pub fn readmit(&mut self, ordinal: &str, addr: SocketAddr) {
         self.mark(ordinal, None, "readmit", &format!("endpoint published at {addr}"));
-        self.publish(ordinal, addr, None);
-    }
-
-    /// **Re-admit `ordinal` at `addr` as a freshly joined pod** — what
-    /// [`readmit`](Self::readmit) does, with the endpoint's first-seen instant
-    /// stamped at now, as the production projection stamps every joining
-    /// endpoint: the proxy's fresh-pod guard then runs from this instant.
-    pub fn readmit_fresh(&mut self, ordinal: &str, addr: SocketAddr) {
-        self.mark(
-            ordinal,
-            None,
-            "readmit",
-            &format!("endpoint published at {addr}; fresh-pod guard starts"),
-        );
-        let now = u64::try_from(self.clock.now_ms()).unwrap_or(0);
-        self.publish(ordinal, addr, Some(now));
+        self.publish(ordinal, addr);
     }
 
     /// Publish `ordinal` at `addr` in the proxy's registry (`Unknown`) and in
     /// every live peer's membership.
-    fn publish(&mut self, ordinal: &str, addr: SocketAddr, first_seen_at_ms: Option<u64>) {
+    fn publish(&mut self, ordinal: &str, addr: SocketAddr) {
         self.views.record("orchestrator", ordinal, Belief::Admitted, "readmit");
         if let Some(registry) = self.views.proxy_registry() {
             registry.add(sip_proxy::registry::WorkerEntry {
-                id: ordinal.to_string(),
-                address: ProxyAddr::new(addr.ip().to_string(), addr.port()),
                 health: WorkerHealth::Unknown,
-                draining_since: None,
-                first_seen_at_ms,
+                ..sip_proxy::registry::WorkerEntry::alive(
+                    ordinal,
+                    ProxyAddr::new(addr.ip().to_string(), addr.port()),
+                )
             });
             self.views.record(
                 "proxy",

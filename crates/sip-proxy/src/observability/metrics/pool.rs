@@ -9,8 +9,8 @@ use crate::observability::catalogue as c;
 /// The worker pool gauges, set by the runner's sampler.
 #[derive(Debug, Default)]
 pub(super) struct PoolGauges {
-    /// Workers per health state: alive, draining, not ready, unknown, dead.
-    health: [AtomicU64; 5],
+    /// Workers per health state: alive, unknown, dead.
+    health: [AtomicU64; 3],
     /// `1` iff no worker is `Alive` (routable): the proxy can serve no new
     /// dialog. Pairs with the `/readyz` gate.
     empty: AtomicU64,
@@ -21,7 +21,7 @@ pub(super) struct PoolGauges {
 }
 
 impl PoolGauges {
-    pub(super) fn set_health_counts(&self, counts: [u64; 5]) {
+    pub(super) fn set_health_counts(&self, counts: [u64; 3]) {
         for (gauge, n) in self.health.iter().zip(counts) {
             gauge.store(n, Ordering::Relaxed);
         }

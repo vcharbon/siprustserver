@@ -78,6 +78,9 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
         self.writes.lock().unwrap().push((worker_id.to_string(), health));
         self.inner.set_health(worker_id, health);
     }
+    fn set_acceptance(&self, worker_id: &str, acceptance: sip_proxy::registry::Acceptance) {
+        self.inner.set_acceptance(worker_id, acceptance);
+    }
 }
 
 /// Spawn a responder that answers every OPTIONS with 200 OK, but only AFTER

@@ -47,9 +47,7 @@ impl RoutingStrategy for ForwardAllStrategy {
         _msg: &SipMessage,
     ) -> DecodeResult {
         match route_param.get(TARGET_PARAM).and_then(|raw| ProxyAddr::parse(raw)) {
-            Some(target) => {
-                DecodeResult::Forward { target, is_emergency: false, fresh_primary: false }
-            }
+            Some(target) => DecodeResult::Forward { target, is_emergency: false },
             None => DecodeResult::Unknown { is_emergency: false },
         }
     }

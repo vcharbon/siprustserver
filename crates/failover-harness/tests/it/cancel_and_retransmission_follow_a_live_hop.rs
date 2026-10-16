@@ -1,0 +1,128 @@
+//! **A CANCEL and a retransmission go where their transaction lives.** The
+//! front proxy sends a CANCEL to the node its INVITE went to while that node
+//! is alive (RFC 3261 §9.1, §16.10), and repeats a retransmission's target
+//! only while that target is alive: a retransmission whose first copy went
+//! to a node now dead is placed again by the call's cookie.
+//!
+//! ```text
+//!   cancel   the proxy reads P dead (P keeps running) · the caller's
+//!            re-INVITE → C, relayed, the callee's 100 · the proxy reads P
+//!            alive again · the caller's CANCEL → C: 200 + 487, the callee's
+//!            side cancelled and its 487 ACKed
+//!   rtx      the callee's 2xx to the initial INVITE replicates but never
+//!            reaches the caller · P is killed, the peers are not told · the
+//!            caller's INVITE retransmission → C, which answers the 2xx it
+//!            holds; the caller's ACK reaches the callee once
+//! ```
+//!
+//! Every cell ends with the caller's BYE, one CDR and clean memory.
+
+use std::time::Duration;
+
+use failover_harness::{worker_ordinals, FailoverHarness, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER};
+use sip_message::Method;
+
+use crate::inflight_resend::{
+    assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
+    last_request_sent, reboot_and_reclaim, round_invites_sent_to, settle_to_one_cdr, split_mut,
+    survivor_of, synchronized_call_ref, REOFFER, REPLICATE,
+};
+
+const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+
+const ALICE: &str = "127.0.0.1:5060";
+const BOB: &str = "127.0.0.1:5070";
+
+/// The caller's CANCEL of a re-INVITE round the takeover copy relays reaches
+/// that copy, though the proxy reads the primary alive again by then.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_follows_its_reinvite_to_the_copy_after_the_primary_reads_alive_again() {
+    let name = "cancel-follows-its-reinvite-to-the-copy";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, w_b1, w_b2) = bring_up(&mut fh).await;
+    let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
+    let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
+
+    // ── the proxy reads P dead; the round goes to C, which relays it ────────
+    fh.accept_rfc_deviations_from_now(
+        RULE_CSEQ_IN_DIALOG_ORDER,
+        "ADR-0014 accepted trade-off: two potential owners of one leg while the proxy \
+         misreads the primary dead",
+    );
+    fh.mark(&pri_ord, None, "misread dead", "the proxy reads the running primary dead");
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
+    reinvite.expect(100).await;
+    let mut at_bob = bob.receive("INVITE").await;
+    at_bob.respond(100, "Trying").await;
+    fh.advance(REPLICATE).await;
+    assert_taken_over_once(survivor, hydrated_before);
+
+    // ── the proxy reads P alive again; the caller CANCELs the round ─────────
+    fh.mark(&pri_ord, None, "alive", "the proxy reads the primary alive again");
+    proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    let mut cancel = reinvite.cancel().await;
+    cancel.expect(200).await;
+    bob.receive_absorbing("CANCEL", &["INVITE"]).await.respond(200, "OK").await;
+    at_bob.respond(487, "Request Terminated").await;
+    reinvite.expect(487).await;
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    assert_eq!(round_invites_sent_to(&fh, bob.addr(), REOFFER), 1, "one b-leg INVITE");
+
+    // ── the call lives on and is hung up ─────────────────────────────────────
+    fh.advance(Duration::from_secs(1)).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    drop(proxy);
+}
+
+/// The caller's initial INVITE retransmitted after its node was killed
+/// unannounced reaches the backup, which answers it with the replicated 2xx.
+#[tokio::test(start_paused = true)]
+async fn an_initial_invite_retransmitted_after_an_unannounced_kill_draws_the_replicated_2xx() {
+    let name = "initial-invite-retransmitted-after-a-kill";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+
+    // ── the caller hears nothing: her 100 and her 2xx are lost ───────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    fh.cut_signalling("alice", alice.addr());
+    let mut uas = bob.receive("INVITE").await;
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    fh.advance(REPLICATE).await;
+    let call_ref = survivor_of(&pri_ord, &w_b1, &w_b2)
+        .scan_one_backed_up(&pri_ord)
+        .await
+        .expect("the answered call replicated");
+
+    // ── P is killed, the peers are not told ─────────────────────────────────
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    fh.restore_signalling("alice", alice.addr());
+    assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
+
+    // ── the caller's Timer A rung reaches the backup ────────────────────────
+    let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Invite);
+    alice.try_send_datagram(&wire, dst).await.expect("the caller's re-send leaves");
+    call.expect(200).await;
+    assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
+    let mut dialog = call.ack().await;
+    bob.receive_tolerating("ACK", &["INVITE"]).await;
+
+    // ── the caller hangs up; the primary returns and folds the record ───────
+    fh.advance(Duration::from_secs(4)).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_secs(60)).await;
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    drop(proxy);
+}

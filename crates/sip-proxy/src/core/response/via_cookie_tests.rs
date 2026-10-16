@@ -18,7 +18,7 @@ use crate::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use crate::registry::simulated::SimulatedWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerHealth};
 use crate::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use crate::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
+use crate::strategies::LoadBalancerStrategy;
 use crate::strategy::{RouteParams, RoutingStrategy};
 use crate::ProxyMetrics;
 
@@ -92,7 +92,6 @@ fn fixture() -> Fixture {
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),
         metrics.clone(),
         clock.clone(),
-        LoadBalancerConfig::default(),
     ));
     let wire = Arc::new(Wire::default());
     let core = ProxyCoreBuilder::new(

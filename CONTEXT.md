@@ -714,8 +714,9 @@ bare `503` (no `Reason`, no `Retry-After`) on the initial INVITE and the
 an answer is a decision, not a failure.
 
 **Backend gate** (OPTIONS):
-A backend breaker registered on a node's OPTIONS self-health: open, a `Ready`
-node answers OPTIONS `503` not-ready; never latched, never read by `/ready`.
+A backend breaker registered on a node's acceptance of new calls: open, a `Ready`
+node answers OPTIONS `200` with `X-Readiness: new=refuse; cause=backend` and keeps
+serving its dialogs; never latched, never read by `/ready`.
 
 ## Call state-machine services (Rust shape)
 

@@ -131,7 +131,7 @@ use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::WorkerHealth;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate};
-use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
+use sip_proxy::strategies::LoadBalancerStrategy;
 use sip_proxy::{ExternalFaceParts, RoutingStrategy};
 use sip_proxy_runner::config::{refuse_to_start, ExternalFace, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
@@ -442,7 +442,6 @@ async fn main() {
         observer.clone(),
         metrics.clone(),
         clock.clone(),
-        LoadBalancerConfig::default(),
     ));
 
     // Health probe: periodic OPTIONS to the pool, feeding the band observer.
@@ -594,18 +593,15 @@ async fn main() {
                     }
                     stalled_before = stalled;
                 }
-                let (mut alive, mut draining, mut not_ready, mut unknown, mut dead) =
-                    (0, 0, 0, 0, 0);
+                let (mut alive, mut unknown, mut dead) = (0, 0, 0);
                 for w in reg.snapshot() {
                     match w.health {
                         WorkerHealth::Alive => alive += 1,
-                        WorkerHealth::Draining => draining += 1,
-                        WorkerHealth::NotReady => not_ready += 1,
                         WorkerHealth::Unknown => unknown += 1,
                         WorkerHealth::Dead => dead += 1,
                     }
                 }
-                m.set_worker_health_counts(alive, draining, not_ready, unknown, dead);
+                m.set_worker_health_counts(alive, unknown, dead);
                 match discovery.as_ref().map(|watch| watch.watch_health()) {
                     Some(h) => m.set_discovery(h.client_failing, h.broken_since_unix_ms),
                     None => m.set_discovery(false, None),
@@ -615,28 +611,31 @@ async fn main() {
     }
 
     // Stale-payload sweep. A 1 s `tokio::time::interval` ticks the observer's
-    // `sweep_stale(now_ms)`: any Alive worker whose OPTIONS replies stop
-    // carrying a fresh `X-Overload` payload (or whose probe stalls) is conservatively
+    // `sweep_stale`: any Alive worker whose OPTIONS replies stop carrying a fresh
+    // `X-Overload` payload (or whose probe stalls) is conservatively
     // decreased once `payload_stale_ms` (8000) is exceeded, instead of keeping its
     // last AIMD cap forever while the LB admits at full rate into a worker it has
-    // lost telemetry on. The probe cycle (interval 1000 + timeout 1500) is well
-    // inside the stale window, so a HEALTHY worker is never floored — the decrease
-    // only fires when telemetry actually dries up. Shares the probe's observer
-    // `Arc`; owns no per-call state, so no release path. Each sweep's floored-worker
-    // count feeds the coarse `stale_decrease` aggregate counter so a silently
-    // floored cap is diagnosable in Prometheus (there is no per-worker
-    // `worker_id`-labelled surface).
+    // lost telemetry on. Every 200 carries a payload, a refusing worker's
+    // included, and the probe cycle (interval 1000 + timeout 1500) is well inside
+    // the stale window, so a worker that answers is never floored (ADR-0050 §6).
+    // Shares the probe's observer `Arc`; owns no per-call state, so no release
+    // path. Each sweep's floored-worker count feeds the coarse `stale_decrease`
+    // aggregate counter so a silently floored cap is diagnosable in Prometheus
+    // (there is no per-worker `worker_id`-labelled surface).
     {
         let obs = sweep_observer;
         let clk = clock.clone();
         let m = metrics.clone();
+        let reg = registry.clone();
         tokio::spawn(async move {
             let mut t = tokio::time::interval(Duration::from_secs(1));
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             t.tick().await; // skip the immediate first tick — first sweep fires at +1s
             loop {
                 t.tick().await;
-                let floored = obs.sweep_stale(clk.now_ms());
+                let alive: Vec<_> =
+                    reg.snapshot().into_iter().filter(|w| w.is_alive()).map(|w| w.id).collect();
+                let floored = obs.sweep_stale(clk.now_ms(), |id| alive.iter().any(|a| a == id));
                 if floored > 0 {
                     m.record_overload_stale_decrease(floored);
                 }

@@ -225,4 +225,4 @@ pub use b2bua::store::PartitionRole;
 /// [`ReplicatedB2buaSut::flow_caught_up`] names it. Distinct from
 /// [`PartitionRole`], which names a body's keyspace in the store.
 pub use repl_net::frame::Partition;
-pub use sip_proxy::registry::WorkerHealth;
+pub use sip_proxy::registry::{Acceptance, WorkerHealth};

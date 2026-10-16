@@ -11,11 +11,13 @@
 #[allow(dead_code)]
 mod stateful_proxy;
 
+mod a_returned_primary_serves_its_dialogs;
 mod abandoned_callee_via_lb;
 mod adopted_counter_reverse_fold;
 mod answer_lost_with_primary_no_answer;
 mod backup_capacity;
 mod call_terminate_on_backup;
+mod cancel_and_retransmission_follow_a_live_hop;
 mod consult_answer_deadline;
 mod crossed_reinvite_round;
 mod deferred_end_of_a_departed_primary;
@@ -38,6 +40,7 @@ mod limiter_release_by_call;
 mod limiter_uncounted_calls;
 mod long_ring_ha;
 mod message_ring_takeover;
+mod new_call_acceptance;
 mod new_call_queue_headroom;
 mod new_call_replication_window;
 mod not_ready_member_stays_pulled;
@@ -46,7 +49,6 @@ mod prack_repeat_takeover;
 mod prack_takeover;
 mod reinvite_2xx_acked_through_the_primary;
 mod reinvite_answer_failover;
-mod reinvite_inside_the_fresh_pod_guard;
 mod reinvite_round_gives_up_after_takeover;
 mod reinvite_round_not_yet_replicated;
 mod reinvite_server_side_at_the_takeover;

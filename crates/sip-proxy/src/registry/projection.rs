@@ -7,13 +7,13 @@
 //! set, the set *is* membership, and a `WorkerEntry` is a pure projection:
 //!
 //! ```text
-//!   WorkerEntry = membership.host  ⊕  annotation{ port, health, draining, first_seen }
+//!   WorkerEntry = membership.host  ⊕  annotation{ port, health, acceptance }
 //! ```
 //!
 //! - **Identity + host** live in `topology::Membership` — one container, one diff
 //!   (`reconcile_to_desired`), one self-heal loop (`spawn_membership_reconcile`),
 //!   shared with the b2bua replication supervisor.
-//! - **Port + health + LB-timing** live in `WorkerAnnotations`, keyed by ordinal.
+//! - **Port + health + acceptance** live in `WorkerAnnotations`, keyed by ordinal.
 //!   Port is here (not in membership) because topology is deliberately
 //!   port-agnostic — the port is a consumer concern. In production every worker
 //!   uses the cluster-wide `default_port`; `static`/`simulated` may set a
@@ -41,7 +41,7 @@ use topology::{Membership, Peer};
 use crate::addr::ProxyAddr;
 
 use super::tombstone::{Tombstones, DEPARTED_ADDRESS_TTL_MS};
-use super::{WorkerEntry, WorkerHealth, WorkerId};
+use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerId};
 
 /// Per-ordinal proxy annotation — everything a [`WorkerEntry`] carries that
 /// membership does not. `host` is shadowed only to detect an address move (→ a
@@ -50,8 +50,7 @@ use super::{WorkerEntry, WorkerHealth, WorkerId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Annot {
     health: WorkerHealth,
-    draining_since: Option<u64>,
-    first_seen_at_ms: Option<u64>,
+    acceptance: Acceptance,
     host: String,
     /// Per-worker port. `None` → use the registry's `default_port` (the
     /// production/k8s case; every worker shares the cluster SIP port).
@@ -59,14 +58,12 @@ struct Annot {
 }
 
 impl Annot {
-    /// A brand-new annotation for a just-(re)joined endpoint: `Unknown` (not
-    /// routable until the OPTIONS probe confirms it), `first_seen` stamped so the
-    /// LB fresh-pod guard engages.
-    fn fresh(host: String, now_ms: u64) -> Self {
+    /// A brand-new annotation for a just-(re)joined endpoint: `Unknown`, not
+    /// routable until the OPTIONS probe reads it `Alive` (ADR-0050 §8).
+    fn fresh(host: String) -> Self {
         Self {
             health: WorkerHealth::Unknown,
-            draining_since: None,
-            first_seen_at_ms: Some(now_ms),
+            acceptance: Acceptance::Accept,
             host,
             port_override: None,
         }
@@ -108,12 +105,7 @@ impl WorkerAnnotations {
     ///
     /// Returns the `(ordinal, address)` pairs the overlay stopped serving — a
     /// departure or a host move — for the caller to tombstone.
-    fn sync_membership(
-        &self,
-        peers: &[Peer],
-        now_ms: u64,
-        default_port: u16,
-    ) -> Vec<(WorkerId, ProxyAddr)> {
+    fn sync_membership(&self, peers: &[Peer], default_port: u16) -> Vec<(WorkerId, ProxyAddr)> {
         let live: HashSet<&str> = peers.iter().map(|p| p.ordinal.as_str()).collect();
         let mut departed = Vec::new();
         // Membership deltas are rare state changes: each gets its own line. The
@@ -163,7 +155,7 @@ impl WorkerAnnotations {
                 match recs.get(&p.ordinal) {
                     Some(rec) if rec.host == p.host => {} // unchanged → preserve
                     _ => {
-                        recs.insert(p.ordinal.clone(), Annot::fresh(p.host.clone(), now_ms));
+                        recs.insert(p.ordinal.clone(), Annot::fresh(p.host.clone()));
                     }
                 }
             }
@@ -172,9 +164,8 @@ impl WorkerAnnotations {
     }
 
     /// Annotate health (the OPTIONS probe write / `WorkerRegistryControl`). No-op
-    /// if the worker is unknown or unchanged; entering `Draining` stamps
-    /// `draining_since`.
-    fn set_health(&self, id: &str, health: WorkerHealth, now_ms: u64) {
+    /// if the worker is unknown or unchanged.
+    fn set_health(&self, id: &str, health: WorkerHealth) {
         let previous = self.snapshot().get(id).map(|r| r.health);
         if previous == Some(health) {
             return;
@@ -191,9 +182,29 @@ impl WorkerAnnotations {
         self.update(|recs| {
             if let Some(rec) = recs.get_mut(id) {
                 rec.health = health;
-                if health == WorkerHealth::Draining && rec.draining_since.is_none() {
-                    rec.draining_since = Some(now_ms);
-                }
+            }
+        });
+    }
+
+    /// Annotate acceptance of new calls. No-op if the worker is unknown or
+    /// unchanged.
+    fn set_acceptance(&self, id: &str, acceptance: Acceptance) {
+        let previous = self.snapshot().get(id).map(|r| r.acceptance);
+        if previous == Some(acceptance) {
+            return;
+        }
+        if let Some(previous) = previous {
+            tracing::info!(
+                node = observe::node(),
+                worker = id,
+                from = ?previous,
+                to = ?acceptance,
+                "worker acceptance flip"
+            );
+        }
+        self.update(|recs| {
+            if let Some(rec) = recs.get_mut(id) {
+                rec.acceptance = acceptance;
             }
         });
     }
@@ -221,8 +232,7 @@ fn project(
                 id: p.ordinal.clone(),
                 address: ProxyAddr::new(p.host.clone(), port),
                 health: a.map(|a| a.health).unwrap_or(WorkerHealth::Unknown),
-                draining_since: a.and_then(|a| a.draining_since),
-                first_seen_at_ms: a.and_then(|a| a.first_seen_at_ms),
+                acceptance: a.map(|a| a.acceptance).unwrap_or(Acceptance::Accept),
             }
         })
         .collect()
@@ -271,7 +281,7 @@ impl WorkerSet {
     pub(crate) fn recompose(&self) {
         let peers: Vec<Peer> = self.membership.snapshot().into_iter().filter(|p| p.ready).collect();
         let now_ms = self.now_ms();
-        let departed = self.annotations.sync_membership(&peers, now_ms, self.default_port);
+        let departed = self.annotations.sync_membership(&peers, self.default_port);
         let annots = self.annotations.snapshot();
         let entries = project(&peers, &annots, self.default_port);
         for (id, address) in departed {
@@ -293,7 +303,14 @@ impl WorkerSet {
 
     /// Annotate a worker's health (the OPTIONS write seam) and recompose.
     pub(crate) fn set_health(&self, id: &str, health: WorkerHealth) {
-        self.annotations.set_health(id, health, self.now_ms());
+        self.annotations.set_health(id, health);
+        self.recompose();
+    }
+
+    /// Annotate a worker's acceptance of new calls (the OPTIONS write seam)
+    /// and recompose.
+    pub(crate) fn set_acceptance(&self, id: &str, acceptance: Acceptance) {
+        self.annotations.set_acceptance(id, acceptance);
         self.recompose();
     }
 
@@ -309,27 +326,20 @@ impl WorkerSet {
     }
 
     /// Seed an explicit annotation for `id` *before* it is added to membership, so
-    /// the subsequent `recompose` preserves the intended port/health/timing instead
-    /// of seeding a fresh `Unknown`. For the `static`/`simulated` add paths.
+    /// the subsequent `recompose` preserves the intended port/health/acceptance
+    /// instead of seeding a fresh `Unknown`. For the `static`/`simulated` add paths.
     pub(crate) fn preset(
         &self,
         id: &str,
         host: String,
         port: u16,
         health: WorkerHealth,
-        draining_since: Option<u64>,
-        first_seen_at_ms: Option<u64>,
+        acceptance: Acceptance,
     ) {
         self.annotations.update(|recs| {
             recs.insert(
                 id.to_string(),
-                Annot {
-                    health,
-                    draining_since,
-                    first_seen_at_ms,
-                    host: host.clone(),
-                    port_override: Some(port),
-                },
+                Annot { health, acceptance, host: host.clone(), port_override: Some(port) },
             );
         });
     }
