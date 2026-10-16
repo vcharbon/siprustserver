@@ -275,8 +275,8 @@ made. A run profile joins the two.
    is never charged to the allowance of a bare refusal of the same code, and
    `over_outage`, which counts `max_seconds` beyond the window's outage (its
    first `inject` to its last `recovered`), so one budget states a fault's
-   residue whatever its hold. A failed setup is charged to the first entry
-   that matches it.
+   residue whatever its hold; `setup_slow` takes `over_outage` the same way.
+   A failed setup is charged to the first entry that matches it.
 4. **The reason vocabulary.** With a final, `reason` is the first value of its
    first Reason header line normalised to `<protocol>;cause=<n>`, the protocol
    token lowercased (`q.850;cause=34`), or the status code alone (`486`) when

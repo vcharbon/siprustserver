@@ -3,9 +3,15 @@ same code, and a budget may count beyond its window's outage (ADR-0049 §3.3).""
 
 from __future__ import annotations
 
-from kit import T0, rejected
+from pathlib import Path
 
-from hakit.classify import Impact, classify
+from kit import T0, record, rejected
+from rundir import SCHEMAS, kill, run_dir
+
+from hakit import jsonval as jv
+from hakit.verdict import compute
+
+from hakit.classify import Impact, SetupLatency, classify
 from hakit.judge import judge
 from hakit.jsonval import Json
 from hakit.model import Allowance, Budget, ExpectedEnding, SetupSlowAllowance, Shape, parse_budget
@@ -70,3 +76,49 @@ def test_a_budget_file_states_both_fields() -> None:
     )
     (e,) = b.setup_failed
     assert (e.retry_after, e.over_outage, e.allowed(10.0, 21.0)) == (False, True, 270.0)
+
+
+def test_a_verdict_keeping_the_retry_after_key_is_schema_valid(tmp_path: Path) -> None:
+    budget: Json = {
+        "schema": "budget.v1",
+        "name": "bare",
+        "description": "d",
+        "setup_failed": [{"stream": "*", "code": 503, "reason": "503", "retry_after": False, "max_calls": 5}],
+    }
+    d = run_dir(
+        tmp_path,
+        [refused("a", T0 + 101_000, None), refused("b", T0 + 101_000, 7)],
+        calls=2,
+        events=kill(1, T0 + 100_000, budget="bare"),
+        budgets=[budget],
+        profile={"generator_stall_ms": 3_600_000},
+    )
+    v = compute(d, SCHEMAS)
+    assert SCHEMAS.errors("verdict.v1", v) == []
+    (w,) = jv.objs(v, "windows")
+    rows = {r.get("retry_after"): (r["count"], r["finding"]) for r in jv.objs(w, "impacts") if r["class"] == "setup_failed"}
+    assert rows == {False: (1, False), True: (1, True)}
+
+
+def test_setup_slow_may_count_beyond_the_window_s_outage() -> None:
+    b = parse_budget(
+        {
+            "schema": "budget.v1",
+            "name": "x",
+            "description": "d",
+            "setup_slow": {"max_seconds": 2, "over_outage": True},
+        }
+    )
+    assert (b.setup_slow.over_outage, b.setup_slow.allowed(10.0, 21.0)) == (True, 230.0)
+    w = window([Phase("inject", T0, "fault"), Phase("recovered", T0 + 21_000, "fault")])
+    slow = [record(f"s{i}", T0 + 1000 + i, provisional=2000, setup=2100, answered=2100) for i in range(230)]
+    impacts: list[Impact] = []
+    latencies: list[SetupLatency] = []
+    for r in slow:
+        c = classify(r, ANSWER)
+        impacts += c.impacts
+        if c.latency is not None:
+            latencies.append(c.latency)
+    rows = judge([w], impacts, latencies, {"bare": b}, 1000, {"basic": 10.0}).per_window["001-fault"]
+    ((count, allowed, finding),) = [(r["count"], r["allowed"], r["finding"]) for r in rows if r["class"] == "setup_slow"]
+    assert (count, allowed, finding) == (230, 230.0, False)

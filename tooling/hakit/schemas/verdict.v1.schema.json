@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "verdict.v1.schema.json",
-  "$comment": "minor 1",
+  "$comment": "minor 2",
   "title": "verdict.v1",
   "description": "The `verdict.json` of a run directory: every window with its impact against its budget, the in-dialog impact with the windows it may belong to, the impact outside every window, and the integrity of the measurement. `hakit verdict <run-dir>` recomputes it from the run directory alone. ADR-0049.",
   "type": "object",
@@ -201,6 +201,10 @@
         "stream": { "type": "string" },
         "code": { "type": "integer" },
         "reason": { "type": "string" },
+        "retry_after": {
+          "description": "The key's Retry-After: true for finals that carried one, false for an entry that matches only finals without one; absent, the key does not tell them apart.",
+          "type": "boolean"
+        },
         "count": {
           "description": "Calls, or events for a class counted in events; for `recovery`, the seconds of the slowest stream.",
           "type": "number"

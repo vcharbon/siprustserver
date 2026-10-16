@@ -189,7 +189,7 @@ def judge(
             by_stream[lat.stream].append(lat)
         for stream, lats in sorted(by_stream.items()):
             rate = cps.get(stream, 0.0)
-            rows.append(_row(SETUP_SLOW, stream, lats, budget.setup_slow.allowed(rate), rate))
+            rows.append(_row(SETUP_SLOW, stream, lats, budget.setup_slow.allowed(rate, out_s), rate))
         by_class: dict[str, list[Impact]] = defaultdict(list)
         for imp in counted_in_window.get(w.event, []):
             by_class[imp.cls].append(imp)

@@ -136,11 +136,14 @@ class SetupSlowAllowance:
     threshold_ms: float | None
     max_calls: int | None
     max_seconds: float | None
+    # Whether `max_seconds` counts beyond the window's outage.
+    over_outage: bool = False
 
-    def allowed(self, cps: float) -> float:
+    def allowed(self, cps: float, outage_s: float = 0.0) -> float:
         if self.max_calls is not None:
             return float(self.max_calls)
-        return (self.max_seconds or 0.0) * cps
+        extra = outage_s if self.over_outage else 0.0
+        return ((self.max_seconds or 0.0) + extra) * cps
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,7 @@ def parse_budget(d: Json) -> Budget:
             threshold_ms=jv.opt_number(slow, "threshold_ms"),
             max_calls=jv.opt_int(slow, "max_calls"),
             max_seconds=jv.opt_number(slow, "max_seconds"),
+            over_outage=jv.boolean(slow, "over_outage"),
         ),
         raw=d,
         cdr_mismatch_max=jv.opt_int(jv.obj(d, "cdr_mismatch"), "max_calls") or 0,

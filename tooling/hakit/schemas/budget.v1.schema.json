@@ -32,8 +32,14 @@
       "properties": {
         "threshold_ms": { "type": "number", "exclusiveMinimum": 0 },
         "max_calls": { "type": "integer", "minimum": 0 },
-        "max_seconds": { "type": "number", "minimum": 0 }
+        "max_seconds": { "type": "number", "minimum": 0 },
+        "over_outage": {
+          "description": "max_seconds counts beyond the window's outage, from its first inject to its last recovered.",
+          "type": "boolean"
+        }
       },
+      "if": { "properties": { "over_outage": { "const": true } }, "required": ["over_outage"] },
+      "then": { "required": ["max_seconds"] },
       "not": { "required": ["max_calls", "max_seconds"] }
     },
     "cdr_mismatch": {
