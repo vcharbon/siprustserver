@@ -348,7 +348,9 @@ made. A run profile joins the two.
    §6.4) into `cdrs.jsonl`, once the consumer has consumed every CDR the
    system under test wrote (the lab's written and consumed counters over the
    run) and the shipped observations have stopped growing for 10 s, at most
-   300 s, long enough for a broker thawing late. `cdrs-collect.json` keeps
+   300 s, long enough for a broker thawing late. The CDRs of a firing stopped
+   with `abandon` (their Call-IDs carry its event) join nothing: its killed
+   calls wrote no record. `cdrs-collect.json` keeps
    whether that happened and the counts. Byte-identical observations (a
    redelivery, a re-post) count once. Joined on `call_id`:
    - an answered call with no CDR is charged at its `ended_at_ms`;

@@ -5,7 +5,8 @@ the workers wrote was consumed before the cut, the counts, the payloads the
 consumer could not read). What makes the CDR measurement doubtful is a
 `class_failed` integrity finding: an export cut with CDRs still owed (whose
 missing CDRs are then not charged), unreadable payloads or observations, and no
-observation at all while answered calls exist.
+observation at all while answered calls exist. The CDRs of a firing stopped
+with `abandon` are left out: its killed calls wrote no record.
 """
 
 from __future__ import annotations
@@ -27,6 +28,18 @@ def _failed(detail: str) -> Json:
     return integrity("class_failed", f"cdr_mismatch: {detail}")
 
 
+def abandoned_firings(run_dir: Path, run: str) -> list[str]:
+    """The Call-ID marks (`<run>-<event>`) of the load incidents' firings stopped
+    with `abandon`: their calls wrote no record, so their CDRs join none."""
+    return [
+        f"{run}-{jv.string(line, 'event')}"
+        for line in read_jsonl(run_dir / "events.jsonl")
+        if line.get("kind") == "facts"
+        and line.get("executable") == "heal"
+        and jv.obj(line, "facts").get("stop") == "abandon"
+    ]
+
+
 def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas: SchemaSet) -> tuple[list[Impact], list[Json]]:
     if not profile.cdr_join:
         return [], []
@@ -45,10 +58,12 @@ def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas
         found.append(_failed(f"the consumer could not read {unread:g} CDR payloads"))
     good: list[Json] = []
     bad = 0
+    run = jv.string(as_obj(json.loads((run_dir / "run-meta.json").read_text())), "run")
+    abandoned = abandoned_firings(run_dir, run)
     for line in read_jsonl(p):
         if schemas.errors("cdr-observation.v1", line):
             bad += 1
-        else:
+        elif not any(mark in str(line.get("call_id")) for mark in abandoned):
             good.append(line)
     if bad:
         found.append(_failed(f"{bad} observations break cdr-observation.v1"))

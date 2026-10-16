@@ -128,6 +128,28 @@ def test_a_mismatch_allowance_in_seconds_reads_the_run_rate_beyond_the_outage(tm
     assert rows("three", 3) == [(3, 2.0, True)]
 
 
+def test_the_cdrs_of_an_abandoned_firing_join_no_record(tmp_path: Path) -> None:
+    # An `orphan` firing's calls were killed with the generator: no record,
+    # and their CDRs are no mismatch. A CDR of no firing still is.
+    heal: Json = {
+        "kind": "facts",
+        "event": "009-orphan",
+        "step": "orphan",
+        "executable": "heal",
+        "facts": {"stream": "orphaned", "stop": "abandon"},
+    }
+    d = run_dir(
+        tmp_path,
+        [ANSWERED],
+        calls=1,
+        events=[heal],
+        profile={"cdr_join": True, "generator_stall_ms": 3_600_000},
+        cdrs=[cdr("a", T0, 100, 30_000), cdr("7-1-r-009-orphan@h", T0, 100, 5_000), cdr("ghost", T0, None, 500)],
+    )
+    (u,) = jv.objs(compute(d, SCHEMAS), "unattributed")
+    assert (u["class"], u["count"], u["call_ids"]) == ("cdr_mismatch", 1, ["ghost"])
+
+
 def test_cdrs_off_the_schema_or_missing_make_the_run_invalid(tmp_path: Path) -> None:
     on: Json = {"cdr_join": True, "generator_stall_ms": 3_600_000}
     d = run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=on, cdrs=[{**cdr("a", T0, 100, 30_000), "disposition": "?"}])
