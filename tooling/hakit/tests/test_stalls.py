@@ -95,6 +95,17 @@ def test_the_step_in_force_sets_the_rate_of_the_verdict_s_stall_bound(tmp_path: 
     assert s["stalls"] == []
 
 
+def test_a_gap_across_a_rate_drop_is_judged_at_the_lower_rate(tmp_path: Path) -> None:
+    basic = {"name": "basic", "driver": "sipp", "shape": "basic", "scenario": "uac-basic-hold.xml", "cps": 20}
+    stream = {**basic, "setup_deadline_s": 32, "steps": [{"at_s": 60, "cps": 1}]}
+    # The last start at 20 cps is at +59.95 s, the first at 1 cps at +61 s: 1.05 s
+    # apart, a stall at 20 cps, none at 1 cps.
+    recs = paced("a", T0, T0 + 60_000, 20) + paced("b", T0 + 61_000, T0 + 120_000, 1)
+    d = run_dir(tmp_path, recs, calls=len(recs), events=[], profile={"streams": [stream]})
+    (s,) = jv.objs(compute(d, SCHEMAS), "streams")
+    assert s["stalls"] == []
+
+
 def test_a_slow_setup_outside_any_stall_stays_an_impact(tmp_path: Path) -> None:
     at = T0 + 60_000
     recs = paced_with_stall(at, 1000)
