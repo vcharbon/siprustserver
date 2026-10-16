@@ -6,7 +6,10 @@
 //! Observations queue in a bounded channel; a batch goes out every second or
 //! at [`BATCH`] lines, and a batch whose post fails is posted again until it
 //! lands. A full queue drops the new observation and counts it, so the
-//! consumer never stalls on the store.
+//! consumer never stalls on the store. Each offer returns a signal that fires
+//! once its observation's batch has landed: the consumer acknowledges the CDR
+//! only then, so a consumer killed before shipping leaves the CDR to the
+//! broker's redelivery instead of losing its observation.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -15,7 +18,11 @@ use std::time::Duration;
 use metric_catalogue::{Family, Labels};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+/// Fires once the offered observation's batch has landed; dropped unfired
+/// when the observation was dropped at a full queue.
+pub type Shipped = oneshot::Receiver<()>;
 
 use crate::observation::CdrObservation;
 
@@ -126,16 +133,19 @@ impl Endpoint {
 /// The sending half: offers never wait.
 #[derive(Clone)]
 pub struct ObservationSink {
-    tx: mpsc::Sender<CdrObservation>,
+    tx: mpsc::Sender<(CdrObservation, oneshot::Sender<()>)>,
     metrics: Arc<ShipMetrics>,
 }
 
 impl ObservationSink {
-    /// Queues one observation; a full queue drops it and counts it.
-    pub fn offer(&self, obs: CdrObservation) {
-        if self.tx.try_send(obs).is_err() {
+    /// Queues one observation; a full queue drops it and counts it. The signal
+    /// fires once the observation has landed.
+    pub fn offer(&self, obs: CdrObservation) -> Shipped {
+        let (done, shipped) = oneshot::channel();
+        if self.tx.try_send((obs, done)).is_err() {
             self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
         }
+        shipped
     }
 
     /// Counts a payload the observation view could not read.
@@ -208,16 +218,20 @@ async fn post(endpoint: &Endpoint, body: &str) -> std::io::Result<bool> {
 
 async fn ship(
     endpoint: Endpoint,
-    mut rx: mpsc::Receiver<CdrObservation>,
+    mut rx: mpsc::Receiver<(CdrObservation, oneshot::Sender<()>)>,
     metrics: Arc<ShipMetrics>,
     pacing: Pacing,
 ) {
-    while let Some(first) = rx.recv().await {
+    while let Some((first, done)) = rx.recv().await {
         let mut batch = vec![line(&first)];
+        let mut signals = vec![done];
         let deadline = tokio::time::Instant::now() + pacing.flush;
         while batch.len() < BATCH {
             match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Some(obs)) => batch.push(line(&obs)),
+                Ok(Some((obs, done))) => {
+                    batch.push(line(&obs));
+                    signals.push(done);
+                }
                 Ok(None) | Err(_) => break,
             }
         }
@@ -233,6 +247,9 @@ async fn ship(
             }
         }
         metrics.shipped.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        for done in signals {
+            let _ = done.send(());
+        }
     }
 }
 
@@ -300,6 +317,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The consumer acks a CDR on this signal: it must not fire while the post
+    /// carrying its observation is unanswered, nor after a failed one.
+    #[tokio::test]
+    async fn an_offer_signals_only_once_its_batch_has_landed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (answer, answer_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            read_request(&mut s).await;
+            s.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            drop(s);
+            let (mut s, _) = listener.accept().await.unwrap();
+            read_request(&mut s).await;
+            answer_rx.await.unwrap();
+            s.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        });
+        let pacing = Pacing {
+            flush: Duration::from_millis(20),
+            retry: Duration::from_millis(20),
+            post_timeout: Duration::from_secs(5),
+        };
+        let sink = spawn_with(
+            Endpoint { host: "127.0.0.1".into(), port },
+            Arc::new(ShipMetrics::default()),
+            pacing,
+            16,
+        );
+        let mut shipped = sink.offer(CdrObservation::new("c".into(), 0, None, 1000, 1));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(shipped.try_recv().is_err(), "signalled before the post landed");
+        answer.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), shipped).await.unwrap().unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

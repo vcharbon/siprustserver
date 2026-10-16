@@ -25,7 +25,7 @@ use tokio::net::TcpListener;
 
 use crate::counting::{Metrics, Payload};
 use crate::observation::ObservationView;
-use crate::shipper::{self, Endpoint, ObservationSink, ShipMetrics};
+use crate::shipper::{self, Endpoint, ObservationSink, ShipMetrics, Shipped};
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -71,14 +71,18 @@ struct Consumer {
 }
 
 impl Consumer {
-    fn deliver(&self, data: &[u8]) {
+    /// Counts one delivery and offers its observation; the signal of an
+    /// offered observation fires once it has landed.
+    fn deliver(&self, data: &[u8]) -> Option<Shipped> {
         if let Err(e) = self.metrics.count(self.payload, data) {
             tracing::warn!(error = %e, "CDR payload parse error");
         }
-        if let Some(sink) = &self.sink {
-            match self.view.observe(data) {
-                Some(obs) => sink.offer(obs),
-                None => sink.note_unread(),
+        let sink = self.sink.as_ref()?;
+        match self.view.observe(data) {
+            Some(obs) => Some(sink.offer(obs)),
+            None => {
+                sink.note_unread();
+                None
             }
         }
     }
@@ -117,9 +121,21 @@ async fn consume(
 
     while let Some(delivery) = deliveries.next().await {
         let delivery = delivery?;
-        consumer.deliver(&delivery.data);
-        // Ack regardless: a malformed record is counted, not redelivered forever.
-        delivery.ack(BasicAckOptions::default()).await?;
+        // Ack regardless of the payload: a malformed record is counted, not
+        // redelivered forever. A shipped observation is acked once it landed,
+        // so a consumer gone before then leaves its CDR to the broker.
+        match consumer.deliver(&delivery.data) {
+            None => delivery.ack(BasicAckOptions::default()).await?,
+            Some(shipped) => {
+                let acker = delivery.acker;
+                tokio::spawn(async move {
+                    let _ = shipped.await;
+                    if let Err(e) = acker.ack(BasicAckOptions::default()).await {
+                        tracing::warn!(error = %e, "CDR ack after its observation shipped failed");
+                    }
+                });
+            }
+        }
     }
     // The consumer stream ended without an error — the broker closed it.
     tracing::info!(node = observe::node(), state = "stream_closed", %queue, "AMQP connection");
