@@ -2236,13 +2236,13 @@
       },
       "targets": [
         {
-          "expr": "last_over_time(sip_chaos_window_verdict[$__range])",
+          "expr": "max by (run, event, budget) (last_over_time(sip_chaos_window_verdict[$__range]))",
           "refId": "A",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "last_over_time(sip_chaos_window_findings[$__range])",
+          "expr": "max by (run, event, budget) (last_over_time(sip_chaos_window_findings[$__range]))",
           "refId": "B",
           "format": "table",
           "instant": true

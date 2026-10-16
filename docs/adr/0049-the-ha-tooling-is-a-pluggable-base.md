@@ -592,19 +592,29 @@ made. A run profile joins the two.
 5. **Dashboards.** The base owns every generic panel; a product dashboard
    holds only its product rows and links to the base dashboards with the time
    range carried. Grafana provisions every `dashboards/` directory of the
-   search path in place, without staging copies. Every dashboard carries the
-   generic annotation block: window regions from `sip_chaos_window == 1` and
-   phase points from `sip_chaos_event`, titled by incident and phase.
-   `hakit validate` refuses a dashboard on the path without it.
+   search path in place, without staging copies: each is mounted read-only at
+   `/hakit/dashboards/<i>`, `i` its position on the path, and
+   `hakit dashboards --compose-override` writes the mounts of the `HAKIT_PATH`
+   entries. Every dashboard carries the generic block: window regions from
+   `sip_chaos_window == 1` and phase points from `sip_chaos_event`, titled by
+   incident and phase, the tag `hakit`, and a link listing every dashboard so
+   tagged with the time range kept. `hakit validate` refuses a dashboard on
+   the path without it, and a dashboard uid defined twice. When a verdict is
+   written the runner pushes it as series for the dashboards
+   (`sip_chaos_window_verdict`, `sip_chaos_window_findings`,
+   `sip_chaos_run_verdict`).
 6. **Series labels.** Every series a generator exposes and every record carry
    `stream` and `shape`, so the generic panels show a product's shapes
    without product panels.
 7. **Metric catalogue.** A product extends the contract through `metrics/`:
    catalogue files in the `metric-contract export` JSON format. The name
    checker reads the base's export plus every `metrics/` file of the search
-   path. The series the tooling itself pushes (`sip_chaos_event`,
-   `sip_chaos_window`) and the generators' record and not-placed counters are
-   declared in the base's `content/metrics/`, not allow-listed.
+   path (`metric-contract check --content <entry>`), and refuses a family the
+   contract already holds. The series the tooling itself pushes
+   (`sip_chaos_*`, and the `sip_soak_*` state a workflow supervising a run
+   pushes) and the SIPp exporter twin's record counters are declared in the
+   base's `content/metrics/`, not allow-listed; loadgen's record and
+   not-placed counters are in its own catalogue.
 
 ## Considered and rejected
 
