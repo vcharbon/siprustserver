@@ -57,7 +57,7 @@ def test_a_cdr_without_a_record_is_charged_at_its_own_end() -> None:
 
 
 def test_every_cdr_after_the_first_of_a_call_is_a_mismatch() -> None:
-    got = details([ANSWERED], [cdr("a", T0, 100, 30_000), cdr("a", T0, 100, 30_000), cdr("a", T0, 100, 30_000)])
+    got = details([ANSWERED], [cdr("a", T0, 100, 30_000), cdr("a", T0, 100, 30_001), cdr("a", T0, 100, 30_002)])
     assert got == [("a", T0 + 30_000, "CDR 2 of the call"), ("a", T0 + 30_000, "CDR 3 of the call")]
 
 
@@ -72,7 +72,7 @@ def test_a_disposition_that_differs_is_a_mismatch() -> None:
 
 def test_a_cut_call_compares_presence_and_disposition_only() -> None:
     cut = record("c", T0, "cut", ended=9_000, failures=[{"at_ms": T0 + 9_000, "kind": "dialog_request", "method": "BYE", "code": 481}])
-    assert details([cut], [cdr("c", T0, 100, 40_000)]) == []
+    assert details([cut], [cdr("c", T0, 100, 9_500)]) == []
     assert details([cut], []) == [("c", T0 + 9_000, "answered call without a CDR")]
 
 
@@ -103,13 +103,64 @@ def test_cdrs_off_the_schema_or_missing_make_the_run_invalid(tmp_path: Path) -> 
     d = run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=on, cdrs=[{**cdr("a", T0, 100, 30_000), "disposition": "?"}])
     v = compute(d, SCHEMAS)
     assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
-        ("class_failed", "cdr_mismatch: 1 observations break cdr-observation.v1")
+        ("class_failed", "cdr_mismatch: 1 observations break cdr-observation.v1"),
+        ("class_failed", "cdr_mismatch: no CDR observation for 1 answered calls; is the consumer shipping?"),
     ]
     (tmp_path / "run").rename(tmp_path / "first")
     v = compute(run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=on), SCHEMAS)
-    assert [i["detail"] for i in jv.objs(v, "integrity")] == ["cdr_mismatch: the run directory holds no cdrs.jsonl"]
+    assert [i["detail"] for i in jv.objs(v, "integrity")] == ["cdr_mismatch: the run directory holds no CDR export"]
 
 
 def test_without_cdr_join_no_cdr_is_read(tmp_path: Path) -> None:
     v = compute(run_dir(tmp_path, [ANSWERED], calls=1, events=[], cdrs=[]), SCHEMAS)
     assert v["status"] == "pass"
+
+
+def test_a_byte_identical_observation_counts_once_and_a_distinct_second_cdr_is_a_mismatch() -> None:
+    first = cdr("a", T0, 100, 30_000)
+    assert details([ANSWERED], [first, dict(first)]) == []
+    assert details([ANSWERED], [first, {**first, "end_ms": T0 + 30_001}]) == [("a", T0 + 30_000, "CDR 2 of the call")]
+
+
+def test_a_cut_call_s_cdr_may_not_end_after_the_caller_s_end() -> None:
+    cut = record("c", T0, "cut", ended=9_000, failures=[{"at_ms": T0 + 9_000, "kind": "dialog_request", "method": "BYE", "code": 481}])
+    assert details([cut], [cdr("c", T0, 100, 10_001)]) == []  # 1 s + 1 ms unit after
+    assert details([cut], [cdr("c", T0, 100, 1_800_000)]) == [
+        ("c", T0 + 9_000, "CDR ends 1791000 ms after the caller's end (allowed 1001 ms)")
+    ]
+    stranded = record("s", T0, "stranded", ended=60_000)
+    assert details([stranded], [cdr("s", T0, 100, 59_000)]) == []
+
+
+ON: Json = {"cdr_join": True, "generator_stall_ms": 3_600_000}
+
+
+def collected(complete: bool, written: float, consumed: float, unread: float = 0) -> Json:
+    return {"complete": complete, "written": written, "consumed": consumed, "unread": unread}
+
+
+def test_no_observation_at_all_for_answered_calls_is_a_measurement_failure(tmp_path: Path) -> None:
+    d = run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=ON, cdrs=[], cdr_collect=collected(True, 0, 0))
+    v = compute(d, SCHEMAS)
+    assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
+        ("class_failed", "cdr_mismatch: no CDR observation for 1 answered calls; is the consumer shipping?")
+    ]
+    assert v["unattributed"] == []
+
+
+def test_cdrs_still_owed_at_the_cut_are_an_incomplete_export_not_impacts(tmp_path: Path) -> None:
+    second = record("b", T0 + 1_000)
+    d = run_dir(tmp_path, [ANSWERED, second], calls=2, events=[], profile=ON, cdrs=[cdr("a", T0, 100, 30_000)], cdr_collect=collected(False, 2, 1))
+    v = compute(d, SCHEMAS)
+    assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
+        ("class_failed", "cdr_mismatch: the export was cut with CDRs still owed: 2 written, 1 consumed")
+    ]
+    assert v["unattributed"] == []
+
+
+def test_payloads_the_consumer_could_not_read_make_the_run_invalid(tmp_path: Path) -> None:
+    d = run_dir(tmp_path, [ANSWERED], calls=1, events=[], profile=ON, cdrs=[cdr("a", T0, 100, 30_000)], cdr_collect=collected(True, 1, 1, unread=3))
+    v = compute(d, SCHEMAS)
+    assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
+        ("class_failed", "cdr_mismatch: the consumer could not read 3 CDR payloads")
+    ]

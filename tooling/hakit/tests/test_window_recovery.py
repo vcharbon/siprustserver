@@ -111,8 +111,12 @@ def test_a_stream_never_back_before_the_next_window_closes_at_its_opening(tmp_pa
     v = verdict(tmp_path, recs, kill(1, INJECT, budget="kill-rec") + kill(2, second, budget="kill-rec"), None)
     w1, w2 = jv.objs(v, "windows")
     assert w1["closed_at_ms"] == second and w1["recovery"] == [{"stream": "basic", "recovery_s": None}]
-    # The second window's baseline is the first one's damage (ratio 0): back at once.
-    assert w2["recovery"] == [{"stream": "basic", "recovery_s": 0.0}]
+    # Every call before the second inject started inside the first window: the
+    # second window has no baseline, no recovery row, and says why.
+    assert "recovery" not in w2 and recovery_rows(w2) == []
+    assert w2["facts"] == {
+        "hakit": {"recovery": {"basic": "no recovery: 0 calls started in the 60 s before inject outside earlier windows, under 20"}}
+    }
     assert [i["kind"] for i in jv.objs(v, "integrity")] == []
 
 

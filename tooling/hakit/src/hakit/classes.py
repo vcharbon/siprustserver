@@ -4,12 +4,14 @@
 `classes/<name>.count`. The runner runs each count once after the export, with
 `HAKIT_RUN_DIR` set, and keeps its answer as `classes/<name>.json` in the run
 directory; the verdict reads that copy. A count that fails or prints anything
-but a JSON array of `{at_ms, stream?, call_id?, detail?}` is `class_failed`.
+but a JSON array of `{at_ms, stream?, call_id?, detail?}` is `class_failed`, and
+so is a class the run expected (`run-meta.json` `classes`) with no kept answer.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,10 +70,15 @@ def run_counts(classes: dict[str, ProductClass], run_dir: Path, executor: Execut
         (out_dir / f"{name}.json").write_text(json.dumps(doc, indent=2) + "\n")
 
 
-def read_counts(run_dir: Path) -> tuple[list[Impact], list[Json]]:
-    """The impacts of every kept count, and a `class_failed` finding per failed one."""
+def read_counts(run_dir: Path, expected: Sequence[str] = ()) -> tuple[list[Impact], list[Json]]:
+    """The impacts of every kept count, and a `class_failed` finding per failed one
+    and per class the run expected (`run-meta.json` `classes`) without an output."""
     impacts: list[Impact] = []
-    failed: list[Json] = []
+    failed: list[Json] = [
+        {"kind": "class_failed", "detail": f"class {name}: no output in the run directory"}
+        for name in sorted(expected)
+        if not (run_dir / "classes" / f"{name}.json").is_file()
+    ]
     for p in sorted((run_dir / "classes").glob("*.json")):
         doc = as_obj(json.loads(p.read_text()), p.name)
         name = jv.string(doc, "name")

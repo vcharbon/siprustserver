@@ -1,5 +1,5 @@
 """What the readers take from a run directory: the load span, the verdict's windows
-and phases, and the records.
+and phases, the records and the generator stalls.
 
 The windows are the verdict's (`verdict.json`), closed on recovery; without a
 verdict yet they are rebuilt from `events.jsonl` as the runner closed them.
@@ -11,10 +11,14 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from collections import defaultdict
+
 from .. import jsonval as jv
+from ..generator_health import run_stalls
 from ..jsonval import Json, as_obj
 from ..profile import parse_profile
-from ..verdict import read_jsonl
+from ..jsonl import read_jsonl
+from ..stalls import Stall
 from ..windows import build_windows
 
 
@@ -34,6 +38,7 @@ class RunView:
     windows: list[WindowSpan]
     markers: list[tuple[float, str]]
     records: list[Json]
+    stalls: list[Stall]
 
     def in_window(self, from_s: float, to_s: float) -> bool:
         """[from_s, to_s] touches a window."""
@@ -64,6 +69,10 @@ def read_run(run_dir: Path) -> RunView:
     profile = parse_profile(as_obj(json.loads((run_dir / "profile.json").read_text())))
     start_ms = jv.opt_number(meta, "load_started_at_ms") or jv.number(meta, "started_at_ms")
     windows, markers = _windows(run_dir)
+    records = read_jsonl(run_dir / "records.jsonl")
+    starts: dict[str, list[float]] = defaultdict(list)
+    for r in records:
+        starts[jv.string(r, "stream")].append(jv.number(r, "started_at_ms"))
     return RunView(
         run=jv.string(meta, "run"),
         load_start_s=start_ms / 1000,
@@ -71,5 +80,6 @@ def read_run(run_dir: Path) -> RunView:
         ended_s=jv.number(meta, "ended_at_ms") / 1000,
         windows=windows,
         markers=sorted(markers),
-        records=read_jsonl(run_dir / "records.jsonl"),
+        records=records,
+        stalls=run_stalls(run_dir, starts, profile, start_ms),
     )

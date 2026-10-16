@@ -21,7 +21,8 @@ from hakit.readers.logs import format_line, incarnations, query
 from hakit.readers.obs_check import BASE_SCOPES, check, load_scopes, selectors
 from hakit.readers.run_view import read_run
 from hakit.readers.vmrange import Vm
-from hakit.verdict import compute, read_jsonl
+from hakit.jsonl import read_jsonl
+from hakit.verdict import compute
 
 HOURS = 4
 LOAD_S = HOURS * 3600
@@ -239,3 +240,32 @@ def test_obs_check_runs_the_base_check_script() -> None:
     (call,) = fake.calls
     assert call.argv[0].endswith("deploy/observability/check.sh") and call.argv[1:] == ["--wait", "30", "x", "y"]
     assert call.env == {"VM": "http://vm"} and res.rc == 1
+
+
+def test_drift_s_setup_latency_leaves_out_measurements_across_a_generator_stall(tmp_path: Path) -> None:
+    from hakit.readers.drift import latency_points
+
+    d = soak_dir(tmp_path, True)
+    profile = json.loads((d / "profile.json").read_text())
+    profile["generator_stall_ms"] = 500
+    profile["streams"] = [{**s, "cps": 0.2} for s in profile["streams"]]
+    (d / "profile.json").write_text(json.dumps(profile))
+    recs = read_jsonl(d / "records.jsonl")
+    # A gap of 10 s where a start is due every 5 s: a stall (1/cps 5 s + 0.5 s).
+    gap_from, gap_to = T0 + 7_000_000, T0 + 7_010_000
+    recs = [r for r in recs if not gap_from < jv.number(r, "started_at_ms") < gap_to]
+    late = record("late", gap_from, provisional=9_000)
+    recs.append(late)
+    write_jsonl(d / "records.jsonl", recs)
+    points = latency_points(read_run(d))
+    assert all(ms < 9_000 for pts in points.values() for _, ms in pts)
+    assert len(points["basic"]) + len(points["slow"]) == len(recs) - 1  # `late` alone
+
+
+def test_drift_exits_non_zero_on_a_failing_or_unjudged_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hakit.cli import main
+
+    monkeypatch.setenv("HAKIT_VM_URL", "http://127.0.0.1:9")
+    d = soak_dir(tmp_path, True)
+    # The slow shape fails from the records; the series, unread, are na.
+    assert main(["drift", str(d)]) == 1

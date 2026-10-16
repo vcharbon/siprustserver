@@ -52,10 +52,14 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["at_ms", "ms", "spoiled"],
+              "required": ["at_ms", "ms", "spoiled", "source"],
               "properties": {
                 "at_ms": { "type": "number" },
                 "ms": { "type": "number" },
+                "source": {
+                  "description": "`starts`: a gap in the call starts; `watchdog`: the generator's own watchdog fired.",
+                  "enum": ["starts", "watchdog"]
+                },
                 "spoiled": {
                   "description": "The measurements the stall spoiled, listed in its `generator_stall` integrity finding.",
                   "type": "integer"

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .clock import FakeClock
 from .executor import Call, FakeExecutor, HttpResult, ProcResult, Rule
-from .verdict import read_jsonl
+from .jsonl import read_jsonl
 
 STAT_HEADER = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated\n"
 STAT_ROW = "0;0;0;0;0\n"

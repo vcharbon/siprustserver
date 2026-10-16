@@ -21,7 +21,7 @@ from hakit.paths import BASE_CONTENT
 from hakit.preflight import open_events
 from hakit.runner import Runner
 from hakit.schemas import SchemaSet
-from hakit.verdict import read_jsonl
+from hakit.jsonl import read_jsonl
 
 SCHEMAS = SchemaSet.load()
 
@@ -92,13 +92,20 @@ def test_a_fire_request_runs_a_manual_event_and_one_during_its_window_is_refused
     assert not (run_dir / "active").exists()
 
 
-def test_a_manual_window_overlapping_a_scheduled_one_makes_the_run_invalid(tmp_path: Path) -> None:
+def test_a_fire_whose_window_would_reach_a_scheduled_inject_is_refused(tmp_path: Path) -> None:
+    # flaky holds 5 s, expected 65 s, settle 40 s: a window to +105 s, past the
+    # scheduled inject at +30 s.
     content = content_with_defaults(tmp_path, {"at": [{"at_s": 30, "incident": "flaky", "budget": "any"}]})
     run_dir = run(content, tmp_path, requests_on_first_wait(tmp_path, ["flaky"]))
+    assert answers(run_dir) == [
+        {"accepted": False, "reason": "its window (expected 65 s + settle 40 s) would reach event 001-flaky at +30 s", "event": ""}
+    ]
     v = as_obj(json.loads((run_dir / "verdict.json").read_text()))
-    assert [w["event"] for w in jv.objs(v, "windows")] == ["m001-flaky", "001-flaky"]
-    assert [(i["kind"], i.get("event")) for i in jv.objs(v, "integrity")] == [("window_overlap", "001-flaky")]
-    assert v["status"] == "invalid"
+    assert [w["event"] for w in jv.objs(v, "windows")] == ["001-flaky"] and v["integrity"] == []
+    (tmp_path / "results").rename(tmp_path / "first")
+    content = content_with_defaults(tmp_path / "b", {"at": [{"at_s": 106, "incident": "flaky", "budget": "any"}]})
+    run_dir = run(content, tmp_path, requests_on_first_wait(tmp_path, ["flaky"]))
+    assert [a["accepted"] for a in answers(run_dir)] == [True]
 
 
 def test_a_died_stream_opens_a_detected_window_that_allows_nothing(tmp_path: Path) -> None:

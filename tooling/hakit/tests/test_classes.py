@@ -92,3 +92,11 @@ def test_a_failed_count_kept_in_the_run_directory_makes_the_run_invalid(tmp_path
     v = compute(d, SCHEMAS)
     assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [("class_failed", "class media_gap: exit 1: x")]
     assert v["status"] == "invalid"
+
+
+def test_a_class_the_run_expected_without_its_output_makes_the_run_invalid(tmp_path: Path) -> None:
+    d = run_dir(tmp_path, [], calls=0, events=[])
+    meta = json.loads((d / "run-meta.json").read_text())
+    (d / "run-meta.json").write_text(json.dumps({**meta, "classes": ["media_gap"]}))
+    v = compute(d, SCHEMAS)
+    assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [("class_failed", "class media_gap: no output in the run directory")]

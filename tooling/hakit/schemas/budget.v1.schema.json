@@ -70,7 +70,7 @@
           "default": 10
         },
         "latency_slack_ms": {
-          "description": "Added to the baseline p99 × (1 + tolerance): a relative tolerance alone is jitter on a setup of a few milliseconds.",
+          "description": "A span p99 is back within max(baseline × (1 + tolerance), baseline + latency_slack_ms): a relative tolerance alone is jitter on a setup of a few milliseconds.",
           "type": "number",
           "minimum": 0,
           "default": 50

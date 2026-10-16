@@ -19,6 +19,7 @@ from .run_view import read_run
 from .vmrange import Vm
 
 COMMANDS = ("drift", "chart", "logs", "obs-check")
+DRIFT_EXIT = {"pass": 0, "warn": 0, "fail": 1, "na": 3}
 
 
 def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
@@ -66,7 +67,7 @@ def run(cmd: str, args: argparse.Namespace, env: Mapping[str, str], executor: Ex
         for c in jv.objs(doc, "checks"):
             print(f"{c['verdict']:5} {c['name']}: {c['detail']}")
         print(f"drift verdict: {doc['verdict']} ({run_dir / 'drift' / 'drift.json'})")
-        return 0
+        return DRIFT_EXIT[str(doc["verdict"])]
     if cmd == "chart":
         view = read_run(Path(args.run)) if args.run else None
         req = ChartRequest(args.title, list(args.expr), list(args.legend), args.start, args.end, args.step, args.unit, tuple(args.marker))

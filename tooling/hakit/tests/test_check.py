@@ -74,8 +74,25 @@ def test_settle_and_drain_cover_the_streams(tmp_path: Path) -> None:
     c = entry(tmp_path, settle_s=10, drain_s=20, schedule={"at": [{"at_s": 10, "incident": "freeze", "budget": "any", "params": {"mode": "m"}}]})
     assert errors(c) == [
         "profile 'p': drain_s 20 is below the longest stream teardown 96",
-        "profile 'p' event 1 (freeze): settle_s 10 is below the longest setup_deadline_s 32",
-        "profile 'p': settle_s 10 is below the longest setup_deadline_s 32",
+        "profile 'p' event 1 (freeze): settle_s 10 is below the longest setup_deadline_s 32 plus the 1 s deadline tick",
+        "profile 'p': settle_s 10 is below the longest setup_deadline_s 32 plus the 1 s deadline tick",
+    ]
+
+
+def test_settle_covers_the_setup_deadline_plus_the_deadline_tick(tmp_path: Path) -> None:
+    sched = {"at": [{"at_s": 10, "incident": "freeze", "budget": "any", "params": {"mode": "m"}}]}
+    assert errors(entry(tmp_path / "a", settle_s=32, schedule=sched)) == [
+        "profile 'p' event 1 (freeze): settle_s 32 is below the longest setup_deadline_s 32 plus the 1 s deadline tick",
+        "profile 'p': settle_s 32 is below the longest setup_deadline_s 32 plus the 1 s deadline tick",
+    ]
+    assert errors(entry(tmp_path / "b", settle_s=33, schedule=sched)) == []
+
+
+def test_a_recovery_span_must_hold_enough_calls_of_each_stream(tmp_path: Path) -> None:
+    slow = {**STREAM, "cps": 1.9}
+    sched = {"at": [{"at_s": 10, "incident": "freeze", "budget": "any", "params": {"mode": "m"}}]}
+    assert errors(entry(tmp_path, streams=[slow], schedule=sched)) == [
+        "profile 'p' event 1 (freeze): budget 'any' recovery hold_s 10 holds 19 calls of stream 'basic', under 20",
     ]
 
 

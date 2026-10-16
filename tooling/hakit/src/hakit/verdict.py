@@ -14,8 +14,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import jsonval as jv
-from .cdrjoin import join
+from .cdr_check import cdr_impacts_of
 from .classes import read_counts
+from .jsonl import read_jsonl
 from .classify import SETUP_FAILED, Classified, Impact, SetupLatency, classify
 from .judge import judge
 from .jsonval import Json, as_obj
@@ -24,17 +25,12 @@ from .profile import Profile, parse_profile
 from .recovery import Sample, StreamSamples
 from .reconcile import integrity, reconcile
 from .schemas import SchemaSet
-from .stalls import Stall, detect, stall_holding, stall_of
+from .generator_health import run_stalls
+from .stalls import Stall, stall_holding, stall_of
 from .window_recovery import recover_windows
 from .windows import Window, build_windows
 
 MAX_CALL_IDS = 50
-
-
-def read_jsonl(p: Path) -> list[Json]:
-    if not p.is_file():
-        return []
-    return [as_obj(json.loads(line), p.name) for line in p.read_text().splitlines() if line.strip()]
 
 
 def _load_json(p: Path) -> Json:
@@ -71,29 +67,25 @@ class _Calls:
         return out
 
 
-def _stalls(calls: _Calls, profile: Profile, load_start_ms: float) -> list[Stall]:
-    found: list[Stall] = []
-    for name, starts in sorted(calls.starts().items()):
-        s = profile.stream(name)
-        if s is None:
-            continue
-        found += detect(name, starts, lambda at, s=s: s.cps_at((at - load_start_ms) / 1000), profile.generator_stall_ms)
-    return found
-
-
-def _spoiled_timeout(imp: Impact, stalls: list[Stall]) -> Stall | None:
-    if imp.cls != SETUP_FAILED or imp.reason != "timeout":
+def _spoiled_timeout(imp: Impact, stalls: list[Stall], profile: Profile) -> Stall | None:
+    """The stall a timeout's setup deadline (its start + the stream's
+    `setup_deadline_s`) falls in: the generator checked it while it stalled."""
+    s = profile.stream(imp.stream)
+    if imp.cls != SETUP_FAILED or imp.reason != "timeout" or s is None:
         return None
-    return stall_holding(stalls, imp.stream, imp.at_ms)
+    return stall_holding(stalls, imp.stream, imp.started_at_ms + s.setup_deadline_s * 1000)
 
 
 def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, StreamSamples]:
-    """Per stream that runs for the whole load, the setups recovery reads."""
+    """Per stream that runs for the whole load, the setups recovery reads; a call
+    whose timeout a stall spoiled is left out."""
     eligible = {s.name for s in profile.streams if s.start == "run"}
     by_stream: dict[str, list[Sample]] = defaultdict(list)
     for r, c in calls.valid:
         stream = jv.string(r, "stream")
         if stream not in eligible or c.generator_failure is not None:
+            continue
+        if any(_spoiled_timeout(i, stalls, profile) is not None for i in c.impacts):
             continue
         lat = c.latency
         ms = None
@@ -102,23 +94,6 @@ def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, 
         ok = not any(i.budgetable for i in c.impacts)
         by_stream[stream].append(Sample(jv.number(r, "started_at_ms"), ok, ms))
     return {k: StreamSamples(v) for k, v in by_stream.items()}
-
-
-def _cdr_impacts(run_dir: Path, profile: Profile, calls: _Calls, schemas: SchemaSet) -> tuple[list[Impact], list[Json]]:
-    if not profile.cdr_join:
-        return [], []
-    p = run_dir / "cdrs.jsonl"
-    if not p.is_file():
-        return [], [integrity("class_failed", "cdr_mismatch: the run directory holds no cdrs.jsonl")]
-    good: list[Json] = []
-    bad = 0
-    for line in read_jsonl(p):
-        if schemas.errors("cdr-observation.v1", line):
-            bad += 1
-        else:
-            good.append(line)
-    found = [integrity("class_failed", f"cdr_mismatch: {bad} observations break cdr-observation.v1")] if bad else []
-    return join([r for r, _ in calls.valid], good), found
 
 
 def _stall_findings(stalled: dict[Stall, list[str]]) -> list[Json]:
@@ -148,24 +123,38 @@ def _window_integrity(windows: list[Window]) -> list[Json]:
     return found
 
 
+class _Run:
+    """The inputs of a run directory the verdict reads, its calls classified and
+    its generator stalls found."""
+
+    def __init__(self, run_dir: Path, schemas: SchemaSet) -> None:
+        self.meta = _load_json(run_dir / "run-meta.json")
+        self.profile = parse_profile(_load_json(run_dir / "profile.json"))
+        self.budgets: dict[str, Budget] = {}
+        for p in sorted((run_dir / "budgets").glob("*.json")):
+            b = parse_budget(_load_json(p))
+            self.budgets[b.name] = b
+        shapes: dict[str, Shape] = {}
+        for p in sorted((run_dir / "catalogs").glob("*.json")):
+            for s in parse_catalog(_load_json(p)).shapes:
+                shapes[s.shape] = s
+        self.calls = _Calls(read_jsonl(run_dir / "records.jsonl"), shapes, schemas)
+        load_start = jv.opt_number(self.meta, "load_started_at_ms") or jv.number(self.meta, "started_at_ms")
+        self.stalls = run_stalls(run_dir, self.calls.starts(), self.profile, load_start)
+
+
+def recovery_samples(run_dir: Path, schemas: SchemaSet) -> dict[str, StreamSamples]:
+    """The setups recovery reads, per stream."""
+    run = _Run(run_dir, schemas)
+    return _samples(run.calls, run.stalls, run.profile)
+
+
 def compute(run_dir: Path, schemas: SchemaSet) -> Json:
-    meta = _load_json(run_dir / "run-meta.json")
-    profile = parse_profile(_load_json(run_dir / "profile.json"))
-    budgets: dict[str, Budget] = {}
-    for p in sorted((run_dir / "budgets").glob("*.json")):
-        b = parse_budget(_load_json(p))
-        budgets[b.name] = b
-    shapes: dict[str, Shape] = {}
-    for p in sorted((run_dir / "catalogs").glob("*.json")):
-        for s in parse_catalog(_load_json(p)).shapes:
-            shapes[s.shape] = s
+    run = _Run(run_dir, schemas)
+    meta, profile, budgets, calls, stalls = run.meta, run.profile, run.budgets, run.calls, run.stalls
     streams_doc = [as_obj(s) for s in jv.as_list(json.loads((run_dir / "streams.json").read_text()))]
     found: list[Json] = read_jsonl(run_dir / "integrity.jsonl")
     windows = build_windows(read_jsonl(run_dir / "events.jsonl"))
-
-    calls = _Calls(read_jsonl(run_dir / "records.jsonl"), shapes, schemas)
-    load_start = jv.opt_number(meta, "load_started_at_ms") or jv.number(meta, "started_at_ms")
-    stalls = _stalls(calls, profile, load_start)
     stalled: dict[Stall, list[str]] = defaultdict(list)
     impacts: list[Impact] = []
     latencies: list[SetupLatency] = []
@@ -176,7 +165,7 @@ def compute(run_dir: Path, schemas: SchemaSet) -> Json:
             found.append(integrity("generator_failure", c.generator_failure, stream=stream, at_ms=jv.number(r, "ended_at_ms")))
             continue
         for imp in c.impacts:
-            st = _spoiled_timeout(imp, stalls)
+            st = _spoiled_timeout(imp, stalls, profile)
             if st is None:
                 impacts.append(imp)
             else:
@@ -191,8 +180,8 @@ def compute(run_dir: Path, schemas: SchemaSet) -> Json:
         found.append(integrity("record_gap", f"{calls.dups} records repeat a Call-ID already recorded"))
 
     recovered = recover_windows(windows, _samples(calls, stalls, profile), budgets)
-    cdr_impacts, cdr_found = _cdr_impacts(run_dir, profile, calls, schemas)
-    class_impacts, class_found = read_counts(run_dir)
+    cdr_impacts, cdr_found = cdr_impacts_of(run_dir, profile, [r for r, _ in calls.valid], schemas)
+    class_impacts, class_found = read_counts(run_dir, jv.strings(meta, "classes"))
     found += cdr_found + class_found
 
     cps = {jv.string(s, "stream"): jv.number(s, "cps") for s in streams_doc}
@@ -210,7 +199,9 @@ def compute(run_dir: Path, schemas: SchemaSet) -> Json:
         stalled[st].append(lat.call_id)
     stall_rows: dict[str, list[Json]] = defaultdict(list)
     for st in stalls:
-        stall_rows[st.stream].append({"at_ms": st.at_ms, "ms": round(st.ms, 3), "spoiled": len(stalled.get(st, []))})
+        stall_rows[st.stream].append(
+            {"at_ms": st.at_ms, "ms": round(st.ms, 3), "spoiled": len(stalled.get(st, [])), "source": st.source}
+        )
     streams_out, reconciled = reconcile(streams_doc, calls.per_stream, success, stall_rows)
     found += reconciled + _stall_findings(stalled) + _window_integrity(windows)
 

@@ -201,7 +201,7 @@ class Runner:
         unreadable: list[Json] = [{"kind": "generator_failure", "detail": f"unreadable record line: {b}"} for b in bad]
         integrity += unreadable
         if profile.cdr_join:
-            integrity += collect_cdrs(self.vlogs, self.clock, run, run_dir, started)
+            integrity += collect_cdrs(self.vlogs, self.vm, self.lab, self.clock, run, run_dir, started)
         run_counts(self.content.classes, run_dir, self.executor)
         _dump(run_dir / "streams.json", stream_docs)
         with (run_dir / "integrity.jsonl").open("w") as fh:
@@ -246,6 +246,7 @@ class Runner:
             "search_path": [str(p) for p in self.content.path],
             "host": facts,
             "sut_calls_at_start": held,
+            "classes": sorted(self.content.classes),
         }
         _dump(run_dir / "run-meta.json", meta)
 
@@ -316,6 +317,7 @@ class Runner:
                     "shape": s.stream.shape,
                     "start": s.stream.start,
                     "cps": s.stream.cps,
+                    "call_limit": s.max_concurrent(),
                     "calls": c.calls_created,
                     "not_placed": 0,
                     "reconciled": True,

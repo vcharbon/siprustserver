@@ -10,9 +10,14 @@ from __future__ import annotations
 from .content import Content
 from .jsonval import as_obj
 from .model import Incident
+from .recovery import MIN_SAMPLES
 from .profile import EventSpec, Profile, Stream
 from .schedule import overlaps, plan
 from .sipp_driver import worst_call_s
+
+# The scenario checks its setup deadline once a second: a deadline is noticed up
+# to one tick after it passes.
+DEADLINE_TICK_S = 1.0
 
 _PY_TYPES: dict[str, tuple[type, ...]] = {
     "string": (str,),
@@ -70,6 +75,28 @@ def _teardown_s(s: Stream) -> float:
     return max(bound, worst_call_s(s)) if s.driver == "sipp" else bound
 
 
+def _tick_note(deadline: float) -> str:
+    return f"is below the longest setup_deadline_s {deadline:g} plus the {DEADLINE_TICK_S:g} s deadline tick"
+
+
+def _hold_errors(where: str, ev: EventSpec, profile: Profile, content: Content) -> list[str]:
+    """A recovery span of the event's budget must hold MIN_SAMPLES calls of every
+    stream that runs for the whole load (ADR-0049 §3.6)."""
+    budget = content.budgets.get(ev.budget)
+    if budget is None:
+        return []
+    hold = budget.recovery.hold_s
+    out: list[str] = []
+    for s in profile.streams:
+        rate = min([s.cps, *(c for _, c in s.steps if c > 0)])
+        calls = int(hold * rate)
+        if s.start == "run" and calls < MIN_SAMPLES:
+            out.append(
+                f"{where}: budget {ev.budget!r} recovery hold_s {hold:g} holds {calls} calls of stream {s.name!r}, under {MIN_SAMPLES}"
+            )
+    return out
+
+
 def profile_errors(profile: Profile, content: Content) -> list[str]:
     where = f"profile {profile.name!r}"
     errs: list[str] = []
@@ -97,10 +124,11 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
         ew = f"{where} event {i + 1} ({ev.label})"
         errs.extend(_event_errors(ew, ev, profile, content))
         settle = ev.settle_s if ev.settle_s is not None else profile.settle_s
-        if settle < deadline:
-            errs.append(f"{ew}: settle_s {settle:g} is below the longest setup_deadline_s {deadline:g}")
-    if profile.settle_s < deadline:
-        errs.append(f"{where}: settle_s {profile.settle_s:g} is below the longest setup_deadline_s {deadline:g}")
+        if settle < deadline + DEADLINE_TICK_S:
+            errs.append(f"{ew}: settle_s {settle:g} {_tick_note(deadline)}")
+        errs.extend(_hold_errors(ew, ev, profile, content))
+    if profile.settle_s < deadline + DEADLINE_TICK_S:
+        errs.append(f"{where}: settle_s {profile.settle_s:g} {_tick_note(deadline)}")
     for name, entry in profile.defaults.items():
         if name not in content.incidents:
             errs.append(f"{where}: defaults name incident {name!r}, which is not on the search path")

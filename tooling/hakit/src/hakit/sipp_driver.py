@@ -94,10 +94,13 @@ class SippStream:
         return int((worst_call_s(s) + RECV_BACKSTOP_MARGIN_S) * 1000)
 
     def max_concurrent(self) -> int:
+        """SIPp's call limit: every call the peak rate places, each at its worst
+        length, so the limit is reached only when the system under test holds
+        calls past every deadline of the scenario (ADR-0049 §3.12)."""
         s = self.stream
         if s.max_concurrent is not None:
             return s.max_concurrent
-        return int(math.ceil(s.cps * (s.setup_deadline_s + s.ring_s + s.hold_s) * 2)) + 10
+        return int(math.ceil(s.peak_cps * worst_call_s(s))) + 10
 
     def sipp_argv(self) -> list[str]:
         s = self.stream

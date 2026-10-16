@@ -19,7 +19,7 @@ from hakit.lab import lab_from_env
 from hakit.paths import BASE_CONTENT
 from hakit.runner import Runner, RunRefused
 from hakit.schemas import SchemaSet
-from hakit.verdict import read_jsonl
+from hakit.jsonl import read_jsonl
 
 SCHEMAS = SchemaSet.load()
 SMOKE = "kill-worker-smoke"

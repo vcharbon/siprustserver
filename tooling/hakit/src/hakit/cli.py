@@ -28,7 +28,7 @@ from .readers import cli as readers
 from .runner import Runner, RunRefused
 from .schedule import PlannedEvent, plan, plan_event
 from .schemas import SchemaSet
-from .verdict import read_jsonl
+from .jsonl import read_jsonl
 from .vm import VictoriaMetrics
 from .events import EventJournal
 

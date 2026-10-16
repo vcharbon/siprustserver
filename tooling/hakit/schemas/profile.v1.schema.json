@@ -27,7 +27,7 @@
       "default": 120
     },
     "settle_s": {
-      "description": "The default tail of a window after its `recovered` instant. At least the longest `setup_deadline_s` of the streams; the runner refuses a shorter one.",
+      "description": "The default tail of a window after its `recovered` instant. At least the longest `setup_deadline_s` of the streams plus 1 s (the deadline tick); the runner refuses a shorter one.",
       "type": "number",
       "minimum": 0,
       "default": 60

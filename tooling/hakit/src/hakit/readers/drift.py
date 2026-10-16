@@ -10,12 +10,14 @@ judged on its fit (`drift_fit`). The checks:
 - worker memory series: relative late slope and growth;
 - restartable containers' RSS, per instance, judged only on a long late span;
 - worker CPU per completed call: relative;
-- setup latency per shape, from the records (window mean, p50, p95, p99): absolute;
+- setup latency per shape, from the records (window mean, p50, p95, p99), a
+  setup measured across a generator stall left out: absolute;
 - after the drain: the gauges that must read 0, and worker memory against its
   last loaded span;
 - one CDR outcome per completed call, per worker, over the run.
 
 A signal with no series is `na`; the run's verdict is the worst counted check.
+`hakit drift` exits 0 on pass or warn, 1 on fail, 3 on na.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from pathlib import Path
 from .. import jsonval as jv
 from ..classify import setup_latency
 from ..jsonval import Json
+from ..stalls import stall_of
 from .drift_fit import DriftFit, fit, judge, judge_abs, judge_instances, run_verdict
 from .drift_spec import DriftSpec
 from .run_view import RunView
@@ -71,6 +74,17 @@ def _fit_doc(f: DriftFit | None) -> Json | None:
 
 def _chart_fit(f: DriftFit | None) -> Fit | None:
     return None if f is None else Fit(f.t0, f.intercept, f.slope_per_h)
+
+
+def latency_points(view: RunView) -> dict[str, list[tuple[float, float]]]:
+    """Per shape, (start in s, setup time in ms) of every call with a setup time
+    not measured across a generator stall."""
+    out: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for r in view.records:
+        lat = setup_latency(r)
+        if lat is not None and stall_of(view.stalls, lat.stream, lat.at_ms - lat.ms, lat.at_ms) is None:
+            out[jv.string(r, "shape")].append((jv.number(r, "started_at_ms") / 1000, lat.ms))
+    return out
 
 
 class Drift:
@@ -182,11 +196,7 @@ class Drift:
         """Setup latency per shape from the records, one sample per grid step: the
         calls started in the window ending there."""
         sp = self.spec
-        by_shape: dict[str, list[tuple[float, float]]] = defaultdict(list)
-        for r in self.view.records:
-            lat = setup_latency(r)
-            if lat is not None:
-                by_shape[jv.string(r, "shape")].append((jv.number(r, "started_at_ms") / 1000, lat.ms))
+        by_shape = latency_points(self.view)
         if not by_shape:
             self.check("setup latency", "na", "no record with a setup time")
         series: list[tuple[str, list[Point]]] = []

@@ -32,6 +32,14 @@ class Stream:
                 rate = cps
         return rate
 
+    def rate_between(self, from_s: float, to_s: float) -> float:
+        """The lowest offered rate in force over [from_s, to_s] of the load."""
+        return min([self.cps_at(from_s), *(cps for at_s, cps in self.steps if from_s < at_s <= to_s)])
+
+    @property
+    def peak_cps(self) -> float:
+        return max([self.cps, *(cps for _, cps in self.steps)])
+
 
 @dataclass(frozen=True)
 class EventSpec:

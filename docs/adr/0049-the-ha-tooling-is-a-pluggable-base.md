@@ -260,21 +260,27 @@ made. A run profile joins the two.
    record yields no budgetable impact; its setup time is what `setup_slow`
    measures. The baseline of a stream is the successful-setup ratio and the
    nearest-rank p99 setup time of its calls started in the `baseline_s`
-   before `inject`; a stream with no call there (one that starts with an
-   incident) has no baseline and no recovery. From `healed`, in steps of 1 s,
-   the first span of `hold_s` whose calls (by `started_at_ms`, at least one)
-   have a ratio of at least the baseline's × (1 − `tolerance`) and a p99 of at
-   most the baseline's × (1 + `tolerance`) + `latency_slack_ms` (default 50:
-   a relative tolerance alone is jitter on a setup of a few milliseconds) is
-   where the stream is back. Ratios, not counts, so a rate change from
-   `steps` is no impact. `recovery_s` is the time from `healed` to the start
-   of that span; a budget's `recovery.max_s` caps it, and without one the
-   stream must be back before the window's limit (§3.5). A measurement taken
-   across a generator stall (§3.12) counts in neither the baseline nor a
-   span.
+   before `inject`, leaving out the calls started inside an earlier window.
+   A baseline needs 20 calls and its p99 20 setup times; a stream short of
+   them (one that starts with an incident, or whose baseline an earlier
+   window took) has no recovery, and the window's facts (`hakit` /
+   `recovery`) say why. From `healed`, in steps of 1 s, the first span of
+   `hold_s` holding at least 20 calls (by `started_at_ms`), a ratio of at
+   least the baseline's × (1 − `tolerance`) and a p99 (over at least 20
+   setup times) of at most max(baseline × (1 + `tolerance`), baseline +
+   `latency_slack_ms`) is where the stream is back (`latency_slack_ms`
+   default 50: a relative tolerance alone is jitter on a setup of a few
+   milliseconds). The runner refuses a budget whose `hold_s` holds fewer than
+   20 calls of a stream at its lowest rate. Ratios, not counts, so a rate
+   change from `steps` is no impact. `recovery_s` is the time from `healed`
+   to the start of that span; a budget's `recovery.max_s` caps it, and
+   without one the stream must be back before the window's limit (§3.5). A
+   measurement taken across a generator stall (§3.12) counts in neither the
+   baseline nor a span.
 7. **Timing bounds.** `settle_s` is at least the longest `setup_deadline_s`
-   of the streams, so a call stranded at the fault reaches its deadline
-   inside the window; `drain_s` is at least max(`setup_deadline_s`,
+   of the streams plus 1 s (the tick at which a generator checks its
+   deadline), so a call stranded at the fault reaches its deadline inside
+   the window; `drain_s` is at least max(`setup_deadline_s`,
    `ring_s` + `hold_s`) of every stream. The runner refuses a profile that
    breaks either. The dry-run checks that no two windows overlap using each
    event's `expected_s` (default `duration_s` + 60) plus `settle_s`; with the
@@ -287,30 +293,42 @@ made. A run profile joins the two.
    `cdr-observation.v1` line per CDR it consumes to VictoriaLogs the way the
    generators ship records (`source` `cdr-consumer`); a product whose CDR
    payload differs builds the consumer from the same library with its own
-   observation view. After the drain the runner exports the observations
-   whose `call_id` carries the run id (the Call-ID nonce of §6.4) into
-   `cdrs.jsonl`, once their count has stopped growing for 10 s (at most
-   60 s). Joined on `call_id`:
+   observation view, and counts the payloads its view cannot read
+   (`cdr_observations_unread_total`). After the drain the runner exports
+   the observations whose `call_id` carries the run id (the Call-ID nonce of
+   §6.4) into `cdrs.jsonl`, once the consumer has consumed every CDR the
+   system under test wrote (the lab's written and consumed counters over the
+   run) and the shipped observations have stopped growing for 10 s, at most
+   300 s, long enough for a broker thawing late. `cdrs-collect.json` keeps
+   whether that happened and the counts. Byte-identical observations (a
+   redelivery, a re-post) count once. Joined on `call_id`:
    - an answered call with no CDR is charged at its `ended_at_ms`;
    - a CDR with no record at its own `end_ms`;
-   - each CDR after the first of a call at the record's `ended_at_ms`;
+   - each distinct CDR after the first of a call at the record's
+     `ended_at_ms`;
    - a CDR whose disposition differs from the record's at the record's
      `ended_at_ms`;
    - for a record ending `answered` (a planned teardown, timed by the
      caller), a duration that differs from `ended_at_ms` − `answered_at_ms`
-     by more than 1 s plus the CDR's unit, at the record's `ended_at_ms`. A
-     `cut` or `stranded` call is an impact already: of its CDR only the
-     presence and the disposition are compared.
+     by more than 1 s plus the CDR's unit, at the record's `ended_at_ms`;
+   - for a `cut` or `stranded` call, an impact already, a CDR ending more
+     than 1 s plus its unit after the record's `ended_at_ms`: the call was
+     billed past the caller's end.
 
    An unanswered call without a CDR is no mismatch. A window allows
-   `cdr_mismatch.max_calls`.
+   `cdr_mismatch.max_calls`. What leaves the CDR measurement in doubt is a
+   `class_failed` integrity finding, never impacts: an export cut with CDRs
+   still owed (its missing CDRs are not charged), payloads the consumer could
+   not read, observations off the schema, and no observation at all while
+   answered calls exist.
 9. **Events off the schedule.** `hakit fire <incident>` during a run and a
    `detected` event (named after what was detected, such as `stream_died`)
    open windows under the same rules. Their ids are `m<seq>-<incident>` and
    `d<seq>-<name>`. `hakit fire` leaves a request in the running run's
    directory (`fire/`) and waits for the answer; the runner takes it between
-   two waits, refuses it without a `defaults` entry for the incident or while
-   a window is open, and otherwise runs the event with the entry's budget,
+   two waits, refuses it without a `defaults` entry for the incident, while
+   a window is open, or when its window (its `expected_s` + `settle_s`)
+   would reach a scheduled inject, and otherwise runs the event with the entry's budget,
    parameters and target. A detected event heals nothing: its window opens at
    the detection and closes `settle_s` later, under the `defaults` entry of
    its name, or without one under a budget that allows nothing.
@@ -319,8 +337,10 @@ made. A run profile joins the two.
     exported the runner runs each count once, with `HAKIT_RUN_DIR` set; it
     prints one JSON array of impacts with their instants, kept as
     `classes/<name>.json` in the run directory so the verdict recomputes
-    without the executable. A count that fails or prints anything else is a
-    `class_failed` integrity finding. Attribution and budgets work on it as
+    without the executable. `run-meta.json` lists the classes of the search
+    path the run expects. A count that fails or prints anything else, and an
+    expected class without its kept answer, is a `class_failed` integrity
+    finding. Attribution and budgets work on it as
     on a built-in class (`budget.classes.<name>.max` per window).
 11. **The verdict.** `verdict.json` (`verdict.v1`): per stream the calls, the
     calls never placed, the records, the successes and the generator's
@@ -334,15 +354,20 @@ made. A run profile joins the two.
     from it: the status and why, then per window and per stream each class
     against its allowance.
 12. **Generator health.** A generator stall is a time the generator did not
-    run: it placed no call and read no message. Its signal is in the records:
-    two consecutive calls of a stream started more than 1/cps +
+    run: it placed no call and read no message. It has two signals. In the
+    records: two consecutive calls of a stream started more than 1/cps +
     `generator_stall_ms` apart (profile, default 500 ms, SIPp's own watchdog
-    threshold), at the rate of the step in force; the stall is the interval
-    between the two starts. A paced generator places the calls it owes once
-    it runs again, and the runner sizes SIPp's call limit at twice the
-    stream's concurrency, so a gap is never the system under test holding
-    calls. A setup time measured across a stall, and a setup deadline that
-    falls inside one, measure the generator: they leave the impacts and are
+    threshold), at the lowest rate in force over the gap; the stall runs from
+    the start that was due (the first start + 1/cps) to the second start. A
+    gap is also what a generator at its call limit shows, the system under
+    test holding calls: the runner sizes SIPp's limit for every call of the
+    peak rate at the scenario's worst length, and a gap while the generator's
+    statistics show the limit reached is no stall. In the generator's own
+    statistics: the interval between two rows across which its watchdog
+    counter grew (SIPp's `WatchdogMinor`/`WatchdogMajor`). A setup time
+    measured across a stall, and a setup deadline (the call's start + the
+    stream's `setup_deadline_s`) that falls inside one, measure the generator:
+    they leave the impacts and the recovery samples, and are
     listed, with their Call-IDs, in one `generator_stall` integrity finding
     per stall. A stall that spoiled no measurement is listed in the stream's
     `stalls` and leaves the status alone. A generator's own count of calls it
@@ -496,8 +521,9 @@ made. A run profile joins the two.
    is a product's (pods, containers, bounds, series scopes) is a flag or a
    `--spec` YAML the product keeps in its own repository, never a search-path
    family. `drift` judges memory, CPU per call, setup latency per shape (from
-   the records), the gauges after the drain and one CDR outcome per call, on
-   samples outside the verdict's windows; `chart` draws a range query with the
+   the records, a setup measured across a generator stall left out), the
+   gauges after the drain and one CDR outcome per call, on samples outside
+   the verdict's windows, and exits non-zero on a `fail` or `na`; `chart` draws a range query with the
    run's windows and phases; `logs` reads every container incarnation's lines
    back from VictoriaLogs; `obs-check` checks the series of named scopes; the
    capacity ramp's step judgement and CPU fit are pure functions over step

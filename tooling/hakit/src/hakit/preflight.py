@@ -9,7 +9,7 @@ from pathlib import Path
 from .executor import Executor
 from .jsonval import Json
 from .profile import Preflight
-from .verdict import read_jsonl
+from .jsonl import read_jsonl
 
 GIB = 1024**3
 

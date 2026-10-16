@@ -3,8 +3,9 @@
 `hakit fire` leaves `fire/<id>.request` (`{"incident": name}`) in the running
 run's directory and waits for `fire/<id>.answer` (`{"accepted", "reason",
 "event"}`). The runner takes requests between two waits: one is refused without
-a `defaults` entry for the incident, for a load incident, or while a window is
-open; otherwise its event `m<seq>-<incident>` runs with the entry's budget,
+a `defaults` entry for the incident, for a load incident, while a window is
+open, or when its window (`expected_s` + `settle_s`) would reach a scheduled
+inject; otherwise its event `m<seq>-<incident>` runs with the entry's budget,
 parameters and target. A detected event `d<seq>-<name>` heals nothing: its
 window opens at the detection and closes `settle_s` later, under the `defaults`
 entry of its name or a budget that allows nothing.
@@ -25,7 +26,7 @@ from .incident_exec import EventRunner
 from .jsonval import Json, as_obj
 from .model import Incident
 from .profile import EventSpec, Profile
-from .schedule import PlannedEvent, plan_event
+from .schedule import PlannedEvent, plan, plan_event
 
 ACTIVE = "active"
 FIRE_DIR = "fire"
@@ -153,6 +154,17 @@ class OffSchedule:
             return f"a window is open ({', '.join(sorted(self.journal.open))})"
         return None
 
+    def _scheduled_clash(self, ev: PlannedEvent) -> str | None:
+        """Why the manual event's window (its `expected_s` + `settle_s`) would reach
+        a scheduled inject still to come, or None."""
+        for sched in plan(self.profile, self.content.incidents):
+            if ev.at_s <= sched.at_s < ev.window_end_s:
+                return (
+                    f"its window (expected {ev.expected_s:g} s + settle {ev.settle_s:g} s) would reach event "
+                    f"{sched.event_id} at +{sched.at_s:g} s"
+                )
+        return None
+
     def poll(self) -> None:
         """Take every pending `hakit fire` request, oldest first."""
         fire = self.run_dir / FIRE_DIR
@@ -171,9 +183,13 @@ class OffSchedule:
             if why is not None or spec is None:
                 self._answer(request, False, why or "no defaults entry")
                 continue
-            self.manual += 1
             at_s = (self.clock.now_ms() - self.load_start_ms()) / 1000
-            ev = plan_event(self.manual, at_s, spec, self.profile, self.content.incidents, prefix="m")
+            ev = plan_event(self.manual + 1, at_s, spec, self.profile, self.content.incidents, prefix="m")
+            clash = self._scheduled_clash(ev)
+            if clash is not None:
+                self._answer(request, False, clash)
+                continue
+            self.manual += 1
             self._answer(request, True, "fired", ev.event_id)
             self.say(f"hakit: manual event {ev.event_id} (budget {spec.budget})")
             incs = [self.content.incidents[incident]]
