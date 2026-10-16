@@ -224,6 +224,8 @@ def test_obs_check_scopes_include_and_name_the_namespace(tmp_path: Path) -> None
     assert got[:5] == BASE_SCOPES["cluster"].series
     assert got[-1] == 'my_calls{namespace="lab"}' and got.count("kube_pod_info") == 1
     assert 'b2bua_active_calls{namespace="lab"}' in got
+    proxy = 'sip_proxy_requests_total{namespace="lab"}'
+    assert proxy not in got and selectors(scopes, ["proxy"], "lab")[-1] == proxy
     p.write_text("scopes:\n  sut: {series: [x]}\n")
     with pytest.raises(ValueError, match="the base's"):
         load_scopes(p)

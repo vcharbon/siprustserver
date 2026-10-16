@@ -32,18 +32,6 @@
         "step": "10s"
       },
       {
-        "name": "UAS crash (involuntary)",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "vm"
-        },
-        "enable": true,
-        "iconColor": "red",
-        "expr": "sip_chaos_window{type=\"uas_crash\"} == 1",
-        "titleFormat": "INVOLUNTARY UAS crash (test infra)",
-        "step": "10s"
-      },
-      {
         "name": "Incident window",
         "datasource": {
           "type": "prometheus",

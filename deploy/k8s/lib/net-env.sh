@@ -1,6 +1,7 @@
-# Shared network + port wiring for the kind-based SIP runner — the SINGLE source
-# of truth, sourced by run.sh, endurance.sh and chaos.sh so the three never
-# drift (PROXY_VIP/PROXY_TARGET are defaulted here once).
+# Shared network + port wiring of the kind lab — the SINGLE source of truth,
+# sourced by deploy/helm/lib/cluster.sh and restated by the charts' kind values
+# (deploy/helm/check asserts they agree; PROXY_VIP/PROXY_TARGET are defaulted
+# here once).
 # Everything here is overridable from the environment.
 #
 #   SIP_SUBNET   internal kind docker bridge /16   (default 172.20.0.0/16)
@@ -61,9 +62,9 @@ SIP_PORT="${SIP_PORT:-5060}"
 #                   high like PROXY_VIP so pinned container IPs never collide)
 #   SIPEXT_IF       optional explicit interface override (else resolved)
 #   SIPEXT_NET      docker network name
-#   Pinned container/edge addresses: edges .11/.12, loadgen .20, sipp-uas .21,
-#   dnsmasq .53 — pinned so ladders/scenarios are reproducible and a docker
-#   restart can never reshuffle them.
+#   Pinned container/edge addresses: edges .11/.12, sipp-uas .21, dnsmasq .53 —
+#   pinned so ladders/scenarios are reproducible and a docker restart can never
+#   reshuffle them.
 SIPEXT_SUBNET="${SIPEXT_SUBNET:-192.168.60.0/24}"
 case "$SIPEXT_SUBNET" in
   *.0/24) : ;;
@@ -77,7 +78,6 @@ SIPEXT_IF="${SIPEXT_IF:-eth1}"
 SIPEXT_NET="${SIPEXT_NET:-sipext}"
 SIPEXT_EDGE1_IP="${SIPEXT_EDGE1_IP:-${_sipext_prefix}.11}"
 SIPEXT_EDGE2_IP="${SIPEXT_EDGE2_IP:-${_sipext_prefix}.12}"
-SIPEXT_LOADGEN_IP="${SIPEXT_LOADGEN_IP:-${_sipext_prefix}.20}"
 SIPEXT_UAS_IP="${SIPEXT_UAS_IP:-${_sipext_prefix}.21}"
 SIPEXT_DNSMASQ_IP="${SIPEXT_DNSMASQ_IP:-${_sipext_prefix}.53}"
 
@@ -94,23 +94,19 @@ SIPEXT_TARGET="${SIPEXT_TARGET:-$SIPEXT_VIP}"
 
 export SIP_SUBNET SIP_GATEWAY PROXY_VIP PROXY_TARGET SIP_PORT
 export SIPEXT_SUBNET SIPEXT_GATEWAY SIPEXT_VIP SIP_IF SIPEXT_IF SIPEXT_NET
-export SIPEXT_EDGE1_IP SIPEXT_EDGE2_IP SIPEXT_LOADGEN_IP SIPEXT_UAS_IP SIPEXT_DNSMASQ_IP
+export SIPEXT_EDGE1_IP SIPEXT_EDGE2_IP SIPEXT_UAS_IP SIPEXT_DNSMASQ_IP
 export POD_CIDR PROXY_FACE_INT_CIDRS SIPEXT_TARGET
 
-# --- NEW KNOB (sipext generator migration): UAC stream IP plan ---------------
-# Every SIPp UAC stream launched as a docker container on the sipext bridge
-# (lib/sipext-gen.sh) gets ONE deterministic IP at SIPEXT_UAC_BASE_IP + slot,
+# Generator stream IP plan: every stream the HA tooling runs as a docker
+# container on the sipext bridge gets ONE deterministic IP at
+# SIPEXT_UAC_BASE_IP + its slot (the runner's HAKIT_SIPP_IP_BASE / _SLOTS),
 # parked ABOVE the pinned single-container range so parallel streams can never
-# collide with a pinned IP or with each other. The stream's stat exporter runs
-# in the SAME network namespace (--network container:<uac>), so :9035 rides the
-# stream's own IP — no second address needed. Full address plan for the /24:
-#   .1    gateway (the WSL host)         .11/.12 edge nodes (SIPEXT_EDGE*_IP)
-#   .20   loadgen (SIPEXT_LOADGEN_IP)    .21+    sipp-uas containers
-#   .53   dnsmasq                        .100+   UAC streams (slot plan below)
+# collide with a pinned IP or with each other. A SIPp stream's stat exporter
+# runs in the SAME network namespace, so :9035 rides the stream's own IP; a
+# loadgen stream serves :9300 there. Full address plan for the /24:
+#   .1    gateway (the host)             .11/.12 edge nodes (SIPEXT_EDGE*_IP)
+#   .21+  sipp-uas containers            .53     dnsmasq
+#   .100+ generator streams (slots 0..35, scraped by the host VictoriaMetrics)
 #   .250  SIPEXT_VIP (parked high)
-# Slot conventions (see lib/sipext-gen.sh; observability scrapes .100-.135):
-#   0      run.sh caps()/sweep()          1/2    chaos.sh failover/bringback
-#   3/4/5  chaos.sh peak/abuse/orphan     10..29 endurance long shards
-#   30..35 endurance reinvite/short_em/short_ne/limiter/spare
 SIPEXT_UAC_BASE_IP="${SIPEXT_UAC_BASE_IP:-${_sipext_prefix}.100}"
 export SIPEXT_UAC_BASE_IP

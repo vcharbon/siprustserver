@@ -110,7 +110,7 @@
 // single-task and far less alloc-heavy than the b2bua, so this is mostly for a
 // uniform memory story across tiers — but it also lets the same jemalloc_*
 // /metrics probe rule the proxy in or out during a soak. Tuned via
-// _RJEM_MALLOC_CONF on the container (see deploy/k8s/manifests/30-proxy.yaml).
+// _RJEM_MALLOC_CONF on the container (see deploy/helm/siprust/values-kind.yaml).
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

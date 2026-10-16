@@ -8,8 +8,8 @@ env grammar and its ranges), `discovery.rs` (the worker pool),
 `readiness.rs`, `main.rs` (the SIGTERM handler), `crates/topology/src/k8s.rs`
 and `k8s/watch_health.rs` (the kube client retry, the watch's own health),
 `crates/sip-proxy/src/resolver.rs` (the bounded lookup, the address family),
-`deploy/k8s/manifests/30-proxy.yaml` (the VRRP health check, the cookie key
-Secret), `deploy/k8s/run.sh` (`proxy_hmac_secret`).
+`deploy/helm/siprust/files/keepalived.conf` (the VRRP health check),
+`templates/proxy-hmac-secret.yaml` (the cookie key Secret).
 
 ## Context
 

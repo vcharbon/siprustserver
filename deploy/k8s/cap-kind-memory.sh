@@ -17,7 +17,7 @@
 # Each cap is set with `--memory-swap == --memory` (a true ceiling, no swap
 # growth), so the sum of per-node hard caps is the cluster's absolute cgroup
 # ceiling. We refuse if that sum would exceed TOTAL_CAP_MB. Re-run after any
-# `kind create` (run.sh `up` calls this). Pod-level limits (20-worker.yaml: 2Gi)
+# `kind create` (kind-lab.sh `up` calls this). Pod-level limits (the worker: 2Gi)
 # still apply inside; this is the node-container backstop.
 #
 # App-node rule: APP_CAP_MB >= APP_POD_LIMIT_MB (the worker pod's memory limit)

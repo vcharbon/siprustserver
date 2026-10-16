@@ -88,7 +88,7 @@
 // jemalloc's decay-based purging returns dirty/muzzy pages to the OS (tuned
 // aggressively via _RJEM_MALLOC_CONF on the worker container), bounding
 // steady-state RSS. No logical leak exists; this is purely allocator retention.
-// See deploy/k8s/manifests/20-worker.yaml.
+// See deploy/helm/siprust/values-kind.yaml (worker env).
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

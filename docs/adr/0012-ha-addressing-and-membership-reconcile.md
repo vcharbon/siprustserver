@@ -299,6 +299,6 @@ failover, not a tolerated outage.
   both proxy and b2bua).
 - `crates/b2bua/src/repl/{supervisor,puller}.rs`, `crates/topology/src/{lib,k8s}.rs`,
   `crates/sip-proxy/src/registry/`, `crates/{b2bua-runner,sip-proxy-runner}/src/main.rs`,
-  `deploy/k8s/{run.sh,chaos.sh,manifests/}`.
+  `deploy/helm/siprust/`.
 - Incident handoff: `/tmp/handoff-repl-reconnect-bug.md`;
   run `deploy/k8s/results/endurance-20260602-085331/`.

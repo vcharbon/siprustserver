@@ -19,7 +19,7 @@ PREFLIGHT_FIX_SYSCTLS="${PREFLIGHT_FIX_SYSCTLS:-0}"
 # Space-separated "key=min" pairs. A node is OK when its current value >= min.
 REQUIRED_SYSCTLS="${REQUIRED_SYSCTLS:-fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152 net.core.wmem_max=4194304 net.core.rmem_max=4194304}"
 
-# Reuse the caller's log/warn/die if present (run.sh defines log+die); otherwise
+# Reuse the caller's log/warn/die if present (lib/cluster.sh defines log+die); otherwise
 # provide minimal fallbacks so the lib is sourceable standalone.
 command -v log  >/dev/null 2>&1 || log()  { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 command -v warn >/dev/null 2>&1 || warn() { printf '\033[1;33m>> %s\033[0m\n' "$*" >&2; }
@@ -138,7 +138,7 @@ sync_clock_at_bringup() {
   fi
 }
 
-# Run all host checks. Called from run.sh `up` before the cluster is created.
+# Run all host checks. Called from kind-lab.sh `up` before the cluster is created.
 check_host() {
   log "host preflight: cgroups + sysctls + clock (advisory; PREFLIGHT_STRICT=1 to enforce)"
   check_cgroups

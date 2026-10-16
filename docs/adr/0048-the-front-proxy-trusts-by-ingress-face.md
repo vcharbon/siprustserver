@@ -6,8 +6,8 @@
 direction), `core/request/admission.rs` (the To-tag rule and the gate),
 `core/response.rs` (the response rule), `crates/sip-message/src/header/via.rs`
 (`received`), `crates/sip-proxy-runner/src/config.rs` (the single-face warning,
-the wildcard refusal), `deploy/k8s/manifests/05-masq-exempt.yaml` (the edge
-node's drop rule).
+the wildcard refusal), `deploy/helm/siprust/templates/masq-exempt.yaml` and
+`files/masq-exempt.sh` (the edge node's drop rule).
 
 ## Context
 

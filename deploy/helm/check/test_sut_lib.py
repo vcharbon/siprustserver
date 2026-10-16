@@ -1,13 +1,14 @@
 """The kind lab's SUT release helpers (lib/sut.sh), against a stand-in kubectl:
 a namespace another deploy owns is refused, and the VIP and isolation smokes
-run only when the release deploys the front proxy."""
+and the proxy's series run only when the release deploys the front proxy."""
 import subprocess
 import unittest
 
 from charts import HELM_DIR
 
-# Stand-ins for run.sh's log, die and smokes, and a kubectl answering from
-# FAKE_* variables: the worker StatefulSet's owner and release, the proxy.
+# Stand-ins for lib/cluster.sh's log and die, lib/smokes.sh's smokes, and a
+# kubectl answering from FAKE_* variables: the worker StatefulSet's owner and
+# release, the proxy.
 HARNESS = """
 set -euo pipefail
 log() { echo "log: $*"; }
@@ -38,16 +39,16 @@ def run(step: str, owner: str = "", release: str = "", proxy: str = "0", sut_rel
 
 class Ownership(unittest.TestCase):
     def test_an_empty_namespace_and_the_release_s_own_objects_pass(self) -> None:
-        self.assertEqual(run("require_no_raw_deploy").returncode, 0)
-        self.assertEqual(run("require_no_raw_deploy", "Helm", "siprust").returncode, 0)
+        self.assertEqual(run("require_own_release").returncode, 0)
+        self.assertEqual(run("require_own_release", "Helm", "siprust").returncode, 0)
 
-    def test_a_raw_deploy_is_refused(self) -> None:
-        out = run("require_no_raw_deploy", "kubectl", "")
+    def test_objects_helm_does_not_own_are_refused(self) -> None:
+        out = run("require_own_release", "kubectl", "")
         self.assertNotEqual(out.returncode, 0)
-        self.assertIn("holds a run.sh deploy", out.stdout)
+        self.assertIn("holds a b2bua-worker helm does not own", out.stdout)
 
     def test_another_release_is_refused_naming_it(self) -> None:
-        out = run("require_no_raw_deploy", "Helm", "siprust", sut_release="product")
+        out = run("require_own_release", "Helm", "siprust", sut_release="product")
         self.assertNotEqual(out.returncode, 0)
         self.assertIn("holds release siprust; uninstall it first", out.stdout)
 
@@ -62,6 +63,12 @@ class Smokes(unittest.TestCase):
         self.assertEqual(out.returncode, 0)
         self.assertNotIn("vip_smoke", out.stdout)
         self.assertIn("smokes do not apply", out.stdout)
+
+
+class ObsScope(unittest.TestCase):
+    def test_the_series_gate_names_the_proxy_only_when_the_release_runs_one(self) -> None:
+        self.assertEqual(run("sut_obs_scope", proxy="1").stdout.strip(), "proxy")
+        self.assertEqual(run("sut_obs_scope", proxy="0").stdout.strip(), "sut")
 
 
 if __name__ == "__main__":

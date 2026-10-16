@@ -748,11 +748,10 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
 // `w_bak`, echoed onto `topology.bak`). If the changelog is bumped under one id
 // ("w1") but the puller connects as a DIFFERENT id ("b2bua-worker-1"), the
 // server finds no entries for that caller and silently delivers NOTHING — no
-// error, no close, just zero applies. This is what bit the live cluster:
-// `run.sh` keyed the proxy registry as `w${i}` while each worker's ordinal was
-// its pod name, so the keys never matched. This test pins that silent-failure
-// contract so the invariant ("changelog peer-key == puller caller") is explicit;
-// the deploy fix (pod-name proxy ids) keeps them equal by construction.
+// error, no close, just zero applies: a deploy whose proxy names a worker by
+// anything but its pod name never matches the ordinal. This test pins that
+// silent-failure contract so the invariant ("changelog peer-key == puller
+// caller") is explicit; pod-name proxy ids keep them equal by construction.
 #[tokio::test]
 async fn mismatched_ordinal_silently_delivers_nothing() {
     let clock = Clock::test_at(0);

@@ -3,7 +3,7 @@
 # defaults: the internal kind bridge 172.20.0.0/16 (eth0 on a node, gateway =
 # the host) and the no-NAT external bridge 192.168.60.0/24 the edge nodes join
 # as eth1. The helm check asserts these values agree with net-env.sh's
-# defaults, and that the lab renders what deploy/k8s/manifests renders.
+# defaults.
 #
 #   helm upgrade --install siprust deploy/helm/siprust -n sip-test \
 #     --create-namespace -f deploy/helm/siprust/values-kind.yaml [--set ...]

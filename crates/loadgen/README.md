@@ -66,7 +66,7 @@ Prerequisites for the real cluster (one-time):
 
 - With the default `header` correlation, the B2BUA must be **transparent to the
   correlation header**: deploy it with `B2BUA_RELAY_HEADERS=X-Loadgen-Id`
-  (already set in `deploy/k8s/manifests/20-worker.yaml`). Without it the callee
+  (already set in `deploy/helm/siprust/values-kind.yaml`). Without it the callee
   leg never correlates and you'll see `loadgen_mux_orphan_total` climb / zero OK
   calls — or switch to `--correlate to-user`, which needs no SUT cooperation
   (see *Correlation strategies* below).
@@ -329,7 +329,7 @@ call, the driver tracks the **cross-call delivery rate** and exports it:
 
 `received / expected` should stay **> 99%** (at the 1/1000 default it is ~99.8%);
 a value well below that is a *systemic* 18x regression (a real bug), unlike one
-dropped 180. The endurance harness gates on this ratio.
+dropped 180.
 
 ### Realistic timers + the long recorded call
 
@@ -479,27 +479,18 @@ empty = the full audit. Smoke coverage:
 `loadgen_failing_check_reclassifies_to_check_fail`,
 `loadgen_allow_violations_waives_named_rfc_rule`.
 
-### In the endurance run (parallel to SIPp)
+### In a soak (parallel to SIPp)
 
-The endurance harness runs `loadgen` as an **in-cluster Job alongside the SIPp
-baseline** — same image (`siprustserver:dev`, now carrying the `loadgen` binary),
-scraped via the same pod annotations. It is wired in `deploy/k8s`:
-
-- `manifests/45-loadgen-job.yaml` — the Job (binds the mux on the pod IP, pins the
-  b-leg back to itself, 20 cps base, the timers above, full recording).
-- `endurance.sh` — `LOADGEN_*` knobs (default `LOADGEN_CPS=20`); the stream starts
-  in `start_baseline`, is supervised by `ensure_loadgen`, stopped in `stop_streams`,
-  and its HTML report is copied out at the end (and anytime via
-  `./endurance.sh fetch-loadgen`) into `results/endurance-*/loadgen-report/`.
-- `deploy/observability/.../dashboards/loadgen.json` — the Grafana panels
-  (in-flight summed over every loadgen next to the offered rate and the mean
-  call hold, the success ratio over admitted calls next to the 503 refusal
-  ratio, completion rate by class/shape, SIP round-trip quantiles, RSS +
-  leak canaries), aligned to the chaos-window annotations.
-
-Disable it for a SIPp-only run with `LOADGEN_ENABLE=0`. REFER is off by default in
-the endurance mix (`LOADGEN_W_REFER=0`) because it needs cluster REFER auth; raise
-the weight to include it.
+A run profile of the HA tooling (`tooling/hakit`, ADR-0049) runs `loadgen` as a
+stream beside the SIPp reference streams: `driver: loadgen`, its image and
+command in the stream's `params`, a docker container on the external plane or a
+pod in the cluster (`placement: pod`). The runner starts, drains (SIGUSR1) and
+stops it, reads its counters and its call-outcome records, and attributes its
+failures to the incident windows. `tooling/hakit/content/dashboards/loadgen.json`
+holds the Grafana panels (in-flight summed over every loadgen next to the
+offered rate and the mean call hold, the success ratio over admitted calls next
+to the 503 refusal ratio, completion rate by class/shape, SIP round-trip
+quantiles, RSS + leak canaries), with the incident windows annotated.
 
 ---
 
@@ -539,10 +530,9 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
 
 ### Chaos correlation (near vs clear)
 
-When a fault is injected during a run, the chaos driver flags the loadgen at the
-kill instant via **`POST /chaos?type=<kind>&target=<who>`** (same socket as
-`/metrics`; the endurance harness does this in `loadgen_chaos_flag`). Each
-finished call is then auto-classified on the `chaos` label:
+When a fault is injected during a run, a chaos driver can flag the loadgen at
+the kill instant via **`POST /chaos?type=<kind>&target=<who>`** (same socket as
+`/metrics`). Each finished call is then auto-classified on the `chaos` label:
 
 - **`chaos="near"`** — an injected fault landed on a *fragile moment* of the
   call: within `--chaos-phase-tolerance-ms` (default 200) of a dialog-state

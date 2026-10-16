@@ -2,7 +2,8 @@
 
 A scope is a list of selectors and of the scopes it includes; `${namespace}`
 stands for the lab namespace. The base scopes cover the in-cluster collectors
-(`cluster`) and the system under test the base chart deploys (`sut`). A product
+(`cluster`), the system under test the base chart deploys (`sut`) and its
+front proxy, when the release runs one (`proxy`, which includes `sut`). A product
 adds its own scopes with `--spec FILE` (YAML: `scopes: {name: {include: [...],
 series: [...]}}`); a scope name the base defines is refused. The check itself
 is `deploy/observability/check.sh`, which waits for each selector to have a
@@ -48,9 +49,9 @@ BASE_SCOPES: dict[str, Scope] = {
             'b2bua_active_calls{namespace="${namespace}"}',
             'limiter_admission_max{namespace="${namespace}"}',
             'cdr_consumed_total{namespace="${namespace}"}',
-            'sip_proxy_requests_total{namespace="${namespace}"}',
         ],
     ),
+    "proxy": Scope(include=["sut"], series=['sip_proxy_requests_total{namespace="${namespace}"}']),
 }
 
 

@@ -9,8 +9,8 @@ traces** over OTLP, sampled and off unless a collector is configured.
 ### Where it lives
 
 `deploy/observability/install.sh --bootstrap` brings up the host stack
-(`deploy/observability/stack/docker-compose.yml`); `./deploy/k8s/run.sh up` calls
-it. Traces land in **VictoriaTraces** and are read in Grafana through the
+(`deploy/observability/stack/docker-compose.yml`) once the kind lab's `up` has
+made the `kind` network (deploy/README.md). Traces land in **VictoriaTraces** and are read in Grafana through the
 `VictoriaTraces` (Jaeger) datasource.
 
 | | endpoint |
@@ -30,11 +30,12 @@ it. Traces land in **VictoriaTraces** and are read in Grafana through the
 | `SIP_TRACE_HEADER` | `1` makes the process honour `X-Trace-Sample`. Lab/endurance ONLY — the header is untrusted input on a serving edge. |
 | `RUST_LOG` | Lifecycle log filter, default `info`. |
 
-`deploy/k8s/run.sh` is the **dev/lab** composition: it stamps both into
-`manifests/20-worker.yaml` and `manifests/30-proxy.yaml` (`OTLP_EXPORT_ENDPOINT`
-pointed at the host VictoriaTraces, `SIP_TRACE_HEADER=1`) via `envsubst`.
-`OBS_ENABLE=0` empties the endpoint. **A production composition leaves both
-empty**; sampling then costs one boolean per call.
+The SUT chart's kind values (`deploy/helm/siprust/values-kind.yaml`) are the
+**dev/lab** composition: `tracing.otlpEndpoint` points the worker and the proxy
+at the host VictoriaTraces through the kind bridge gateway, and
+`tracing.traceHeader` sets `SIP_TRACE_HEADER=1`. **A production composition
+leaves both empty** (the chart's defaults); sampling then costs one boolean per
+call.
 
 ### Activating a trace on a call
 

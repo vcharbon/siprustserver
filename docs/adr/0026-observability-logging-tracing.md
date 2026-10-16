@@ -201,12 +201,10 @@ served.
 Which composition a process belongs to is expressed entirely by the two env
 vars, so the same binary serves all of them:
 
-- **dev/lab and endurance** (`deploy/k8s/run.sh`, which endurance drives): both
-  the worker and the proxy manifests carry `OTEL_EXPORTER_OTLP_ENDPOINT` pointed
-  at the host stack's VictoriaTraces and `SIP_TRACE_HEADER=1`. The values are
-  stamped by `envsubst` at deploy time because the host's address from the
-  cluster's point of view is the kind bridge gateway, which is not a fixed
-  address on WSL2.
+- **dev/lab and endurance** (the SUT chart's kind values,
+  `deploy/helm/siprust/values-kind.yaml`): the worker and the proxy carry
+  `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at the host stack's VictoriaTraces
+  through the kind bridge gateway, and `SIP_TRACE_HEADER=1`.
 - **production**: both empty. Empty is the meaningful value — not a missing
   key — so a composition never has to remember to delete a line to stay inert.
 

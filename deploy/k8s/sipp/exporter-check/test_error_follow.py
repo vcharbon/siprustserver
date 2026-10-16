@@ -9,6 +9,7 @@ The last check runs a real SIPp with the lanes' rotation flags when `sipp` is on
 PATH, and is skipped otherwise.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,19 @@ SIPP_DIR = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(SIPP_DIR, "exporter"))
 
 import error_follow  # noqa: E402
+
+# The HA tooling's base UAC, the scenario every SIPp stream of a run plays.
+UAC = os.path.join(SIPP_DIR, "..", "..", "..", "tooling", "hakit", "content", "scenarios",
+                   "uac-basic-hold.xml")
+KEY_DEFAULT = re.compile(r"^\s*hakit-key:\s*([a-z_][a-z0-9_]*)=(\S*)\s*$", re.MULTILINE)
+
+
+def uac_keys(**keys):
+    """The `-key` arguments of UAC: the defaults its header declares, then `keys`."""
+    with open(UAC, encoding="latin-1") as fh:
+        header = fh.read().split("<scenario", 1)[0]
+    merged = {**dict(KEY_DEFAULT.findall(header)), **keys}
+    return [a for k, v in sorted(merged.items()) for a in ("-key", k, v)]
 
 STAMP = "2026-01-01\t10:00:00.000000\t1767261600.000000: "
 
@@ -168,7 +182,7 @@ class SippRingBuffer(unittest.TestCase):
         work = tempfile.mkdtemp(prefix="sipp-ring-")
         try:
             with open(os.path.join(work, "t.csv"), "w") as fh:
-                fh.write("SEQUENTIAL\n127.0.0.1\n")
+                fh.write("SEQUENTIAL\nring;X-Test: ring;;;\n")
             dead = socket_port()
             follower = error_follow.ErrorFollower(os.path.join(work, "errors.log"))
             stop = threading.Event()
@@ -183,10 +197,10 @@ class SippRingBuffer(unittest.TestCase):
             try:
                 subprocess.run(
                     ["sipp", f"127.0.0.1:{dead}",
-                     "-sf", os.path.join(SIPP_DIR, "scenarios", "uac-basic.xml"),
-                     "-inf", "t.csv", "-key", "xapi", "{}", "-s", "svc",
+                     "-sf", UAC, "-inf", "t.csv",
+                     *uac_keys(run="ring", stream="ring", shape="basic", setup_ms="100", hold_ms="100"),
                      "-i", "127.0.0.1", "-p", str(socket_port()), "-m", "40", "-r", "20",
-                     "-recv_timeout", "100", "-nostdin", "-trace_err",
+                     "-recv_timeout", "100", "-max_invite_retrans", "1", "-nostdin", "-trace_err",
                      "-error_file", os.path.join(work, "errors.log"),
                      "-ringbuffer_files", "1", "-ringbuffer_size", "1000"],
                     cwd=work, capture_output=True, timeout=60)

@@ -48,7 +48,7 @@ Two halves, do not conflate them:
 - **The infra advice still stands** — the SUT bounds the residual, it does not
   license drift. Keep the host awake for whole endurance runs; use slewing
   chrony, not stepping timesyncd. `deploy/k8s/lib/host-checks.sh::check_clock`
-  warns; `run.sh up` resyncs once before pods anchor.
+  warns; `deploy/helm/kind-lab.sh up` resyncs once before pods anchor.
 
 The paused-clock harness closes the skew fidelity gap with
 `with_worker_clock_offset` (deterministic inter-node skew;

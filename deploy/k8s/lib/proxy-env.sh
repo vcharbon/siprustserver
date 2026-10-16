@@ -1,6 +1,6 @@
-# Shared HTTP(S)-proxy wiring for the kind-based SIP runner — the SINGLE source
-# of truth for the local-vs-non-local proxy split, sourced by run.sh (and, later,
-# by deploy/observability/install.sh) so a PROXIFIED host can still build images
+# Shared HTTP(S)-proxy wiring of the kind lab — the SINGLE source of truth for
+# the local-vs-non-local proxy split, sourced by deploy/helm/lib/cluster.sh and
+# deploy/observability/install.sh so a PROXIFIED host can still build images
 # and reach external mirrors while NEVER funnelling cluster-internal traffic
 # through the proxy.
 #
@@ -93,8 +93,8 @@ local_curl() {
 # docker_build — `docker build` wrapper that injects the proxy build-args
 # (proxy_build_args) so apt-get/apk/git clone inside the Dockerfiles can reach
 # external mirrors on a proxified host, while the merged NO_PROXY keeps
-# cluster-local/127 fetches off the proxy. SHARED by run.sh (cluster `up`) and
-# endurance.sh (wireup rebuild) so BOTH build sites forward the proxy identically.
+# cluster-local/127 fetches off the proxy. Every lab image build goes through it
+# (kind-lab.sh `up` and `image`), so each forwards the proxy identically.
 # proxy_build_args emits one token per line — read into an array so values stay
 # intact. Echoes the EXACT command it runs (via the caller's `log` if defined,
 # else stderr) so the forwarded args are transparent in the run log. With no host

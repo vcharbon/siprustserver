@@ -766,7 +766,7 @@ impl ReplicatedB2buaSut {
             node: Some(self.incarnation_key()),
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
-            // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
+            // EXACT production (kind) timers — `deploy/helm/siprust/values-kind.yaml`.
             // The keepalive cells must be representative: a long quiescent call is
             // flushed (and its backup TTL refreshed) only by its in-dialog OPTIONS,
             // so the dead-peer/limiter-refresh/backup-TTL cadence only matches

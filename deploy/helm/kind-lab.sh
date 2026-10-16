@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# The kind lab from the charts. The cluster, the external SIP plane, the host
-# preflight (cgroups, the sysctls of ADR-0033) and the images come from
-# deploy/k8s/run.sh's library, its `up` with its own observability path off;
+# The kind lab from the charts: the cluster, the external SIP plane, the host
+# preflight (cgroups, the sysctls of ADR-0033) and the images (lib/cluster.sh);
 # the SUT and the in-cluster collectors are two helm releases on the kind
 # values (deploy/helm/README.md).
 #
@@ -36,21 +35,10 @@
 set -euo pipefail
 HELM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OBS_NS="${OBS_NS:-observability}"
-# run.sh's observability path (install.sh, the raw kind-addons) stays off: the
-# collectors are the siprust-observability release.
-export OBS_ENABLE=0
-# shellcheck source-path=SCRIPTDIR source=../k8s/run.sh
-source "$HELM_DIR/../k8s/run.sh"
-
-# run.sh's up() preflight without envsubst: the chart path renders no manifest
-# through it.
-preflight() {
-  local t
-  for t in kind kubectl docker helm; do command -v "$t" >/dev/null || die "missing tool: $t"; done
-  [ -f "$CLUSTER_CONFIG" ] || die "cluster.yaml missing"
-  [ -f "$SIPP_DIR/Dockerfile" ] || die "sipp/Dockerfile missing (vendored sipp build context)"
-  [ -d "$SCENARIOS" ] || die "sipp/scenarios/ missing (vendored sipp scenarios)"
-}
+# shellcheck source-path=SCRIPTDIR source=lib/cluster.sh
+source "$HELM_DIR/lib/cluster.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/smokes.sh
+source "$HELM_DIR/lib/smokes.sh"
 
 helm_release() { # <release> <chart dir> <namespace> [helm args]
   local release="$1" chart="$2" ns="$3"; shift 3
@@ -92,18 +80,20 @@ chaos_mesh_release() {
 }
 
 # The SIPp callees: the HA tooling's base UAS (tooling/hakit/content/scenarios)
-# with the key defaults it declares, at the addresses run.sh's callees take,
-# so every catalog shape (a callee that re-INVITEs among them) is served. The
-# scenario is copied into each container, never mounted: a callee outlives the
-# checkout that started it.
+# with the key defaults it declares, at SIPEXT_UAS_IP upward, so every catalog
+# shape (a callee that re-INVITEs among them) is served. The scenario is copied
+# into each container, never mounted: a callee outlives the checkout that
+# started it.
+# Env: SIPP_UAS_REPLICAS=2 SIPP_UAS_CPUS=4 SIPP_UAS_MEM=2g (per container)
+SIPP_UAS_REPLICAS="${SIPP_UAS_REPLICAS:-2}"
+SIPP_UAS_CPUS="${SIPP_UAS_CPUS:-4}"
+SIPP_UAS_MEM="${SIPP_UAS_MEM:-2g}"
 HAKIT_DIR="$(cd "$HELM_DIR/../../tooling/hakit" && pwd)"
+hakit() { uv run --quiet --locked --project "$HAKIT_DIR" hakit "$@"; }
 hakit_uas_up() {
   local prefix="${SIPEXT_UAS_IP%.*}" base="${SIPEXT_UAS_IP##*.}" i ip keys
   docker network inspect "$SIPEXT_NET" >/dev/null 2>&1 || die "sipext network missing: '$0 up' creates it"
-  mapfile -t keys < <(uv run --quiet --locked --project "$HAKIT_DIR" hakit sipp-keys uas-basic.xml) \
-    || die "hakit sipp-keys failed (needs uv)"
-  mkdir -p "$SIPEXT_GEN_DIR"
-  printf 'SEQUENTIAL\n' > "$SIPEXT_GEN_DIR/uas-targets.csv"
+  mapfile -t keys < <(hakit sipp-keys uas-basic.xml) || die "hakit sipp-keys failed (needs uv)"
   for i in $(seq 0 $(( SIPP_UAS_REPLICAS - 1 ))); do
     ip="${prefix}.$(( base + i ))"
     docker rm -f "sipp-uas-$i" >/dev/null 2>&1 || true
@@ -116,15 +106,14 @@ hakit_uas_up() {
         -trace_err -ringbuffer_files 1 -ringbuffer_size 16777216 >/dev/null
     docker cp "$HAKIT_DIR/content/scenarios" "sipp-uas-$i:/scenarios" >/dev/null
     docker start "sipp-uas-$i" >/dev/null
-    printf '%s\n' "$ip" >> "$SIPEXT_GEN_DIR/uas-targets.csv"
     log "sipp-uas-$i up at $ip (docker, sipext, hakit uas-basic.xml)"
   done
 }
 
 lab_deploy() {
-  preflight
+  lab_preflight
   require_infra_node
-  require_no_raw_deploy
+  require_own_release
   require_host_stack
   helm_release siprust-observability "$HELM_DIR/siprust-observability" "$OBS_NS" \
     --set "clusterName=kind-$CLUSTER"
@@ -133,7 +122,8 @@ lab_deploy() {
   hakit_uas_up
   sut_release "$@"
   sut_smokes
-  obs_check stack || die "observability: series missing after deploy (kubectl -n $OBS_NS get pods)"
+  hakit obs-check "$(sut_obs_scope)" --namespace "$NS" \
+    || die "observability: series missing after deploy (kubectl -n $OBS_NS get pods)"
   log "lab ready"
   kubectl -n "$NS" get pods -o wide
 }

@@ -1,6 +1,6 @@
-# Shared kubectl-context pinning for the kind-based SIP runner — sourced by
-# run.sh, endurance.sh and chaos.sh so all three target the SAME cluster and can
-# never silently act on another kube environment that happens to share this host.
+# Shared kubectl-context pinning of the kind lab — sourced by
+# deploy/helm/lib/cluster.sh so every lab command targets the SAME cluster and
+# can never silently act on another kube environment sharing this host.
 #
 # kind names its context "kind-<cluster>". We define a transparent `kubectl`
 # wrapper function (not an alias — aliases don't expand in non-interactive

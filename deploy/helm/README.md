@@ -11,10 +11,6 @@ The stores and Grafana stay outside the cluster (`deploy/observability/stack`,
 docker compose), so their history survives a cluster teardown. Every bring-up
 installs both releases: a cluster never runs unobserved.
 
-The raw manifests of `deploy/k8s/manifests` and `deploy/observability/kind-addons`
-render the same objects through `envsubst` and `sed`; a namespace holds one or
-the other, never both (helm refuses objects it does not own).
-
 ## Values
 
 Each chart's `values.yaml` documents every key and `values.schema.json` refuses
@@ -26,8 +22,7 @@ softly across nodes. `values-kind.yaml` is the kind lab: the docker bridges
 node, the lab's runner env (socket buffers, keepalive, limiter, drain,
 heap profiling, the loadgen relay header, the stress limiter), replication on,
 traces exported with the trace header trusted, the limiter's `NET_ADMIN` for
-network chaos, and `masq-exempt`. `check/test_parity.py` holds the kind render
-to what `deploy/k8s/manifests` renders through `run.sh`.
+network chaos, and `masq-exempt`.
 
 The SUT chart requires its network (`network.proxyVip`, `externalVip`, both
 interfaces, `internalCidrs`, and `externalSubnet` for `masq-exempt`) while the
@@ -38,8 +33,8 @@ proxy is enabled; the collectors chart requires `hostStack.address` and
 Object names are fixed (`b2bua-worker`, `sip-front-proxy`, `call-limiter`,
 `rabbitmq`, `cdr-consumer`, `masq-exempt`; the collectors by their component
 name, their ClusterRoles and bindings prefixed by the release namespace) and
-every pod carries `app: <name>`, which the chaos and endurance tooling select
-by: one SUT release per namespace.
+every pod carries `app: <name>`, which the HA tooling's incidents select by:
+one SUT release per namespace.
 
 ## Extending the SUT chart from a product chart
 
@@ -90,7 +85,7 @@ the Secret itself and names it in `existingSecret`.
 `kind-lab.sh` wraps the bring-up:
 
 ```bash
-deploy/helm/kind-lab.sh up       # cluster, sipext bridge, host preflight, images kind-loaded (run.sh up)
+deploy/helm/kind-lab.sh up       # cluster, sipext bridge, host preflight, images kind-loaded
 deploy/helm/kind-lab.sh image <tag> [docker build args]   # one more image, built and kind-loaded
 deploy/helm/kind-lab.sh deploy   # both releases, Chaos Mesh, SIPp UAS (hakit uas-basic.xml), VIP + isolation smokes, series check
 deploy/helm/kind-lab.sh template # the SUT release as deploy would install it, rendered
@@ -107,8 +102,9 @@ args (`lib/sut.sh`). A namespace
 holds one SUT release: `deploy` refuses one another release owns. The VIP and
 isolation smokes run when the release deploys the front proxy.
 
-`up` and the SIPp generators are `deploy/k8s/run.sh`'s library functions;
-`deploy` is the two helm invocations:
+`up` and `down` are `lib/cluster.sh`, the smokes `lib/smokes.sh`; `deploy`
+needs the host stack up (`deploy/observability/install.sh --bootstrap`) and is
+the two helm invocations:
 
 ```bash
 helm upgrade --install siprust-observability deploy/helm/siprust-observability \
@@ -125,14 +121,15 @@ run needs. A `--set` of an earlier deploy that the next one omits is gone
 passes the whole set from its run profile.
 
 `--wait` makes every workload's readiness part of the deploy, the CDR broker
-and consumer included. SIPp load runs as before: `deploy/k8s/run.sh caps 50 60`.
+and consumer included. The series check after it is `hakit obs-check` on the
+`proxy` scope, or `sut` when the release runs no proxy. Load and incidents are
+the HA tooling's runs (`tooling/hakit`, deploy/README.md).
 
 ## Checks
 
-`just helm-check` (a few seconds, needs `helm`, `envsubst` and PyYAML): `helm
-lint --strict` of both charts, the render contracts (`check/test_*.py`), the
+`just helm-check` (a few seconds, needs `helm` and PyYAML): `helm lint
+--strict` of both charts, the render contracts (`check/test_*.py`), the
 downstream chart, the cookie key's `lookup` against a fake API server, the kind
-values against `net-env.sh`, the parity of the kind render with the old
-manifests, and the golden renders of the kind values (`check/golden/`). A
-change to a render is reviewed in the golden diff: `just helm-golden` rewrites
-them.
+values against `net-env.sh`, the lab's SUT helpers (`lib/sut.sh`) and the golden
+renders of the kind values (`check/golden/`). A change to a render is reviewed
+in the golden diff: `just helm-golden` rewrites them.

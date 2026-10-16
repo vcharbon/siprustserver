@@ -1,4 +1,4 @@
-//! The readers in `deploy/` (probes, chaos and endurance scripts), the base
+//! The readers in `deploy/` (the lab scripts, the SIPp exporter), the base
 //! dashboards of the HA tooling and its runner's own queries
 //! (`tooling/hakit/src`) spell only names, selector labels and
 //! closed label values the catalogues hold: the shipped binaries' export

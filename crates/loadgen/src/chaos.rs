@@ -1,10 +1,10 @@
 //! Chaos-event correlation.
 //!
-//! A bounded log of "a fault was injected at instant T" markers, pushed in by the
-//! chaos driver (endurance.sh / chaos.sh) via the loadgen's HTTP `POST /chaos`
-//! endpoint. A finished call is then auto-classified [`ChaosTag::Near`] (its
-//! lifetime overlapped an injected fault within a tolerance — likely acceptable
-//! kill collateral) vs [`ChaosTag::Clear`] (a genuine SUT signal).
+//! A bounded log of "a fault was injected at instant T" markers, pushed in by a
+//! chaos driver via the loadgen's HTTP `POST /chaos` endpoint. A finished call
+//! is then auto-classified [`ChaosTag::Near`] (its lifetime overlapped an
+//! injected fault within a tolerance — likely acceptable kill collateral) vs
+//! [`ChaosTag::Clear`] (a genuine SUT signal).
 //!
 //! Why a pushed marker, not a timestamp reconciliation: the sampled callflow's
 //! Call-ID/tag ms-counter sits on an unknown base (~41 days off Unix), so "this

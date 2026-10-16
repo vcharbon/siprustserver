@@ -130,19 +130,15 @@ image tag='siprustserver:dev':
     docker build -f deploy/docker/Dockerfile -t {{ tag }} .
 
 # The helm charts (deploy/helm): lint, the render contracts, the extension
-# points through a downstream chart, the kind values against net-env.sh and
-# the old manifests, and the golden renders (needs `helm`, `envsubst` and
-# PyYAML, a few seconds).
+# points through a downstream chart, the kind values against net-env.sh, the
+# lab's SUT helpers and the golden renders (needs `helm` and PyYAML, a few
+# seconds).
 helm-check:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/helm/check
 
 # Rewrites the golden renders of the kind values from the current charts.
 helm-golden:
     HELM_GOLDEN_UPDATE=1 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/helm/check -k Golden
-
-# Loopback check of the lane SIPp scenarios against in-dialog OPTIONS peers (needs `sipp`).
-sipp-check:
-    deploy/k8s/sipp/checks/run.sh
 
 # The SIPp stat exporter against a large stat CSV under a memory cap, its disk trimmer
 # and its error-file follower across SIPp's rotation (the last needs `sipp`).

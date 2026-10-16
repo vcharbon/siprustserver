@@ -7,7 +7,7 @@ services:
     # exporters :9035 / loadgen :9300) DIRECTLY on the no-NAT sipext bridge —
     # docker inter-bridge isolation would otherwise block it (the in-cluster
     # vmagent cannot see them at all). install.sh ensures the network exists
-    # before compose up. Side effect: while VM is attached, `run.sh down`'s
+    # before compose up. Side effect: while VM is attached, `kind-lab.sh down`'s
     # `docker network rm sipext` fails silently and the bridge lingers — fine,
     # sipext_up reuses a same-subnet bridge on the next `up`.
     networks: [default, kind, sipext]
@@ -147,7 +147,7 @@ networks:
   kind:
     external: true
     name: kind
-  # External SIP plane (sipext dual-plane layout): created by run.sh sipext_up,
+  # External SIP plane (sipext dual-plane layout): created by kind-lab.sh up,
   # or by install.sh's ensure_sipext_net guard when the obs stack comes up
   # first. Name overridable to match deploy/k8s/lib/net-env.sh SIPEXT_NET.
   sipext:
