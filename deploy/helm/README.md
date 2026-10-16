@@ -102,7 +102,8 @@ A product chart that depends on `siprust` is the SUT release instead with
 `SUT_CHART` (its directory), `SUT_RELEASE` (its release name) and
 `SUT_SUBCHART` (the name of its `siprust` dependency): `deploy` and `template`
 build its dependencies, pass the siprust kind values nested under that name,
-then the product chart's own `values-kind.yaml`, then the helm args. A namespace
+then the product chart's own `values-kind.yaml` when it has one, then the helm
+args (`lib/sut.sh`). A namespace
 holds one SUT release: `deploy` refuses one another release owns. The VIP and
 isolation smokes run when the release deploys the front proxy.
 

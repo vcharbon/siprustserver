@@ -166,6 +166,15 @@ class DownstreamKindLab(unittest.TestCase):
         self.assertEqual(worker["spec"]["replicas"], 3, "the helm args win")
         self.assertIn(("DaemonSet", "masq-exempt"), names(docs))
 
+        (chart / "values-kind.yaml").unlink()
+        out = subprocess.run(
+            [str(HELM_DIR / "kind-lab.sh"), "template"], capture_output=True, text=True,
+            env={**os.environ, "SUT_CHART": str(chart), "SUT_RELEASE": "product", "SUT_SUBCHART": "siprust"})
+        self.assertEqual(out.returncode, 0, "a product chart may have no values-kind.yaml: " + out.stderr)
+        docs = [d for d in yaml.safe_load_all(out.stdout) if d]
+        e = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
+        self.assertEqual(e["B2BUA_KEEPALIVE_SEC"], "300", "the siprust kind values alone")
+
 
 if __name__ == "__main__":
     unittest.main()
