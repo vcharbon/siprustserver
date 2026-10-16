@@ -188,7 +188,10 @@ async fn an_intake_age_shed_is_labelled_for_the_dequeue_age() {
 fn worker_health_gauges_render() {
     let m = ProxyMetrics::new();
     m.set_worker_health_counts(1, 2, 0);
+    m.set_worker_acceptance_counts(0, 1);
     let txt = m.prometheus_text();
+    assert!(txt.contains("sip_worker_acceptance{acceptance=\"accept\"} 0"));
+    assert!(txt.contains("sip_worker_acceptance{acceptance=\"refuse\"} 1"));
     assert!(txt.contains("sip_worker_health{health=\"alive\"} 1"));
     assert!(txt.contains("sip_worker_health{health=\"unknown\"} 2"));
     assert!(txt.contains("sip_worker_health{health=\"dead\"} 0"));

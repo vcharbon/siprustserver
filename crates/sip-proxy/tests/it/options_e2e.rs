@@ -19,10 +19,9 @@ use sip_message::worker_report::{incarnation_value, Readiness, X_INCARNATION, X_
 use sip_message::{serialize, SipMessage, SipParser};
 use sip_net::UdpEndpoint;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
-use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
+use sip_proxy::load_observer::{sweep_alive, LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
-use sip_proxy::strategy::{RoutingStrategy, SelectOpts};
 use sip_proxy::ProxyAddr;
 use sip_txn::IdGen;
 
@@ -34,6 +33,8 @@ enum Mode {
     Refusing,
     /// Not yet bootstrapped.
     NotReady,
+    /// Serving and accepting, with no load payload.
+    Bare,
     Silent,
 }
 
@@ -74,6 +75,14 @@ fn spawn_responder(
             };
             let (status, reason, extra): (u16, &str, Vec<SipHeader>) = match w.mode {
                 Mode::Silent => continue,
+                Mode::Bare => (
+                    200,
+                    "OK",
+                    crate::common::options_capabilities()
+                        .into_iter()
+                        .chain([incarnation.clone()])
+                        .collect(),
+                ),
                 Mode::Accepting => (200, "OK", serving(Readiness::accept())),
                 Mode::Refusing => (200, "OK", serving(Readiness::refuse("backend"))),
                 Mode::NotReady => (503, "Service Unavailable", vec![incarnation.clone()]),
@@ -197,54 +206,100 @@ async fn a_new_incarnation_at_the_same_address_resets_the_worker_to_unknown() {
     let _ = p.h.finish().await;
 }
 
-/// A worker refusing new calls keeps sending its load payload: past the
-/// stale-payload window and many sweeps its cap is never floored, and new
-/// calls placed on it (the only alive worker) are never refused by the
-/// proxy's rate cap (ADR-0050 §6).
+/// A restart at the same address answered `200` at once is read `Alive` in
+/// one write: no reader sees the worker `Unknown` in between, which would
+/// pass its in-dialog requests to its backup for nothing.
 #[tokio::test(start_paused = true)]
-async fn a_refusing_worker_is_never_floored_by_the_stale_sweep() {
-    let p = probed("options-e2e-refusing-sweep", Mode::Refusing).await;
-    wait_for_view(&p.registry, (WorkerHealth::Alive, Acceptance::Refuse)).await;
+async fn a_restart_answered_200_is_read_alive_in_one_write() {
+    let h = Harness::with_transit_delay("options-e2e-restart-200", 0);
+    let (worker_ep, worker_sock) = h.bind_sut("b2b-1", "127.0.0.1:5071").await;
+    let worker = Arc::new(Mutex::new(Worker { mode: Mode::Accepting, incarnation: 1 }));
+    let _responder = spawn_responder(worker_ep, worker.clone());
+    let registry = Arc::new(SimulatedWorkerRegistry::with_clock(
+        vec![WorkerEntry {
+            health: WorkerHealth::Unknown,
+            ..WorkerEntry::alive("b2b-1", ProxyAddr::from(worker_sock))
+        }],
+        Clock::test_at(0),
+    ));
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let control = Arc::new(RecordingControl { inner: registry.control(), writes: writes.clone() });
+    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
+    let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
+    let probe = HealthProbe::new(
+        probe_ep,
+        registry.clone(),
+        control,
+        observer,
+        Clock::test_at(0),
+        Arc::new(IdGen::seeded(4)),
+        HealthProbeConfig { interval_ms: 30, timeout_ms: 40, threshold: 2 },
+    );
+    let task = tokio::spawn(probe.run());
+    wait_for_view(&registry, (WorkerHealth::Alive, Acceptance::Accept)).await;
+
+    writes.lock().unwrap().clear();
+    worker.lock().unwrap().incarnation = 2;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let seen = writes.lock().unwrap().clone();
+    assert!(seen.contains(&WorkerHealth::Alive), "{seen:?}");
+    assert!(!seen.contains(&WorkerHealth::Unknown), "never Unknown in between: {seen:?}");
+    task.abort();
+    let _ = h.finish().await;
+}
+
+/// Two alive workers past the stale-payload window, swept every second by
+/// the runner's sweep (ADR-0050 §6): one refuses new calls and keeps sending
+/// its load payload, the other accepts but sends none. The silent one is
+/// floored, its bucket down to one call; the refusing one never is, its
+/// bucket admitting a burst.
+#[tokio::test(start_paused = true)]
+async fn the_stale_sweep_floors_a_silent_worker_and_never_a_refusing_one() {
+    let h = Harness::with_transit_delay("options-e2e-refusing-sweep", 0);
+    let clock = Clock::test_at(0);
+    let (refusing_ep, refusing_sock) = h.bind_sut("refusing", "127.0.0.1:5071").await;
+    let (silent_ep, silent_sock) = h.bind_sut("silent", "127.0.0.1:5072").await;
+    let worker = |mode| Arc::new(Mutex::new(Worker { mode, incarnation: 1 }));
+    let _r1 = spawn_responder(refusing_ep, worker(Mode::Refusing));
+    let _r2 = spawn_responder(silent_ep, worker(Mode::Bare));
+    let unknown = |id: &str, sock| WorkerEntry {
+        health: WorkerHealth::Unknown,
+        ..WorkerEntry::alive(id, ProxyAddr::from(sock))
+    };
+    let registry = Arc::new(SimulatedWorkerRegistry::with_clock(
+        vec![unknown("refusing", refusing_sock), unknown("silent", silent_sock)],
+        clock.clone(),
+    ));
+    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
+    let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
+    let probe = HealthProbe::new(
+        probe_ep,
+        registry.clone(),
+        registry.control(),
+        observer.clone(),
+        clock.clone(),
+        Arc::new(IdGen::seeded(3)),
+        HealthProbeConfig::default(),
+    );
+    let task = tokio::spawn(probe.run());
+    wait_for_health(&registry, "refusing", WorkerHealth::Alive).await;
+    wait_for_health(&registry, "silent", WorkerHealth::Alive).await;
+
     let stale_ms = LoadObserverConfig::default().payload_stale_ms;
     let mut floored = 0;
     for _ in 0..(3 * stale_ms / 1000) {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let alive = |id: &str| p.registry.resolve(id).is_some_and(|w| w.is_alive());
-        floored += p.observer.sweep_stale(Clock::test_at(0).now_ms(), alive);
+        floored += sweep_alive(&observer, registry.as_ref(), clock.now_ms());
     }
-    assert_eq!(floored, 0, "a worker answering 200 is never floored");
-
-    let strategy = sip_proxy::LoadBalancerStrategy::new(
-        p.registry.clone(),
-        Arc::new(
-            sip_proxy::security::hmac::StaticHmacKeyProvider::new(
-                sip_proxy::security::hmac::HmacKey::new("k1", vec![7u8; 32]),
-                None,
-            )
-            .unwrap(),
-        ),
-        p.observer.clone(),
-        Arc::new(sip_proxy::ProxyMetrics::new()),
-        Clock::test_at(0),
-    );
-    for n in 0..20 {
-        let invite = CustomParser::new()
-            .parse(
-                format!(
-                    "INVITE sip:bob@b SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{n}\r\n\
-                     From: <sip:alice@a>;tag=f\r\nTo: <sip:bob@b>\r\nCall-ID: rf-{n}@h\r\n\
-                     CSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
-                )
-                .as_bytes(),
-            )
-            .unwrap();
-        assert!(
-            strategy.select_for_new_dialog(&invite, SelectOpts::default()).await.is_ok(),
-            "call {n} reaches the refusing worker"
-        );
+    assert!(floored > 0, "the silent worker is floored");
+    let now = clock.now_ms();
+    assert!(observer.try_consume_for("silent", now).is_ok());
+    assert!(observer.try_consume_for("silent", now).is_err(), "floored to one call");
+    for n in 0..10 {
+        assert!(observer.try_consume_for("refusing", now).is_ok(), "call {n}: never floored");
     }
-    p.task.abort();
-    let _ = p.h.finish().await;
+    task.abort();
+    let _ = h.finish().await;
 }
 
 /// Poll the registry until the worker reaches `want` (or fail after ~3 s).
@@ -270,8 +325,14 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
         self.writes.lock().unwrap().push(health);
         self.inner.set_health(worker_id, health);
     }
-    fn set_acceptance(&self, worker_id: &str, acceptance: Acceptance) {
-        self.inner.set_acceptance(worker_id, acceptance);
+    fn set_view(
+        &self,
+        worker_id: &str,
+        health: Option<WorkerHealth>,
+        acceptance: Option<Acceptance>,
+    ) {
+        self.writes.lock().unwrap().extend(health);
+        self.inner.set_view(worker_id, health, acceptance);
     }
 }
 

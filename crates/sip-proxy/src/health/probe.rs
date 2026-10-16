@@ -343,6 +343,7 @@ impl HealthProbe {
 
         // A new process at the same address is judged from scratch: nothing
         // routes on the health the previous one earned (ADR-0050 §8).
+        let mut restarted = false;
         if let Some(gen) = worker_report::incarnation(&resp) {
             let previous = state.incarnation.insert(p.worker_id.clone(), gen);
             if previous.is_some_and(|prev| prev != gen) {
@@ -353,26 +354,18 @@ impl HealthProbe {
                     to = gen,
                     "worker incarnation changed"
                 );
-                self.control.set_health(&p.worker_id, WorkerHealth::Unknown);
                 self.observer.reset(&p.worker_id);
+                restarted = true;
             }
         }
         state.misses.insert(p.worker_id.clone(), 0);
 
-        let readiness = worker_report::readiness(&resp);
-        let reading = read_answer(resp.status(), readiness.as_ref());
-        if let Some(acceptance) = reading.acceptance {
-            self.control.set_acceptance(&p.worker_id, acceptance);
-        }
-        if let Some(health) = reading.health {
-            self.control.set_health(&p.worker_id, health);
-        }
-
-        // Feed the AIMD observer with the self-reported overload payload. The
-        // observer is decoupled from the clock (it takes `now_ms` explicitly),
-        // so hand it the same monotonic-anchored epoch-ms the probe timestamps
-        // with — under a paused runtime this advances in lockstep with
-        // `tokio::time` (CLAUDE.md).
+        // The load payload lands before the view it comes with is published,
+        // so no sweep reads a worker alive on an old payload. The observer is
+        // decoupled from the clock (it takes `now_ms` explicitly), so hand it
+        // the same monotonic-anchored epoch-ms the probe timestamps with —
+        // under a paused runtime this advances in lockstep with `tokio::time`
+        // (CLAUDE.md).
         if let Some(payload) = parse_x_overload_header(resp.raw(X_OVERLOAD).next()) {
             self.observer.apply_payload(&p.worker_id, &payload, self.clock.now_ms());
         } else {
@@ -380,6 +373,13 @@ impl HealthProbe {
             // just the diagnostic counter.
             self.observer.note_payload_missing(&p.worker_id, self.clock.now_ms());
         }
+
+        // Health and acceptance published in one write: a restart answered
+        // 200 reads Alive at once, never Unknown in between.
+        let readiness = worker_report::readiness(&resp);
+        let reading = read_answer(resp.status(), readiness.as_ref());
+        let health = reading.health.or(restarted.then_some(WorkerHealth::Unknown));
+        self.control.set_view(&p.worker_id, health, reading.acceptance);
     }
 
     /// Count one missed reply window. Only a worker still registered at the

@@ -147,6 +147,14 @@ plain_counters! {
         "b2bua_late_prack_answered_total",
         "PRACKs that reached this node after their call's release and named a reliable provisional it showed, answered 200 (RFC 3262 §3); the caller's PRACK crossing the final",
     ) => late_prack_answered, bump_late_prack_answered, late_prack_answered_total;
+    // An initial INVITE the front proxy placed here as another primary's
+    // backup (its cookie names that primary) that is no copy of a replica
+    // this node holds: the primary owns its transaction, so it is dropped
+    // unanswered rather than placed as a second call.
+    FOREIGN_INVITE_COPY_DROPPED = (
+        "b2bua_foreign_invite_copies_dropped_total",
+        "initial INVITEs whose stickiness cookie names another worker as primary and that copy no replica this node holds, dropped unanswered: the primary owns the transaction, so placing them would dial a second call",
+    ) => foreign_invite_copy_dropped, bump_foreign_invite_copy_dropped, foreign_invite_copies_dropped_total;
     // Another incarnation's event: a timer fire, transaction timeout,
     // callout result or late message of an earlier call on the same
     // callRef, dropped before the live call's rules read it. Measures the

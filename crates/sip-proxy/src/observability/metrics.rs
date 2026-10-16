@@ -458,19 +458,6 @@ impl ProxyMetrics {
         t
     }
 
-    /// Set the worker-health gauges from a fleet count. Also derives
-    /// `worker_pool_empty` = `1` iff no worker is `Alive` (routable) — the
-    /// routing-fatal condition the `/readyz` gate also keys on.
-    pub fn set_worker_health_counts(&self, alive: u64, unknown: u64, dead: u64) {
-        self.pool.set_health_counts([alive, unknown, dead]);
-    }
-
-    /// Publish the worker discovery's own health: whether its kube client is
-    /// failing to build, and since when (Unix ms) its watch is broken.
-    pub fn set_discovery(&self, no_client: bool, watch_broken_since_unix_ms: Option<u64>) {
-        self.pool.set_discovery(no_client, watch_broken_since_unix_ms);
-    }
-
     /// Publish how many recv shards are stalled (the readiness gate's reading).
     pub fn set_recv_shards_stalled(&self, n: u64) {
         self.recv_shards_stalled.store(n, Ordering::Relaxed);

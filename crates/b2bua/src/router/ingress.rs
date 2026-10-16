@@ -15,7 +15,7 @@ use sip_message::SipMessage;
 use super::admit;
 use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
-use super::resolve::{replica_takeover, replicated_initial_invite, resolve};
+use super::resolve::{initial_invite_copy, replica_takeover, resolve, InitialInvite};
 use super::responses::build_options_health_response;
 use super::turn::Turn;
 use super::unroutable::Lookup;
@@ -86,11 +86,24 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     let mut res = resolve(ctx, &event);
     let mut lookup = Lookup::Answered;
-    // A copy of the initial INVITE of a call this node backs up, sent here
-    // because its primary died, is that call's: taken over, it is answered
-    // from the record, never placed as a second call.
-    if let Some(hit) = replicated_initial_invite(ctx, &event, &res).await {
-        res.copy_of(hit, &event);
+    // An initial INVITE the proxy placed here as another primary's backup: a
+    // copy of a call this node holds the answered record of is that call's,
+    // answered from the record; any other belongs to that primary and is
+    // dropped, its transaction relinquished unanswered — never a second call.
+    match initial_invite_copy(ctx, &event, &res).await {
+        InitialInvite::Own => {}
+        InitialInvite::CopyOf(hit) => res.copy_of(hit, &event),
+        InitialInvite::Foreign => {
+            ctx.metrics.bump_foreign_invite_copy_dropped();
+            if let CallEvent::Sip { message, .. } = &event {
+                if let SipMessage::Request(req) = message.as_ref() {
+                    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
+                        let _ = ctx.txn.relinquish_server(key).await;
+                    }
+                }
+            }
+            return;
+        }
     }
     if res.call_ref.is_none() {
         // Acting-backup takeover BACKSTOP. The normal in-dialog key is the R-URI

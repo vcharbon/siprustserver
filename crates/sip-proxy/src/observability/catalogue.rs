@@ -94,6 +94,10 @@ const SHED_REASON_VALUES: [&str; 2] = label_values!(ShedReason::ALL, ShedReason:
 /// A worker's health state, in the order the registry counts them.
 pub const HEALTH_STATES: [&str; 3] = ["alive", "unknown", "dead"];
 
+/// An alive worker's acceptance of new calls, in the order the registry
+/// counts them.
+pub const ACCEPTANCE_STATES: [&str; 2] = ["accept", "refuse"];
+
 /// A peer: no value declared; each one observed gets its own series.
 pub const PEER: Dim = Dim::new("peer", &[]);
 
@@ -329,6 +333,12 @@ pub const WORKER_HEALTH: Family = Family::gauge(
     "Worker count by health state.",
 );
 
+pub const WORKER_ACCEPTANCE: Family = Family::gauge(
+    "sip_worker_acceptance",
+    Labels::Product(&[Dim::new("acceptance", &ACCEPTANCE_STATES)]),
+    "Alive worker count by acceptance of new calls (the X-Readiness their OPTIONS answer states): accept, or refuse while they serve their dialogs.",
+);
+
 pub const PEER_FAILURES: Family = Family::counter(
     "sip_proxy_peer_failures_total",
     Labels::Product(&[PEER, PEER_SCOPE, PEER_FAILURE_KIND]),
@@ -440,6 +450,7 @@ pub const PROXY: &[Family] = &[
     WORKER_STALE_DECREASE,
     LB_EMERGENCY_BYPASSED,
     WORKER_HEALTH,
+    WORKER_ACCEPTANCE,
     PEER_FAILURES,
     PEER_FAILURES_OVERFLOW,
 ];

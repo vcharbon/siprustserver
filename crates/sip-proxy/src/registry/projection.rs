@@ -165,46 +165,33 @@ impl WorkerAnnotations {
 
     /// Annotate health (the OPTIONS probe write / `WorkerRegistryControl`). No-op
     /// if the worker is unknown or unchanged.
-    fn set_health(&self, id: &str, health: WorkerHealth) {
-        let previous = self.snapshot().get(id).map(|r| r.health);
-        if previous == Some(health) {
+    /// Annotate health and acceptance of new calls in one write, `None`
+    /// leaving that one as it is. No-op if the worker is unknown or unchanged.
+    fn set_view(&self, id: &str, health: Option<WorkerHealth>, acceptance: Option<Acceptance>) {
+        let Some(previous) = self.snapshot().get(id).map(|r| (r.health, r.acceptance)) else {
+            return;
+        };
+        let next = (health.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
+        if next == previous {
             return;
         }
-        if let Some(previous) = previous {
+        if next.0 != previous.0 {
+            let (from, to) = (previous.0, next.0);
+            tracing::info!(node = observe::node(), worker = id, ?from, ?to, "worker health flip");
+        }
+        if next.1 != previous.1 {
+            let (from, to) = (previous.1, next.1);
             tracing::info!(
                 node = observe::node(),
                 worker = id,
-                from = ?previous,
-                to = ?health,
-                "worker health flip"
-            );
-        }
-        self.update(|recs| {
-            if let Some(rec) = recs.get_mut(id) {
-                rec.health = health;
-            }
-        });
-    }
-
-    /// Annotate acceptance of new calls. No-op if the worker is unknown or
-    /// unchanged.
-    fn set_acceptance(&self, id: &str, acceptance: Acceptance) {
-        let previous = self.snapshot().get(id).map(|r| r.acceptance);
-        if previous == Some(acceptance) {
-            return;
-        }
-        if let Some(previous) = previous {
-            tracing::info!(
-                node = observe::node(),
-                worker = id,
-                from = ?previous,
-                to = ?acceptance,
+                ?from,
+                ?to,
                 "worker acceptance flip"
             );
         }
         self.update(|recs| {
             if let Some(rec) = recs.get_mut(id) {
-                rec.acceptance = acceptance;
+                (rec.health, rec.acceptance) = next;
             }
         });
     }
@@ -303,14 +290,24 @@ impl WorkerSet {
 
     /// Annotate a worker's health (the OPTIONS write seam) and recompose.
     pub(crate) fn set_health(&self, id: &str, health: WorkerHealth) {
-        self.annotations.set_health(id, health);
-        self.recompose();
+        self.set_view(id, Some(health), None);
     }
 
     /// Annotate a worker's acceptance of new calls (the OPTIONS write seam)
     /// and recompose.
     pub(crate) fn set_acceptance(&self, id: &str, acceptance: Acceptance) {
-        self.annotations.set_acceptance(id, acceptance);
+        self.set_view(id, None, Some(acceptance));
+    }
+
+    /// Annotate a worker's health and acceptance at once (`None` keeps that
+    /// one) and recompose once: no read sees one without the other.
+    pub(crate) fn set_view(
+        &self,
+        id: &str,
+        health: Option<WorkerHealth>,
+        acceptance: Option<Acceptance>,
+    ) {
+        self.annotations.set_view(id, health, acceptance);
         self.recompose();
     }
 

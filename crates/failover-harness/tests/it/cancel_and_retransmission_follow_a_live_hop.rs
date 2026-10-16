@@ -19,9 +19,11 @@
 
 use std::time::Duration;
 
+use b2bua::decision::ScriptedDecisionEngine;
 use failover_harness::{worker_ordinals, FailoverHarness, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER};
 use sip_message::Method;
 
+use crate::departure_support::{bring_up_deciding, placed, CountedDecision};
 use crate::inflight_resend::{
     assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
     last_request_sent, reboot_and_reclaim, round_invites_sent_to, settle_to_one_cdr, split_mut,
@@ -33,6 +35,57 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
+
+/// The proxy misreads the primary dead while it holds the caller's INVITE
+/// undecided; the caller's retransmission then follows the cookie to the
+/// backup, which holds no answered record of the call and drops the copy
+/// rather than dial a second call. The primary decides, dials the callee
+/// once and answers the caller: one b-leg INVITE, one CDR.
+#[tokio::test(start_paused = true)]
+async fn a_retransmission_sent_to_the_backup_of_a_live_primary_dials_no_second_call() {
+    let name = "retransmission-to-the-backup-of-a-live-primary";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    let (decision, _consults) = CountedDecision::counting(route, Duration::from_secs(3));
+    let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, decision).await;
+
+    // ── the caller hears nothing; the primary holds the INVITE undecided ────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    fh.cut_signalling("alice", alice.addr());
+    let (pri_ord, _call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    fh.mark(&pri_ord, None, "misread dead", "the proxy reads the live primary dead");
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    fh.restore_signalling("alice", alice.addr());
+
+    // ── the caller's Timer A rung reaches the backup ────────────────────────
+    let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Invite);
+    alice.try_send_datagram(&wire, dst).await.expect("the caller's re-send leaves");
+    fh.advance(Duration::from_millis(200)).await;
+    proxy.set_health(&pri_ord, WorkerHealth::Alive);
+
+    // ── the primary decides and dials once; the caller is answered ──────────
+    let mut uas = bob.receive_tolerating("INVITE", &["OPTIONS"]).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive_tolerating("ACK", &["OPTIONS", "INVITE"]).await;
+    fh.advance(Duration::from_secs(1)).await;
+    assert_eq!(round_invites_sent_to(&fh, bob.addr(), OFFER), 1, "one b-leg INVITE");
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    assert!(
+        survivor.metrics().foreign_invite_copies_dropped_total() >= 1,
+        "the backup dropped the copy"
+    );
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
+    assert!(drained, "the cluster drains the call");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
+    assert_eq!(cdrs, 1, "one CDR");
+    drop(proxy);
+}
 
 /// The caller's CANCEL of a re-INVITE round the takeover copy relays reaches
 /// that copy, though the proxy reads the primary alive again by then.

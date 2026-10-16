@@ -6,7 +6,9 @@ use call::{Call, Direction, IndexHit, IndexLookup, KeyKind};
 use sip_message::header::{ParamValue, Via};
 use sip_message::{Method, SipMessage};
 
+use super::materialise::names_server_branch;
 use super::RouterCtx;
+use crate::initial_invite::foreign_primary;
 use crate::store::StoreError;
 use b2bua_sdk::event::CallEvent;
 
@@ -41,8 +43,8 @@ impl Resolution {
     }
 
     /// Take the replicated call an initial INVITE is a copy of
-    /// ([`replicated_initial_invite`]): the INVITE is that call's, never a
-    /// new call's.
+    /// ([`initial_invite_copy`]): the INVITE is that call's, never a new
+    /// call's.
     pub(super) fn copy_of(&mut self, hit: IndexHit, event: &CallEvent) {
         self.found_by_index(hit, event);
         self.initial_invite = false;
@@ -241,37 +243,58 @@ pub(super) async fn replica_takeover(
     ctx.state.resolve_from_replica_index(request_lookup(req)).await
 }
 
-/// **A copy of a replicated call's initial INVITE.** An INVITE with no To-tag
-/// derives a `callRef` of this node's own; when nothing is here under it and
-/// the replica store holds a routed call (one with an outgoing leg) whose
-/// incoming leg it names, it is a copy of that call's INVITE (RFC 3261
-/// §17.2.3) — the caller retransmitting to a node whose primary died — and
-/// resolves to that call, to be taken over and answered from its record. A
-/// call no decision routed yet has dialled nobody: the copy is placed here as
-/// a new call. `None`: a new call.
-pub(super) async fn replicated_initial_invite(
+/// What an initial INVITE is to this node ([`initial_invite_copy`]).
+pub(super) enum InitialInvite {
+    /// A call of this node's own, new or a copy of one here.
+    Own,
+    /// A copy of the replicated call the hit names: taken over, it is answered
+    /// from the record.
+    CopyOf(IndexHit),
+    /// Another primary's INVITE this node holds no answered record of: the
+    /// primary owns its transaction, and placing it would dial a second call.
+    Foreign,
+}
+
+/// **A copy of another primary's initial INVITE.** The front proxy places an
+/// INVITE's retransmission on the cookie's backup when it reads the primary
+/// dead, the cookie it repeats naming that primary. Such an INVITE, with
+/// nothing here under its own `callRef`, is a copy (RFC 3261 §17.2.3) of the
+/// replicated call whose incoming leg it names when it carries that call's
+/// INVITE CSeq and its top-Via branch names that call's own server
+/// transaction ([`names_server_branch`]); any other is foreign. An INVITE
+/// whose cookie names this node, or none, is this node's own.
+pub(super) async fn initial_invite_copy(
     ctx: &RouterCtx,
     event: &CallEvent,
     res: &Resolution,
-) -> Option<IndexHit> {
+) -> InitialInvite {
     let (true, Some(derived)) = (res.initial_invite, res.call_ref.as_deref()) else {
-        return None;
+        return InitialInvite::Own;
     };
-    let CallEvent::Sip { message, .. } = event else { return None };
-    let SipMessage::Request(req) = message.as_ref() else { return None };
-    if ctx.unborn.holds(derived, req.cseq().seq()) || ctx.state.peek(derived).is_some() {
-        return None;
+    let CallEvent::Sip { message, .. } = event else { return InitialInvite::Own };
+    let SipMessage::Request(req) = message.as_ref() else { return InitialInvite::Own };
+    let cseq = req.cseq().seq();
+    if ctx.unborn.holds(derived, cseq) || ctx.state.peek(derived).is_some() {
+        return InitialInvite::Own;
+    }
+    if foreign_primary(req, &ctx.config.self_ordinal).is_none() {
+        return InitialInvite::Own;
     }
     let call_id = req.call_id().as_str();
     let from_tag = req.from().tag().unwrap_or("");
     let lookup = IndexLookup::Invite { call_id, from_tag };
-    let hit = ctx.state.replica_index_hit(lookup).await.ok()??;
-    let (call, _) = ctx.state.peek_replica(&hit.call_ref).await.ok()?;
-    if call.b_legs.is_empty() {
-        return None;
+    let Ok(Some(hit)) = ctx.state.replica_index_hit(lookup).await else {
+        return InitialInvite::Foreign;
+    };
+    let Ok((call, _)) = ctx.state.peek_replica(&hit.call_ref).await else {
+        return InitialInvite::Foreign;
+    };
+    let branch = req.top_via().branch().unwrap_or_default();
+    if call.a_leg_invite.cseq != cseq || !names_server_branch(&call, branch) {
+        return InitialInvite::Foreign;
     }
     ctx.state.note_takeover_resolved(&hit);
-    Some(hit)
+    InitialInvite::CopyOf(hit)
 }
 
 /// The index lookup for a request that carries no `callRef` of ours: a CANCEL

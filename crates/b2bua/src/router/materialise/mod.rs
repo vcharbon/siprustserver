@@ -53,7 +53,7 @@
 
 mod relayed_invite;
 mod seeds;
-pub(in crate::router) use seeds::relayed_server_key;
+pub(in crate::router) use seeds::{names_server_branch, relayed_server_key};
 #[cfg(test)]
 mod tests;
 

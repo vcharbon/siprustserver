@@ -56,6 +56,17 @@ pub(super) fn read_topology_cookie(invite: &SipRequest, self_ordinal: &str) -> C
     CookieRead::Topology(CallTopology::new(pri, bak, 1, 0))
 }
 
+/// The worker the proxy's stickiness cookie on `invite` names as primary,
+/// when it names one other than `self_ordinal`: the proxy placed the INVITE
+/// here as that primary's backup, a retransmission whose first copy went
+/// there (ADR-0050).
+pub(crate) fn foreign_primary(invite: &SipRequest, self_ordinal: &str) -> Option<String> {
+    match read_topology_cookie(invite, self_ordinal) {
+        CookieRead::Topology(topology) if topology.pri != self_ordinal => Some(topology.pri),
+        _ => None,
+    }
+}
+
 /// What the inbound INVITE's Record-Route says about the proxy's stickiness
 /// cookie. Two of the three outcomes are ordinary; the third is a placement the
 /// call loses, so they are kept apart rather than collapsed to `Option`.

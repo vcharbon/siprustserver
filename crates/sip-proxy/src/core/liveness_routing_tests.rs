@@ -235,6 +235,30 @@ async fn a_cancel_follows_the_cookie_once_its_invites_node_is_not_alive() {
     assert_eq!(f.metrics.no_target_dropped_count(NoTargetDrop::Cancel), 1);
 }
 
+/// The CANCEL of an INVITE whose node left the pool follows the cookie long
+/// after the departed address's window closed, and when another worker is
+/// bound at that address since.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_follows_the_cookie_once_its_invites_node_left_the_pool() {
+    for reused in [false, true] {
+        let f = fixture().await;
+        let invite = initial("INVITE", "");
+        let went = f.core.route_request_from(&invite, src()).await.target.unwrap();
+        let (primary_id, backup) =
+            if Some(went.clone()) == w1() { ("w1", w2()) } else { ("w2", w1()) };
+        f.registry.remove(primary_id);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            crate::registry::tombstone::DEPARTED_ADDRESS_TTL_MS + 8_000,
+        ))
+        .await;
+        if reused {
+            f.registry.add(WorkerEntry::alive("w3", went.clone()));
+        }
+        let out = f.core.route_request_from(&initial("CANCEL", ""), src()).await;
+        assert_eq!(out.target, backup, "reused={reused}: the backup holding the call");
+    }
+}
+
 /// A caller's INVITE that preloads a plain Route to the proxy keeps the cookie
 /// the proxy mints for it: its CANCEL, after the primary died, reaches the
 /// backup (ADR-0014).

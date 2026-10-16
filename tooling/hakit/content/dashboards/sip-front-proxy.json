@@ -96,11 +96,14 @@
       "fieldConfig": { "defaults": { "unit": "cps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.01 }] } } }
     },
     {
-      "id": 5, "type": "timeseries", "title": "Worker health by state",
-      "description": "`sip_worker_health` gauge — number of upstream workers in each health band (alive / unknown / dead).",
+      "id": 5, "type": "timeseries", "title": "Worker health by state, alive workers by acceptance",
+      "description": "`sip_worker_health` gauge — number of upstream workers in each health band (alive / unknown / dead). `sip_worker_acceptance` gauge — alive workers accepting new calls or refusing them while they serve their dialogs.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "max by (health) (sip_worker_health{pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{health}}" }],
+      "targets": [
+        { "expr": "max by (health) (sip_worker_health{pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{health}}" },
+        { "expr": "max by (acceptance) (sip_worker_acceptance{pod=~\"$pod\"})", "refId": "B", "legendFormat": "alive, {{acceptance}}" }
+      ],
       "fieldConfig": { "defaults": { "unit": "none", "min": 0 } }
     },
     {

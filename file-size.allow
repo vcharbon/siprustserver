@@ -117,7 +117,7 @@ crates/sip-pcap/src/bin/sipflow.rs 1059
 crates/sip-pcap/src/flow.rs 820
 crates/sip-pcap/src/flow/tests.rs 1000
 crates/sip-proxy-runner/src/main.rs 761
-crates/sip-proxy/src/observability/metrics.rs 621
+crates/sip-proxy/src/observability/metrics.rs 608
 crates/sip-txn/src/layer/client.rs 747
 crates/sip-txn/src/layer/owner.rs 517
 crates/sip-txn/src/layer/server.rs 550

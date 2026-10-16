@@ -56,7 +56,7 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    whenever it serves dialogs (Ready, Cordoned, Draining), always with its
    load payload (`X-Overload`), its `X-Readiness`, and its `X-Incarnation`
    (the process's boot generation, ADR-0011 X9). It answers `503` only while
-   NotReady (not yet bootstrapped), with no payload.
+   NotReady (not yet bootstrapped), with its `X-Incarnation` and no payload.
 
    ```
    X-Readiness: new=accept
@@ -74,14 +74,24 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    address tombstone (ADR-0031 D4) make it `Dead`. The proxy's `Draining`
    health, its grace, and the `503` Reason-text split are gone.
 4. **In-dialog routing reads liveness only.** A request carrying a verified
-   cookie goes to `w_pri` while `w_pri` is present and not `Dead`, whatever
-   its acceptance; otherwise to `w_bak` while `w_bak` is present and not
-   `Dead`. It never runs a fresh selection. A worker that refuses new calls
-   keeps every dialog it owns, and no takeover is caused by its acceptance.
+   cookie goes to `w_pri` while `w_pri` is `Alive`, whatever its acceptance;
+   otherwise to `w_bak` while `w_bak` is `Alive`. It never runs a fresh
+   selection. An `Unknown` worker (just joined, re-hosted, of a new
+   incarnation, or before a proxy's first probe answer) is not routed. A
+   worker that refuses new calls keeps every dialog it owns, and no takeover
+   is caused by its acceptance. A CANCEL goes where its INVITE went while
+   that node is an `Alive` worker its cookie names, and a retransmission
+   repeats its first copy's target on the same terms; otherwise each follows
+   the cookie.
 5. **No answer without a target.** An in-dialog request whose two workers are
-   both absent or `Dead`, or that reaches a proxy before its first worker
-   view, is dropped and counted (`sip_proxy_no_target_dropped_total{kind}`),
-   never answered `503`: the sender's retransmission reaches the next view.
+   both absent or not `Alive`, or that reaches a proxy before its first
+   worker view, is dropped and counted
+   (`sip_proxy_no_target_dropped_total{kind}`), never answered `503`: the
+   sender's retransmission reaches the next view. A worker that receives a
+   copy of a replicated call's initial INVITE (the call's CSeq and branch,
+   its cookie naming another primary) answers it from the replica, and drops
+   a copy it holds no replica for (`b2bua_foreign_invite_copies_dropped_total`):
+   the primary still owns that transaction.
 6. **New calls.** A new dialog goes to an `Alive` accepting worker. When none
    accepts, it goes to an `Alive` refusing one (the fallback of ADR-0043 §12),
    which answers it with its own refusal and writes its call record. The proxy
@@ -160,7 +170,7 @@ take a new call, and may an in-dialog request of a call it owns reach it.
 - One worker cut from its backend loses no call: new calls go to the others,
   its own dialogs stay with it.
 - A restarted worker's new calls stay on it; a restarted proxy diverts
-  nothing.
+  nothing once its first probe round has answered.
 - A site is taken out of service by cordoning its workers, waiting on their
   call counts, then SIGTERM (calls handed to backups elsewhere) or
   release-all (no backup outside the site). Nothing places a call's backup

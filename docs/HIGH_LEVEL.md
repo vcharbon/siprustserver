@@ -224,9 +224,10 @@ call-cache-backup}.md` + `src/cache`, `src/storage`, `src/replication`:
   enumerates peers, and pulls each peer's relevant partition until **caught up to
   the head-at-open** (or a 30 s ceiling). A sidecar-wiped boot uses a one-shot
   **peer-scan bootstrap** (pull the peer's `bak:{self}:*` back into local `pri:`).
-  The partition stays **not-ready** (the proxy parks/503s SIP for it) until caught
-  up; epoch mismatch ⇒ full resync from `since=0`; no reachable peer ⇒ cold start
-  (counts lost calls).
+  The node stays **not-ready** (its OPTIONS answer is `503`, so the proxy routes
+  it nothing and keeps its calls on their backup) until caught up; epoch mismatch
+  ⇒ full resync from `since=0`; no reachable peer ⇒ cold start (counts lost
+  calls).
 
 ### 5.1 Model fields to carry now (even if unused single-node)
 

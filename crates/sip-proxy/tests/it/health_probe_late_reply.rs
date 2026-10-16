@@ -78,8 +78,16 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
         self.writes.lock().unwrap().push((worker_id.to_string(), health));
         self.inner.set_health(worker_id, health);
     }
-    fn set_acceptance(&self, worker_id: &str, acceptance: sip_proxy::registry::Acceptance) {
-        self.inner.set_acceptance(worker_id, acceptance);
+    fn set_view(
+        &self,
+        worker_id: &str,
+        health: Option<WorkerHealth>,
+        acceptance: Option<sip_proxy::registry::Acceptance>,
+    ) {
+        if let Some(health) = health {
+            self.writes.lock().unwrap().push((worker_id.to_string(), health));
+        }
+        self.inner.set_view(worker_id, health, acceptance);
     }
 }
 

@@ -481,6 +481,7 @@ fn build_reject_headers(
 }
 
 mod topology_cookie;
+pub(crate) use topology_cookie::foreign_primary;
 use topology_cookie::topology_from_cookie;
 
 #[cfg(test)]

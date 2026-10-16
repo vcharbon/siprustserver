@@ -102,8 +102,9 @@ readiness-gated) by design.
     `sip_proxy_degraded_backup_total{reason="no_foreign_domain"}` counter.
   - if the primary's domain is `None` (degenerate cluster), behave as today
     (no filter) — never *worse* than current.
-- **Impact:** changes `w_bak` for *new* dialogs only. `decode_stickiness`,
-  ACK/CANCEL exemption, fresh-pod guard, drain grace all unchanged.
+- **Impact:** changes `w_bak` for *new* dialogs only. `decode_stickiness` (the
+  liveness routing of ADR-0050 §4) unchanged; the domain filter applies within
+  §7's accepting-first choice.
 - **Tests:** unit — primary in z1 with alive z2/z3 ⇒ `w_bak` is z2 or z3, never
   z1; only-z1-alive ⇒ same-zone `w_bak` + counter bumped; `None`-domain ⇒
   identical to the pre-change golden.

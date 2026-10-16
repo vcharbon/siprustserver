@@ -18,6 +18,7 @@ b2bua-runner b2bua_second_final_refused_total counter fixed {}
 b2bua-runner b2bua_provisional_after_final_refused_total counter fixed {}
 b2bua-runner b2bua_going_away_absorbed_total counter fixed {}
 b2bua-runner b2bua_late_prack_answered_total counter fixed {}
+b2bua-runner b2bua_foreign_invite_copies_dropped_total counter fixed {}
 b2bua-runner b2bua_other_incarnation_dropped_total counter fixed {}
 b2bua-runner b2bua_store_fault_rejected_total counter fixed {}
 b2bua-runner b2bua_store_fault_audit_skipped_total counter fixed {}
@@ -240,6 +241,7 @@ sip-proxy-runner sip_proxy_overload_rejections_total counter fixed {reason}
 sip-proxy-runner sip_proxy_worker_stale_decrease_total counter fixed {}
 sip-proxy-runner sip_proxy_lb_emergency_bypassed_total counter fixed {}
 sip-proxy-runner sip_worker_health gauge fixed {health}
+sip-proxy-runner sip_worker_acceptance gauge fixed {acceptance}
 sip-proxy-runner sip_proxy_peer_failures_total counter capped:256 {peer,scope,kind}
 sip-proxy-runner sip_proxy_peer_failures_overflow_total counter fixed {}
 sip-proxy-runner sip_proxy_self_elu_ewma gauge fixed {}

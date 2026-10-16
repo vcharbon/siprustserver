@@ -126,7 +126,7 @@ use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_proxy::health::HealthProbe;
-use sip_proxy::load_observer::WorkerLoadObserver;
+use sip_proxy::load_observer::{sweep_alive, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::WorkerHealth;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
@@ -593,15 +593,17 @@ async fn main() {
                     }
                     stalled_before = stalled;
                 }
-                let (mut alive, mut unknown, mut dead) = (0, 0, 0);
+                let (mut alive, mut unknown, mut dead, mut accepting) = (0, 0, 0, 0);
                 for w in reg.snapshot() {
                     match w.health {
                         WorkerHealth::Alive => alive += 1,
                         WorkerHealth::Unknown => unknown += 1,
                         WorkerHealth::Dead => dead += 1,
                     }
+                    accepting += u64::from(w.accepts_new_calls());
                 }
                 m.set_worker_health_counts(alive, unknown, dead);
+                m.set_worker_acceptance_counts(accepting, alive - accepting);
                 match discovery.as_ref().map(|watch| watch.watch_health()) {
                     Some(h) => m.set_discovery(h.client_failing, h.broken_since_unix_ms),
                     None => m.set_discovery(false, None),
@@ -633,9 +635,7 @@ async fn main() {
             t.tick().await; // skip the immediate first tick — first sweep fires at +1s
             loop {
                 t.tick().await;
-                let alive: Vec<_> =
-                    reg.snapshot().into_iter().filter(|w| w.is_alive()).map(|w| w.id).collect();
-                let floored = obs.sweep_stale(clk.now_ms(), |id| alive.iter().any(|a| a == id));
+                let floored = sweep_alive(&obs, reg.as_ref(), clk.now_ms());
                 if floored > 0 {
                     m.record_overload_stale_decrease(floored);
                 }

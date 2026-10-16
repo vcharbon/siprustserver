@@ -106,13 +106,12 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
     seeds
 }
 
-/// Whether `branch` names a server seed an in-dialog INVITE can be a copy of:
-/// a relayed INVITE still pending on one of `call`'s dialogs, or an INVITE
-/// whose 2xx a dialog retains. The a-leg's unanswered initial INVITE is not
-/// asked about: its retransmission carries no To-tag, resolves as an initial
-/// INVITE and never reaches the in-dialog re-offer; the layer's own seed
-/// absorbs it below the router.
-pub(super) fn names_server_branch(call: &Call, branch: &str) -> bool {
+/// Whether `branch` names a server seed an INVITE can be a copy of: a relayed
+/// INVITE still pending on one of `call`'s dialogs, or an INVITE whose 2xx a
+/// dialog retains, the answered initial INVITE's included. The a-leg's
+/// unanswered initial INVITE is not named: on the node serving the call the
+/// layer's own transaction absorbs its retransmission below the router.
+pub(in crate::router) fn names_server_branch(call: &Call, branch: &str) -> bool {
     if branch.is_empty() {
         return false;
     }

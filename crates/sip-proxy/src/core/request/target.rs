@@ -100,19 +100,29 @@ impl ProxyCore {
     }
 
     /// The node a request goes to whose transaction already went to `went`:
-    /// `went` itself while it is not a worker the proxy reads not alive, else
-    /// where `cookie` places the call now. `None`: the cookie verified and
-    /// names no alive worker. A cookie the strategy cannot place keeps `went`.
+    /// with no `cookie`, `went` itself; with one, `went` while it is the
+    /// address of an alive worker the cookie names, else where the cookie
+    /// places the call now — whatever the registry remembers of `went`, a
+    /// departed address being forgotten after its window or bound by another
+    /// worker since. `None`: the cookie verified and names no alive worker. A
+    /// cookie the strategy cannot place keeps `went`.
     pub(super) async fn follow_live_hop(
         &self,
         went: ProxyAddr,
         cookie: Option<&RouteParams>,
         msg: &SipMessage,
     ) -> Option<ProxyAddr> {
-        let not_alive = self.registry.lookup_by_address(&went).is_some_and(|w| !w.is_alive());
-        let Some(cookie) = cookie.filter(|_| not_alive) else {
+        let Some(cookie) = cookie else { return Some(went) };
+        let named =
+            [self.strategy.stickiness_primary(cookie), self.strategy.stickiness_backup(cookie)];
+        let live_there = named
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.registry.resolve(id))
+            .any(|w| w.address == went && w.is_alive());
+        if live_there {
             return Some(went);
-        };
+        }
         match self.strategy.decode_stickiness(cookie, msg).await {
             DecodeResult::Forward { target, .. } | DecodeResult::ForwardBackup { target, .. } => {
                 Some(target)
