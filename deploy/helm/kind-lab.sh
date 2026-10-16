@@ -11,6 +11,7 @@
 #                                    the series check; helm args go to the SUT
 #                                    release (e.g. --set worker.replicas=3)
 #   kind-lab.sh chaos-mesh           Chaos Mesh alone (chaos-mesh-values-kind.yaml)
+#   kind-lab.sh uas                  (re)start the SIPp callees (the hakit base UAS)
 #   kind-lab.sh down                 the cluster and the sipext plane
 #
 # Env: CHAOS_MESH_VERSION=2.8.4 (the pinned chart and images); CHAOS_MESH=0
@@ -76,6 +77,33 @@ chaos_mesh_release() {
     --wait --timeout "$ROLLOUT_TIMEOUT"
 }
 
+# The SIPp callees: the HA tooling's base UAS (tooling/hakit/content/scenarios)
+# with the key defaults it declares, at the addresses run.sh's callees take,
+# so every catalog shape (a callee that re-INVITEs among them) is served.
+HAKIT_DIR="$(cd "$HELM_DIR/../../tooling/hakit" && pwd)"
+hakit_uas_up() {
+  local prefix="${SIPEXT_UAS_IP%.*}" base="${SIPEXT_UAS_IP##*.}" i ip keys
+  docker network inspect "$SIPEXT_NET" >/dev/null 2>&1 || die "sipext network missing: '$0 up' creates it"
+  mapfile -t keys < <(uv run --quiet --locked --project "$HAKIT_DIR" hakit sipp-keys uas-basic.xml) \
+    || die "hakit sipp-keys failed (needs uv)"
+  mkdir -p "$SIPEXT_GEN_DIR"
+  printf 'SEQUENTIAL\n' > "$SIPEXT_GEN_DIR/uas-targets.csv"
+  for i in $(seq 0 $(( SIPP_UAS_REPLICAS - 1 ))); do
+    ip="${prefix}.$(( base + i ))"
+    docker rm -f "sipp-uas-$i" >/dev/null 2>&1 || true
+    docker run -d --name "sipp-uas-$i" --label "sipext-run=$CLUSTER" \
+      --restart unless-stopped \
+      --network "$SIPEXT_NET" --ip "$ip" \
+      --cpus "$SIPP_UAS_CPUS" --memory "$SIPP_UAS_MEM" \
+      -v "$HAKIT_DIR/content/scenarios:/scenarios:ro" \
+      sipp:dev sipp -sf /scenarios/uas-basic.xml "${keys[@]}" -i "$ip" -p 5060 \
+        -l 60000 -recv_timeout 900000 \
+        -trace_err -ringbuffer_files 1 -ringbuffer_size 16777216 >/dev/null
+    printf '%s\n' "$ip" >> "$SIPEXT_GEN_DIR/uas-targets.csv"
+    log "sipp-uas-$i up at $ip (docker, sipext, hakit uas-basic.xml)"
+  done
+}
+
 lab_deploy() {
   preflight
   require_infra_node
@@ -85,7 +113,7 @@ lab_deploy() {
     --set "clusterName=kind-$CLUSTER"
   if [ "${CHAOS_MESH:-1}" = 1 ]; then chaos_mesh_release; else log "Chaos Mesh skipped (CHAOS_MESH=0)"; fi
   # The UAS containers first: the first one is the workers' scripted callee.
-  sipp_uas_up
+  hakit_uas_up
   helm_release siprust "$HELM_DIR/siprust" "$NS" "$@"
   vip_smoke || die "vip-smoke: the external VIP ${SIPEXT_VIP}:${SIP_PORT} answers nothing; kubectl -n $NS logs deploy/sip-front-proxy -c keepalived"
   isolation_smoke
@@ -98,6 +126,7 @@ case "${1:-}" in
   up) up ;;
   deploy) shift; lab_deploy "$@" ;;
   chaos-mesh) chaos_mesh_release ;;
+  uas) hakit_uas_up ;;
   down) down ;;
-  *) die "usage: $0 {up|deploy [helm args]|chaos-mesh|down}" ;;
+  *) die "usage: $0 {up|deploy [helm args]|chaos-mesh|uas|down}" ;;
 esac

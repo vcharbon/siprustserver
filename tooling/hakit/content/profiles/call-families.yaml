@@ -4,7 +4,8 @@ description: >-
   Every call family of the base UAC at 2 to 4 calls a second, side by side, with a
   worker crash every 150 s: the plain hold and its emergency variant, the
   limited call, the caller's re-INVITEs, a long call the far end may end, the
-  callee's re-INVITEs, the ghost and the two floods. The ghost is released by
+  callee's re-INVITEs (the lab's base UAS sends them 60 s and 120 s in and
+  hangs up at 180 s), the ghost and the two floods. The ghost is released by
   the system under test's keepalive, so its 600 s bound sits above the lab's
   keepalive interval plus its answer grace (300 s + 120 s).
 duration_s: 900
@@ -44,7 +45,7 @@ streams:
     cps: 2
     setup_deadline_s: 32
     ring_s: 2
-    hold_s: 60
+    hold_s: 240
     params: { far_end_bye: release }
   - name: options_flood
     driver: sipp
