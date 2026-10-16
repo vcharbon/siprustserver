@@ -121,6 +121,94 @@ async fn a_held_callee_numbers_its_requests_on_across_the_answer() {
     h.finish().await;
 }
 
+/// A held callee rings reliably and rejects only once its 183 is PRACKed: a
+/// caller that PRACKs late gets the PRACK's 200 first, then the 486, which it
+/// ACKs, and the call settles.
+#[tokio::test(start_paused = true)]
+async fn a_held_callee_rejects_after_its_reliable_provisional_is_pracked() {
+    let h = Harness::new("actor-held-reject");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let alice_task = {
+        let alice = alice.clone();
+        let bob = bob.clone();
+        tokio::spawn(async move {
+            let mut call = alice
+                .invite(&bob)
+                .with_sdp(OFFER_SDP)
+                .with_header("Supported", "100rel")
+                .send()
+                .await;
+            let p183 = call.expect(183).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the 183");
+            prack.expect(200).await;
+            call.expect(486).await;
+        })
+    };
+
+    let call = plan(
+        vec![held_bob(
+            &bob,
+            vec![
+                Goal::new(Barrier::None, GoalStep::Ring { forks: &[], reliable: true }),
+                Goal::new(Barrier::None, GoalStep::Reject { status: 486 }),
+            ],
+        )],
+        vec![],
+    );
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the rejected held call settles, got {verdict:?}");
+    alice_task.await.expect("alice's side");
+
+    h.finish().await;
+}
+
+/// A PRACK that reaches a callee after its own non-2xx final names an early
+/// dialog the final ended: it draws 481.
+#[tokio::test(start_paused = true)]
+async fn a_prack_after_the_callee_s_reject_draws_481() {
+    let h = Harness::new("actor-held-reject-late-prack");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let alice_task = {
+        let alice = alice.clone();
+        let bob = bob.clone();
+        tokio::spawn(async move {
+            let mut call = alice
+                .invite(&bob)
+                .with_sdp(OFFER_SDP)
+                .with_header("Supported", "100rel")
+                .send()
+                .await;
+            let p183 = call.expect(183).await;
+            let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the 183");
+            prack.expect(200).await;
+            call.expect(486).await;
+            let mut late = call.try_prack(&p183).await.expect("alice PRACKs again");
+            late.expect(481).await;
+        })
+    };
+
+    let call = plan(
+        vec![held_bob(
+            &bob,
+            vec![
+                Goal::new(Barrier::None, GoalStep::Ring { forks: &[], reliable: true }),
+                Goal::new(Barrier::None, GoalStep::Reject { status: 486 }),
+            ],
+        )],
+        vec![],
+    );
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the rejected held call settles, got {verdict:?}");
+    alice_task.await.expect("alice's side");
+
+    h.finish().await;
+}
+
 /// A CANCEL that reaches a held callee before it rang 487s the INVITE and
 /// drops the ring and answer goals: the call ends abandoned and settles.
 #[tokio::test(start_paused = true)]

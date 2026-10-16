@@ -21,7 +21,15 @@ use sip_message::SipRequest;
 
 use super::goals::{BodyExpect, RequestKind};
 use super::runner::ParkedRequest;
-use super::script::parked_matches;
+
+/// Whether a parked request satisfies an `ExpectRequest`'s kind.
+pub(super) fn parked_matches(p: &ParkedRequest, kind: &RequestKind) -> bool {
+    match kind {
+        RequestKind::Initial => p.initial,
+        RequestKind::InDialog(m) => !p.initial && p.txn.request().method().as_str() == m.as_str(),
+        RequestKind::Cancel => !p.initial && p.txn.request().method().as_str() == "CANCEL",
+    }
+}
 
 /// The index of the parked request this expectation consumes, `None` when none
 /// of them is of the kind.

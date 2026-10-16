@@ -43,6 +43,7 @@
 
 mod accept_delta;
 mod answer;
+mod barrier;
 mod delta;
 mod drive;
 mod ending;

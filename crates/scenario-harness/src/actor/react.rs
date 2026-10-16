@@ -16,7 +16,7 @@ use super::ledger::{ObligationKey, ObligationKind};
 use super::response::react_response;
 use super::runner::{ActorState, ParkedRequest};
 use super::script::{scripted_wants_cancel, scripted_wants_in_dialog};
-use super::state::{Observation, SubflowState};
+use super::state::{LegPhase, Observation, SubflowState};
 use crate::{Inbound, ServerTxn, StepError};
 
 /// The CANCEL automatic's 487 half (RFC 3261 §9.2), shared by the live CANCEL
@@ -220,9 +220,8 @@ pub(super) async fn react_in_dialog_request(
             // (a reject-final's hop-ACK that surfaced unclaimed, or a recovered
             // answer-ACK landing after the leg was BYE-terminated) — closing a
             // never-opened key is a harmless no-op.
-            let already_terminated = st
-                .obs
-                .with_snapshot(|s| s.leg(st.role).phase() == super::state::LegPhase::Terminated);
+            let already_terminated =
+                st.obs.with_snapshot(|s| s.leg(st.role).phase() == LegPhase::Terminated);
             if already_terminated {
                 st.obs.record(
                     Observation::ResponseObserved {
@@ -424,6 +423,12 @@ pub(super) async fn react_in_dialog_request(
         // FORKING callee (C1/E3) answers only on the WINNER fork's PRACK — a
         // losing fork's PRACK (identified by its To-tag) is 200'd and absorbed.
         "PRACK" => {
+            // After this leg's own final (or its BYE) the early dialog the
+            // PRACK names is gone: 481 (RFC 3261 §12.2.2, RFC 3262 §3).
+            if st.obs.with_snapshot(|s| s.leg(st.role).phase() == LegPhase::Terminated) {
+                uas.respond(481, "Call/Transaction Does Not Exist").try_send().await?;
+                return Ok(());
+            }
             st.ctx.anchor(&st.agent, "prack", uas.request());
             let prack_tag = uas.request().to().tag().map(str::to_owned);
             uas.respond(200, "OK").try_send().await?;

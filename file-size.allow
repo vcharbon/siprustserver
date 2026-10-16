@@ -94,11 +94,10 @@ crates/rfc-rules/src/rules/dialog/tests.rs 1159
 crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1722
-crates/scenario-harness/src/actor/goals.rs 510
 crates/scenario-harness/src/actor/response.rs 537
 crates/scenario-harness/src/actor/runner.rs 595
 crates/scenario-harness/src/actor/scenarios.rs 1086
-crates/scenario-harness/src/actor/script.rs 540
+crates/scenario-harness/src/actor/script.rs 532
 crates/scenario-harness/src/actor/state.rs 668
 crates/scenario-harness/src/agent/client_invite.rs 598
 crates/scenario-harness/src/agent/dialog.rs 719

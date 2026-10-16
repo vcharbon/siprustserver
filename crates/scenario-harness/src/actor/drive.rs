@@ -8,7 +8,7 @@ use sip_message::generators::InDialogMethod;
 
 use super::answer::discharge_on_teardown;
 use super::goals::{FinalAssert, GoalStep};
-use super::held::{answer_held, callee_early_request, ring};
+use super::held::{answer_held, callee_early_request, reject_held, ring};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::originate::{
     originate_early, originate_in_dialog, originate_initial_invite, originate_reinvite,
@@ -142,6 +142,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         GoalStep::Ring { forks, reliable } => ring(st, forks, reliable).await?,
         GoalStep::Answer { winner } => answer_held(st, winner).await?,
+        GoalStep::Reject { status } => reject_held(st, status).await?,
         // One in-dialog OPTIONS keepalive ping, its 200 read inline (the reactor
         // has nothing else to do for this leg during the ping).
         GoalStep::Options => {

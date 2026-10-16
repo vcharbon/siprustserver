@@ -109,7 +109,8 @@ pub enum Disposition {
     /// Holds the initial INVITE with no automatic response: the actor's goals
     /// ring it ([`GoalStep::Ring`](super::GoalStep::Ring)), may send requests
     /// on its early dialogs ([`GoalStep::EarlyRequest`](super::GoalStep::EarlyRequest)),
-    /// and answer it ([`GoalStep::Answer`](super::GoalStep::Answer)). A CANCEL
+    /// and answer it ([`GoalStep::Answer`](super::GoalStep::Answer)) or reject
+    /// it ([`GoalStep::Reject`](super::GoalStep::Reject)). A CANCEL
     /// 487s the held INVITE and drops the remaining goals: no dialog is left
     /// for them to act on.
     Held,

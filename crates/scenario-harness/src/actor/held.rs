@@ -1,14 +1,15 @@
 //! The [`Disposition::Held`](super::Disposition::Held) callee: an initial
 //! INVITE no policy answers. Its goals ring it ([`ring`]), send requests on
-//! its early dialogs ([`callee_early_request`]) and answer it
-//! ([`answer_held`]); [`answer_ready`] and [`early_request_ready`] are the
-//! goal-arm gates that keep those steps RFC 3262 compliant.
+//! its early dialogs ([`callee_early_request`]) and answer or reject it
+//! ([`answer_held`], [`reject_held`]); [`answer_ready`], [`reject_ready`] and
+//! [`early_request_ready`] are the goal-arm gates that keep those steps RFC
+//! 3262 compliant (the reject's gate is stricter than RFC 3262 asks).
 
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
 
-use super::answer::answer_initial_invite;
+use super::answer::{answer_initial_invite, arm_reject_final, reject_reason};
 use super::endpoint::ForkWinner;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::runner::{ActorState, ForkAnswer};
@@ -108,6 +109,32 @@ pub(super) async fn answer_held(
         unpracked: Default::default(),
     });
     answer_initial_invite(st, txn, fork).await
+}
+
+/// Whether `GoalStep::Reject` may fire: the INVITE is held and every reliable
+/// provisional it drew is PRACKed.
+pub(super) fn reject_ready(st: &ActorState<'_>) -> bool {
+    st.held.is_some() && st.unpracked.is_empty()
+}
+
+/// `GoalStep::Reject`: the non-2xx final `status` on the held INVITE, which
+/// ends the leg and awaits its hop-ACK.
+pub(super) async fn reject_held(st: &mut ActorState<'_>, status: u16) -> Result<(), StepError> {
+    if status < 300 {
+        return Err(StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: format!("Reject goal with the non-final-error status {status}"),
+        });
+    }
+    let Some(mut txn) = st.held.take() else {
+        return Err(no_held_invite(st.role, "Reject"));
+    };
+    txn.respond(status, reject_reason(status)).try_send().await?;
+    arm_reject_final(st, &txn, status);
+    let now = Instant::now();
+    st.obs.record(Observation::LegTerminated { leg: st.role }, now);
+    st.scope.mark_terminated();
+    Ok(())
 }
 
 /// Whether a callee's `GoalStep::EarlyRequest` on `fork` may fire: the
