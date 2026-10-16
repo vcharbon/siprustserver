@@ -14,10 +14,11 @@ Counters restart at 0 with the process and then count the current file again:
 a reader takes them as reset-aware counters (increase()), and a restart can
 count the current file's entries twice, never less than once.
 
-With a keep path, every entry but a scenario's own receive timer (a recv
-timeout that jumps to its label: the normal path of a hold or a deadline
-check, which fills the error file) is appended there whole, so the entries
-worth reading outlive the error file's own bound.
+A scenario's own receive timer (a recv timeout that jumps to its label: the
+normal path of a hold or a deadline check, which fills the error file) is not
+an error: it is counted apart (timer_jumps), and `entries` counts the other
+entries alone. With a keep path, every entry but those timer jumps is appended
+there whole, so the entries worth reading outlive the error file's own bound.
 """
 import collections
 import os
@@ -40,7 +41,7 @@ CHUNK = 64 * 1024
 # A partial line longer than this is dropped: no entry's first line is that long.
 LINE_MAX = 64 * 1024
 
-Counts = collections.namedtuple("Counts", "entries unexpected")
+Counts = collections.namedtuple("Counts", "entries timer_jumps unexpected")
 
 
 class ErrorFollower:
@@ -55,6 +56,7 @@ class ErrorFollower:
         self._fh = None
         self._partial = b""
         self._entries = 0
+        self._timer_jumps = 0
         self._unexpected = collections.Counter()
         self._lock = threading.Lock()
 
@@ -83,7 +85,7 @@ class ErrorFollower:
 
     def snapshot(self):
         with self._lock:
-            return Counts(self._entries, dict(self._unexpected))
+            return Counts(self._entries, self._timer_jumps, dict(self._unexpected))
 
     def close(self):
         with self._lock:
@@ -132,8 +134,10 @@ class ErrorFollower:
                 self._kept(line)
             return
         self._keeping = ROUTINE.match(line, m.end()) is None
-        if self._keeping:
-            self._kept(line)
+        if not self._keeping:
+            self._timer_jumps += 1
+            return
+        self._kept(line)
         self._entries += 1
         u = UNEXPECTED.match(line, m.end())
         if u:

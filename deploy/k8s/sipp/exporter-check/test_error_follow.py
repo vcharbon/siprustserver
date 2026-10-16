@@ -40,6 +40,11 @@ def timeout_entry(call_id):
             f"jumping to label 14\n")
 
 
+def error_entry(call_id):
+    """An entry that is an error: a send's retransmissions ran out."""
+    return f"{STAMP}Call-Id: {call_id}, timeout on max UDP retrans for message 9, jumping to label 20 \n"
+
+
 POST_ANSWER_480 = (("action", "aborted"), ("expecting", "OPTIONS"), ("received", "480"))
 
 
@@ -70,13 +75,13 @@ class Follow(unittest.TestCase):
     def test_an_abort_survives_two_rotations(self):
         self.append("The following events occurred:\n" + abort_entry("c1", "OPTIONS", "SIP/2.0 480 Temporarily Unavailable"))
         self.follower.poll()
-        self.append(timeout_entry("c2"))
+        self.append(error_entry("c2"))
         self.rotate(1)
         self.follower.poll()
-        self.append(timeout_entry("c3"))
+        self.append(error_entry("c3"))
         self.rotate(2)
         self.follower.poll()
-        self.append(timeout_entry("c4"))
+        self.append(error_entry("c4"))
         self.follower.poll()
         counts = self.follower.snapshot()
         self.assertEqual(counts.unexpected, {POST_ANSWER_480: 1})
@@ -114,10 +119,10 @@ class Follow(unittest.TestCase):
         self.assertEqual(self.follower.snapshot().unexpected, {POST_ANSWER_480: 1})
 
     def test_truncated_in_place_reads_from_the_start(self):
-        self.append(timeout_entry("c1") * 3)
+        self.append(error_entry("c1") * 3)
         self.follower.poll()
         open(self.path, "w").close()
-        self.append(timeout_entry("c2"))
+        self.append(error_entry("c2"))
         self.follower.poll()
         self.assertEqual(self.follower.snapshot().entries, 4)
 
@@ -133,14 +138,23 @@ class Follow(unittest.TestCase):
         self.append(retrans[30:] + timeout_entry("c5"))
         follower.poll()
         follower.close()
-        self.assertEqual(follower.snapshot().entries, 5)
+        self.assertEqual((follower.snapshot().entries, follower.snapshot().timer_jumps), (2, 3))
         with open(keep) as fh:
             self.assertEqual(fh.read(), abort + retrans)
+
+    def test_a_scenarios_own_timer_is_counted_apart_from_the_errors(self):
+        """A recv timeout that jumps to its label is a scenario's tick, not an
+        error: entries counts the errors alone, timer_jumps the ticks."""
+        retrans = f"{STAMP}Call-Id: c4, timeout on max UDP retrans for message 9, jumping to label 20 \n"
+        self.append(timeout_entry("c1") * 3 + abort_entry("c2", "OPTIONS", "SIP/2.0 480 Temporarily Unavailable") + retrans)
+        self.follower.poll()
+        counts = self.follower.snapshot()
+        self.assertEqual((counts.entries, counts.timer_jumps), (2, 3))
 
     def test_a_missing_file_counts_nothing_until_it_appears(self):
         self.follower.poll()
         self.assertEqual(self.follower.snapshot().entries, 0)
-        self.append(timeout_entry("c1"))
+        self.append(error_entry("c1"))
         self.follower.poll()
         self.assertEqual(self.follower.snapshot().entries, 1)
 
@@ -211,7 +225,7 @@ class TrimmedErrorFileTest(unittest.TestCase):
         import stat_trim
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "errors.log")
-            entry = timeout_entry("c1")
+            entry = error_entry("c1")
             with open(path, "w") as fh:
                 fh.write("The following events occurred:\n")
                 fh.write(entry * (3 * 1024 * 1024 // len(entry)))

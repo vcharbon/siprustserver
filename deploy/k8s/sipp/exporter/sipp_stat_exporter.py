@@ -28,7 +28,10 @@ Headline series (labelled by scenario/role/job from the env):
   sipp_up                       gauge   1 when the stat file is readable/fresh
   sipp_stat_file_allocated_bytes gauge  disk the stat file holds
   sipp_stat_trim_failed         gauge   1 while the trimmer's last attempt failed
-  sipp_error_entries_total      counter entries of the error file (error_follow.py)
+  sipp_error_entries_total      counter entries of the error file (error_follow.py),
+                                        a scenario's own recv timer jumps left out
+  sipp_recv_timer_jumps_total   counter recv timeouts that jumped to their label:
+                                        a scenario's ticks, not errors
   sipp_unexpected_msgs_total{action,expecting,received}
                                 counter unexpected-message entries: aborted or
                                         continued, the scenario step expected, the
@@ -199,6 +202,7 @@ def render(path=STAT_FILE, trimmer=None, follower=None, shipper=None):
     if follower is not None:
         counts = follower.snapshot()
         out.append(fmt("sipp_error_entries_total", counts.entries))
+        out.append(fmt("sipp_recv_timer_jumps_total", counts.timer_jumps))
         for labels, n in sorted(counts.unexpected.items()):
             out.append(fmt("sipp_unexpected_msgs_total", n, labels))
     header, row = read_last_row(path)
