@@ -26,6 +26,9 @@ from .probe_live import RunFiles, event_rows, judge_recent, planned_events, read
 from .probe_spec import ProbeSpec
 from .vmrange import Vm
 
+# Shipping and ingestion of a record, past the end of its call.
+RECORD_GRACE_S = 30
+
 
 def run_state(run_dir: Path) -> str:
     """`running` while its runner lives, `ended` once its verdict is written,
@@ -125,8 +128,11 @@ def _anomalies(snap: Json, files: RunFiles, spec: ProbeSpec, loading: bool, not_
             an.append(f"bound {b['name']}: {v:g} > {b['max']:g}")
     if loading:
         records = jv.obj(recent, "records")
+        elapsed = jv.number(jv.obj(snap, "load"), "elapsed_s", 0)
         for s in files.profile.streams:
-            if s.start == "run" and s.name not in spec.ballast and not records.get(s.name):
+            # A stream's first records come once its first calls could have ended.
+            due = max(s.setup_deadline_s, s.ring_s + s.hold_s) + RECORD_GRACE_S
+            if s.start == "run" and s.name not in spec.ballast and elapsed >= due and not records.get(s.name):
                 an.append(f"stream {s.name} wrote no record in the last {spec.recent_s:g} s")
         if not any(e["status"] in ("open", "settling") for e in jv.objs(snap, "events")):
             an.extend(f"pod not ready outside every window: {p}" for p in not_ready)

@@ -88,6 +88,8 @@ class PodLoadgenStream:
                     "command": argv[:1],
                     "args": argv[1:],
                     "env": [{"name": "POD_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}}],
+                    # The scrape keeps the declared port the annotation names.
+                    "ports": [{"name": "metrics", "containerPort": METRICS_PORT}],
                     "volumeMounts": mount,
                     "resources": {"limits": {"cpu": "4", "memory": "1536Mi"}},
                 },

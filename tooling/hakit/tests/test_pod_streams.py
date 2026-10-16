@@ -85,6 +85,9 @@ def test_a_pod_stream_runs_the_binary_at_the_pods_address_against_the_resolved_s
     assert args[args.index("--target") + 1] == "10.96.0.10:5060"
     assert args[args.index("--bind-ip") + 1] == "$(POD_IP)"
     assert args[args.index("--records-url") + 1] == "http://172.20.0.1:9428"
+    # The in-cluster scrape keeps the declared port its annotation names.
+    assert gen["ports"] == [{"name": "metrics", "containerPort": 9300}]
+    assert as_obj(meta["annotations"])["prometheus.io/port"] == "9300"
     assert keeper["name"] == "keeper"
     # The pod is ready before the load starts; the run starts no docker generator.
     assert any("--for=condition=Ready" in a for a in kubectl(calls, "wait"))

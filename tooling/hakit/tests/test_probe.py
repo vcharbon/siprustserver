@@ -86,11 +86,16 @@ def test_the_second_final_needs_a_non_2xx_for_the_invite_after_the_answer() -> N
 def test_a_running_run_checks_liveness_bounds_and_pods(tmp_path: Path) -> None:
     d = run_dir(tmp_path, [], calls=0, events=[])
     meta = json.loads((d / "run-meta.json").read_text())
-    (d / "run-meta.json").write_text(json.dumps({**meta, "load_started_at_ms": NOW - 60_000}))
     (d / "active").write_text(f"{os.getpid()}\n")
     assert run_state(d) == "running"
     pods = json.dumps({"items": [{"metadata": {"name": "w-0"}, "status": {"phase": "Pending"}}]})
     spec = ProbeSpec(bounds=[Bound("limiter admission", "max(limiter_admission_max)", 4)])
+    # The stream's first calls end at its 32 s setup deadline at the latest:
+    # 30 s into the load, no record yet is no anomaly; 120 s in, it is.
+    (d / "run-meta.json").write_text(json.dumps({**meta, "load_started_at_ms": NOW - 30_000}))
+    early = [str(a) for a in jv.lst(snap(d, [], spec), "anomalies")]
+    assert not [a for a in early if a.startswith("stream basic")]
+    (d / "run-meta.json").write_text(json.dumps({**meta, "load_started_at_ms": NOW - 120_000}))
     s = snap(d, [], spec, vm={"limiter_admission_max": 5}, pods=pods)
     an = [str(a) for a in jv.lst(s, "anomalies")]
     assert jv.obj(s, "load")["phase"] == "loading"
