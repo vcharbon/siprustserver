@@ -159,6 +159,26 @@ def test_a_refused_rate_step_is_a_generator_failure(tmp_path: Path) -> None:
     assert json.loads((run_dir / "verdict.json").read_text())["status"] == "invalid"
 
 
+def test_a_finding_is_in_integrity_jsonl_while_the_run_still_runs(tmp_path: Path) -> None:
+    seen_at_drain: list[str] = []
+
+    def refuse_then_look(c: Call) -> ProcResult | None:
+        if c.argv[:1] != ["kubectl"] or "--raw" not in c.argv:
+            return None
+        if "rate" in c.argv[-3]:
+            return ProcResult(1, "", "404")
+        found = list((tmp_path / "results").glob("*/integrity.jsonl"))
+        seen_at_drain.extend(p.read_text() for p in found)
+        seen_at_drain.extend(p.read_text() for p in (tmp_path / "results").glob("*/run-meta.json"))
+        return None
+
+    run(tmp_path, [cell("cell_a", steps=[{"at_s": 60, "cps": 8}])], [refuse_then_look])
+    integrity, meta = seen_at_drain
+    assert '"generator_failure"' in integrity
+    # The load's start is in run-meta.json from the moment it starts.
+    assert "load_started_at_ms" in meta
+
+
 def test_a_load_incident_stream_takes_no_steps(tmp_path: Path) -> None:
     c = content(tmp_path, [cell("cell_a")])
     p = parse_profile({**c.profiles["pods"].raw, "streams": [cell("cell_a", start="incident", steps=[{"at_s": 1, "cps": 2}])]})
