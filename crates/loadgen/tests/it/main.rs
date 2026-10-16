@@ -8,6 +8,7 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=loadgen) & binary(it)' --run-ignored only <module>::`.
 
+mod drain;
 mod fake_net;
 mod fake_rig;
 mod from_user_net;

@@ -103,3 +103,13 @@ def test_a_leg_that_never_opened_or_ended_otherwise_is_an_unexpected_ending() ->
     assert (imp.reason, imp.code) == ("leg:primary", 503)
     r["legs"] = [{"role": "primary", "ending": "rejected", "final_code": 486}, {"role": "backup", "ending": "answered", "final_code": 200}]
     assert classify(r, FAILOVER).success
+
+
+def test_an_answer_that_withholds_early_media_fails_when_the_caller_saw_some() -> None:
+    quiet = Shape("quiet", "c", None, [], [], [ExpectedEnding("answered", None, False)], True)
+    assert classify(record("a", T0), quiet).success
+    leaked = {**record("b", T0), "early_media": True}
+    c = classify(leaked, quiet)
+    assert not c.success
+    (imp,) = c.impacts
+    assert (imp.cls, imp.answered, imp.budgetable) == ("unexpected_ending", True, False)

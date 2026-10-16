@@ -26,6 +26,9 @@ pub use mix::check_from_user_mix;
 use mix::{resolve_mix, Mix};
 pub use product::{command, main, parse_from, NoFlags, Product, RunLayout, Shipped};
 
+/// The file of `--out-dir` that holds the `/metrics` body as the run ended.
+pub const FINAL_METRICS_FILE: &str = "metrics.prom";
+
 /// Run the complete loadgen application for `product`: its `flags` and the
 /// loadgen `args` parsed (and configured) by [`main`]. The registry is the
 /// product's, built once the endpoint layout is resolved; a registry the
@@ -190,6 +193,15 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     // re-targets it and the governor re-anchors its grid; exported as the
     // `loadgen_target_cps` gauge.
     let rate = driver.rate_handle();
+    // SIGUSR1 drains the run, as `POST /drain` does: no new call, the calls in
+    // flight end, then the run finishes as at its duration.
+    let usr1_rate = rate.clone();
+    let mut usr1 = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
+    tokio::spawn(async move {
+        if usr1.recv().await.is_some() {
+            usr1_rate.drain();
+        }
+    });
 
     // Live /metrics: reporter series + mux series + chaos markers + the current
     // rate target + a process-memory canary (RSS) so the endurance dashboard can
@@ -274,6 +286,12 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     }
     reporter.finalize_run(&args.out_dir, meta_for(&clock, true), mux_canaries(&core))?;
     outcomes.close();
+    // The final `/metrics` body, for whoever reads the run's counters once the
+    // process is gone.
+    std::fs::write(
+        args.out_dir.join(FINAL_METRICS_FILE),
+        metrics_body(&reporter, &core, &chaos, &rate, &outcomes),
+    )?;
     eprintln!(
         "[{name}] done: {} offered: {} records, {} not placed, {} generator failures{}; \
          registry_size={}; report at {}",

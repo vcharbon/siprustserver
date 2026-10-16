@@ -21,6 +21,8 @@ use crate::rate::RateHandle;
 ///   The governor re-anchors its grid on the next slot. Responds with the applied
 ///   value.
 /// - **`GET /rate`** → the current target cps.
+/// - **`POST /drain`** (when a [`RateHandle`] is attached) → the run places no
+///   new call, waits for its calls in flight to end and exits.
 /// - **`GET /debug/flamegraph[?seconds=N]`** → on-demand pprof CPU flamegraph
 ///   SVG of this process (default 20 s, max 120). The load driver runs the same
 ///   shared `sip-message` parse path the SUT tiers do, at a saturated core, so
@@ -107,6 +109,14 @@ pub async fn serve_metrics_on(
                     "ok: no chaos log attached\n".to_string()
                 };
                 ("200 OK", body)
+            } else if method == "POST" && path == "/drain" {
+                match &rate {
+                    None => ("404 Not Found", "no rate handle attached\n".to_string()),
+                    Some(h) => {
+                        h.drain();
+                        ("200 OK", "ok: draining\n".to_string())
+                    }
+                }
             } else if path == "/rate" {
                 match &rate {
                     None => ("404 Not Found", "no rate handle attached\n".to_string()),

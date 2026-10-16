@@ -27,6 +27,7 @@ from .freshness import Freshness
 from .incident_exec import EventRunner
 from .jsonval import Json
 from .lab import Lab, lab_capabilities
+from .loadgen import LoadgenStream
 from .model import Incident
 from .offschedule import OffSchedule, clear_active, mark_active
 from .paths import REPO_ROOT
@@ -73,6 +74,21 @@ def _left_faulted(event: str, at_ms: int) -> Json:
     }
 
 
+def _undrained(stream_docs: list[Json]) -> list[Json]:
+    """A `run` stream's generator that did not end as its drain promises
+    (killed at the drain bound, or a bad exit) is a generator failure: its last
+    calls are unknown. A load incident's stream fails its heal step instead."""
+    return [
+        {
+            "kind": "generator_failure",
+            "stream": d["stream"],
+            "detail": f"the generator did not drain cleanly (exit code {d.get('exit_code')})",
+        }
+        for d in stream_docs
+        if d.get("start") == "run" and d.get("drained") is False
+    ]
+
+
 def _dump(p: Path, doc: object) -> None:
     p.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
@@ -112,9 +128,8 @@ class Runner:
 
     def refusals(self, profile: Profile, capabilities: list[str]) -> list[str]:
         errs = profile_errors(profile, self.content)
-        for s in profile.streams:
-            if s.driver != "sipp":
-                errs.append(f"stream {s.name!r}: driver {s.driver!r} is not implemented by this runner")
+        if not errs:
+            errs += self._loadgen_refusals(profile)
         for ev in plan(profile, self.content.incidents):
             for name in ev.spec.incidents:
                 inc = self.content.incidents[name]
@@ -125,6 +140,19 @@ class Runner:
             errs.append(f"{len(profile.streams)} streams exceed the lab's {self.lab.sipp_ip_slots} generator slots")
         if profile.cdr_join and "cdr" not in capabilities:
             errs.append("cdr_join needs the lab capability `cdr` (a CDR consumer shipping observations)")
+        return errs
+
+    def _loadgen_refusals(self, profile: Profile) -> list[str]:
+        """Each loadgen stream's product image accepts its flags and registers
+        its shape (ADR-0049 §5.4)."""
+        errs: list[str] = []
+        for slot, s in enumerate(profile.streams):
+            if s.driver != "loadgen" or slot >= self.lab.sipp_ip_slots:
+                continue
+            gen = LoadgenStream("check", s, slot, Path("/nonexistent"), self.lab, self.executor)
+            err = gen.shape_check()
+            if err is not None:
+                errs.append(err)
         return errs
 
     def run(self, profile_name: str) -> Path:
@@ -205,6 +233,7 @@ class Runner:
             live.loading = False
             streams.drain(self.clock.now_ms() + int(profile.drain_s * 1000), wait_until)
             stream_docs = streams.docs()
+            integrity += _undrained(stream_docs)
             close = journal.next_close_ms()
             while close is not None:
                 wait_until(close)

@@ -2,7 +2,8 @@
 
 The simulated lab answers what a healthy one would: every executable exits 0
 with no facts, a generator runs until it is drained, places no call, the
-system under test holds no call, and the API server serves every resource
+system under test holds no call, a loadgen image registers every shape of the
+search path, and the API server serves every resource
 definition asked for (Chaos Mesh's included). Each effect is recorded, and the timeline
 printed from the run's own `events.jsonl`.
 """
@@ -10,12 +11,14 @@ printed from the run's own `events.jsonl`.
 from __future__ import annotations
 
 import urllib.parse
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .clock import FakeClock
 from .executor import Call, FakeExecutor, HttpResult, ProcResult, Rule
 from .jsonl import read_jsonl
+from .loadgen import FINAL_METRICS
 
 STAT_HEADER = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated\n"
 STAT_ROW = "0;0;0;0;0\n"
@@ -25,12 +28,19 @@ class SimulatedLab:
     """Docker generators that run until drained, and quiet observability endpoints
     whose live series stay fresh: a sample at every instant, a record a second."""
 
-    def __init__(self, clock: FakeClock) -> None:
+    def __init__(self, clock: FakeClock, shapes: Sequence[str] = ()) -> None:
         self.drained: set[str] = set()
         self.clock = clock
         self.t0 = clock.now_ms()
+        self.shapes = list(shapes)
 
     def rule(self, call: Call) -> ProcResult | HttpResult | str | None:
+        if call.kind == "run" and call.argv[:2] == ["docker", "run"] and "--list-shapes" in call.argv:
+            return ProcResult(0, "".join(f"{s}\n" for s in self.shapes), "")
+        if call.kind == "read" and call.path is not None and call.path.name == FINAL_METRICS:
+            parts = call.path.parts
+            stream = parts[parts.index("streams") + 1] if "streams" in parts else ""
+            return f'loadgen_calls_offered_total{{stream="{stream}",shape="s"}} 0\n'
         if call.kind == "run" and call.argv[:2] == ["docker", "run"] and "--name" in call.argv:
             self.drained.discard(call.argv[call.argv.index("--name") + 1])
             return None
@@ -66,9 +76,10 @@ class SimulatedLab:
         return None
 
 
-def simulated(extra: list[Rule] | None = None) -> tuple[FakeClock, FakeExecutor]:
+def simulated(extra: list[Rule] | None = None, shapes: Sequence[str] = ()) -> tuple[FakeClock, FakeExecutor]:
+    """The simulated lab; `shapes` are the ones a loadgen image registers."""
     clock = FakeClock()
-    lab = SimulatedLab(clock)
+    lab = SimulatedLab(clock, shapes)
     return clock, FakeExecutor([*(extra or []), lab.rule])
 
 

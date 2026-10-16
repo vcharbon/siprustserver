@@ -392,8 +392,8 @@ async fn run_one(
         );
         binder.seed_ids(next_seed(seed_base));
         if let Some(sink) = &outcomes {
-            // The run is the Call-ID nonce: two runs never share a Call-ID.
-            binder.call_id_nonce(&sink.run);
+            // The run (and its call-id tag) is the Call-ID nonce: no two share one.
+            binder.call_id_nonce(&sink.call_id_nonce);
         }
         match bind_agents(&binder, &transport, legs).await {
             Ok((alice, callees)) => {

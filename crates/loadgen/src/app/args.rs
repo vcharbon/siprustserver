@@ -129,6 +129,11 @@ pub struct Args {
     /// `stream` label of the record counters (`[a-z][a-z0-9_]*`).
     #[arg(long, default_value = "main")]
     pub stream: String,
+    /// What every Call-ID carries after the run id, so two generators of one
+    /// run (two firings of one stream) never share a Call-ID (letters,
+    /// digits, `.`, `_`, `+`, `-`).
+    #[arg(long, default_value = "")]
+    pub call_id_tag: String,
     /// The JSON-lines file the call-outcome records are appended to. Default:
     /// `<out-dir>/call-outcomes.jsonl`.
     #[arg(long)]
@@ -360,17 +365,24 @@ pub(super) fn outcome_sink(
         return Err(invalid(format!("--stream {stream:?}: expected [a-z][a-z0-9_]*")));
     }
     let run = args.run.clone().unwrap_or_else(|| format!("{source}-{started_ms}"));
-    let nonce_safe = !run.is_empty()
-        && run.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
-    if !nonce_safe {
+    let nonce_safe = |s: &str| {
+        s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+    };
+    if run.is_empty() || !nonce_safe(&run) {
         return Err(invalid(format!(
             "--run {run:?}: expected letters, digits, `.`, `_`, `+`, `-`"
+        )));
+    }
+    let tag = args.call_id_tag.as_str();
+    if !nonce_safe(tag) {
+        return Err(invalid(format!(
+            "--call-id-tag {tag:?}: expected letters, digits, `.`, `_`, `+`, `-`"
         )));
     }
     let file =
         args.records_file.clone().unwrap_or_else(|| args.out_dir.join("call-outcomes.jsonl"));
     let logs = args.records_url.as_deref().map(LogsTarget::parse).transpose().map_err(invalid)?;
-    OutcomeSink::new(&run, source, stream, &file, logs)
+    Ok(OutcomeSink::new(&run, source, stream, &file, logs)?.with_call_id_tag(tag))
 }
 
 /// The run's [`Correlation`] from `--correlate` and the header knobs.

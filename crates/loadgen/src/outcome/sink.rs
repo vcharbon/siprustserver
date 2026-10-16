@@ -42,6 +42,10 @@ pub struct OutcomeSink {
     pub run: String,
     pub source: String,
     pub stream: String,
+    /// What every Call-ID of the run carries: the run, then the call-id tag
+    /// ([`Self::with_call_id_tag`]), so two generators of one run never share
+    /// a Call-ID.
+    pub call_id_nonce: String,
     tx: Mutex<Option<SyncSender<Value>>>,
     writers: Mutex<Vec<JoinHandle<()>>>,
     counts: Arc<Counts>,
@@ -138,10 +142,17 @@ impl OutcomeSink {
             run: run.to_string(),
             source: source.to_string(),
             stream: stream.to_string(),
+            call_id_nonce: run.to_string(),
             tx: Mutex::new(Some(tx)),
             writers: Mutex::new(writers),
             counts,
         })
+    }
+
+    /// The sink of a generator whose Call-IDs carry `tag` after the run.
+    pub fn with_call_id_tag(mut self, tag: &str) -> Self {
+        self.call_id_nonce = format!("{}{tag}", self.run);
+        self
     }
 
     /// Write one record (counted by its shape and ending); one arriving at a

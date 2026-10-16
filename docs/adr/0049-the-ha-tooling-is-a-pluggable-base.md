@@ -162,7 +162,8 @@ tolerated (§3).
    With `stop: drain` (the default) the generator stops placing calls, the
    calls in flight finish their teardown within the stream's
    `setup_deadline_s` or `ring_s` + `hold_s`, and only then is the generator
-   removed (SIPp: `SIGUSR1`; loadgen: rate 0, then its drain). With
+   removed (`SIGUSR1` for both drivers; loadgen also takes `POST /drain`,
+   and a drained loadgen must exit 0, any other exit fails the step). With
    `stop: abandon` the generator is killed with its calls in flight, which
    leaves those calls to the system under test to reap; the stream writes no
    record for them and is left out of the reconciliation. A stream that
@@ -548,8 +549,14 @@ made. A run profile joins the two.
    takes a shape registry (`ShapeRegistry`); a product binary registers its
    shapes and adds no wiring of its own. A product shape registers under its
    catalog shape id: one id is one catalog entry and one registered shape.
-   loadgen lists the ids it registered, and the dry-run refuses a `loadgen`
-   stream whose shape has no registration or no catalog entry.
+   loadgen lists the ids it registered, and the runner refuses a `loadgen`
+   stream whose shape has no registration or no catalog entry. A `loadgen`
+   stream's `params` name the product's `image` and its binary (`command`);
+   every other parameter is one more flag of the binary, and the flags the
+   runner sets (address, rate, run, stream, call limit as `--max-in-flight`,
+   records file and URL) are refused there. Its counters are those of its
+   last `/metrics` body, which loadgen leaves in the stream directory as it
+   exits (`metrics.prom`).
 
 ### 6. The runner
 

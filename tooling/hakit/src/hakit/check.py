@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .content import Content
 from .jsonval import as_obj
+from . import loadgen
 from .model import Incident
 from .recovery import MIN_SAMPLES
 from .profile import EventSpec, Profile, Stream
@@ -78,11 +79,11 @@ def _event_errors(where: str, ev: EventSpec, profile: Profile, content: Content)
 
 def _teardown_s(s: Stream, content: Content | None = None) -> float:
     """How long a stream's last call can take after the drain starts: ADR-0049
-    §3.7's bound, and for SIPp the base scenario's own worst case under the
-    scenario's declared keys."""
+    §3.7's bound, and the generator's own worst case: for SIPp the base
+    scenario's under the scenario's declared keys."""
     bound = max(s.setup_deadline_s, s.ring_s + s.hold_s)
     if s.driver != "sipp":
-        return bound
+        return max(bound, loadgen.worst_call_s(s))
     path = None if content is None else content.scenarios.get(s.scenario or "")
     return max(bound, worst_call_s(s, None if path is None else key_defaults(path)))
 
@@ -147,6 +148,8 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
             missing = sorted(scenario_keys(path) - set(DRIVER_KEYS) - set(key_defaults(path)) - set(s.params))
             if missing:
                 errs.append(f"{where}: stream {s.name!r}: scenario {s.scenario!r} reads keys no param sets: {missing}")
+        if s.driver == "loadgen":
+            errs.extend(f"{where}: stream {s.name!r}: {e}" for e in loadgen.param_errors(s))
     deadline = max((s.setup_deadline_s for s in profile.streams), default=0.0)
     teardown = max((_teardown_s(s, content) for s in profile.streams), default=0.0)
     if profile.drain_s < teardown:

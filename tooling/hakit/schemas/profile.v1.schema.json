@@ -160,7 +160,7 @@
           "pattern": "^[a-z][a-z0-9_]*$"
         },
         "driver": {
-          "description": "The generator. `loadgen` covers a product binary built on the loadgen library; the deploy values name its image.",
+          "description": "The generator. `loadgen` covers a product binary built on the loadgen library; the stream's `params` name its `image` and `command`.",
           "enum": ["sipp", "loadgen"]
         },
         "start": {
@@ -210,7 +210,7 @@
         },
         "max_concurrent": { "type": "integer", "exclusiveMinimum": 0 },
         "params": {
-          "description": "Other driver parameters (a SIPp `-key` value, an image).",
+          "description": "Other driver parameters: a SIPp `-key` value; for `loadgen` the product `image` and `command`, every other one a flag of the binary.",
           "type": "object",
           "additionalProperties": { "type": ["string", "number", "boolean"] }
         }

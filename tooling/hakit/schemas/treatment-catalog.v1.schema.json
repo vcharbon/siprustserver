@@ -117,7 +117,7 @@
           "maximum": 699
         },
         "early_media": {
-          "description": "For `rejected`: whether early media must precede the final. Absent, either.",
+          "description": "Whether early media (an 18x with a session description) must precede the final (`true`) or must not (`false`). Absent, either.",
           "type": "boolean"
         }
       },

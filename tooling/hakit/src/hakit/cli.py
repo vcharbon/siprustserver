@@ -96,7 +96,7 @@ def cmd_sipp_keys(content: Content, scenario: str) -> int:
 def cmd_run(schemas: SchemaSet, content: Content, env: Mapping[str, str], profile: str, dry_run: bool) -> int:
     lab = lab_from_env(env)
     if dry_run:
-        clock, fake = simulated()
+        clock, fake = simulated(shapes=sorted(content.shapes))
         results = Path(tempfile.mkdtemp(prefix="hakit-dry-run-"))
         runner = Runner(content, schemas, lab, fake, clock, results)
     else:

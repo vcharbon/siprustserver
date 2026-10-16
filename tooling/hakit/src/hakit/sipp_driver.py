@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .executor import Executor
+from .generator import Tally
 from .lab import Lab
 from .paths import SIPP_EXPORTER_DIR
 from .profile import Stream
@@ -243,6 +244,15 @@ class SippStream:
 
     def counters(self) -> Counters:
         return parse_stat_csv(self.executor.read_text(self.dir / "stat.csv"))
+
+    def tally(self) -> Tally:
+        """SIPp places every call it creates and fails none on its own."""
+        return Tally(self.counters().calls_created)
+
+    def clean_exit(self, code: int | None) -> bool:
+        """SIPp's exit code counts the calls that failed, not the drain: a
+        drained SIPp has ended once it no longer runs."""
+        return True
 
     def local_records(self) -> int:
         text = self.executor.read_text(self.records_path) or ""

@@ -20,9 +20,11 @@ from pathlib import Path
 from .clock import Clock
 from .content import Content
 from .executor import Executor
+from .generator import Generator
 from .injection import render
 from .jsonval import Json
 from .lab import Lab
+from .loadgen import LoadgenStream
 from .model import Incident
 from .profile import Profile, Stream
 from .schedule import PlannedEvent
@@ -43,10 +45,12 @@ class Firing:
     incident's span for an `incident` one."""
 
     event: str | None
-    gen: SippStream
+    gen: Generator
     stop: str = "drain"
     drained: bool = False
     calls: int | None = None
+    not_placed: int = 0
+    generator_failures: int | None = None
     local: int = 0
     exit_code: int | None = None
 
@@ -79,8 +83,10 @@ class StreamSet:
     def _slot(self, stream: Stream) -> int:
         return next(i for i, s in enumerate(self.profile.streams) if s.name == stream.name)
 
-    def _generator(self, stream: Stream, sdir: Path, tag: str) -> SippStream:
+    def _generator(self, stream: Stream, sdir: Path, tag: str) -> Generator:
         sdir.mkdir(parents=True)
+        if stream.driver == "loadgen":
+            return LoadgenStream(self.run, stream, self._slot(stream), sdir, self.lab, self.executor, call_id_tag=tag)
         shape = self.content.shapes[stream.shape]
         (sdir / "inject.csv").write_text(render(shape, self.content.catalogs[shape.catalog], self.lab.callees))
         scenario = self.content.scenarios[stream.scenario or ""]
@@ -102,7 +108,7 @@ class StreamSet:
                 return err
         return None
 
-    def live(self) -> list[SippStream]:
+    def live(self) -> list[Generator]:
         """The generators due to be running: a stream is out of this list from the
         instant its stop begins."""
         return [f.gen for f in self.active.values()]
@@ -148,6 +154,8 @@ class StreamSet:
         if not ok:
             f.gen.kill()
         shipped = self._settle(f, wait)
+        if f.drained and not f.gen.clean_exit(f.exit_code):
+            f.drained = ok = False
         f.gen.remove()
         facts: Json = {
             "stream": name,
@@ -166,7 +174,8 @@ class StreamSet:
     def _settle(self, f: Firing, wait: Waiter) -> int | None:
         """Read the firing's counter and records, and wait (bounded) until
         VictoriaLogs holds every record the stream wrote so far."""
-        f.calls = f.gen.counters().calls_created
+        tally = f.gen.tally()
+        f.calls, f.not_placed, f.generator_failures = tally.calls, tally.not_placed, tally.generator_failures
         f.exit_code = f.gen.exit_code()
         f.local = f.gen.local_records()
         name = f.gen.stream.name
@@ -195,6 +204,7 @@ class StreamSet:
             if not f.drained:
                 f.gen.kill()
             self._settle(f, wait)
+            f.drained = f.drained and f.gen.clean_exit(f.exit_code)
 
     def remove_all(self) -> None:
         for fs in self.firings.values():
@@ -209,6 +219,8 @@ class StreamSet:
             fs = self.firings[s.name]
             counts = [f.calls for f in fs]
             calls = None if any(c is None for c in counts) else sum(c or 0 for c in counts)
+            failures = [f.generator_failures for f in fs]
+            failed = None if not fs or any(c is None for c in failures) else sum(c or 0 for c in failures)
             abandon = s.start == "incident" and self._stop_mode(s.name) == "abandon"
             shipped = self._shipped(s.name) if fs else 0
             out.append(
@@ -219,13 +231,14 @@ class StreamSet:
                     "cps": s.cps,
                     "call_limit": fs[0].gen.max_concurrent() if fs else None,
                     "calls": calls,
-                    "not_placed": 0,
+                    "not_placed": sum(f.not_placed for f in fs),
                     "reconciled": not abandon,
                     "firings": len(fs),
                     "drained": all(f.drained for f in fs if f.stop == "drain"),
                     "exit_code": fs[-1].exit_code if fs else None,
                     "local_records": sum(f.local for f in fs),
                     "shipped_records": shipped,
+                    **({} if failed is None else {"generator_failures": failed}),
                 }
             )
         return out
