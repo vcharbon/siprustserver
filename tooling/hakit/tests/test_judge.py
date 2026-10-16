@@ -144,3 +144,14 @@ def test_a_window_injected_after_the_failure_is_no_candidate() -> None:
     cut = record("a", T0, "cut", ended=40_000, failures=[{"at_ms": T0 + 20_000, "kind": "dialog_request", "method": "BYE", "code": 481}])
     _, in_dialog, _ = run([cut], [before, after])
     assert [i["candidate_windows"] for i in in_dialog] == [["001-kill_worker"], ["001-kill_worker"]]
+
+
+def test_a_window_holding_the_failure_is_a_candidate_for_a_call_started_after_its_inject() -> None:
+    w = window("001-kill_worker", T0 + 5_000, T0 + 60_000)
+    late = record("a", T0 + 5_093, "cut", ended=30_000, failures=[{"at_ms": T0 + 13_000, "kind": "dialog_request", "method": "BYE", "code": 503}])
+    _, in_dialog, unatt = run([late], [w])
+    assert [(i["class"], i["candidate_windows"]) for i in in_dialog] == [
+        ("call_cut", ["001-kill_worker"]),
+        ("dialog_request_failed", ["001-kill_worker"]),
+    ]
+    assert unatt == []

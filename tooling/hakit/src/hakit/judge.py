@@ -5,8 +5,8 @@ charged to the first budget entry that matches it; a key no entry names allows
 0. A counted impact (`cdr_mismatch`, a product's class) is charged to its
 window's allowance for the class. One outside every window is `unattributed`.
 An in-dialog impact takes no budget: it carries every window whose inject fell
-inside the call's lifetime before the impact, and with none it is
-`unattributed`. A slow setup measured across a generator stall is no impact:
+inside the call's lifetime before the impact or that holds the impact's
+instant, and with none it is `unattributed`. A slow setup measured across a generator stall is no impact:
 it is returned apart, with its stall.
 """
 
@@ -136,7 +136,9 @@ def judge(
                 in_window[w.event].append(imp)
             continue
         candidates = [
-            w.event for w in windows if (inj := w.first("inject")) is not None and imp.started_at_ms <= inj <= imp.at_ms
+            w.event
+            for w in windows
+            if ((inj := w.first("inject")) is not None and imp.started_at_ms <= inj <= imp.at_ms) or w.holds(imp.at_ms)
         ]
         if not candidates:
             outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "", False)].append(imp)

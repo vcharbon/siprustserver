@@ -297,8 +297,8 @@ made. A run profile joins the two.
    window that holds its instant; one outside every window is
    `unattributed`. An in-dialog impact takes no budget, so its attribution is
    for analysis: its `candidate_windows` are every window whose `inject` fell
-   inside the call's lifetime before the failure, and with none it is
-   `unattributed`. A call stranded before a window opens and whose setup
+   inside the call's lifetime before the failure, or that holds the failure's
+   instant, and with none it is `unattributed`. A call stranded before a window opens and whose setup
    deadline falls inside it is charged to that window by its instant. A
    window whose inject, heal or probe step fails closes at the incident's
    maximum with status `incident_failed`, which makes the run `invalid`.
