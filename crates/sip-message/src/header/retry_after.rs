@@ -18,7 +18,7 @@ mod tests {
     use super::*;
 
     fn read(lines: &[&str]) -> Option<u32> {
-        retry_after_seconds(lines.iter().map(|l| SipStr::owned(*l)))
+        retry_after_seconds(lines.iter().map(|l| SipStr::owned(l)))
     }
 
     #[test]

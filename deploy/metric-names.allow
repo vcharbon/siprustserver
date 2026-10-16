@@ -62,6 +62,7 @@ k8s/sipp/: trace_*
 ../tooling/hakit/src/: cdr_impacts
 ../tooling/hakit/src/: cdr_impacts_of
 ../tooling/hakit/src/: cdr_join
+../tooling/hakit/src/: cdr_required
 ../tooling/hakit/src/: cdr_mismatch
 ../tooling/hakit/src/: cdr_mismatch_max
 ../tooling/hakit/src/: cdr_ms
