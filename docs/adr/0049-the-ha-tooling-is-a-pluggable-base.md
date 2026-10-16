@@ -81,7 +81,8 @@ is cut for a second product whose code the base does not know.
    name (`call-outcome.v1`); a breaking change is a new major file beside the
    old one, and the runner refuses a major it does not ship. An added optional
    field is a minor version of the same file (its `$comment`), read by every
-   reader of that major.
+   reader of that major. Until the first production release a v1 file may
+   still be narrowed in place when every producer already complies.
 
 ### 2. The incident contract
 
@@ -433,8 +434,8 @@ made. A run profile joins the two.
    without `ontimeout` aborts it, and an unexpected message received while
    the call is already in its unexpected-message handler aborts it. So every
    UAC scenario follows these rules:
-   - every `<recv>` has its own `timeout` with an `ontimeout` label, or is on a
-     path that reaches a label that writes the record;
+   - every wait (a group of `<recv>`s) is entered on a recv with its own
+     `timeout` and `ontimeout`: a pending send never bounds it (below);
    - every `<send>` SIPp retransmits has `ontimeout`;
    - the `_unexp.main` handler accepts any request and any response (a
      regexp `response` match). A response there is one that landed while the
@@ -451,20 +452,35 @@ made. A run profile joins the two.
    - `-recv_timeout` is above every timeout of the scenario, a backstop that
      never fires on a correct scenario.
 
-   Two facts of SIPp's engine follow from these rules: a provisional stops
-   the retransmissions of an INVITE (so a wait after one is bounded by its own
-   timeout), and an `ontimeout` naming the end of the scenario counts the call
-   failed. SIPp stops retransmitting a send only on a message taken by a recv
-   placed after it, so every retransmitted send precedes `_unexp.main`, and a
-   handler path answers and resumes in one step: a message landing while the
-   handler runs aborts the call.
+   Facts of SIPp's engine (3.7, `call.cpp`) shape these rules:
+   - the retransmissions of a pending send stop when a recv placed after it
+     takes any final, an INVITE provisional, or an ACK, CANCEL, BYE or PRACK,
+     another transaction's included: a scenario sends a request whose
+     retransmissions such a message stopped again (a BYE), and every
+     retransmitted send precedes `_unexp.main`;
+   - SIPp sends nothing while a send of its own is retransmitting, so a
+     request landing while the call's request is pending is captured by the
+     wait and answered once a provisional or the final is in;
+   - on a byte-identical copy of the message last received, SIPp re-sends the
+     first message it sent after that receive, and only that one;
+   - a `<recv response>` without `response_txn` takes only the responses to
+     the CSeq methods of the `<send>`s placed before it in the file, so a wait
+     follows the requests it waits for and `_unexp.main` follows every send;
+   - a message landing while the call runs its handler aborts the call, so a
+     handler path answers and resumes in one step (the resume is an action of
+     its send); an `ontimeout` naming the end of the scenario counts the call
+     failed; SIPp 3.7 loads no scenario file over 64 KiB.
 
-   A static lint checks these rules on every scenario of the search path, and
-   `hakit validate` runs it.
+   A static lint checks these rules on every scenario of the search path (the
+   wait timers, the method lists, the handler's coverage, the resume guards,
+   one record on every path, the file size), and `hakit validate` runs it. The
+   base UAC is one file over the ~500-line ratchet: SIPp has no include, and
+   one file keeps one copy of the record machinery.
 
    A scenario's variants are `-key` parameters. It declares the default of
    each key it reads beyond the runner's own (`run`, `stream`, `shape`,
-   `hold_ms`, `setup_ms`) in a comment line `hakit-key: <name>=<value>`; the
+   `hold_ms`, `setup_ms`) in its header comment, one line
+   `hakit-key: <name>=<value>` each; the
    runner passes the defaults under the stream's `params`, and refuses a
    profile whose stream leaves a key the scenario reads unset. The base has
    one UAC (`uac-basic-hold.xml`: the hold, the caller's re-INVITEs, the far
