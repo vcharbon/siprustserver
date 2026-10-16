@@ -176,6 +176,37 @@ async fn barrier_received_is_method_and_leg_scoped() {
     assert!(!obs.with_snapshot(|s| s.leg_received_method("alice", "INFO")));
 }
 
+/// A leg's received requests fold once per `(Call-ID, CSeq, method)`: a
+/// retransmission keeps the original, and a barrier reads each one's subscription
+/// state and body.
+#[tokio::test]
+async fn a_request_fact_folds_once_and_reads_its_state_and_body() {
+    let now = tokio::time::Instant::now();
+    let obs = ObservedState::new();
+    let notify = |state: &str, body: &[u8]| Observation::LegRequest {
+        leg: "bob",
+        call_id: "c1".to_string(),
+        cseq: 7,
+        fact: RequestFact {
+            method: "NOTIFY".to_string(),
+            subscription_state: Some(state.to_string()),
+            body: body.to_vec(),
+        },
+    };
+    obs.record(notify("terminated", b"SIP/2.0 503 Service Unavailable\r\n"), now);
+    obs.record(notify("active", b"SIP/2.0 200 OK\r\n"), now);
+    let refused = |s: &StateInner| {
+        s.leg_received_where("bob", |f| {
+            f.method == "NOTIFY"
+                && f.subscription_state.as_deref() == Some("terminated")
+                && f.body.starts_with(b"SIP/2.0 503")
+        })
+    };
+    assert!(obs.with_snapshot(refused));
+    assert_eq!(obs.with_snapshot(|s| s.leg("bob").requests().count()), 1);
+    assert!(!obs.with_snapshot(|s| s.leg_received_where("alice", |_| true)));
+}
+
 /// Fold-order determinism: the SAME set of observations folded in forward
 /// and reverse order yields the SAME barrier verdict + ledger state — the
 /// grow-only, commutative fold the N-reactor reconciliation depends on.

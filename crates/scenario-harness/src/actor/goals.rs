@@ -332,11 +332,21 @@ pub struct Goal {
     /// A per-goal override of the standard bounded guard wait — a
     /// capture-declared tighter bound. `None` uses the actor's step timeout.
     pub deadline: Option<Duration>,
+    /// The goal is not owed once this holds before its guard does: the call
+    /// took a branch where the step has no place (a transfer refused, so the
+    /// target's leg never opens).
+    pub unless: Option<Barrier>,
 }
 
 impl Goal {
     pub fn new(guard: Barrier, step: GoalStep) -> Self {
-        Self { guard, delay: Duration::ZERO, step, deadline: None }
+        Self { guard, delay: Duration::ZERO, step, deadline: None, unless: None }
+    }
+
+    /// Drop this goal when `branch` holds before its guard does.
+    pub fn unless(mut self, branch: Barrier) -> Self {
+        self.unless = Some(branch);
+        self
     }
 
     /// Dwell this long AFTER the guard holds, before driving the step (e.g. the
@@ -418,29 +428,36 @@ impl GoalCursor {
 
     /// Resolve once the next pending goal's guard holds (immediately for
     /// [`Barrier::None`]) and its post-guard dwell has elapsed, returning the
-    /// step to drive — the guard wait is bounded by `timeout` so a genuinely
-    /// stuck guard fails the actor rather than hanging. Parks forever if the
-    /// cursor is exhausted (the reactor gates this arm on
-    /// [`has_pending`](Self::has_pending), so the park is never actually polled).
+    /// step to drive, or `None` when its [`unless`](Goal::unless) branch held
+    /// first (the goal is not owed: the caller advances past it) — the guard
+    /// wait is bounded by `timeout` so a genuinely stuck guard fails the actor
+    /// rather than hanging. Parks forever if the cursor is exhausted (the
+    /// reactor gates this arm on [`has_pending`](Self::has_pending), so the
+    /// park is never actually polled).
     pub async fn next_ready(
         &mut self,
         obs: &ObservedState,
         timeout: Duration,
-    ) -> Result<GoalStep, StepError> {
+    ) -> Result<Option<GoalStep>, StepError> {
         let Some(goal) = self.goals.get(self.cursor) else {
             return std::future::pending().await;
         };
         // Lift the guard/delay out so the dwell anchor below can borrow `self`
         // mutably (the guard is Arc-backed, the clone is cheap).
         let (guard, delay, bound) = (goal.guard.clone(), goal.delay, goal.deadline);
+        let unless = goal.unless.clone();
         let deadline =
             *self.deadline_at.get_or_insert_with(|| Instant::now() + bound.unwrap_or(timeout));
-        await_pred(obs, guard.name(), |s| guard.holds(s), deadline).await?;
+        let skipped = |s: &super::state::StateInner| unless.as_ref().is_some_and(|b| b.holds(s));
+        await_pred(obs, guard.name(), |s| guard.holds(s) || skipped(s), deadline).await?;
+        if !obs.with_snapshot(|s| guard.holds(s)) {
+            return Ok(None);
+        }
         if !delay.is_zero() {
             let at = *self.ready_at.get_or_insert(Instant::now() + delay);
             tokio::time::sleep_until(at).await;
         }
-        Ok(self.goals[self.cursor].step.clone())
+        Ok(Some(self.goals[self.cursor].step.clone()))
     }
 
     /// Advance past the goal that just fired (resets the dwell and deadline

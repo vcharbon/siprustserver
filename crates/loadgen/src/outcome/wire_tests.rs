@@ -200,3 +200,37 @@ async fn a_challenged_invite_retried_restarts_the_setup() {
     assert_eq!((r["ending"].as_str(), r["final_code"].as_u64()), (Some("answered"), Some(200)));
     assert_eq!(r["failures"], serde_json::json!([]));
 }
+
+/// A leg keeps what each in-dialog request it received said: a NOTIFY's
+/// subscription state and sipfrag once, whatever its retransmissions; an ACK
+/// and the leg's opening INVITE are no received request.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_leg_keeps_what_its_in_dialog_requests_said() {
+    let frag = "SIP/2.0 503 Service Unavailable\r\n";
+    let notify = format!(
+        "NOTIFY sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:6000;branch=z9hG4bK-9\r\n\
+         Call-ID: b1\r\nFrom: <sip:a@h>;tag=f1\r\nTo: <sip:b@h>;tag=q1\r\nCSeq: 2 NOTIFY\r\n\
+         Event: refer\r\nSubscription-State: terminated;reason=noresource\r\n\
+         Content-Type: message/sipfrag;version=2.0\r\nContent-Length: {}\r\n\r\n{frag}",
+        frag.len()
+    )
+    .into_bytes();
+    let wire = CallWire::new(Clock::test_at(5_000));
+    let f = feed(
+        &wire,
+        &[
+            (Side::Leg("callee"), Dir::In, msg("INVITE sip:q@h SIP/2.0", "b1", "1 INVITE", "", "")),
+            (Side::Leg("callee"), Dir::Out, msg("SIP/2.0 200 OK", "b1", "1 INVITE", "q1", "")),
+            (Side::Leg("callee"), Dir::In, msg("ACK sip:q@h SIP/2.0", "b1", "1 ACK", "q1", "")),
+            (Side::Leg("callee"), Dir::In, notify.clone()),
+            (Side::Leg("callee"), Dir::In, notify),
+        ],
+    );
+    let (leg,) = (&f.legs[0],);
+    assert_eq!(leg.received.len(), 1);
+    let r = &leg.received[0];
+    assert_eq!((r.at_ms, r.method.as_str()), (5_000, "NOTIFY"));
+    assert_eq!(r.subscription_state.as_deref(), Some("terminated"));
+    assert_eq!(r.body, frag.as_bytes());
+}

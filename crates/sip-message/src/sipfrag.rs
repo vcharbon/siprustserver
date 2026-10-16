@@ -13,6 +13,19 @@ pub fn sipfrag_from_status(code: u16, reason: &str) -> Vec<u8> {
     format!("SIP/2.0 {code} {reason}\r\n").into_bytes()
 }
 
+/// The status code of a fragment that starts with a status line
+/// (`SIP/2.0 <code> <reason>`, RFC 3420 §2); None for a request line, no start
+/// line, or a code that does not read as three digits.
+pub fn status(fragment: &[u8]) -> Option<u16> {
+    let rest = fragment.strip_prefix(b"SIP/2.0 ")?;
+    let digits = rest.get(..3)?;
+    let follows = rest.get(3).copied();
+    if !digits.iter().all(u8::is_ascii_digit) || follows.is_some_and(|b| b != b' ' && b != b'\r') {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
+}
+
 /// The header fields of a fragment (RFC 3420 §2: an optional start line, then
 /// header fields, then an optional blank line and body), read as the parser
 /// reads a message's header block. A fragment without a start line is read
@@ -46,6 +59,15 @@ mod tests {
             .into_iter()
             .map(|h| (h.name.as_str().to_string(), h.value.as_str().to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_fragment_states_its_status_only_on_a_status_line() {
+        assert_eq!(status(&sipfrag_from_status(503, "Service Unavailable")), Some(503));
+        assert_eq!(status(b"SIP/2.0 200 OK"), Some(200));
+        assert_eq!(status(b"INVITE sip:b@h SIP/2.0\r\n"), None);
+        assert_eq!(status(b"SIP/2.0 5030 X\r\n"), None);
+        assert_eq!(status(b"To: <sip:b@h>\r\n"), None);
     }
 
     #[test]

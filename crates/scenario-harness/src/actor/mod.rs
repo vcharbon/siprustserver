@@ -48,6 +48,7 @@ mod delta;
 mod drive;
 mod ending;
 mod endpoint;
+mod facts;
 mod goals;
 mod held;
 mod held_acks;
@@ -100,7 +101,7 @@ pub use spec::{
 };
 pub use state::{
     await_pred, LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry,
-    ResponseFact, StateInner, SubflowState,
+    RequestFact, ResponseFact, StateInner, SubflowState,
 };
 pub use verdict::{verdict, FailedAt, ScenarioVerdict};
 

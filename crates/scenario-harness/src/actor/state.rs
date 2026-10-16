@@ -24,29 +24,7 @@ use tokio::time::Instant;
 use super::ledger::{ObligationKey, ObligationLedger};
 use crate::StepError;
 
-/// One observed inbound response on a leg — status, body presence, and the
-/// fork identity (`To`-tag) it carried. `typed` retains the full response while
-/// a matcher-carrying reception goal is pending on the leg, or a reception
-/// observer is installed, so a content matcher or an observing caller reads
-/// headers+body without a second receive.
-#[derive(Debug, Clone)]
-pub struct ResponseFact {
-    pub status: u16,
-    pub reason: String,
-    /// The CSeq method of the request this response answers — the transaction
-    /// it belongs to. A leg carries several concurrent transactions (the INVITE
-    /// plus every automatic: PRACK, UPDATE), so a response expectation that
-    /// names a method skips the ones that are another transaction's business.
-    pub cseq_method: String,
-    pub body_len: usize,
-    pub body_is_sdp: bool,
-    /// The `To`-tag — the early-dialog/fork identity a reception goal's
-    /// `early` binding matches (RFC 3261 §12.1.2).
-    pub early_tag: Option<String>,
-    /// Boxed: retained only for a pending matcher or an installed reception
-    /// observer, and kept off the `Observation` fold's common-variant size.
-    pub typed: Option<Box<sip_message::SipResponse>>,
-}
+pub use super::facts::{RequestFact, ResponseFact};
 
 /// One `ObserveFinal`/`ExpectFinal` outcome: the capture-declared expectation
 /// beside what actually arrived. Divergence is data, never a verdict.
@@ -163,6 +141,9 @@ pub struct LegObservation {
     /// origination can gate on an *observed* inbound request rather than a timed
     /// dwell (the MRF `INFO(EOF)` that must follow the worker's `INFO(play)`).
     received_methods: std::collections::BTreeSet<String>,
+    /// The inbound in-dialog requests this leg received, keyed by
+    /// `(Call-ID, CSeq, method)` so a retransmission folds into its original.
+    requests: std::collections::BTreeMap<(String, u32, String), RequestFact>,
     /// The renegotiations (re-INVITEs, UPDATEs) this leg ORIGINATED and
     /// COMPLETED, as `((local tag, remote tag), CSeq)` — a grow-only set (commutative
     /// fold) whose *cardinality* serializes an N-cycle re-INVITE script: cycle
@@ -231,6 +212,11 @@ impl LegObservation {
     /// gates an origination on.
     pub fn received_method(&self, method: &str) -> bool {
         self.received_methods.contains(method)
+    }
+
+    /// The inbound in-dialog requests this leg received.
+    pub fn requests(&self) -> impl Iterator<Item = &RequestFact> {
+        self.requests.values()
     }
 
     /// How many renegotiations (re-INVITEs, UPDATEs) this leg originated and
@@ -326,6 +312,12 @@ impl StateInner {
         self.legs.get(role).is_some_and(|l| l.received_method(method))
     }
 
+    /// Whether `role` received an in-dialog request `pred` holds for — a barrier
+    /// on what a request said, not only on its method (borrows).
+    pub fn leg_received_where(&self, role: &str, pred: impl Fn(&RequestFact) -> bool) -> bool {
+        self.legs.get(role).is_some_and(|l| l.requests.values().any(pred))
+    }
+
     /// Whether EVERY leg that has appeared is `Terminated` — the `torn_down`
     /// predicate. Vacuously false before any leg appears (a call that never
     /// started has not "torn down").
@@ -409,6 +401,8 @@ pub enum Observation {
     /// detector (any method) AND into the receiving leg's received-method set
     /// (so an origination can gate on "leg X received an inbound `<method>`").
     InDialogRequest { leg: &'static str, call_id: String, cseq: u32, method: String },
+    /// What an in-dialog request `leg` received said, once per `(call_id, cseq, method)`.
+    LegRequest { leg: &'static str, call_id: String, cseq: u32, fact: RequestFact },
     /// `leg`'s establishing INVITE drew a non-2xx final (the reject path) —
     /// grow-only, read by the accepted-ending verdict.
     LegFinal { leg: &'static str, status: u16, reason: String },
@@ -482,6 +476,12 @@ impl StateInner {
             Observation::InDialogRequest { leg, call_id, cseq, method } => {
                 self.ledger.record_in_dialog(call_id, leg, cseq);
                 self.leg_mut(leg).record_method(method);
+            }
+            Observation::LegRequest { leg, call_id, cseq, fact } => {
+                self.leg_mut(leg)
+                    .requests
+                    .entry((call_id, cseq, fact.method.clone()))
+                    .or_insert(fact);
             }
             Observation::LegFinal { leg, status, reason } => {
                 self.leg_mut(leg).finals.insert((status, reason));

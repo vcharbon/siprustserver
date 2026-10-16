@@ -2,7 +2,7 @@ use scenario_harness::actor::FailedAt;
 use serde_json::json;
 
 use super::*;
-use crate::outcome::wire::{LegFacts, WireFailure};
+use crate::outcome::wire::{LegFacts, LegRequest, WireFailure};
 
 const META: RecordMeta<'static> =
     RecordMeta { run: "r1", source: "loadgen", stream: "main", shape: "basic_call" };
@@ -195,6 +195,40 @@ fn each_leg_reads_its_ending() {
         r["legs"].as_array().unwrap().iter().map(|l| l["ending"].as_str().unwrap()).collect();
     assert_eq!(endings, ["rejected", "answered", "abandoned", "timeout"]);
     assert_eq!(r["legs"][1]["early_media"], true);
+}
+
+/// A leg's received in-dialog requests ride its record, the body in hex; a
+/// leg that received none carries no list.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_leg_record_states_its_received_requests() {
+    let notify = LegRequest {
+        at_ms: 7,
+        method: "NOTIFY".into(),
+        cseq: 2,
+        subscription_state: Some("terminated".into()),
+        body: b"SIP/2.0 503".to_vec(),
+    };
+    let legs = vec![
+        LegFacts {
+            role: "callee".into(),
+            final_code: Some(200),
+            received: vec![notify],
+            ..LegFacts::default()
+        },
+        LegFacts { role: "other".into(), final_code: Some(200), ..LegFacts::default() },
+    ];
+    let r = record(&WireFacts { legs, bye: Some(Some(200)), ..answered() }, &ok());
+    assert_eq!(
+        r["legs"][0]["received"],
+        serde_json::json!([{
+            "at_ms": 7,
+            "method": "NOTIFY",
+            "subscription_state": "terminated",
+            "body_hex": "5349502f322e3020353033",
+        }])
+    );
+    assert!(r["legs"][1].get("received").is_none());
 }
 
 /// A call refused before any datagram, or one that sent no INVITE, has no

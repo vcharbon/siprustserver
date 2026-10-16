@@ -12,11 +12,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use sip_clock::Clock;
-use sip_message::header::{cause_key, retry_after_seconds};
+use sip_message::header::{cause_key, retry_after_seconds, HeaderValue, SubscriptionState};
 use sip_message::sip_str::SipStr;
 use sip_message::sniff::{
-    call_id, content_type_is, cseq_method_token, cseq_number, has_body, header_values, is_response,
-    req_method, resp_status, to_tag,
+    body, call_id, content_type_is, cseq_method_token, cseq_number, has_body, header_value,
+    header_values, is_response, req_method, resp_status, to_tag,
 };
 
 use crate::mux::{Dir, Side, WireTap};
@@ -30,6 +30,24 @@ pub struct WireFailure {
     pub code: Option<u16>,
 }
 
+/// One in-dialog request a callee leg received (ACK and CANCEL aside): what
+/// it said, for a reader that tells one outcome of an in-dialog exchange from
+/// another (a NOTIFY's subscription state and sipfrag, an INFO's payload).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegRequest {
+    pub at_ms: i64,
+    pub method: String,
+    pub(crate) cseq: u32,
+    /// The `Subscription-State` value's state token (RFC 6665 §8.2.3).
+    pub subscription_state: Option<String>,
+    /// The body's first [`LEG_REQUEST_BODY_MAX`] bytes.
+    pub body: Vec<u8>,
+}
+
+/// The bound on the requests a leg's facts keep, and on each one's body.
+pub const LEG_REQUESTS_MAX: usize = 8;
+pub const LEG_REQUEST_BODY_MAX: usize = 64;
+
 /// What one callee leg did with the INVITE that opened it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LegFacts {
@@ -40,6 +58,9 @@ pub struct LegFacts {
     pub early_media: bool,
     /// A CANCEL reached the leg.
     pub cancelled: bool,
+    /// The in-dialog requests the leg received, a retransmission once, the
+    /// first [`LEG_REQUESTS_MAX`].
+    pub received: Vec<LegRequest>,
 }
 
 /// The caller's facts, and each callee leg's, in the order the legs opened.
@@ -120,7 +141,7 @@ impl CallWire {
             let mut f = facts.lock().unwrap();
             match side {
                 Side::Caller => f.on_caller(dir, raw, now),
-                Side::Leg(role) => f.on_leg(role, dir, raw),
+                Side::Leg(role) => f.on_leg(role, dir, raw, now),
             }
         })
     }
@@ -251,7 +272,7 @@ impl WireFacts {
         }
     }
 
-    fn on_leg(&mut self, role: &str, dir: Dir, raw: &[u8]) {
+    fn on_leg(&mut self, role: &str, dir: Dir, raw: &[u8], now: i64) {
         if self.sealed {
             return;
         }
@@ -267,6 +288,7 @@ impl WireFacts {
             (Dir::In, false, Some(i)) if req_method(raw).as_deref() == Some("CANCEL") => {
                 self.legs[i].cancelled = true;
             }
+            (Dir::In, false, Some(i)) => self.legs[i].received_request(raw, now),
             (Dir::Out, true, Some(i)) if cseq_method_token(raw).as_deref() == Some("INVITE") => {
                 let leg = &mut self.legs[i];
                 let Some(code) = resp_status(raw) else { return };
@@ -281,6 +303,28 @@ impl WireFacts {
             }
             _ => {}
         }
+    }
+}
+
+impl LegFacts {
+    fn received_request(&mut self, raw: &[u8], now: i64) {
+        let (Some(method), Some(cseq)) = (req_method(raw), cseq_number(raw)) else { return };
+        let in_dialog = !to_tag(raw).is_empty();
+        let seen = self.received.iter().any(|r| r.cseq == cseq && r.method == method);
+        if method == "ACK" || !in_dialog || seen || self.received.len() >= LEG_REQUESTS_MAX {
+            return;
+        }
+        let subscription_state = header_value(raw, "Subscription-State")
+            .and_then(|v| SubscriptionState::parse(&SipStr::owned(&v)).ok())
+            .map(|s| s.token().to_ascii_lowercase());
+        let body = body(raw).unwrap_or_default();
+        self.received.push(LegRequest {
+            at_ms: now,
+            method,
+            cseq,
+            subscription_state,
+            body: body[..body.len().min(LEG_REQUEST_BODY_MAX)].to_vec(),
+        });
     }
 }
 

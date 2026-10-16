@@ -12,6 +12,7 @@ use super::answer::{
     respond_200_sdp,
 };
 use super::endpoint::{Disposition, SUBFLOW_REALIGN};
+use super::facts::record_request;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::response::react_response;
 use super::runner::{ActorState, ParkedRequest};
@@ -133,6 +134,10 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
             );
             return Ok(());
         }
+    }
+
+    if method != "ACK" && method != "CANCEL" {
+        record_request(st, uas.request());
     }
 
     // Scripted CANCEL park-or-react (ADR-0024): the CANCEL hop's `200` stays

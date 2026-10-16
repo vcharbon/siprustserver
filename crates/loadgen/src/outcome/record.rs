@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 use crate::class::{CallOutcome, ResultClass};
-use crate::outcome::wire::WireFacts;
+use crate::outcome::wire::{LegRequest, WireFacts};
 use scenario_harness::StepError;
 
 /// The record schema this module writes.
@@ -227,14 +227,30 @@ fn legs(wire: &WireFacts) -> Vec<Value> {
                 Some(_) => "rejected",
                 None => "timeout",
             };
-            json!({
+            let mut leg = json!({
                 "role": l.role,
                 "ending": ending,
                 "final_code": l.final_code,
                 "early_media": l.early_media,
-            })
+            });
+            if !l.received.is_empty() {
+                leg["received"] = l.received.iter().map(received).collect();
+            }
+            leg
         })
         .collect()
+}
+
+/// One in-dialog request a leg received, its body in hex.
+fn received(r: &LegRequest) -> Value {
+    let mut v = json!({ "at_ms": r.at_ms, "method": r.method });
+    if let Some(state) = &r.subscription_state {
+        v["subscription_state"] = json!(state);
+    }
+    if !r.body.is_empty() {
+        v["body_hex"] = json!(r.body.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
+    v
 }
 
 #[cfg(test)]
