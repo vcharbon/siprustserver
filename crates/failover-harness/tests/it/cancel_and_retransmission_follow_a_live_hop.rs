@@ -87,6 +87,116 @@ async fn a_retransmission_sent_to_the_backup_of_a_live_primary_dials_no_second_c
     drop(proxy);
 }
 
+/// After the misread above, the primary reads alive again and relays the
+/// callee's 180; the caller's CANCEL goes where its INVITE went, the live
+/// primary, not to the backup the dropped retransmission was sent to. One
+/// 487 reaches the caller and is ACKed; the backup takes nothing over.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_after_a_misread_retransmission_goes_to_the_live_primary() {
+    let name = "cancel-after-a-misread-retransmission";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    let (decision, _consults) = CountedDecision::counting(route, Duration::from_secs(3));
+    let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, decision).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    fh.cut_signalling("alice", alice.addr());
+    let (pri_ord, _call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    fh.restore_signalling("alice", alice.addr());
+    let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Invite);
+    alice.try_send_datagram(&wire, dst).await.expect("the caller's re-send leaves");
+    fh.advance(Duration::from_millis(200)).await;
+    proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    let hydrated = survivor.metrics().repl_takeover_hydrated_total();
+
+    let mut uas = bob.receive_tolerating("INVITE", &["OPTIONS"]).await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    fh.advance(Duration::from_millis(500)).await;
+    let mut cancel = call.cancel().await;
+    cancel.expect(200).await;
+    bob.receive_absorbing("CANCEL", &["INVITE", "OPTIONS"]).await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    call.expect(487).await;
+    bob.receive_absorbing("ACK", &["INVITE", "OPTIONS"]).await;
+    fh.advance(Duration::from_secs(5)).await;
+
+    let finals: std::collections::HashSet<_> = fh
+        .sip_entries()
+        .into_iter()
+        .filter(|e| e.to == alice.addr() && e.raw.starts_with(b"SIP/2.0 487"))
+        .map(|e| e.raw)
+        .collect();
+    assert_eq!(finals.len(), 1, "one 487 reaches the caller");
+    assert_eq!(
+        survivor.metrics().repl_takeover_hydrated_total(),
+        hydrated,
+        "the backup took nothing over"
+    );
+    let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
+    assert!(drained, "the cluster drains the call");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
+    assert_eq!(cdrs, 1, "one CDR");
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}
+
+/// The answered call's 2xx is lost on its way to the caller and its node is
+/// killed; the front proxy restarts and has no memo of the INVITE, so the
+/// caller's retransmission is placed afresh on the backup with a cookie of
+/// its own. The backup holds the call's answered replica: it answers the
+/// copy with the replicated 2xx and dials the callee no second time.
+#[tokio::test(start_paused = true)]
+async fn a_retransmission_placed_afresh_on_the_backup_draws_the_replicated_2xx() {
+    let name = "retransmission-placed-afresh-on-the-backup";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    fh.cut_signalling("alice", alice.addr());
+    let mut uas = bob.receive("INVITE").await;
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    fh.advance(REPLICATE).await;
+    let call_ref = survivor_of(&pri_ord, &w_b1, &w_b2)
+        .scan_one_backed_up(&pri_ord)
+        .await
+        .expect("the answered call replicated");
+
+    // ── P is killed; the front proxy restarts and its memo is lost ──────────
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    drop(proxy);
+    fh.advance(Duration::from_millis(10)).await;
+    let proxy = crate::departure_support::spawn_front_proxy(&fh).await;
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    fh.restore_signalling("alice", alice.addr());
+
+    // ── the caller's re-send is placed afresh on the backup ─────────────────
+    let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Invite);
+    alice.try_send_datagram(&wire, dst).await.expect("the caller's re-send leaves");
+    call.expect(200).await;
+    assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
+    let mut dialog = call.ack().await;
+    bob.receive_tolerating("ACK", &["INVITE"]).await;
+    fh.advance(Duration::from_secs(4)).await;
+    assert_eq!(round_invites_sent_to(&fh, bob.addr(), OFFER), 1, "one b-leg INVITE");
+
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_secs(60)).await;
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    drop(proxy);
+}
+
 /// The caller's CANCEL of a re-INVITE round the takeover copy relays reaches
 /// that copy, though the proxy reads the primary alive again by then.
 #[tokio::test(start_paused = true)]
