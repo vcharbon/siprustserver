@@ -133,4 +133,34 @@ describe.skipIf(!served)("the retention ruling", () => {
     }))
     expect([...forgetting.removable].sort()).toEqual([at.superseded.bundlePath, at.envOld.bundlePath, unrecorded].sort())
   })
+
+  it("rules on a bundle set aside under its capture's aside directory like on any other", async () => {
+    const aside = (hoursAgo: number) =>
+      Effect.gen(function*() {
+        const runs = yield* Runs.Service
+        const sql = yield* SqlClient
+        const opened = yield* runs.open({
+          capture: "ret_aside.pcap.gz",
+          lane: "paused",
+          mode: "record",
+          sessionDir: path.join(sessions, "ret_aside", "aside"),
+          identity: { env: "aside", branch: null, laneHash: null, load: null },
+          setKind: "cases"
+        })
+        yield* runs.finish({ id: opened.id, status: "done", cases: [passed("ret_aside.pcap.gz-k1")] })
+        yield* sql`UPDATE runs SET finished_at = now() - make_interval(hours => ${hoursAgo}) WHERE id = ${opened.id}`
+        fs.mkdirSync(opened.bundlePath, { recursive: true })
+        return opened
+      })
+    const at = await withStore(Effect.all({ old: aside(100), young: aside(2) }))
+    const plan = await withStore(Retention.plan({
+      sessions,
+      livePreps: null,
+      graceHours: GRACE,
+      realLanes: [],
+      forgetUnrecorded: false
+    }))
+    expect([...plan.onDisk].sort()).toEqual([at.old.bundlePath, at.young.bundlePath].sort())
+    expect(plan.removable).toEqual([at.old.bundlePath])
+  })
 })

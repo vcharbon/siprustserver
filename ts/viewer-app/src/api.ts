@@ -408,6 +408,11 @@ export interface TriageCellJoin {
 export interface TriageStudySession {
   readonly name: string
   readonly dir: string
+  /**
+   * Set where the run was set aside, saying what made it: a link naming its
+   * cell opens it, and nothing on the page defaults to it.
+   */
+  readonly aside?: string
   /** When the run directory was last written: how fresh this run is. */
   readonly writtenAt?: string
   readonly campaign: unknown

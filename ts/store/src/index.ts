@@ -15,6 +15,7 @@
  * and the migration it runs (`StoreBinding`), and its reading of a document's
  * features (`case_features`, `Migrations`).
  */
+export * as Aside from "./aside.js"
 export * as StoreBinding from "./binding.js"
 export * as Bundle from "./bundle.js"
 export * as CallHistory from "./call-history.js"

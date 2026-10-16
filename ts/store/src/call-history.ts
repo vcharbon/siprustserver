@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
+import * as Aside from "./aside.js"
 import type { SetKind } from "./model.js"
 
 /** One run of the call. */
@@ -71,7 +72,7 @@ export const layer = Layer.effect(
   Effect.gen(function*() {
     const sql = yield* SqlClient
 
-    /** The runs of the call on the capture, newest first, the lane narrowed or not. */
+    /** The runs of the call on the capture, newest first, the lane narrowed or not; never an aside run. */
     const runsOf = (capture: string, caseId: string, lane: string | undefined, limit: number) =>
       sql<Row>`
         SELECT r.lane, r.id AS run_id, r.set_kind, r.job_id, r.finished_at,
@@ -81,6 +82,7 @@ export const layer = Layer.effect(
         JOIN case_results cr ON cr.run_id = r.id AND cr.case_id = ${caseId}
         LEFT JOIN case_documents d ON d.hash = cr.document_hash
         WHERE r.capture = ${capture} AND ${lane === undefined ? sql`true` : sql`r.lane = ${lane}`}
+          AND ${Aside.excluded(sql, "r")}
         ORDER BY r.id DESC
         LIMIT ${limit}
       `

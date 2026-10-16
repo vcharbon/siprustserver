@@ -22,6 +22,7 @@ import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import type { Fragment } from "effect/unstable/sql/Statement"
+import * as Aside from "./aside.js"
 import type { Cell, Elsewhere, Side, SideSweep } from "./compare.js"
 import { NoCurrentPopulation } from "./current.js"
 import { type ErrorColumns, errorOf } from "./error-columns.js"
@@ -174,7 +175,12 @@ export const layer = Layer.effect(
       }
     }
 
-    const where = (selector: Selector): Fragment => sql.and(selector.terms.map(termOf))
+    /** Whether the selector names aside runs by their run or their environment; no other term reaches one. */
+    const namesAside = (selector: Selector): boolean =>
+      selector.terms.some((term) => term._tag === "run" || (term._tag === "env" && term.env === Aside.ENV))
+
+    const where = (selector: Selector): Fragment =>
+      sql.and([...selector.terms.map(termOf), ...(namesAside(selector) ? [] : [Aside.excluded(sql, "r")])])
 
     const refusal = Effect.fn("RunSets.refusal")(function*(selector: Selector) {
       for (const term of selector.terms) {

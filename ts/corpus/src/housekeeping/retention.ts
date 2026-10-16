@@ -24,7 +24,7 @@
  * live ceiling, is that prep's. A cut a command can still be asked to replay
  * is never the wrong cut to hold a generator log for.
  */
-import { Runs } from "@sip/store"
+import { Aside, Runs } from "@sip/store"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
@@ -41,17 +41,21 @@ const isCapture = (stem: string): boolean => !stem.startsWith("_")
 const isDirectory = (fs: FileSystem.FileSystem, file: string) =>
   fs.stat(file).pipe(Effect.map((info) => info.type === "Directory"), Effect.orElseSucceed(() => false))
 
-/** Every `run<id>` bundle under the session tree's capture workdirs. */
+/** Every `run<id>` bundle under the session tree's capture workdirs, those set aside (`Aside.DIR`) included. */
 const listRunDirs = Effect.fn("Retention.listRunDirs")(function*(sessions: string) {
   const fs = yield* FileSystem.FileSystem
   const out: Array<string> = []
+  const runsIn = (dir: string) =>
+    Effect.map(
+      fs.readDirectory(dir).pipe(Effect.orElseSucceed(() => [] as Array<string>)),
+      (entries) => entries.filter((entry) => /^run\d+$/.test(entry)).map((entry) => path.join(dir, entry))
+    )
   const stems = yield* fs.readDirectory(sessions).pipe(Effect.orElseSucceed(() => [] as Array<string>))
   for (const stem of [...stems].sort()) {
     if (!isCapture(stem)) continue
     const sessionDir = path.join(sessions, stem)
     if (!(yield* isDirectory(fs, sessionDir))) continue
-    const entries = yield* fs.readDirectory(sessionDir).pipe(Effect.orElseSucceed(() => [] as Array<string>))
-    for (const entry of entries) if (/^run\d+$/.test(entry)) out.push(path.join(sessionDir, entry))
+    out.push(...(yield* runsIn(sessionDir)), ...(yield* runsIn(path.join(sessionDir, Aside.DIR))))
   }
   return out as ReadonlyArray<string>
 })

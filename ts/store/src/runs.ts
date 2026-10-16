@@ -21,6 +21,7 @@ import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import * as path from "node:path"
+import * as Aside from "./aside.js"
 import { citedRuns } from "./citations.js"
 import { hashDocument } from "./hash.js"
 import type { CaseOutcome, CaseResult, CaseRun, Deltas, Provenance, RunStatus, SetKind, Standing } from "./model.js"
@@ -126,9 +127,9 @@ export interface Interface {
   readonly openMany: (requests: ReadonlyArray<OpenRequest>) => Effect.Effect<ReadonlyArray<OpenedRun>, SqlError>
   readonly finish: (request: FinishRequest) => Effect.Effect<void, SqlError>
   readonly importRun: (request: ImportRequest) => Effect.Effect<number, SqlError>
-  /** Every lane the table has ever recorded a run on, with its size. */
+  /** Every lane the table has ever recorded a run on, with its size; an aside run (`aside.ts`) counts in none. */
   readonly lanes: Effect.Effect<ReadonlyArray<Lane>, SqlError>
-  /** Every capture with a run on the lane, whoever made it, in capture order. */
+  /** Every capture with a run on the lane, whoever made it, in capture order; an aside run makes none. */
   readonly ranOn: (lane: string) => Effect.Effect<ReadonlyArray<string>, SqlError>
   /**
    * What each (capture, lane) currently stands at: its latest `@current` run,
@@ -557,7 +558,8 @@ export const layer = Layer.effect(
       // every run row in the table, the two hash passes do not.
       const rows = yield* sql<{ lane: string; runs: number; captures: number }>`
         SELECT lane, sum(n)::int AS runs, count(*)::int AS captures
-        FROM (SELECT lane, capture, count(*) AS n FROM runs GROUP BY lane, capture) per_capture
+        FROM (SELECT lane, capture, count(*) AS n FROM runs WHERE ${Aside.excluded(sql, "runs")} GROUP BY lane, capture)
+          per_capture
         GROUP BY lane
         ORDER BY lane
       `
@@ -570,7 +572,7 @@ export const layer = Layer.effect(
 
     const ranOn = Effect.fn("Runs.ranOn")(function*(lane: string) {
       const rows = yield* sql<{ capture: string }>`
-        SELECT DISTINCT capture FROM runs WHERE lane = ${lane} ORDER BY capture
+        SELECT DISTINCT capture FROM runs WHERE lane = ${lane} AND ${Aside.excluded(sql, "runs")} ORDER BY capture
       `
       return rows.map((row) => row.capture)
     })

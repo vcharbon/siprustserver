@@ -61,26 +61,15 @@ import { StudyHead } from "../components/StudyHead.tsx"
 import { SutRecords } from "../components/SutRecords.tsx"
 import { VerdictPane } from "../components/VerdictPane.tsx"
 import { findingsByStep, marksOnLadder } from "../findings.ts"
+import { caseIdOf, cellPassed, studyCells } from "../study-cells.ts"
 import { useCommands } from "../commands.ts"
 import { launchRef } from "../launch.ts"
 import { cellDocument, cellOpening, NO_OPENING, openingOfExclusions, type CaptureOpening } from "../opening.ts"
 import { href, setQuery, useQuery } from "../router.ts"
 import { captureSteps, focusStep, recordingSteps, scenarioSteps, stepOfEvent, type Focus } from "../steps.ts"
 
-/**
- * A cell passed when the run's index says so — the verdict the store records,
- * the RFC audit and the bless included. A run that wrote no index answers by
- * its interpreter's word: `ok-negative` is a pass — a case that passed BY
- * failing exactly as declared — and nothing else is.
- */
-const cellPassed = (cell: TriageStudyCell): boolean =>
-  cell.passed ?? (cell.status === "ok" || cell.status === "ok-negative")
-
 /** A ladder about no leg in particular: the capture's own first legs are drawn. */
 const NO_LEGS: readonly number[] = []
-
-/** The CALL a cell replayed: a cell dir is `<case>__<shape>__<lane>`. */
-const caseIdOf = (cellName: string): string => cellName.split("__")[0] ?? cellName
 
 /**
  * How ONE call ended, in a word. A run that mixes a green call and a red one
@@ -683,31 +672,14 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
   // The lane every reading and every action on this page stays on: what the run
   // database answered for, else what the URL asked for.
   const lane = loaded?.standing?.lane ?? queryLane
-  // The workdir holds every lane's bundles side by side, and the lanes carry
-  // different defects — so a study opened on one lane reads that lane's cells
-  // and nothing else. A cell whose name states no lane is shown either way.
-  const cells = loaded === undefined
-    ? []
-    : loaded.sessions.flatMap((session) =>
-      session.cells
-        .filter((cell) => lane === undefined || cell.lane === undefined || cell.lane === lane)
-        .map((cell) => ({ key: `${session.name}/${cell.name}`, session, cell }))
-    )
-  // The default cell is the LATEST run's first failing cell (else its first):
-  // after a re-run the page must show what just happened, not the oldest
-  // failure. An explicit pick — the reader's, or the URL's — still wins.
-  const lastSession = cells[cells.length - 1]?.session
-  const latest = cells.filter((entry) => entry.session === lastSession)
-  const ran = latest.filter((entry) => entry.cell.skipped === undefined)
-  const active = cells.find((entry) => entry.key === cellKey) ??
-    (queryCase === undefined
-      ? undefined
-      : latest.find((entry) => caseIdOf(entry.cell.name) === queryCase)) ??
-    ran.find((entry) => !cellPassed(entry.cell)) ?? ran[0] ?? latest[0] ?? cells[0]
+  // Which cells the page lists and opens on, a run set aside opened only by its link (`study-cells.ts`).
+  const { active, cells, latest, picker } = studyCells(loaded?.sessions ?? [], lane, cellKey, queryCase)
   const activeCase = active === undefined ? undefined : caseIdOf(active.cell.name)
   // The header follows the CELL on screen: picking an older run must not leave
   // the page stating the latest run's number over an older run's ladders.
   const activeSession = active?.session
+  // The run whose hooks and held state stand for the page where no cell is on screen: the latest not set aside.
+  const shownSession = activeSession ?? [...(loaded?.sessions ?? [])].reverse().find((one) => one.aside === undefined)
   // The prep the run on screen read its cases as of, where it is the standing
   // run and that prep is not the standing cut's: the lanes pin their own preps.
   const runPrep = loaded?.standing !== undefined
@@ -755,6 +727,11 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
           <p className="muted">
             {study.loading && <span className="tag">reloading…</span>}
             {study.error !== undefined && <span className="tag missing">{study.error}</span>}{" "}
+            {activeSession?.aside !== undefined && (
+              <>
+                <span className="tag">{activeSession.name}: {activeSession.aside}, set aside</span>{" "}
+              </>
+            )}
             {value.standing === undefined
               ? `never run on ${queryLane ?? "the configured lane"}`
               : (
@@ -776,7 +753,7 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
           </p>
           {/* What the deployment's hooks recorded around the run on screen —
               the box's own account of that replay, kept beside it. */}
-          {(activeSession ?? value.sessions[value.sessions.length - 1])?.hooks.map((hook) => (
+          {shownSession?.hooks.map((hook) => (
             <details key={hook.name} className="rerun-log study-hook">
               <summary className="muted">
                 hook: {hook.name}
@@ -788,10 +765,10 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
           ))}
           {/* What each batch's cleanup gate read of the SUT's call state:
               what it held before and after, and what the batch's calls left. */}
-          {((activeSession ?? value.sessions[value.sessions.length - 1])?.held ?? []).length > 0 && (
+          {(shownSession?.held ?? []).length > 0 && (
             <details className="rerun-log study-held">
               <summary className="muted">SUT call state around each batch</summary>
-              <JsonView value={(activeSession ?? value.sessions[value.sessions.length - 1])?.held} label="contexts" />
+              <JsonView value={shownSession?.held} label="contexts" />
             </details>
           )}
           {/* Where the cases and the flows doc below come from. The lanes pin
@@ -838,12 +815,12 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
             }
           )}
           <ReplayButton capture={value.capture} lane={lane ?? ""} />
-          {cells.length > 1 && (
+          {picker.length > 1 && (
             <select
               value={active?.key ?? ""}
               onChange={(event) => setCellKey(event.target.value)}
             >
-              {cells.map((entry) => (
+              {picker.map((entry) => (
                 <option key={entry.key} value={entry.key}>
                   {entry.key}
                   {cellPassed(entry.cell) ? " · passed" : " · failed"}
