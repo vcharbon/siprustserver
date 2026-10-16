@@ -127,6 +127,46 @@ describe("Generation.nameOf", () => {
   })
 })
 
+describe("Generation.current and Generation.after over a gap", () => {
+  const run = <A>(effect: Effect.Effect<A, unknown, never>) => Effect.runPromise(effect)
+  const holding = (store: string, names: ReadonlyArray<string>) => {
+    for (const name of names) fs.mkdirSync(path.join(store, name), { recursive: true })
+    return store
+  }
+
+  it("stands at the highest generation held, whatever generation below it is gone", async () => {
+    const store = holding(path.join(scratch, "gap-store"), ["gap.anon3", "other.anon2"])
+    const at = await run(Generation.current(store, "gap.anon").pipe(Effect.provide(NodeServices.layer)))
+    expect(at).toEqual({ capture: "gap.anon3", generation: 3 })
+    const plain = holding(path.join(scratch, "gap-store-plain"), ["gap", "gap.anon4"])
+    const atPlain = await run(Generation.current(plain, "gap").pipe(Effect.provide(NodeServices.layer)))
+    expect(atPlain).toEqual({ capture: "gap.anon4", generation: 4 })
+  })
+
+  it("counts on past the highest generation held", async () => {
+    const store = holding(path.join(scratch, "gap-store-after"), ["gap.anon3"])
+    const next = await run(Generation.after(store, "gap.anon", 1).pipe(Effect.provide(NodeServices.layer)))
+    expect(next).toEqual({ capture: "gap.anon4", generation: 4 })
+  })
+
+  it("reads only the names of the capture's own generations", () => {
+    expect(Generation.generationOf("gap.anon", "gap.anon")).toBe(1)
+    expect(Generation.generationOf("gap.anon", "gap.anon12")).toBe(12)
+    expect(Generation.generationOf("gap", "gap.anon2")).toBe(2)
+    for (const name of ["gap.anon1", "gap.anon02", "gap.anon2b", "gap.anon2.anon3", "gapx.anon2", "gap"]) {
+      expect(Generation.generationOf("gap.anon", name)).toBeUndefined()
+    }
+  })
+
+  it("stands a source at the highest generation held", async () => {
+    holding(artifacts, ["gapped.anon3"])
+    const standing = await run(
+      Extract.standing(artifacts, { capture: "gapped.anon", pcaps: [raw] }).pipe(Effect.provide(NodeServices.layer))
+    )
+    expect(standing).toEqual({ capture: "gapped.anon3", pcaps: [raw], first: "gapped.anon" })
+  })
+})
+
 describe("Extract.extract generations", () => {
   it("lands a capture held without a kept seed under its next generation, the old one untouched", async () => {
     mode = "m1"
