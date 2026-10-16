@@ -1,10 +1,11 @@
 schema: incident.v1
 name: partition
 description: >-
-  Partition the target pods (one or all) from the pods of peer_selector, both
-  directions, for duration_s (Chaos Mesh NetworkChaos). The default target is
-  the workers among themselves: the replication link cut, each side vanished
-  from the other. Host-network pods are refused.
+  Partition the target pods (one or all) from their peers, both directions,
+  for duration_s (Chaos Mesh NetworkChaos). The peers are the pods of
+  peer_selector, or else the other live pods of the target selector: by
+  default one worker cut from the others, the replication link gone and each
+  side vanished from the other. Host-network pods are refused.
 kind: fault
 target:
   selector: app=b2bua-worker
@@ -13,7 +14,7 @@ params:
   peer_selector:
     type: string
     default: ""
-    description: The pods cut from the targets; empty is the target selector itself.
+    description: The pods cut from the targets; empty is the other live pods of the target selector.
   inject_wait_s:
     type: integer
     default: 30

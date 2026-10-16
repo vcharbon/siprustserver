@@ -3,11 +3,17 @@ name: net_delay
 description: >-
   Delay every packet the target pods send by delay_ms (netem on eth0) for
   duration_s: a component that answers, later than its clients wait.
+  On a host-network pod the fault hits its whole node: such a target is
+  refused unless allow_host_network.
 kind: fault
 target:
   selector: app=call-limiter
   pick: one
 params:
+  allow_host_network:
+    type: boolean
+    default: false
+    description: Allow a host-network target, whose netns is its node's; the fault then hits every pod and the kubelet of that node.
   delay_ms:
     type: integer
     default: 300

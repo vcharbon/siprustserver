@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Crash the front proxy that holds the virtual address (the VRRP master):
-# SIGKILL every container process of the pod (the proxy and its VRRP
-# sidecar) from its node and prove them dead; its peer must take the address
-# over. Facts: the crash's, plus the holder's node and interface.
+# SIGKILL every container of the pod (the proxy and its VRRP sidecar) from its
+# node and prove them dead; its peer must take the address over. Facts: the
+# crash's, plus the holder's node and interface.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=vip.sh
@@ -10,10 +10,11 @@ source "$HAKIT_LIB/vip.sh"
 # shellcheck source=crash.sh
 source "$HAKIT_LIB/crash.sh"
 holders="$(hk_vip_holders "$HAKIT_PARAM_ADDRESS" "$HAKIT_PARAM_CONTAINER")"
-[ "$(grep -c . <<<"$holders" || true)" -eq 1 ] || hk_die "expected one holder of $HAKIT_PARAM_ADDRESS, found: ${holders:-none}"
+[ "$(hk_count <<<"$holders")" -eq 1 ] || hk_die "expected one holder of $HAKIT_PARAM_ADDRESS, found: ${holders:-none}"
 read -r pod node ifc <<<"$holders"
-hk_live_pods | awk -v p="$pod" '$1 == p' > "$HAKIT_EVENT_DIR/targets"
-hk_live_pods | grep -c . > "$HAKIT_EVENT_DIR/live_before"
+live="$(hk_live_pods)"
+awk -v p="$pod" '$1 == p' <<<"$live" > "$HAKIT_EVENT_DIR/targets"
+hk_count <<<"$live" > "$HAKIT_EVENT_DIR/live_before"
 hk_crash_prepare
 crashed="$(hk_crash_kill)"
 jq -cn --argjson d "$crashed" --arg node "$node" --arg ifc "$ifc" '$d + {node: $node, interface: $ifc}'

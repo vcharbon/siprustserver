@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Recovered when every pod of the namespace bound to a stopped node is Ready
-# again and as many target pods are live as before. Exit 75 while not yet.
+# again and as many target pods are live as before. Exit 75 while not yet, or
+# while the pods cannot be read.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
+nodes="$(cat "$HAKIT_EVENT_DIR/nodes")"
 while read -r n; do
-  pending="$(kubectl -n "$NS" get pods --field-selector "spec.nodeName=$n" -o json \
-    | jq -r '.items[] | select(.status.phase != "Succeeded") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True") | not) | .metadata.name')" \
-    || exit "$HK_NOT_YET"
+  [ -n "$n" ] || continue
+  pods="$(kubectl -n "$NS" get pods --field-selector "spec.nodeName=$n" -o json)" || exit "$HK_NOT_YET"
+  pending="$(jq -r '.items[] | select(.status.phase != "Succeeded")
+    | select(any(.status.conditions[]?; .type == "Ready" and .status == "True") | not) | .metadata.name' <<<"$pods")"
   [ -z "$pending" ] || exit "$HK_NOT_YET"
-done < "$HAKIT_EVENT_DIR/nodes"
-[ "$(hk_live_pods | grep -c . || true)" -ge "$(cat "$HAKIT_EVENT_DIR/live_before")" ] || exit "$HK_NOT_YET"
+done <<<"$nodes"
+live="$(hk_live_pods)" || exit "$HK_NOT_YET"
+[ "$(hk_count <<<"$live")" -ge "$(cat "$HAKIT_EVENT_DIR/live_before")" ] || exit "$HK_NOT_YET"
 jq -cn --argjson at "$(hk_now_ms)" '{all_ready_at_ms: $at}'

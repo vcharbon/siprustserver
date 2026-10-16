@@ -1,9 +1,9 @@
 schema: incident.v1
 name: cpu_starve
 description: >-
-  Cap the CPU of one pod's container (pick one) or every pod's (pick all) to
-  quota_us per period_us for duration_s, with no restart: the overload of
-  scarcity. With pick all no healthy peer is left to absorb the load.
+  Cap the CPU of one pod (pick one) or every pod (pick all), its pod-level
+  cgroup, to quota_us per period_us for duration_s, with no restart: the
+  overload of scarcity. With pick all no healthy peer is left to absorb the load.
 kind: fault
 target:
   selector: app=b2bua-worker
@@ -17,10 +17,6 @@ params:
     type: integer
     default: 100000
     description: The cgroup period, in microseconds.
-  container:
-    type: string
-    default: ""
-    description: The container to cap; empty is the pod's first container.
 duration_s: 90
 timeouts:
   inject_s: 60

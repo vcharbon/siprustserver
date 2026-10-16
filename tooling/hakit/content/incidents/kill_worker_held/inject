@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
 # Crash one ready worker and keep it absent: every node the pod's nodeSelector
-# admits is tainted NoSchedule, the pod object is deleted (so the kubelet does
-# not restart it in place) and its processes are killed with SIGKILL at once
-# and proven dead. The replacement the workload creates stays Pending until
-# heal lifts the taint. Running pods are not touched by a NoSchedule taint.
-# Facts: the crash's, plus the held nodes.
+# admits is tainted NoSchedule, its containers are killed with SIGKILL and
+# proven dead, and the pod object is force-deleted at once so the kubelet
+# does not restart it in place; an in-place restart that got in first (a
+# higher restart count at the delete) fails the step. The replacement the
+# workload creates stays Pending until heal lifts the taint. Running pods are
+# not touched by a NoSchedule taint. Facts: the crash's, plus the held nodes.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=crash.sh
 source "$HAKIT_LIB/crash.sh"
 hk_pick_targets
-read -r pod _ _ < <(hk_targets)
-selector="$(kubectl -n "$NS" get pod "$pod" -o json | jq -r '.spec.nodeSelector // {} | to_entries | map("\(.key)=\(.value)") | join(",")')"
+read -r pod _ _ <<<"$(hk_targets)"
+spec="$(kubectl -n "$NS" get pod "$pod" -o json)"
+selector="$(jq -r '.spec.nodeSelector // {} | to_entries | map("\(.key)=\(.value)") | join(",")' <<<"$spec")"
 if [ -n "$selector" ]; then
-  mapfile -t nodes < <(kubectl get nodes -l "$selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+  list="$(kubectl get nodes -l "$selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
 else
-  mapfile -t nodes < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+  list="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
 fi
-[ "${#nodes[@]}" -gt 0 ] || hk_die "no node admits $pod"
+mapfile -t nodes <<<"$list"
+[ -n "${nodes[0]:-}" ] || hk_die "no node admits $pod"
 printf '%s\n' "${nodes[@]}" > "$HAKIT_EVENT_DIR/held_nodes"
 hk_crash_prepare
 kubectl taint nodes "${nodes[@]}" "hakit.io/hold=$HAKIT_RUN:NoSchedule" --overwrite >&2
-kubectl -n "$NS" delete pod "$pod" --grace-period=0 --force --wait=false >&2
 crashed="$(hk_crash_kill)"
-jq -cn --argjson d "$crashed" --argjson n "$(printf '%s\n' "${nodes[@]}" | jq -Rnc '[inputs]')" '$d + {held_nodes: $n}'
+restarts="$(hk_restarts "$pod")"
+kubectl -n "$NS" delete pod "$pod" --grace-period=0 --force --wait=false >&2
+before="$(awk '{ n += $6 } END { print n + 0 }' "$HAKIT_EVENT_DIR/crashed")"
+[ "${restarts:-0}" -eq "$before" ] || hk_die "$pod restarted in place before its delete ($before -> ${restarts:-?} restarts)"
+jq -cn --argjson d "$crashed" --argjson n "$(printf '%s\n' "${nodes[@]}" | jq -Rnc '[inputs]')" --argjson r "${restarts:-null}" \
+  '$d + {held_nodes: $n, restarts_at_delete: $r}'

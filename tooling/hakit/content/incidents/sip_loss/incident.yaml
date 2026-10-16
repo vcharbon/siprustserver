@@ -5,11 +5,17 @@ description: >-
   duration_s: loss_pct % lost, duplicate_pct % duplicated, delay_ms added. Other
   traffic (replication, probes, metrics) is untouched. Retransmission across a
   takeover meets a lossy plane here.
+  On a host-network pod the fault hits its whole node: such a target is
+  refused unless allow_host_network.
 kind: fault
 target:
   selector: app=b2bua-worker
   pick: one
 params:
+  allow_host_network:
+    type: boolean
+    default: false
+    description: Allow a host-network target, whose netns is its node's; the fault then hits every pod and the kubelet of that node.
   port:
     type: integer
     default: 5060

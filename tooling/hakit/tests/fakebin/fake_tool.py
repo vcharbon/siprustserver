@@ -6,7 +6,8 @@ name first) and what it read on stdin to `$FAKE_LOG`, one JSON object a line,
 and answers from the rules in `$FAKE_RULES` (a JSON list of
 `{"match", "stdout", "rc", "once"}`): the first rule whose regular expression
 matches the space-joined argv decides; a `once` rule is spent after its first
-match. Without a match: no output, exit 0.
+match. A call no rule scripts exits 97 with the call on stderr: a test
+states every answer the lab gives.
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ def main() -> int:
                 rules_path.write_text(json.dumps(rules))
             sys.stdout.write(str(rule.get("stdout", "")))
             return int(str(rule.get("rc", 0)))
-    return 0
+    sys.stderr.write(f"fake_tool: unscripted call: {joined}\n")
+    return 97
 
 
 if __name__ == "__main__":

@@ -8,6 +8,6 @@ source "$HAKIT_LIB/incident.sh"
 # shellcheck source=worker.sh
 source "$HAKIT_LIB/worker.sh"
 replaced="$(hk_probe_replaced)"
-read -r pod _ _ < <(hk_targets)
+read -r pod _ _ <<<"$(hk_targets)"
 timings="$(hk_worker_timings "$pod" "$(cat "$HAKIT_EVENT_DIR/killed_at_ms")")"
 jq -cn --argjson r "$replaced" --argjson t "$timings" '$r + $t'

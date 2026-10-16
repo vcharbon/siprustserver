@@ -8,10 +8,10 @@ source "$HAKIT_LIB/incident.sh"
 # shellcheck source=worker.sh
 source "$HAKIT_LIB/worker.sh"
 replaced="$(hk_probe_replaced)"
-read -r pod _ _ < <(hk_targets)
+read -r pod _ _ <<<"$(hk_targets)"
 pending="$(cat "$HAKIT_EVENT_DIR/pending_uid")"
 released="$(cat "$HAKIT_EVENT_DIR/released_at_ms")"
-row="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.metadata.uid}{" "}{.status.conditions[?(@.type=="PodScheduled")].lastTransitionTime}')"
+row="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.metadata.uid}{" "}{.status.conditions[?(@.type=="PodScheduled")].lastTransitionTime}')" || exit "$HK_NOT_YET"
 read -r uid scheduled <<<"$row"
 scheduled_ms="$(hk_ms "$scheduled")"
 [ "$uid" = "$pending" ] || hk_die "$pod came back as $uid, not the replacement $pending that waited through the hold"

@@ -1,8 +1,9 @@
 schema: incident.v1
 name: node_stop
 description: >-
-  Stop the kind node hosting one target pod (pick one) or every target pod
-  (pick all) for duration_s, then start it: the loss of a machine and of every
+  Stop the kind nodes node_selector names, or else the node hosting one
+  target pod (pick one) or every target pod (pick all), for duration_s, then
+  start them: the loss of a machine and of every
   pod on it. Its pods come back on the same node. The probe waits until every
   pod bound to it is Ready again.
 kind: fault
@@ -10,6 +11,10 @@ target:
   selector: app=rabbitmq
   pick: one
 params:
+  node_selector:
+    type: string
+    default: ""
+    description: A node label selector naming the nodes to stop; empty is the nodes hosting the target pods.
   ready_timeout_s:
     type: integer
     default: 240

@@ -1,31 +1,24 @@
 #!/usr/bin/env bash
-# Cap the CPU of the target pods' container (cgroup v2 cpu.max written from its
-# node) to quota_us / period_us: the platform overloaded by scarcity, with no
-# restart. Each prior cpu.max is kept in `starved` for heal. Facts: per pod the
-# cap and the value it replaced.
+# Cap the CPU of the target pods (cgroup v2 cpu.max of the pod-level cgroup,
+# written from its node) to quota_us / period_us: the platform overloaded by
+# scarcity, with no restart. Each prior cpu.max is kept in `starved` for heal
+# before it is replaced. Facts: per pod the cap and the value it replaced.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 hk_pick_targets
 quota="$HAKIT_PARAM_QUOTA_US $HAKIT_PARAM_PERIOD_US"
 facts="{}"
 : > "$HAKIT_EVENT_DIR/starved"
-while read -r pod _ node; do
-  if [ -n "$HAKIT_PARAM_CONTAINER" ]; then
-    cid="$(kubectl -n "$NS" get pod "$pod" -o jsonpath="{.status.containerStatuses[?(@.name==\"$HAKIT_PARAM_CONTAINER\")].containerID}")"
-  else
-    cid="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].containerID}')"
-  fi
-  cid="${cid##*/}"
-  [ -n "$cid" ] || hk_die "no container id for $pod"
-  dir="$(docker exec "$node" find /sys/fs/cgroup -type d -name "*${cid}*" 2>/dev/null | while read -r d; do
-    if docker exec "$node" test -f "$d/cpu.max"; then echo "$d"; break; fi
-  done)"
-  [ -n "$dir" ] || hk_die "no cpu.max cgroup for container $cid of $pod on $node"
+targets="$(hk_targets)"
+while read -r pod _ _; do
+  [ -n "$pod" ] || continue
+  cg="$(pf_pod_cgroup "$pod")"
+  node="${cg% *}" dir="${cg#* }"
   prev="$(docker exec "$node" cat "$dir/cpu.max")"
   echo "$pod $node $dir $prev" >> "$HAKIT_EVENT_DIR/starved"
   docker exec "$node" sh -c "echo '$quota' > '$dir/cpu.max'"
   now="$(docker exec "$node" cat "$dir/cpu.max")"
   [ "$now" = "$quota" ] || hk_die "cpu.max of $pod reads '$now' after writing '$quota'"
   facts="$(jq -c --arg p "$pod" --arg q "$quota" --arg was "$prev" '. + {($p): {cpu_max: $q, was: $was}}' <<<"$facts")"
-done < <(hk_targets)
+done <<<"$targets"
 jq -cn --argjson f "$facts" --argjson at "$(hk_now_ms)" '{pods: $f, applied_at_ms: $at}'

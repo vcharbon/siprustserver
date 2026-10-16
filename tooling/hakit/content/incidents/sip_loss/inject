@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # netem loss, duplication and delay on the SIP datagrams the target pods send
 # (UDP from or to the SIP port), every other packet untouched: a prio qdisc
-# whose fourth band carries the netem, and u32 filters on the port. Facts as
-# pod_freeze's.
+# whose fourth band carries the netem, and u32 filters on the port. A
+# host-network pod's netns is its node's: refused unless allow_host_network.
+# Facts as pod_freeze's.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=timed.sh
 source "$HAKIT_LIB/timed.sh"
 sip_netem() { # pod
   local p="$HAKIT_PARAM_PORT" spec=(netem loss "$HAKIT_PARAM_LOSS_PCT%" duplicate "$HAKIT_PARAM_DUPLICATE_PCT%")
-  [ "$HAKIT_PARAM_DELAY_MS" -gt 0 ] && spec+=(delay "${HAKIT_PARAM_DELAY_MS}ms")
+  if [ "$HAKIT_PARAM_DELAY_MS" -gt 0 ]; then spec+=(delay "${HAKIT_PARAM_DELAY_MS}ms"); fi
   pf_netns "$1" tc qdisc replace dev eth0 root handle 1: prio bands 4 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 || return 1
   pf_netns "$1" tc qdisc replace dev eth0 parent 1:4 handle 40: "${spec[@]}" || return 1
   pf_netns "$1" tc filter add dev eth0 parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip sport "$p" 0xffff flowid 1:4 || return 1
   pf_netns "$1" tc filter add dev eth0 parent 1: protocol ip prio 2 u32 match ip protocol 17 0xff match ip dport "$p" 0xffff flowid 1:4
 }
+hk_pick_targets
+hk_refuse_host_network "$HAKIT_PARAM_ALLOW_HOST_NETWORK"
 hk_timed_inject netem sip_netem

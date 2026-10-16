@@ -1,36 +1,48 @@
 #!/usr/bin/env bash
-# Follows each elder container on its node (its last log line and its exit,
-# kept in `elders` while the node still holds it) and is recovered when the
-# replacement is live and every elder has exited. Exit 75 while not yet.
-# Facts: per elder its exit and last log instants, the replacement's first log
-# line, and the overlap of the two incarnations.
+# Follows each elder container on its node by its id until it ended: its exit
+# (the runtime's finishedAt), or else the first time the runtime no longer
+# knew it; a state that cannot be read is not an end. Recovered when every
+# elder ended and the replacement is live. Exit 75 while not yet. Facts: per
+# elder its end and how it was seen, the successor container's start (the
+# runtime's startedAt), and their overlap.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=crash.sh
 source "$HAKIT_LIB/crash.sh"
-seen="$HAKIT_EVENT_DIR/elders"
-[ -f "$seen" ] || echo '{}' > "$seen"
-while read -r pod _ node cname cid _ _; do
-  state="$(docker exec "$node" crictl inspect --output go-template --template '{{.status.state}} {{.status.finishedAt}}' "$cid" 2>/dev/null || true)"
-  [ -n "$state" ] || continue
-  read -r st fin <<<"$state"
-  line="$(docker exec "$node" crictl logs --timestamps --tail 1 "$cid" 2>&1 | tail -n 1 || true)"
-  last="$(date -d "${line%% *}" +%s%3N 2>/dev/null || echo null)"
-  exited=null
-  [ "$st" != CONTAINER_EXITED ] || exited="$(hk_ms "$fin")"
-  jq --arg k "$pod/$cname" --argjson l "$last" --argjson e "$exited" \
-    '.[$k] = {last_log_ms: ($l // .[$k].last_log_ms), exited_at_ms: $e}' "$seen" > "$seen.new"
-  mv "$seen.new" "$seen"
-  [ "$st" = CONTAINER_EXITED ] || exit "$HK_NOT_YET"
-done < "$HAKIT_EVENT_DIR/crashed"
+seen="$(hk_state elders)"
+[ -n "$seen" ] || seen='{}'
+crashed="$(cat "$HAKIT_EVENT_DIR/crashed")"
+running=0
+while read -r pod _ node cname cid _; do
+  key="$pod/$cname"
+  [ "$(jq -r --arg k "$key" '.[$k].end_ms // "none"' <<<"$seen")" = none ] || continue
+  state="$(hk_container_state "$node" "$cid")" || exit "$HK_NOT_YET"
+  case "$state" in
+    running) running=1 ;;
+    exited)
+      fin="$(docker exec "$node" crictl inspect --output go-template --template '{{.status.finishedAt}}' "$cid")" || exit "$HK_NOT_YET"
+      seen="$(jq -c --arg k "$key" --argjson e "$(hk_ms "$fin")" '.[$k] = {end_ms: $e, seen: "exited"}' <<<"$seen")" ;;
+    gone)
+      seen="$(jq -c --arg k "$key" --argjson e "$(hk_now_ms)" '.[$k] = {end_ms: $e, seen: "gone"}' <<<"$seen")" ;;
+  esac
+done <<<"$crashed"
+echo "$seen" > "$HAKIT_EVENT_DIR/elders"
+[ "$running" -eq 0 ] || exit "$HK_NOT_YET"
 replaced="$(hk_probe_replaced)"
 facts="[]"
-while read -r pod _ _ cname _ _ _; do
-  first="$(hk_log_edge "$pod" "$cname" first)"
-  facts="$(jq -c --arg k "$pod/$cname" --argjson f "${first:-null}" --slurpfile s "$seen" \
-    '. + [{container: $k, elder_last_log_ms: $s[0][$k].last_log_ms, elder_exited_at_ms: $s[0][$k].exited_at_ms,
-           successor_first_log_ms: $f,
-           overlap_ms: (if $s[0][$k].last_log_ms == null or $f == null then null
-                        else ([$s[0][$k].last_log_ms - $f, 0] | max) end)}]' <<<"$facts")"
-done < "$HAKIT_EVENT_DIR/crashed"
+while read -r pod _ _ cname _ _; do
+  json="$(kubectl -n "$NS" get pod "$pod" --ignore-not-found -o json)" || exit "$HK_NOT_YET"
+  started=null
+  if [ -n "$json" ]; then
+    node="$(jq -r '.spec.nodeName' <<<"$json")"
+    cid="$(jq -r --arg c "$cname" '.status.containerStatuses[]? | select(.name == $c) | .containerID // empty' <<<"$json")"
+    if [ -n "$cid" ]; then
+      st="$(docker exec "$node" crictl inspect --output go-template --template '{{.status.startedAt}}' "${cid#*://}")" || exit "$HK_NOT_YET"
+      started="$(hk_ms "$st")"
+    fi
+  fi
+  facts="$(jq -c --arg k "$pod/$cname" --argjson s "$started" --argjson seen "$seen" \
+    '. + [{container: $k, elder_end_ms: $seen[$k].end_ms, elder_end_seen: $seen[$k].seen, successor_started_at_ms: $s,
+           overlap_ms: (if $s == null then null else ([$seen[$k].end_ms - $s, 0] | max) end)}]' <<<"$facts")"
+done <<<"$crashed"
 jq -cn --argjson r "$replaced" --argjson e "$facts" '$r + {elders: $e}'

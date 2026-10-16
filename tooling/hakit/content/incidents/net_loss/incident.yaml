@@ -3,11 +3,17 @@ name: net_loss
 description: >-
   Drop loss_pct % of the packets the target pods send (netem on eth0) for
   duration_s; at 100 % a network cut of the component, its probes included.
+  On a host-network pod the fault hits its whole node: such a target is
+  refused unless allow_host_network.
 kind: fault
 target:
   selector: app=call-limiter
   pick: one
 params:
+  allow_host_network:
+    type: boolean
+    default: false
+    description: Allow a host-network target, whose netns is its node's; the fault then hits every pod and the kubelet of that node.
   loss_pct:
     type: number
     default: 100

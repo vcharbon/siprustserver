@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
-# Restore each starved container's prior cpu.max and prove it restored; a
-# cgroup gone with its container (a restart) carries no cap. Idempotent.
+# Restore each starved pod's prior cpu.max and prove it restored, twice, the
+# second time a second later; a cgroup that no longer exists (the pod gone)
+# carries no cap. Idempotent.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
+restore() { # pod node dir prev → its state
+  if ! docker exec "$2" test -d "$3"; then
+    docker exec "$2" true || hk_die "node $2 cannot be reached to restore $1"
+    echo gone
+    return
+  fi
+  docker exec "$2" sh -c "echo '$4' > '$3/cpu.max'"
+  local now
+  now="$(docker exec "$2" cat "$3/cpu.max")"
+  [ "$now" = "$4" ] || hk_die "cpu.max of $1 reads '$now', not the prior '$4'"
+  echo restored
+}
+starved="$(hk_state starved)"
 facts="{}"
 while read -r pod node dir prev; do
-  if ! docker exec "$node" test -f "$dir/cpu.max" 2>/dev/null; then
-    state=gone
-  else
-    docker exec "$node" sh -c "echo '$prev' > '$dir/cpu.max'"
-    now="$(docker exec "$node" cat "$dir/cpu.max")"
-    [ "$now" = "$prev" ] || hk_die "cpu.max of $pod reads '$now', not the prior '$prev'"
-    state=restored
-  fi
+  [ -n "$pod" ] || continue
+  state="$(restore "$pod" "$node" "$dir" "$prev")"
   facts="$(jq -c --arg p "$pod" --arg s "$state" '. + {($p): $s}' <<<"$facts")"
-done < <(cat "$HAKIT_EVENT_DIR/starved" 2>/dev/null || true)
+done <<<"$starved"
+sleep "${HK_RECHECK_S:-1}"
+while read -r pod node dir prev; do
+  [ -n "$pod" ] || continue
+  restore "$pod" "$node" "$dir" "$prev" >/dev/null
+done <<<"$starved"
 jq -cn --argjson f "$facts" --argjson at "$(hk_now_ms)" '{pods: $f, healed_at_ms: $at}'
