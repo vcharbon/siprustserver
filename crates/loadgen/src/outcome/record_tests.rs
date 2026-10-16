@@ -148,6 +148,28 @@ fn after_answer_the_dialog_facts_name_the_ending() {
     assert_eq!(r["ending"], "cut", "a BYE the caller did not wait for");
 }
 
+/// A step of an answered call that waited in vain is a failure, even when the
+/// generator's teardown released the dialog: the call did not run as its shape
+/// says, so the record never reads as a clean answered call.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_step_timeout_after_answer_is_a_failure_whatever_the_teardown() {
+    let released = WireFacts { teardown_released: true, ..answered() };
+    let closed = step(StepError::QueueClosed { who: "alice".into() });
+    for outcome in [timeout(), closed] {
+        let r = record(&released, &outcome);
+        assert_eq!(r["ending"], "answered");
+        assert_eq!(
+            r["failures"],
+            json!([{ "at_ms": 9_000, "kind": "protocol", "detail": "step established timed out" }])
+        );
+    }
+    assert_eq!(
+        record(&WireFacts { bye: Some(Some(200)), ..answered() }, &ok())["failures"],
+        json!([])
+    );
+}
+
 /// Each callee leg reads its own ending.
 #[test]
 #[ignore = "slow lane: loadgen"]

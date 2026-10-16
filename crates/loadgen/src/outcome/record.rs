@@ -120,6 +120,14 @@ pub fn build(
         (ending, Some(reason), phase)
     } else {
         let (ending, released) = ending_after_answer(wire, stop);
+        // A step of the answered call that waited in vain: the call did not
+        // run as its shape says, whatever its teardown drew. An in-dialog
+        // request left unanswered already states why.
+        if let (Stop::Timeout, CallOutcome::Step { at, .. }, true) =
+            (stop, outcome, failures.is_empty())
+        {
+            failures.push(failure(ended_at_ms, "protocol", Some(format!("step {at} timed out"))));
+        }
         if ending == "failed" && matches!(stop, Stop::Timeout | Stop::Flagged) {
             failures.push(failure(ended_at_ms, "protocol", Some("never released".into())));
         }
