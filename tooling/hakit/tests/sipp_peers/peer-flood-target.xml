@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
-<!-- Answers, then answers every in-dialog OPTIONS and re-INVITE 200 (a re-INVITE's 200 not retransmitted: the flood never ACKs it), and the BYE. -->
+<!-- Answers, then answers every in-dialog OPTIONS 200 and every re-INVITE 100 then 200 (the 200 not retransmitted: the flood never ACKs it), and the BYE. -->
 <scenario name="peer-flood-target">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -51,6 +51,19 @@
     ]]>
   </send>
   <label id="inv"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
   <send next="serve">
     <![CDATA[
       SIP/2.0 200 OK

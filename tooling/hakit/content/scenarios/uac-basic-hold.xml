@@ -753,11 +753,35 @@
   </nop>
 
   <!-- A flood: flood_count in-dialog requests flood_gap_ms apart, neither
-       retransmitted nor awaited (their responses reach the handler and are let
-       go, a re-INVITE's 2xx unACKed), then the BYE. -->
+       retransmitted nor awaited, then the BYE. After each request the call
+       goes straight to a recv and waits there in 100 ms steps, so the
+       responses (a re-INVITE's 100 and 2xx back to back) are taken by it and
+       let go, a re-INVITE's 2xx unACKed, and never reach the handler. -->
   <nop/>
   <label id="flood"/>
-  <pause variable="flood_gap"/>
+  <nop>
+    <action>
+      <gettimeofday assign_to="fl_t0_s,fl_t0_us"/>
+    </action>
+  </nop>
+  <label id="flood_wait"/>
+  <recv response="^[1-6][0-9][0-9]$" regexp_match="true" timeout="100" ontimeout="flood_tick" next="flood_wait"/>
+  <nop/>
+  <label id="flood_tick"/>
+  <nop test="flood_gap_over" next="flood_send">
+    <action>
+      <gettimeofday assign_to="fl_s,fl_us"/>
+      <subtract assign_to="fl_s" variable="fl_t0_s"/>
+      <multiply assign_to="fl_s" value="1000"/>
+      <subtract assign_to="fl_us" variable="fl_t0_us"/>
+      <divide assign_to="fl_us" value="1000"/>
+      <add assign_to="fl_s" variable="fl_us"/>
+      <test assign_to="flood_gap_over" variable="fl_s" compare="greater_than_equal" variable2="flood_gap"/>
+    </action>
+  </nop>
+  <nop next="flood_wait"/>
+  <nop/>
+  <label id="flood_send"/>
   <nop test="flood_done" next="teardown"/>
   <nop>
     <action>
@@ -769,7 +793,7 @@
     </action>
   </nop>
   <nop test="is_rflood" next="flood_invite"/>
-  <send next="flood">
+  <send next="flood_wait">
     <![CDATA[
       OPTIONS [next_url] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
@@ -782,10 +806,13 @@
       Max-Forwards: 70
       Content-Length: 0
     ]]>
+    <action>
+      <gettimeofday assign_to="fl_t0_s,fl_t0_us"/>
+    </action>
   </send>
   <nop/>
   <label id="flood_invite"/>
-  <send next="flood">
+  <send next="flood_wait">
     <![CDATA[
       INVITE [next_url] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
@@ -807,6 +834,9 @@
       m=audio [media_port] RTP/AVP 0
       a=rtpmap:0 PCMU/8000
     ]]>
+    <action>
+      <gettimeofday assign_to="fl_t0_s,fl_t0_us"/>
+    </action>
   </send>
 
   <!-- A 2xx after the deadline: ACK it and tear its dialog down. -->
