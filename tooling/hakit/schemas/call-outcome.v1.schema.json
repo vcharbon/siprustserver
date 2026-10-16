@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "call-outcome.v1.schema.json",
-  "$comment": "minor 1",
+  "$comment": "minor 2",
   "title": "call-outcome.v1",
   "description": "One record per call a caller-side generator placed, written once when the generator is done with the call, whatever path it took. It states what the caller observed; it never judges it. The classifier compares it with the treatment catalog. Times are Unix epoch milliseconds. ADR-0049.",
   "type": "object",
@@ -52,7 +52,7 @@
       "type": "number"
     },
     "first_provisional_at_ms": {
-      "description": "When the first provisional response (100 to 199) to the INVITE arrived. Null when none did.",
+      "description": "When the first provisional response past 100 Trying (101 to 199) to the INVITE arrived: a 100 is the next hop's own acknowledgement (RFC 3261 §8.2.6.1). Null when none did.",
       "type": ["number", "null"]
     },
     "setup_ended_at_ms": {
@@ -90,6 +90,11 @@
         { "type": "string", "pattern": "^[1-6][0-9]{2}$" },
         { "type": "string", "pattern": "^[a-z0-9.+-]+;cause=[0-9]+$" }
       ]
+    },
+    "retry_after_s": {
+      "description": "The delta-seconds of the final's Retry-After header (0 when its value does not read); null or absent when the final carried none or the call had no final. Tells a refusal that asks the caller to retry later from a bare one of the same code.",
+      "type": ["integer", "null"],
+      "minimum": 0
     },
     "ending": {
       "description": "How the call ended, from the caller's facts alone: `answered` (answered, then released by the planned teardown), `rejected` (a non-2xx final), `abandoned` (the caller CANCELed by design and got the 487), `timeout` (no final by the setup deadline), `cut` (answered, then ended before the planned teardown: a BYE the caller did not expect, or a 481 to an in-dialog request or to the BYE), `stranded` (answered, and the teardown never completed: the BYE got no final), `failed` (the generator stopped the call on a protocol or transport error; see `failures`).",

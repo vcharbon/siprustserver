@@ -1,7 +1,7 @@
 """The base UAC scenario writes one schema-valid call-outcome record at every exit.
 
 Each pairing runs the scenario against a SIPp peer on loopback that drives one
-exit (answer, reject, ring forever, silence, a late answer, a 2xx crossing the
+exit (answer, reject, a refusal with a Retry-After, ring forever, silence, a late answer, a 2xx crossing the
 CANCEL, far-end BYE, 481 or no final to the BYE, an in-dialog request the
 caller cannot serve, a 2xx retransmitted after the ACK) and checks the record
 the call left and that the peer, which fails on any missing ACK, BYE or
@@ -32,12 +32,15 @@ class Case:
     failures: list[str] = field(default_factory=lambda: [])
     early_media: bool = False
     provisional: bool = True
+    retry_after: int | None = None
 
 
 CASES = [
     Case("peer-answer.xml", "answered", 200, None, "released"),
     Case("peer-early-media.xml", "answered", 200, None, "released", early_media=True),
-    Case("peer-reject-486.xml", "rejected", 486, "486", "provisional"),
+    # A 100 Trying is the next hop's own acknowledgement, no provisional.
+    Case("peer-reject-486.xml", "rejected", 486, "486", "invited", provisional=False),
+    Case("peer-reject-503-retry-after.xml", "rejected", 503, "503", "invited", provisional=False, retry_after=7),
     Case("peer-reject-503-reason.xml", "rejected", 503, "q.850;cause=34", "invited", provisional=False),
     Case("peer-reject-reason-token.xml", "rejected", 503, "503", "invited", provisional=False),
     Case("peer-reason-list.xml", "rejected", 503, "sip;cause=503", "invited", provisional=False),
@@ -87,6 +90,7 @@ def test_every_exit_writes_one_valid_record(case: Case, pairings: dict[str, Pair
     assert r["early_media"] is case.early_media
     assert [f["kind"] for f in jv.objs(r, "failures")] == case.failures
     assert (r["first_provisional_at_ms"] is not None) is case.provisional
+    assert r.get("retry_after_s") == case.retry_after
     assert r["run"] == "loopback" and r["stream"] == "basic" and r["shape"] == "basic"
     assert str(r["call_id"]).endswith("-loopback@127.0.0.1")
 

@@ -42,6 +42,7 @@
    <assignstr assign_to="r_ans" value="null"/>
    <assignstr assign_to="r_code" value="null"/>
    <assignstr assign_to="r_reason" value="null"/>
+   <assignstr assign_to="r_ra" value="null"/>
    <assignstr assign_to="r_fail" value=""/>
    <assignstr assign_to="r_sep" value=""/>
    <assignstr assign_to="r_ending" value="failed"/>
@@ -128,7 +129,8 @@ a=rtpmap:0 PCMU/8000
   </action>
  </nop>
  <label id="wait"/>
- <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="1000" ontimeout="tick" next="tick">
+ <recv response="100" optional="true" timeout="1000" ontimeout="tick" next="tick"/>
+ <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="tick">
   <action>
    <assignstr assign_to="now_t" value="[clock_tick]"/>
    <todouble assign_to="now_s" variable="now_t"/>
@@ -155,6 +157,9 @@ a=rtpmap:0 PCMU/8000
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="fin_all,fin_code"/>
    <ereg regexp="^[[:blank:]]*([A-Za-z0-9.+-]+)[[:blank:]]*;[^,]*cause[[:blank:]]*=[[:blank:]]*([0-9]+)" search_in="hdr" header="Reason:" assign_to="rsn_all,rsn_proto,rsn_cause"/>
+   <ereg regexp="^[[:blank:]]*([0-9]+)" search_in="hdr" header="Retry-After:" assign_to="ra_all,ra_s"/>
+   <assignstr assign_to="ra_t" value="[$ra_s]null"/>
+   <ereg regexp="^([0-9]+|null)" search_in="var" variable="ra_t" assign_to="ra_m,r_ra"/>
   </action>
  </recv>
 
@@ -1392,6 +1397,7 @@ Content-Length: 0
    <ereg regexp="^[A-Z]+" search_in="msg" assign_to="ux_req"/>
   </action>
  </recv>
+ <recv response="100" optional="true" counter="2" next="unexp_resume"/>
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" counter="2" next="ux_1xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="ux_all,ux_code"/>
@@ -1430,6 +1436,8 @@ Content-Length: 0
    <strcmp assign_to="ux_cc" variable="ux_n" variable2="cs_n"/>
    <test assign_to="ux_cur" variable="ux_cc" compare="equal" value="0"/>
    <ereg regexp="^[[:blank:]]*([A-Za-z0-9.+-]+)[[:blank:]]*;[^,]*cause[[:blank:]]*=[[:blank:]]*([0-9]+)" search_in="hdr" header="Reason:" assign_to="ux_rsn_all,ux_rsn_proto,ux_rsn_cause"/>
+   <ereg regexp="^[[:blank:]]*([0-9]+)" search_in="hdr" header="Retry-After:" assign_to="ra_all,ux_ra_s"/>
+   <assignstr assign_to="ux_ra_t" value="[$ux_ra_s]null"/>
    <ereg regexp="branch=([^;,[:space:]]+)" search_in="hdr" header="Via:" assign_to="ux_br_all,ux_branch"/>
   </action>
  </recv>
@@ -1609,6 +1617,7 @@ Content-Length: 0
    <assignstr assign_to="fin_code" value="[$ux_code]"/>
    <assignstr assign_to="rsn_proto" value="[$ux_rsn_proto]"/>
    <assignstr assign_to="rsn_cause" value="[$ux_rsn_cause]"/>
+   <ereg regexp="^([0-9]+|null)" search_in="var" variable="ux_ra_t" assign_to="ra_m,r_ra"/>
   </action>
  </nop>
  <nop/>
@@ -1781,7 +1790,7 @@ Content-Length: 0
    <todouble assign_to="now_s" variable="now_t"/>
    <add assign_to="now_s" variable="t_off"/>
    <test assign_to="r_em" variable="em_acc" compare="greater_than" value="0"/>
-   <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$now_s],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
+   <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$now_s],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;retry_after_s&quot;:[$r_ra],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
   </action>
  </nop>
 

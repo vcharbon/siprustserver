@@ -52,25 +52,43 @@ def _row(cls: str, stream: str, items: Sequence[Impact | SetupLatency], allowed:
     return row
 
 
-def _keyed(cls: str, impacts: list[Impact], entries: list[Allowance], cps: dict[str, float]) -> list[Json]:
+def _keyed(
+    cls: str, impacts: list[Impact], entries: list[Allowance], cps: dict[str, float], outage_s: float = 0.0
+) -> list[Json]:
     charged: dict[tuple[int, str], list[Impact]] = defaultdict(list)
-    unmatched: dict[tuple[str, int, str], list[Impact]] = defaultdict(list)
+    unmatched: dict[tuple[str, int, str, bool], list[Impact]] = defaultdict(list)
     for imp in impacts:
         code, reason = imp.code or 0, imp.reason or ""
-        idx = next((i for i, e in enumerate(entries) if e.matches(imp.stream, code, reason)), None)
+        idx = next((i for i, e in enumerate(entries) if e.matches(imp.stream, code, reason, imp.retry_after)), None)
         if idx is None:
-            unmatched[(imp.stream, code, reason)].append(imp)
+            unmatched[(imp.stream, code, reason, imp.retry_after)].append(imp)
         else:
             charged[(idx, imp.stream)].append(imp)
     rows: list[Json] = []
     for (idx, stream), items in sorted(charged.items()):
         e = entries[idx]
         rate = cps.get(stream, 0.0)
-        rows.append({**_row(cls, stream, items, e.allowed(rate), rate), "code": e.code, "reason": e.reason})
-    for (stream, code, reason), items in sorted(unmatched.items()):
+        row = {**_row(cls, stream, items, e.allowed(rate, outage_s), rate), "code": e.code, "reason": e.reason}
+        if e.retry_after is not None:
+            row["retry_after"] = e.retry_after
+        rows.append(row)
+    for (stream, code, reason, retry_after), items in sorted(unmatched.items()):
         rate = cps.get(stream, 0.0)
-        rows.append({**_row(cls, stream, items, 0, rate), "code": code, "reason": reason})
+        row = {**_row(cls, stream, items, 0, rate), "code": code, "reason": reason}
+        if retry_after:
+            row["retry_after"] = True
+        rows.append(row)
     return rows
+
+
+def outage_s(w: Window) -> float:
+    """The window's outage in seconds: its first `inject` to its last `recovered`
+    (to its last `healed` without one); 0 when it has neither."""
+    start = w.first("inject")
+    end = w.last("recovered") or w.last("healed")
+    if start is None or end is None:
+        return 0.0
+    return max(0.0, (end - start) / 1000.0)
 
 
 def _counted_allowance(budget: Budget, cls: str) -> float:
@@ -105,7 +123,7 @@ def judge(
     in_window: dict[str, list[Impact]] = defaultdict(list)
     counted_in_window: dict[str, list[Impact]] = defaultdict(list)
     slow_in_window: dict[str, list[SetupLatency]] = defaultdict(list)
-    outside: dict[tuple[str, str, int, str], list[Impact | SetupLatency]] = defaultdict(list)
+    outside: dict[tuple[str, str, int, str, bool], list[Impact | SetupLatency]] = defaultdict(list)
     in_dialog: list[Json] = []
     stalled: list[tuple[SetupLatency, Stall]] = []
 
@@ -113,7 +131,7 @@ def judge(
         if imp.budgetable:
             w = _holding(windows, imp.at_ms)
             if w is None:
-                outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "")].append(imp)
+                outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "", imp.retry_after)].append(imp)
             else:
                 in_window[w.event].append(imp)
             continue
@@ -121,7 +139,7 @@ def judge(
             w.event for w in windows if (inj := w.first("inject")) is not None and imp.started_at_ms <= inj <= imp.at_ms
         ]
         if not candidates:
-            outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "")].append(imp)
+            outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "", False)].append(imp)
             continue
         entry: Json = {
             "class": imp.cls,
@@ -137,7 +155,7 @@ def judge(
     for imp in counted:
         w = _holding(windows, imp.at_ms)
         if w is None:
-            outside[(imp.cls, "", 0, "")].append(imp)
+            outside[(imp.cls, "", 0, "", False)].append(imp)
         else:
             counted_in_window[w.event].append(imp)
 
@@ -153,7 +171,7 @@ def judge(
         if stall is not None:
             stalled.append((lat, stall))
         elif w is None:
-            outside[(SETUP_SLOW, lat.stream, 0, "")].append(lat)
+            outside[(SETUP_SLOW, lat.stream, 0, "", False)].append(lat)
         else:
             slow_in_window[w.event].append(lat)
 
@@ -161,8 +179,11 @@ def judge(
     for w in windows:
         budget = budget_of(w, budgets)
         mine = in_window.get(w.event, [])
-        rows = _keyed(SETUP_FAILED, [i for i in mine if i.cls == SETUP_FAILED], budget.setup_failed, cps)
-        rows += _keyed(UNEXPECTED_ENDING, [i for i in mine if i.cls != SETUP_FAILED], budget.unexpected_ending, cps)
+        out_s = outage_s(w)
+        rows = _keyed(SETUP_FAILED, [i for i in mine if i.cls == SETUP_FAILED], budget.setup_failed, cps, out_s)
+        rows += _keyed(
+            UNEXPECTED_ENDING, [i for i in mine if i.cls != SETUP_FAILED], budget.unexpected_ending, cps, out_s
+        )
         by_stream: dict[str, list[SetupLatency]] = defaultdict(list)
         for lat in slow_in_window.get(w.event, []):
             by_stream[lat.stream].append(lat)
@@ -177,12 +198,14 @@ def judge(
         per_window[w.event] = rows
 
     unattributed: list[Json] = []
-    for (cls, stream, code, reason), items in sorted(outside.items()):
+    for (cls, stream, code, reason, retry_after), items in sorted(outside.items()):
         row = _row(cls, stream, items, 0, cps.get(stream, 0.0))
         row["finding"] = True
         if cls in (SETUP_FAILED, UNEXPECTED_ENDING):
             row["code"] = code
         if reason:
             row["reason"] = reason
+        if retry_after:
+            row["retry_after"] = True
         unattributed.append(row)
     return Judged(per_window=per_window, in_dialog=in_dialog, unattributed=unattributed, stalled=stalled)

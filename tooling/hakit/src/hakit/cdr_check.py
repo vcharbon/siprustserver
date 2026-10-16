@@ -56,4 +56,5 @@ def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas
     if not good and answered:
         found.append(_failed(f"no CDR observation for {answered} answered calls; is the consumer shipping?"))
         return [], found
-    return join(records, good, charge_missing=complete), found
+    required = profile.cdr_required
+    return join(records, good, charge_missing=complete, required=lambda r: any(m.matches(r) for m in required)), found

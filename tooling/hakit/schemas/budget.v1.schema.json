@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "budget.v1.schema.json",
-  "$comment": "minor 1",
+  "$comment": "minor 2",
   "title": "budget.v1",
   "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
   "type": "object",
@@ -136,8 +136,18 @@
           "description": "The allowance in seconds of the stream's offered rate: the count may reach max_seconds × the stream's cps in the window.",
           "type": "number",
           "minimum": 0
+        },
+        "retry_after": {
+          "description": "Matches only a final that carried a Retry-After (true) or only one that carried none (false); absent, either. Tells a refusal that asks for a retry later from a bare one of the same code.",
+          "type": "boolean"
+        },
+        "over_outage": {
+          "description": "max_seconds counts beyond the window's outage, from its first inject to its last recovered: the count may reach (max_seconds + outage) × the stream's cps, so one budget holds for any hold of the fault.",
+          "type": "boolean"
         }
       },
+      "if": { "properties": { "over_outage": { "const": true } }, "required": ["over_outage"] },
+      "then": { "required": ["max_seconds"] },
       "oneOf": [
         { "required": ["max_calls"] },
         { "required": ["max_seconds"] }

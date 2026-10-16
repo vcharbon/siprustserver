@@ -85,6 +85,23 @@ class Capture:
 
 
 @dataclass(frozen=True)
+class CdrRequired:
+    """A call never answered that must still have a CDR: its ending, and
+    optionally its final's code and whether that final carried a Retry-After."""
+
+    ending: str
+    code: int | None = None
+    retry_after: bool | None = None
+
+    def matches(self, r: Json) -> bool:
+        if jv.string(r, "ending") != self.ending or jv.opt_number(r, "answered_at_ms") is not None:
+            return False
+        if self.code is not None and jv.opt_int(r, "final_code") != self.code:
+            return False
+        return self.retry_after is None or (jv.opt_int(r, "retry_after_s") is not None) == self.retry_after
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     duration_s: float
@@ -100,6 +117,7 @@ class Profile:
     schedule: Schedule | None
     defaults: dict[str, Json]
     raw: Json = field(compare=False)
+    cdr_required: list[CdrRequired] = field(default_factory=lambda: [])
 
     def stream(self, name: str) -> Stream | None:
         return next((s for s in self.streams if s.name == name), None)
@@ -170,6 +188,10 @@ def parse_profile(d: Json) -> Profile:
         setup_slow_ms=jv.number(d, "setup_slow_ms"),
         generator_stall_ms=jv.number(d, "generator_stall_ms", 500),
         cdr_join=jv.boolean(d, "cdr_join"),
+        cdr_required=[
+            CdrRequired(jv.string(m, "ending"), jv.opt_int(m, "code"), jv.opt_bool(m, "retry_after"))
+            for m in jv.objs(d, "cdr_required")
+        ],
         capture=_capture(jv.opt_obj(d, "capture")),
         catalogs=jv.strings(d, "catalogs"),
         preflight=Preflight(

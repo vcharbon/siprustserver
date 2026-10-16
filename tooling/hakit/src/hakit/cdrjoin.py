@@ -8,13 +8,14 @@ disposition that differs, and for a planned teardown (`ending: answered`) a
 duration that differs from the caller's by more than 1 s plus the CDR's unit,
 at the record's `ended_at_ms`. For a `cut` or `stranded` call the CDR may not
 end later than the caller's end plus that tolerance. An unanswered call
-without a CDR is no mismatch.
+without a CDR is no mismatch, unless the profile's `cdr_required` names it.
 """
 
 from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Callable
 
 from . import jsonval as jv
 from .classify import Impact
@@ -23,6 +24,7 @@ from .jsonval import Json
 CDR_MISMATCH = "cdr_mismatch"
 DURATION_TOLERANCE_MS = 1000
 NO_CDR = "answered call without a CDR"
+NO_REQUIRED_CDR = "a call that must have a CDR without one"
 
 
 def _impact(stream: str, call_id: str, at_ms: float, detail: str) -> Impact:
@@ -64,9 +66,15 @@ def distinct(cdrs: list[Json]) -> list[Json]:
     return out
 
 
-def join(records: list[Json], cdrs: list[Json], charge_missing: bool = True) -> list[Impact]:
+def join(
+    records: list[Json],
+    cdrs: list[Json],
+    charge_missing: bool = True,
+    required: Callable[[Json], bool] = lambda _r: False,
+) -> list[Impact]:
     """The `cdr_mismatch` impacts of a run's schema-valid records and observations.
-    `charge_missing` False when the export was cut with CDRs still owed."""
+    `charge_missing` False when the export was cut with CDRs still owed;
+    `required` names the calls never answered that must have a CDR too."""
     by_call: dict[str, list[Json]] = defaultdict(list)
     for c in distinct(cdrs):
         by_call[jv.string(c, "call_id")].append(c)
@@ -83,6 +91,8 @@ def join(records: list[Json], cdrs: list[Json], charge_missing: bool = True) -> 
         if not mine:
             if charge_missing and jv.opt_number(r, "answered_at_ms") is not None:
                 out.append(_impact(stream, call_id, ended, NO_CDR))
+            elif charge_missing and required(r):
+                out.append(_impact(stream, call_id, ended, NO_REQUIRED_CDR))
             continue
         why = _compare(r, mine[0])
         if why is not None:

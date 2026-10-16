@@ -36,6 +36,8 @@ class Impact:
     reason: str | None = None
     answered: bool = False
     detail: str = ""
+    # The final carried a `Retry-After` (the record's `retry_after_s` is set).
+    retry_after: bool = False
 
     @property
     def budgetable(self) -> bool:
@@ -81,12 +83,14 @@ def _leg_impacts(r: Json, shape: Shape, base: Impact) -> list[Impact]:
     for leg in shape.legs:
         got = seen.get(leg.role)
         if got is None:
-            out.append(replace(base, code=0, reason=f"leg:{leg.role}", detail="leg never opened"))
+            out.append(replace(base, code=0, reason=f"leg:{leg.role}", detail="leg never opened", retry_after=False))
             continue
         code = jv.opt_int(got, "final_code")
         ending = jv.string(got, "ending")
         if not _expected(leg.expected, ending, code, jv.boolean(got, "early_media")):
-            out.append(replace(base, code=code or 0, reason=f"leg:{leg.role}", detail=f"leg ended {ending}"))
+            out.append(
+                replace(base, code=code or 0, reason=f"leg:{leg.role}", detail=f"leg ended {ending}", retry_after=False)
+            )
     return out
 
 
@@ -124,7 +128,9 @@ def classify(r: Json, shape: Shape) -> Classified:
 
     setup_instant = setup_end if setup_end is not None else ended
     answered = answered_at is not None
-    base = Impact(UNEXPECTED_ENDING, stream, call_id, setup_instant, started, answered=answered)
+    retry_after = jv.opt_int(r, "retry_after_s") is not None
+    base = Impact(UNEXPECTED_ENDING, stream, call_id, setup_instant, started, answered=answered,
+                  retry_after=retry_after)
 
     caller_ok = _expected(shape.expected, ending, code, early_media)
     if not caller_ok:

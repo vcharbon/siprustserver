@@ -20,7 +20,9 @@ def _t(ms: float) -> str:
 
 
 def _key(r: Json) -> str:
-    return " ".join(str(x) for x in (r.get("stream"), r.get("code"), r.get("reason")) if x is not None and x != "")
+    ra = r.get("retry_after")
+    tag = ("Retry-After" if ra else "no Retry-After") if isinstance(ra, bool) else None
+    return " ".join(str(x) for x in (r.get("stream"), r.get("code"), r.get("reason"), tag) if x is not None and x != "")
 
 
 def _impact(r: Json) -> str:

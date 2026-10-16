@@ -31,9 +31,11 @@ fn feed(wire: &CallWire, events: &[(Side<'_>, Dir, Vec<u8>)]) -> WireFacts {
     wire.facts()
 }
 
-/// The caller's setup facts: its first INVITE, the first provisional, early
-/// media, the final with the cause key of its Reason; a retransmitted
-/// INVITE and a later provisional change none of them.
+/// The caller's setup facts: its first INVITE, the first provisional past
+/// 100 Trying (a hop's own acknowledgement, RFC 3261 §8.2.6.1, says nothing
+/// of the setup), early media, the final with the cause key of its Reason and
+/// its Retry-After; a retransmitted INVITE and a later provisional change
+/// none of them.
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn the_setup_facts_are_read_from_the_caller_side() {
@@ -60,11 +62,39 @@ async fn the_setup_facts_are_read_from_the_caller_side() {
     let f = wire.facts();
     assert_eq!(f.call_id.as_deref(), Some("c1"));
     assert_eq!(f.started_at_ms, Some(1_000));
-    assert_eq!(f.first_provisional_at_ms, Some(1_010));
+    assert_eq!(f.first_provisional_at_ms, Some(1_020));
     assert!(f.early_media);
     assert_eq!((f.setup_ended_at_ms, f.final_code), (Some(1_030), Some(486)));
     assert_eq!(f.final_cause.as_deref(), Some("q.850;cause=17"));
+    assert_eq!(f.final_retry_after_s, None);
     assert_eq!(f.answered_at_ms, None);
+}
+
+/// A final with a Retry-After keeps its delta-seconds; one without keeps none.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_refusal_keeps_its_retry_after() {
+    let wire = CallWire::new(Clock::test_at(0));
+    let f = feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c9", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 100 Trying", "c9", "1 INVITE", "", "")),
+            (
+                Side::Caller,
+                Dir::In,
+                msg(
+                    "SIP/2.0 503 Service Unavailable",
+                    "c9",
+                    "1 INVITE",
+                    "t1",
+                    "Retry-After: 7\r\n",
+                ),
+            ),
+        ],
+    );
+    assert_eq!((f.final_code, f.final_retry_after_s), (Some(503), Some(7)));
+    assert_eq!(f.first_provisional_at_ms, None, "a 100 Trying alone is no provisional");
 }
 
 /// An in-dialog request answered non-2xx is a failure with its method and

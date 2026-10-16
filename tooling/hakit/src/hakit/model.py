@@ -110,18 +110,25 @@ class Allowance:
     reason: str
     max_calls: int | None
     max_seconds: float | None
+    # Whether the final carried a `Retry-After` (None: either).
+    retry_after: bool | None = None
+    # Whether `max_seconds` counts beyond the window's outage, from its first
+    # `inject` to its last `recovered`.
+    over_outage: bool = False
 
-    def matches(self, stream: str, code: int, reason: str) -> bool:
+    def matches(self, stream: str, code: int, reason: str, retry_after: bool = False) -> bool:
         return (
             (self.stream == "*" or self.stream == stream)
             and self.code == code
             and (self.reason == "*" or self.reason == reason)
+            and (self.retry_after is None or self.retry_after == retry_after)
         )
 
-    def allowed(self, cps: float) -> float:
+    def allowed(self, cps: float, outage_s: float = 0.0) -> float:
         if self.max_calls is not None:
             return float(self.max_calls)
-        return (self.max_seconds or 0.0) * cps
+        extra = outage_s if self.over_outage else 0.0
+        return ((self.max_seconds or 0.0) + extra) * cps
 
 
 @dataclass(frozen=True)
@@ -174,6 +181,8 @@ def _allowances(d: Json, key: str) -> list[Allowance]:
                 reason=jv.string(e, "reason"),
                 max_calls=jv.opt_int(e, "max_calls"),
                 max_seconds=jv.opt_number(e, "max_seconds"),
+                retry_after=jv.opt_bool(e, "retry_after"),
+                over_outage=jv.boolean(e, "over_outage"),
             )
         )
     return out

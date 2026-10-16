@@ -102,6 +102,15 @@ def boolean(d: Mapping[str, object], key: str, default: bool = False) -> bool:
     return v
 
 
+def opt_bool(d: Mapping[str, object], key: str) -> bool | None:
+    v = d.get(key)
+    if v is None:
+        return None
+    if not isinstance(v, bool):
+        raise ShapeError(f"{key}: expected a boolean, got {type(v).__name__}")
+    return v
+
+
 def scalars(d: Mapping[str, object], key: str) -> dict[str, str | int | float | bool]:
     out: dict[str, str | int | float | bool] = {}
     for k, v in obj(d, key).items():

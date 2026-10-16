@@ -145,6 +145,7 @@ pub fn build(
         "early_media": wire.early_media,
         "final_code": wire.final_code,
         "reason": reason,
+        "retry_after_s": wire.final_retry_after_s,
         "ending": ending,
         "failures": failures,
         "legs": legs(wire),

@@ -164,3 +164,31 @@ def test_payloads_the_consumer_could_not_read_make_the_run_invalid(tmp_path: Pat
     assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
         ("class_failed", "cdr_mismatch: the consumer could not read 3 CDR payloads")
     ]
+
+
+def test_a_refused_call_the_profile_requires_a_cdr_for_is_charged_without_one(tmp_path: Path) -> None:
+    bare = rejected("bare", T0 + 101_000, 503, "503")
+    retry = {**rejected("retry", T0 + 101_000, 503, "503"), "retry_after_s": 5}
+    busy = rejected("busy", T0 + 101_000, 486, "486")
+    budget: Json = {"schema": "budget.v1", "name": "cdr", "description": "d",
+                    "setup_failed": [{"stream": "*", "code": 503, "reason": "503", "max_calls": 9},
+                                     {"stream": "*", "code": 486, "reason": "486", "max_calls": 9}]}
+    profile: Json = {
+        "cdr_join": True,
+        "generator_stall_ms": 3_600_000,
+        "cdr_required": [{"ending": "rejected", "code": 503, "retry_after": False}],
+    }
+    d = run_dir(
+        tmp_path,
+        [ANSWERED, bare, retry, busy],
+        calls=4,
+        events=kill(1, T0 + 100_000, budget="cdr"),
+        budgets=[budget],
+        profile=profile,
+        cdrs=[cdr("a", T0, 100, 30_000)],
+    )
+    v = compute(d, SCHEMAS)
+    assert SCHEMAS.errors("verdict.v1", v) == []
+    (w,) = jv.objs(v, "windows")
+    mismatch = [r for r in jv.objs(w, "impacts") if r["class"] == "cdr_mismatch"]
+    assert [(r["count"], r["call_ids"], r["finding"]) for r in mismatch] == [(1, ["bare"], True)]

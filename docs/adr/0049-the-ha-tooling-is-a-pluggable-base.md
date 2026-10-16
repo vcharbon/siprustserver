@@ -269,8 +269,14 @@ made. A run profile joins the two.
 3. **Keys.** A `setup_failed` or `unexpected_ending` entry names `stream` (or
    `*`, each stream separately), `code`, `reason` (or `*`) and either
    `max_calls` or `max_seconds`. `max_seconds` is the allowance in seconds of
-   the stream's offered rate, so one budget holds at any cps. A failed setup
-   is charged to the first entry that matches it.
+   the stream's offered rate, so one budget holds at any cps. An entry may
+   add `retry_after` (true: only a final that carried a Retry-After; false:
+   only one that carried none), so a refusal asking the caller to retry later
+   is never charged to the allowance of a bare refusal of the same code, and
+   `over_outage`, which counts `max_seconds` beyond the window's outage (its
+   first `inject` to its last `recovered`), so one budget states a fault's
+   residue whatever its hold. A failed setup is charged to the first entry
+   that matches it.
 4. **The reason vocabulary.** With a final, `reason` is the first value of its
    first Reason header line normalised to `<protocol>;cause=<n>`, the protocol
    token lowercased (`q.850;cause=34`), or the status code alone (`486`) when
@@ -356,7 +362,10 @@ made. A run profile joins the two.
      than 1 s plus its unit after the record's `ended_at_ms`: the call was
      billed past the caller's end.
 
-   An unanswered call without a CDR is no mismatch. A window allows
+   An unanswered call without a CDR is no mismatch, unless the profile's
+   `cdr_required` names its ending (and optionally its final's code and
+   whether that final carried a Retry-After): such a call without a CDR is
+   charged at its `ended_at_ms`. A window allows
    `cdr_mismatch.max_calls`. What leaves the CDR measurement in doubt is a
    `class_failed` integrity finding, never impacts: an export cut with CDRs
    still owed (its missing CDRs are not charged), payloads the consumer could
@@ -422,8 +431,11 @@ made. A run profile joins the two.
    when it is done with a call, on every exit path: success, failure,
    timeout, abort. The record states the caller's facts (`started_at_ms`,
    `first_provisional_at_ms`, `setup_ended_at_ms`, `answered_at_ms`,
-   `ended_at_ms`, `phase_reached`, `final_code`, `reason`, `ending`,
-   `early_media`, `failures`, `legs`) and never a judgement. The generator's
+   `ended_at_ms`, `phase_reached`, `final_code`, `reason`,
+   `retry_after_s`, `ending`, `early_media`, `failures`, `legs`) and never a
+   judgement. The first provisional is the first past 100 Trying, which is
+   the next hop's own acknowledgement (RFC 3261 §8.2.6.1); `retry_after_s` is
+   the delta-seconds of the final's Retry-After, absent without one. The generator's
    own class goes in `producer_verdict`, which the classifier does not read,
    so a generator cannot excuse a call.
 2. **SIPp.** The UAC writes the record with its `<log>` action into a file in

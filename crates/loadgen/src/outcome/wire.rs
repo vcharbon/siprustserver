@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use sip_clock::Clock;
-use sip_message::header::cause_key;
+use sip_message::header::{cause_key, retry_after_seconds};
 use sip_message::sip_str::SipStr;
 use sip_message::sniff::{
     call_id, content_type_is, cseq_method_token, cseq_number, has_body, header_values, is_response,
@@ -56,6 +56,8 @@ pub struct WireFacts {
     /// The final's cause key (`<protocol>;cause=<n>`), when the first value
     /// of its Reason header states one.
     pub final_cause: Option<String>,
+    /// The delta-seconds of the final's Retry-After, when it carried one.
+    pub final_retry_after_s: Option<u32>,
     pub early_media: bool,
     /// The caller sent a CANCEL before the verdict resolved.
     pub cancelled: bool,
@@ -208,6 +210,7 @@ impl WireFacts {
         self.answered_at_ms = None;
         self.final_code = None;
         self.final_cause = None;
+        self.final_retry_after_s = None;
         self.early_media = false;
     }
 
@@ -216,8 +219,12 @@ impl WireFacts {
             return;
         }
         if code < 200 {
-            self.first_provisional_at_ms.get_or_insert(now);
-            self.early_media |= code > 100 && has_sdp(raw);
+            // 100 Trying is the next hop's own acknowledgement (RFC 3261
+            // §8.2.6.1): the setup's progress starts at the first other one.
+            if code > 100 {
+                self.first_provisional_at_ms.get_or_insert(now);
+                self.early_media |= has_sdp(raw);
+            }
             return;
         }
         self.setup_ended_at_ms = Some(now);
@@ -227,6 +234,9 @@ impl WireFacts {
         } else {
             self.final_cause =
                 cause_key(header_values(raw, "Reason").into_iter().map(SipStr::from));
+            self.final_retry_after_s = retry_after_seconds(
+                header_values(raw, "Retry-After").into_iter().map(SipStr::from),
+            );
         }
     }
 
