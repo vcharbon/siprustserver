@@ -12,7 +12,8 @@
  -key: run, stream, shape (labels); setup_ms (no final by then: `timeout`);
     hold_ms; reinvites (the caller's, splitting the hold evenly);
     far_end_bye (`cut`, or `release`: the far end's BYE is the planned
-    end); abuse (`none`; `ghost`: silent until the far end's BYE or hold_ms;
+    end); abuse (`none`; `ghost`: silent until the far end's BYE or hold_ms,
+    checked every 5 s, a BYE landing on that check answered;
     `options_flood`/`reinvite_flood`: flood_count requests flood_gap_ms
     apart, unretransmitted, a flood 2xx unACKed, then BYE; an abuse call
     takes the far end's BYE as its planned end).
@@ -907,7 +908,7 @@ Content-Length: 0
    <test assign_to="ghost_over" variable="gh_s" compare="greater_than_equal" variable2="hold_ms"/>
   </action>
  </nop>
- <recv request="BYE" optional="true" crlf="true" timeout="1000" ontimeout="ghost" next="ghost_bye"/>
+ <recv request="BYE" optional="true" crlf="true" timeout="5000" ontimeout="ghost" next="ghost_bye"/>
  <recv request="[A-Z]" regexp_match="true" optional="true" crlf="true" next="ghost"/>
  <recv response="^[1-6][0-9][0-9]$" regexp_match="true" next="ghost"/>
  <nop/>
@@ -1699,7 +1700,6 @@ Content-Length: 0
 
  <nop/>
  <label id="unexp_bye"/>
- <nop test="is_ghost" next="ux_ghost_bye"/>
  <send>
   <![CDATA[
 SIP/2.0 200 OK
@@ -1717,6 +1717,7 @@ Content-Length: 0
    <assignstr assign_to="ux_what" value="BYE before answer"/>
   </action>
  </send>
+ <nop test="is_ghost" next="ux_ghost_bye"/>
  <nop test="bye_sent" next="ux_bye_crossed"/>
  <nop test="answered" next="far_end_bye"/>
  <nop next="proto_fail"/>
@@ -1729,11 +1730,7 @@ Content-Length: 0
  </nop>
  <nop/>
  <label id="ux_ghost_bye"/>
- <nop next="ghost_bye">
-  <action>
-   <assign assign_to="_unexp.retaddr" value="0"/>
-  </action>
- </nop>
+ <nop next="ghost_bye"/>
 
  <nop/>
  <label id="unexp_request"/>
