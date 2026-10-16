@@ -6,10 +6,10 @@ description: >-
   the call limiter and the broker hung, slowed, refused, cut and restarted,
   the infrastructure node stopped, the replication link partitioned, the SIP
   plane made lossy, a store stalled, a clock shifted, a spike, the overload
-  of CPU scarcity plus a spike, orphaned dialogs, and a pod force-deleted
-  while its process runs on. Each window carries the
+  of CPU scarcity plus a spike, orphaned dialogs, a pod force-deleted while
+  its process runs on, and an in-dialog request flood. Each window carries the
   budget of what its fault may cost.
-duration_s: 2720
+duration_s: 2960
 drain_s: 130
 settle_s: 15
 setup_slow_ms: 1000
@@ -44,6 +44,16 @@ streams:
     setup_deadline_s: 10
     ring_s: 5
     hold_s: 60
+  - name: flooding
+    driver: sipp
+    start: incident
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 5
+    setup_deadline_s: 10
+    ring_s: 5
+    hold_s: 1
+    params: { abuse: options_flood, flood_count: 30, flood_gap_ms: 1000 }
 schedule:
   at:
     - { at_s: 30, incident: kill_worker, budget: worker-kill }
@@ -72,3 +82,4 @@ schedule:
     - { at_s: 2315, incidents: [cpu_starve, spike], stream: burst, duration_s: 30, expected_s: 180, budget: cpu-overload }
     - { at_s: 2515, incident: force_delete, budget: worker-kill }
     - { at_s: 2600, incident: orphan, stream: orphaned, budget: dependency-fault }
+    - { at_s: 2720, incident: abuse, stream: flooding, budget: abuse }
