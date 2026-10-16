@@ -2,7 +2,7 @@
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!-- Peer UAS: answers the call, and on the caller's BYE sends an in-dialog
      OPTIONS before answering the BYE, so the OPTIONS crosses the caller's
-     BYE. The OPTIONS carries two Vias and a Record-Route, as through a proxy;
+     BYE. The OPTIONS carries two Vias with a Record-Route between them, as through a proxy;
      the caller's 200 must echo them and the OPTIONS CSeq. -->
 <scenario name="peer uas: OPTIONS crosses the BYE">
   <recv request="INVITE" crlf="true">
@@ -50,8 +50,8 @@
     <![CDATA[
       OPTIONS [$caller_contact] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-      Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-origin-[call_number]
       Record-Route: <sip:192.0.2.1:5060;lr>
+      Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-origin-[call_number]
       From: <sip:sut@[local_ip]:[local_port]>;tag=[pid]SIPpTag01[call_number]
       To: [$caller]
       [last_Call-ID:]

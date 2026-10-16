@@ -491,16 +491,7 @@
   </send>
   <label id="reinv_wait"/>
   <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="32000" ontimeout="reinv_no_final" next="reinv_wait"/>
-  <recv request="OPTIONS" optional="true" crlf="true" next="reinv_wait">
-    <action>
-      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
-      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
-      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
-      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
-      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
-      <assign assign_to="options_due" value="1"/>
-    </action>
-  </recv>
+  <recv request="OPTIONS" optional="true" crlf="true" next="reinv_wait_cap"/>
   <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" next="reinv_2xx">
     <action>
       <ereg regexp="^[[:blank:]]*([0-9]+)[[:blank:]]+INVITE" search_in="hdr" header="CSeq:" assign_to="rc_all,rc_n"/>
@@ -517,6 +508,18 @@
       <test assign_to="rc_cur" variable="rc_c" compare="equal" value="0"/>
     </action>
   </recv>
+  <nop/>
+  <label id="reinv_wait_cap"/>
+  <nop next="reinv_wait">
+    <action>
+      <assignstr assign_to="opt_via" value="[last_Via:]"/>
+      <assignstr assign_to="opt_rr" value="[last_Record-Route:]"/>
+      <assignstr assign_to="opt_from" value="[last_From:]"/>
+      <assignstr assign_to="opt_to" value="[last_To:]"/>
+      <assignstr assign_to="opt_cseq" value="[last_CSeq:]"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </nop>
   <nop/>
   <label id="reinv_2xx"/>
   <nop test="rc_cur" next="reinv_ack"/>
@@ -578,10 +581,10 @@
       SIP/2.0 200 OK
       [$opt_via]
       [$opt_rr]
-      From:[$opt_from]
-      To:[$opt_to]
+      [$opt_from]
+      [$opt_to]
       Call-ID: [call_id]
-      CSeq:[$opt_cseq]
+      [$opt_cseq]
       Contact: <sip:caller@[local_ip]:[local_port]>
       Content-Length: 0
     ]]>
@@ -657,17 +660,20 @@
     ]]>
   </send>
   <label id="far_ack_wait"/>
-  <recv request="OPTIONS" optional="true" crlf="true" next="far_ack_wait">
+  <recv request="OPTIONS" optional="true" crlf="true" next="far_ack_wait_cap"/>
+  <recv request="ACK" crlf="true" next="far_acked"/>
+  <nop/>
+  <label id="far_ack_wait_cap"/>
+  <nop next="far_ack_wait">
     <action>
-      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
-      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
-      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
-      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
-      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
+      <assignstr assign_to="opt_via" value="[last_Via:]"/>
+      <assignstr assign_to="opt_rr" value="[last_Record-Route:]"/>
+      <assignstr assign_to="opt_from" value="[last_From:]"/>
+      <assignstr assign_to="opt_to" value="[last_To:]"/>
+      <assignstr assign_to="opt_cseq" value="[last_CSeq:]"/>
       <assign assign_to="options_due" value="1"/>
     </action>
-  </recv>
-  <recv request="ACK" crlf="true" next="far_acked"/>
+  </nop>
   <nop/>
   <label id="far_acked"/>
   <send condexec="options_due">
@@ -675,10 +681,10 @@
       SIP/2.0 200 OK
       [$opt_via]
       [$opt_rr]
-      From:[$opt_from]
-      To:[$opt_to]
+      [$opt_from]
+      [$opt_to]
       Call-ID: [call_id]
-      CSeq:[$opt_cseq]
+      [$opt_cseq]
       Contact: <sip:caller@[local_ip]:[local_port]>
       Content-Length: 0
     ]]>
@@ -858,16 +864,7 @@
     </action>
   </send>
   <label id="bye_wait"/>
-  <recv request="OPTIONS" optional="true" crlf="true" next="bye_wait">
-    <action>
-      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
-      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
-      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
-      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
-      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
-      <assign assign_to="options_due" value="1"/>
-    </action>
-  </recv>
+  <recv request="OPTIONS" optional="true" crlf="true" next="bye_wait_cap"/>
   <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="bye_wait"/>
   <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" next="bye_2xx">
     <action>
@@ -894,6 +891,18 @@
       <test assign_to="bw_inv1" variable="bw_c" compare="equal" value="0"/>
     </action>
   </recv>
+  <nop/>
+  <label id="bye_wait_cap"/>
+  <nop next="bye_wait">
+    <action>
+      <assignstr assign_to="opt_via" value="[last_Via:]"/>
+      <assignstr assign_to="opt_rr" value="[last_Record-Route:]"/>
+      <assignstr assign_to="opt_from" value="[last_From:]"/>
+      <assignstr assign_to="opt_to" value="[last_To:]"/>
+      <assignstr assign_to="opt_cseq" value="[last_CSeq:]"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </nop>
 
   <nop/>
   <label id="bye_2xx"/>
@@ -1000,10 +1009,10 @@
       SIP/2.0 200 OK
       [$opt_via]
       [$opt_rr]
-      From:[$opt_from]
-      To:[$opt_to]
+      [$opt_from]
+      [$opt_to]
       Call-ID: [call_id]
-      CSeq:[$opt_cseq]
+      [$opt_cseq]
       Contact: <sip:caller@[local_ip]:[local_port]>
       Content-Length: 0
     ]]>
@@ -1459,7 +1468,7 @@
     </action>
   </nop>
 
-  <Reference variables="opt_via_row,opt_rr_row,fin_all,rsn_all,bye_all,ux_all,setup_str,hold_str,el_us,now_us,hold_us,t_start_us,cancel_us,lc_all,lc_pall,lc_pk,rc_all,rf_all,rb_all,b2_all,bw_all,ux_ci_all,ux_br_all,ri_str,fl_str,fg_str"/>
+  <Reference variables="fin_all,rsn_all,bye_all,ux_all,setup_str,hold_str,el_us,now_us,hold_us,t_start_us,cancel_us,lc_all,lc_pall,lc_pk,rc_all,rf_all,rb_all,b2_all,bw_all,ux_ci_all,ux_br_all,ri_str,fl_str,fg_str"/>
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="100, 1000, 10000, 30000, 60000, 120000"/>
 </scenario>

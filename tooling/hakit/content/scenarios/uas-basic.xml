@@ -43,7 +43,6 @@
       <ereg regexp="[Cc]ontact:[^&lt;[:cntrl:]]*&lt;([^&gt;]+)&gt;" search_in="msg" assign_to="ct_all,ct_angle"/>
       <ereg regexp="[Cc]ontact:[[:blank:]]*([^;&lt;&gt;[:space:]]+)" search_in="msg" assign_to="cb_all,ct_bare"/>
       <ereg regexp=";tag=([^;&gt;[:space:]]+)" search_in="hdr" header="From:" assign_to="tg_all,caller_tag"/>
-      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="inv_via_row,inv_via"/>
       <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="inv_from"/>
       <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="inv_to"/>
       <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="inv_cseq"/>
@@ -65,6 +64,9 @@
       [last_CSeq:]
       Content-Length: 0
     ]]>
+    <action>
+      <assignstr assign_to="inv_via" value="[last_Via:]"/>
+    </action>
   </send>
   <send>
     <![CDATA[
@@ -110,18 +112,21 @@
   <!-- The ACK of the 200. SIPp stops retransmitting a send only on a recv
        placed after it, so each 200 has its own ACK wait. -->
   <label id="ack_wait"/>
-  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE)$" regexp_match="true" optional="true" crlf="true" next="ack_wait">
-    <action>
-      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_via_row,rq_via"/>
-      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_rr_row,rq_rr"/>
-      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="rq_from"/>
-      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="rq_to"/>
-      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="rq_cseq"/>
-      <assign assign_to="rq_due" value="1"/>
-    </action>
-  </recv>
+  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE)$" regexp_match="true" optional="true" crlf="true" next="ack_wait_cap"/>
   <recv request="BYE" optional="true" crlf="true" next="bye_before_ack"/>
   <recv request="ACK" crlf="true" next="acked"/>
+  <nop/>
+  <label id="ack_wait_cap"/>
+  <nop next="ack_wait">
+    <action>
+      <assignstr assign_to="rq_via" value="[last_Via:]"/>
+      <assignstr assign_to="rq_rr" value="[last_Record-Route:]"/>
+      <assignstr assign_to="rq_from" value="[last_From:]"/>
+      <assignstr assign_to="rq_to" value="[last_To:]"/>
+      <assignstr assign_to="rq_cseq" value="[last_CSeq:]"/>
+      <assign assign_to="rq_due" value="1"/>
+    </action>
+  </nop>
 
   <nop/>
   <label id="acked"/>
@@ -130,10 +135,10 @@
       SIP/2.0 200 OK
       [$rq_via]
       [$rq_rr]
-      From:[$rq_from]
-      To:[$rq_to]
+      [$rq_from]
+      [$rq_to]
       Call-ID: [call_id]
-      CSeq:[$rq_cseq]
+      [$rq_cseq]
       Contact: <sip:[local_ip]:[local_port];transport=[transport]>
       Content-Length: 0
     ]]>
@@ -190,18 +195,21 @@
     ]]>
   </send>
   <label id="reinvite_ack_wait"/>
-  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE)$" regexp_match="true" optional="true" crlf="true" next="reinvite_ack_wait">
-    <action>
-      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_via_row,rq_via"/>
-      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_rr_row,rq_rr"/>
-      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="rq_from"/>
-      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="rq_to"/>
-      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="rq_cseq"/>
-      <assign assign_to="rq_due" value="1"/>
-    </action>
-  </recv>
+  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE)$" regexp_match="true" optional="true" crlf="true" next="reinvite_ack_wait_cap"/>
   <recv request="BYE" optional="true" crlf="true" next="bye_before_ack"/>
   <recv request="ACK" crlf="true" next="acked"/>
+  <nop/>
+  <label id="reinvite_ack_wait_cap"/>
+  <nop next="reinvite_ack_wait">
+    <action>
+      <assignstr assign_to="rq_via" value="[last_Via:]"/>
+      <assignstr assign_to="rq_rr" value="[last_Record-Route:]"/>
+      <assignstr assign_to="rq_from" value="[last_From:]"/>
+      <assignstr assign_to="rq_to" value="[last_To:]"/>
+      <assignstr assign_to="rq_cseq" value="[last_CSeq:]"/>
+      <assign assign_to="rq_due" value="1"/>
+    </action>
+  </nop>
 
   <!-- The callee's own requests: two re-INVITEs, then the BYE. A request the
        caller sends meanwhile is captured and answered once the re-INVITE has
@@ -240,23 +248,26 @@
   </send>
   <label id="orig_wait"/>
   <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="32000" ontimeout="callee_bye" next="orig_wait"/>
-  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE|BYE)$" regexp_match="true" optional="true" crlf="true" next="orig_wait">
-    <action>
-      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_via_row,rq_via"/>
-      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="rq_rr_row,rq_rr"/>
-      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="rq_from"/>
-      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="rq_to"/>
-      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="rq_cseq"/>
-      <ereg regexp="BYE" search_in="hdr" header="CSeq:" assign_to="rq_bye"/>
-      <assign assign_to="rq_due" value="1"/>
-    </action>
-  </recv>
+  <recv request="^(OPTIONS|INFO|UPDATE|NOTIFY|MESSAGE|BYE)$" regexp_match="true" optional="true" crlf="true" next="orig_wait_cap"/>
   <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" next="orig_ack"/>
   <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="orig_nack">
     <action>
       <ereg regexp="branch=([^;,[:space:]]+)" search_in="hdr" header="Via:" assign_to="br_all,orig_branch"/>
     </action>
   </recv>
+  <nop/>
+  <label id="orig_wait_cap"/>
+  <nop next="orig_wait">
+    <action>
+      <assignstr assign_to="rq_via" value="[last_Via:]"/>
+      <assignstr assign_to="rq_rr" value="[last_Record-Route:]"/>
+      <assignstr assign_to="rq_from" value="[last_From:]"/>
+      <assignstr assign_to="rq_to" value="[last_To:]"/>
+      <assignstr assign_to="rq_cseq" value="[last_CSeq:]"/>
+      <ereg regexp="BYE" search_in="var" variable="rq_cseq" assign_to="rq_bye"/>
+      <assign assign_to="rq_due" value="1"/>
+    </action>
+  </nop>
 
   <nop/>
   <label id="orig_ack"/>
@@ -299,10 +310,10 @@
       SIP/2.0 200 OK
       [$rq_via]
       [$rq_rr]
-      From:[$rq_from]
-      To:[$rq_to]
+      [$rq_from]
+      [$rq_to]
       Call-ID: [call_id]
-      CSeq:[$rq_cseq]
+      [$rq_cseq]
       Contact: <sip:[local_ip]:[local_port];transport=[transport]>
       Content-Length: 0
     ]]>
@@ -371,10 +382,10 @@
       SIP/2.0 200 OK
       [$rq_via]
       [$rq_rr]
-      From:[$rq_from]
-      To:[$rq_to]
+      [$rq_from]
+      [$rq_to]
       Call-ID: [call_id]
-      CSeq:[$rq_cseq]
+      [$rq_cseq]
       Contact: <sip:[local_ip]:[local_port];transport=[transport]>
       Content-Length: 0
     ]]>
@@ -546,7 +557,7 @@
   <label id="done"/>
   <nop/>
 
-  <Reference variables="ru_all,fr_all,ct_all,cb_all,tg_all,br_all,inv_via_row,rq_via_row,rq_rr_row"/>
+  <Reference variables="ru_all,fr_all,ct_all,cb_all,tg_all,br_all"/>
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000"/>
 </scenario>
