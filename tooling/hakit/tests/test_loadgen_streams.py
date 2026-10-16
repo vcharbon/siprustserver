@@ -140,7 +140,8 @@ def test_a_loadgen_firing_runs_the_product_image_at_its_slot_with_the_runners_fl
     assert flag(argv, "--network") == lab.sipp_network and flag(argv, "--ip") == lab.sipp_ip(1)
     image_at = argv.index(IMAGE)
     assert argv[image_at + 1] == "/bin/product"
-    assert flag(argv, "-v") == f"{run_dir / 'streams' / 'burst' / '001-spike'}:/stats"
+    # The working directory on the generator scratch (workdir.py), never the run directory.
+    assert flag(argv, "-v") == f"{lab.generator_scratch}/{run_dir.name}/streams/burst/001-spike:/stats"
     assert flag(argv, "--target") == lab.sip_target and flag(argv, "--bind-ip") == lab.sipp_ip(1)
     assert flag(argv, "--scenario") == "basic" and flag(argv, "--cps") == "50"
     assert (flag(argv, "--run"), flag(argv, "--stream")) == (run_dir.name, "burst")

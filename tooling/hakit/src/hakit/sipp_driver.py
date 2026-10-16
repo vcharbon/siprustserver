@@ -3,8 +3,9 @@
 The twin starts first and holds the stream's address; the UAC joins its network
 namespace, so the twin keeps shipping the last records after the UAC exits.
 The UAC writes one call-outcome record per call into `records.jsonl` of the
-stream directory (its `<log>` action); the twin ships each line to
-VictoriaLogs and serves the stat counters (ADR-0049 §4.2).
+generator's working directory (its `<log>` action, workdir.py); the twin
+ships each line to VictoriaLogs and serves the stat counters (ADR-0049 §4.2).
+Neither container swaps: a page of SIPp's swapped out stalls every call.
 
 A drain is SIGUSR1: SIPp places no new call and exits once its calls are done.
 """
@@ -201,7 +202,7 @@ class SippStream:
         self.remove()
         twin = self.executor.run(
             ["docker", "run", "-d", "--name", self.twin, *labels]
-            + ["--network", self.lab.sipp_network, "--ip", ip, "--cpus", "0.5", "--memory", "256m"]
+            + ["--network", self.lab.sipp_network, "--ip", ip, "--cpus", "0.5", "--memory", "256m", "--memory-swap", "256m"]
             + ["-v", f"{self.dir}:/stats", "-v", f"{SIPP_EXPORTER_DIR}:/exporter:ro"]
             + ["-e", "SIPP_STAT_FILE=/stats/stat.csv", "-e", f"SIPP_SCENARIO={self.scenario.name}"]
             + ["-e", f"SIPP_ROLE={self.stream.name}", "-e", f"SIPP_JOB={self.uac}"]
@@ -217,7 +218,7 @@ class SippStream:
             return f"exporter twin of {self.stream.name} did not start: {twin.stderr.strip()[:300]}"
         uac = self.executor.run(
             ["docker", "run", "-d", "--name", self.uac, *labels]
-            + ["--network", f"container:{self.twin}", "--cpus", "8", "--memory", "1536m"]
+            + ["--network", f"container:{self.twin}", "--cpus", "8", "--memory", "1536m", "--memory-swap", "1536m"]
             + ["-v", f"{self.scenario.parent}:/scenarios:ro", "-v", f"{self.dir}:/stats", "-w", "/stats"]
             + [self.lab.sipp_image, *self.sipp_argv(target)],
             timeout_s=60,

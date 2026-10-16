@@ -168,7 +168,10 @@ def test_an_interrupted_run_heals_its_open_event_and_removes_its_generators(tmp_
         r.run("flaky-smoke")
     runs = [c.argv for c in fake.calls if c.kind == "run"]
     assert any(a[0].endswith("flaky/heal") for a in runs)
-    assert runs[-1][:3] == ["docker", "rm", "-f"]
+    docker = [a for a in runs if a[:1] == ["docker"]]
+    assert docker[-1][:3] == ["docker", "rm", "-f"]
+    # The generators' files are collected once they are gone.
+    assert runs.index(docker[-1]) < max(i for i, a in enumerate(runs) if a[:2] == ["cp", "-a"])
 
 
 def test_a_system_under_test_holding_calls_refuses_the_run(tmp_path: Path) -> None:

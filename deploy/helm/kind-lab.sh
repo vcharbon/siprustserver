@@ -83,7 +83,8 @@ chaos_mesh_release() {
 # with the key defaults it declares, at SIPEXT_UAS_IP upward, so every catalog
 # shape (a callee that re-INVITEs among them) is served. The scenario is copied
 # into each container, never mounted: a callee outlives the checkout that
-# started it.
+# started it. A callee neither swaps nor writes to disk (its error file is on
+# tmpfs): SIPp's one thread would stall every call it serves.
 # Env: SIPP_UAS_REPLICAS=2 SIPP_UAS_CPUS=4 SIPP_UAS_MEM=2g (per container)
 SIPP_UAS_REPLICAS="${SIPP_UAS_REPLICAS:-2}"
 SIPP_UAS_CPUS="${SIPP_UAS_CPUS:-4}"
@@ -100,7 +101,8 @@ hakit_uas_up() {
     docker create --name "sipp-uas-$i" --label "sipext-run=$CLUSTER" \
       --restart unless-stopped \
       --network "$SIPEXT_NET" --ip "$ip" \
-      --cpus "$SIPP_UAS_CPUS" --memory "$SIPP_UAS_MEM" \
+      --cpus "$SIPP_UAS_CPUS" --memory "$SIPP_UAS_MEM" --memory-swap "$SIPP_UAS_MEM" \
+      --tmpfs /work:size=256m -w /work \
       sipp:dev sipp -sf /scenarios/uas-basic.xml "${keys[@]}" -i "$ip" -p 5060 \
         -l 60000 -recv_timeout 900000 \
         -trace_err -ringbuffer_files 1 -ringbuffer_size 16777216 >/dev/null

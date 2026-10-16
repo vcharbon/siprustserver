@@ -44,6 +44,9 @@ class Lab:
     cdr_written_query: str
     cdr_consumed_query: str
     cdr_unread_query: str
+    # A tmpfs directory a docker generator works in, copied into the run
+    # directory at its end (workdir.py); empty: the run directory itself.
+    generator_scratch: str
 
     @property
     def vm_import_url(self) -> str:
@@ -129,4 +132,5 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
         cdr_written_query=g("HAKIT_CDR_WRITTEN_QUERY", "sum(increase(b2bua_cdr_written_total[{span}s]))"),
         cdr_consumed_query=g("HAKIT_CDR_CONSUMED_QUERY", "sum(increase(cdr_consumed_total[{span}s]))"),
         cdr_unread_query=g("HAKIT_CDR_UNREAD_QUERY", "sum(increase(cdr_observations_unread_total[{span}s]))"),
+        generator_scratch=g("HAKIT_GENERATOR_SCRATCH", "/dev/shm/hakit"),
     )

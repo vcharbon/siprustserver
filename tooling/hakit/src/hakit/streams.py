@@ -7,8 +7,10 @@ its Call-IDs tagged with the event so two firings never share one. At heal,
 `drain` tells the UAC to place no new call and waits for its calls to end;
 `abandon` kills it with its calls in flight. Either way the records it wrote
 are shipped and its counter read before the generator is removed, so the next
-firing starts clean. A stream's `streams.json` entry sums its firings; an
-abandoned stream is left out of the reconciliation.
+firing starts clean. A docker generator works in its working directory
+(workdir.py), collected into its stream directory once it is removed. A
+stream's `streams.json` entry sums its firings; an abandoned stream is left
+out of the reconciliation.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from .profile import Profile, Stream
 from .schedule import PlannedEvent
 from .sipp_driver import SippStream
 from .vlogs import VictoriaLogs
+from .workdir import WorkDir, work_dir
 
 SHIP_WAIT_S = 60
 POLL_MS = 2000
@@ -47,6 +50,7 @@ class Firing:
 
     event: str | None
     gen: Generator
+    workdir: WorkDir
     stop: str = "drain"
     drained: bool = False
     calls: int | None = None
@@ -54,6 +58,7 @@ class Firing:
     generator_failures: int | None = None
     local: int = 0
     exit_code: int | None = None
+    collected: bool = False
 
 
 class StreamSet:
@@ -84,29 +89,41 @@ class StreamSet:
     def _slot(self, stream: Stream) -> int:
         return next(i for i, s in enumerate(self.profile.streams) if s.name == stream.name)
 
-    def _generator(self, stream: Stream, sdir: Path, tag: str) -> Generator:
+    def _firing(self, stream: Stream, sdir: Path, tag: str, event: str | None) -> Firing:
+        """A new generator of `stream` in the stream directory `sdir`; a pod
+        generator copies its files out itself and needs no working directory."""
         sdir.mkdir(parents=True)
         if stream.driver == "loadgen" and stream.placement == "pod":
-            return PodLoadgenStream(self.run, stream, self._slot(stream), sdir, self.lab, self.executor, call_id_tag=tag)
+            gen = PodLoadgenStream(self.run, stream, self._slot(stream), sdir, self.lab, self.executor, call_id_tag=tag)
+            return Firing(event, gen, WorkDir(sdir, sdir))
+        wd = work_dir(self.lab.generator_scratch, self.run_dir, sdir)
         if stream.driver == "loadgen":
-            return LoadgenStream(self.run, stream, self._slot(stream), sdir, self.lab, self.executor, call_id_tag=tag)
+            wd.prepare(self.executor, [])
+            gen = LoadgenStream(self.run, stream, self._slot(stream), wd.work, self.lab, self.executor, call_id_tag=tag)
+            return Firing(event, gen, wd)
         shape = self.content.shapes[stream.shape]
         (sdir / "inject.csv").write_text(render(shape, self.content.catalogs[shape.catalog], self.lab.callees))
+        wd.prepare(self.executor, [sdir / "inject.csv"])
         scenario = self.content.scenarios[stream.scenario or ""]
-        return SippStream(
-            self.run, stream, self._slot(stream), scenario, sdir, self.lab, self.executor, call_id_tag=tag
-        )
+        gen = SippStream(self.run, stream, self._slot(stream), scenario, wd.work, self.lab, self.executor, call_id_tag=tag)
+        return Firing(event, gen, wd)
+
+    def _remove(self, f: Firing) -> None:
+        """Remove the firing's generator, then collect its working directory once."""
+        f.gen.remove()
+        if not f.collected:
+            f.workdir.collect(self.executor)
+            f.collected = True
 
     def start_run_streams(self) -> str | None:
         """Start every `run` stream; the refusal of the first that does not start."""
         for s in self.profile.streams:
             if s.start != "run":
                 continue
-            gen = self._generator(s, self.run_dir / "streams" / s.name, "")
-            f = Firing(None, gen)
+            f = self._firing(s, self.run_dir / "streams" / s.name, "", None)
             self.firings[s.name].append(f)
             self.active[s.name] = f
-            err = gen.start()
+            err = f.gen.start()
             if err is not None:
                 return err
         return None
@@ -127,15 +144,14 @@ class StreamSet:
         if stream is None or stream.start != "incident" or name in self.active:
             return False, {"stream": name, "error": "not an idle `start: incident` stream of the profile"}
         n = len(self.firings[name]) + 1
-        gen = self._generator(stream, self.run_dir / "streams" / name / event, f"-{event}")
-        f = Firing(event, gen)
+        f = self._firing(stream, self.run_dir / "streams" / name / event, f"-{event}", event)
         self.firings[name].append(f)
         self.active[name] = f
-        err = gen.start()
+        err = f.gen.start()
         facts: Json = {"stream": name, "firing": n, "cps": stream.cps, "shape": stream.shape}
         if err is not None:
             del self.active[name]
-            gen.remove()
+            self._remove(f)
             return False, {**facts, "error": err}
         return True, facts
 
@@ -149,7 +165,7 @@ class StreamSet:
         if f is None:
             return True, {"stream": name, "stop": mode, "running": False}
         if mode == "remove":
-            f.gen.remove()
+            self._remove(f)
             return True, {"stream": name, "stop": mode}
         stopped_at = self.clock.now_ms()
         f.stop = mode
@@ -164,7 +180,7 @@ class StreamSet:
         shipped = self._settle(f, wait)
         if f.drained and not f.gen.clean_exit(f.exit_code):
             f.drained = ok = False
-        f.gen.remove()
+        self._remove(f)
         facts: Json = {
             "stream": name,
             "stop": mode,
@@ -217,7 +233,7 @@ class StreamSet:
     def remove_all(self) -> None:
         for fs in self.firings.values():
             for f in fs:
-                f.gen.remove()
+                self._remove(f)
 
     def docs(self) -> list[Json]:
         """`streams.json`: per stream its firings summed. An abandoned stream is

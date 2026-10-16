@@ -6,11 +6,11 @@ The stream's `params` name the product: `image` (the container image) and
 binary, `--<name>` with `_` spelled `-` (`true` a bare flag, `false` none);
 the flags the runner sets itself are refused (`RESERVED`). loadgen plays the
 caller and every callee leg of its calls, writes one call-outcome record per
-call into `records.jsonl` of the stream directory and ships it to
-VictoriaLogs.
+call into `records.jsonl` of its working directory (workdir.py) and ships it
+to VictoriaLogs. The container does not swap.
 
 A drain is SIGUSR1: loadgen places no new call, its calls in flight end, it
-exits 0 and leaves the last `/metrics` body in `metrics.prom` of the stream
+exits 0 and leaves the last `/metrics` body in `metrics.prom` of the working
 directory, which holds the counters the stream is reconciled against.
 """
 
@@ -216,7 +216,7 @@ class LoadgenStream:
         self.remove()
         res = self.executor.run(
             ["docker", "run", "-d", "--name", self.name, *labels]
-            + ["--network", self.lab.sipp_network, "--ip", self.ip, "--cpus", "4", "--memory", "1536m"]
+            + ["--network", self.lab.sipp_network, "--ip", self.ip, "--cpus", "4", "--memory", "1536m", "--memory-swap", "1536m"]
             + ["-v", f"{self.dir}:/stats", str(self.stream.params["image"]), *self.argv(target=target)],
             timeout_s=60,
         )

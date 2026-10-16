@@ -5,7 +5,9 @@ A run interrupted hard (its runner killed, the box rebooted) leaves its open
 events faulted and its generators placing calls. Cleanup heals the events of
 the named run directories, or of every one under the results root, and
 removes each generator labelled with a run whose runner no longer runs,
-whether or not an event of it was open: docker containers and pods alike.
+whether or not an event of it was open: docker containers and pods alike,
+then copies what that run's docker generators left in the generator scratch
+into its run directory (workdir.py).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from .profile import Profile, parse_profile
 from .schedule import PlannedEvent, plan, plan_event
 from .streams import RemoveLoad
 from .vm import VictoriaMetrics
+from .workdir import collect_tree
 
 RUN_LABEL = "hakit-run"
 
@@ -105,4 +108,6 @@ def cleanup(
             continue
         remove_generators(executor, lab, run)
         print(f"hakit: {run}: generators removed")
+        if lab.generator_scratch and collect_tree(executor, Path(lab.generator_scratch) / run, root / run):
+            print(f"hakit: {run}: generator files copied out of {lab.generator_scratch}")
     return 1 if failed else 0

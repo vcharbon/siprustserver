@@ -90,7 +90,7 @@ def test_a_termination_signal_heals_the_open_event(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         r.run(SMOKE)
     assert any(is_step(c, "heal") for c in fake.calls)
-    assert fake.calls[-1].argv[:3] == ["docker", "rm", "-f"]
+    assert [c.argv for c in fake.calls if c.argv[:1] == ["docker"]][-1][:3] == ["docker", "rm", "-f"]
     assert signal.getsignal(signal.SIGTERM) == before
 
 
@@ -107,7 +107,7 @@ def test_a_second_termination_signal_does_not_cut_the_cleanup_short(tmp_path: Pa
     with pytest.raises(SystemExit):
         r.run(SMOKE)
     assert any(is_step(c, "heal") for c in fake.calls)
-    assert fake.calls[-1].argv[:3] == ["docker", "rm", "-f"]
+    assert [c.argv for c in fake.calls if c.argv[:1] == ["docker"]][-1][:3] == ["docker", "rm", "-f"]
     assert signal.getsignal(signal.SIGTERM) == before
 
 

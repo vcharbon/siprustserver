@@ -102,7 +102,8 @@ class PodLoadgenStream:
                     "resources": {"requests": {"cpu": "10m", "memory": "8Mi"}},
                 },
             ],
-            "volumes": [{"name": "stats", "emptyDir": {}}],
+            # In memory, charged to the pod: no write waits on the node's disk.
+            "volumes": [{"name": "stats", "emptyDir": {"medium": "Memory", "sizeLimit": "512Mi"}}],
         }
         if selector:
             spec["nodeSelector"] = selector
