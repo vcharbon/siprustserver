@@ -451,8 +451,25 @@ made. A run profile joins the two.
    - `-recv_timeout` is above every timeout of the scenario, a backstop that
      never fires on a correct scenario.
 
+   Two facts of SIPp's engine follow from these rules: a provisional stops
+   the retransmissions of an INVITE (so a wait after one is bounded by its own
+   timeout), and an `ontimeout` naming the end of the scenario counts the call
+   failed. SIPp stops retransmitting a send only on a message taken by a recv
+   placed after it, so every retransmitted send precedes `_unexp.main`, and a
+   handler path answers and resumes in one step: a message landing while the
+   handler runs aborts the call.
+
    A static lint checks these rules on every scenario of the search path, and
    `hakit validate` runs it.
+
+   A scenario's variants are `-key` parameters. It declares the default of
+   each key it reads beyond the runner's own (`run`, `stream`, `shape`,
+   `hold_ms`, `setup_ms`) in a comment line `hakit-key: <name>=<value>`; the
+   runner passes the defaults under the stream's `params`, and refuses a
+   profile whose stream leaves a key the scenario reads unset. The base has
+   one UAC (`uac-basic-hold.xml`: the hold, the caller's re-INVITEs, the far
+   end's re-INVITEs and BYE, the ghost and flood abuse patterns) and one UAS
+   (`uas-basic.xml`).
 3. **loadgen** writes the same record natively for each call it placed,
    mapped from its result classes:
 
