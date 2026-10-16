@@ -291,3 +291,29 @@ fn a_protocol_stop_after_answer_is_failed_whatever_the_teardown() {
     };
     assert_eq!(record(&crossing, &ok())["ending"], "answered");
 }
+
+/// A leg's own failed in-dialog requests ride the record's failures, naming
+/// the leg; one still unanswered at the end is charged at the record's end.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_leg_s_failed_request_is_a_failure_naming_the_leg() {
+    let refer = WireFailure { at_ms: 7, method: "REFER".into(), code: Some(503) };
+    let mut callee =
+        LegFacts { role: "callee".into(), final_code: Some(200), ..LegFacts::default() };
+    callee.failures.push(refer);
+    callee.pending.insert(2002, ("INFO".into(), 8));
+    let r = build(
+        &META,
+        &WireFacts { legs: vec![callee], bye: Some(Some(200)), ..answered() },
+        &ok(),
+        50,
+    )
+    .unwrap();
+    assert_eq!(
+        r["failures"],
+        serde_json::json!([
+            { "at_ms": 7, "kind": "dialog_request", "method": "REFER", "code": 503, "leg": "callee" },
+            { "at_ms": 50, "kind": "dialog_request", "method": "INFO", "leg": "callee" },
+        ])
+    );
+}

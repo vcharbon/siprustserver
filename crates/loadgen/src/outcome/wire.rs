@@ -61,6 +61,19 @@ pub struct LegFacts {
     /// The in-dialog requests the leg received, a retransmission once, the
     /// first [`LEG_REQUESTS_MAX`].
     pub received: Vec<LegRequest>,
+    /// The leg's own in-dialog requests answered with a non-2xx final.
+    pub failures: Vec<WireFailure>,
+    /// The leg's own in-dialog requests awaiting a final, by CSeq number:
+    /// their method and when they were first sent.
+    pub(crate) pending: HashMap<u32, (String, i64)>,
+}
+
+impl LegFacts {
+    /// The leg's own in-dialog requests other than a BYE that never drew a
+    /// final, as failures without a code, in the order they were sent.
+    pub fn unanswered(&self) -> Vec<WireFailure> {
+        unanswered(&self.pending)
+    }
 }
 
 /// The caller's facts, and each callee leg's, in the order the legs opened.
@@ -104,19 +117,20 @@ impl WireFacts {
     /// The caller's in-dialog requests other than the BYE that never drew a
     /// final, as failures without a code, in the order they were sent.
     pub fn unanswered(&self) -> Vec<WireFailure> {
-        let mut left: Vec<WireFailure> = self
-            .pending
-            .values()
-            .filter(|(method, _)| method != "BYE")
-            .map(|(method, at_ms)| WireFailure {
-                at_ms: *at_ms,
-                method: method.clone(),
-                code: None,
-            })
-            .collect();
-        left.sort_by_key(|f| f.at_ms);
-        left
+        unanswered(&self.pending)
     }
+}
+
+/// The requests of `pending` other than a BYE, as failures without a code,
+/// in the order they were sent.
+fn unanswered(pending: &HashMap<u32, (String, i64)>) -> Vec<WireFailure> {
+    let mut left: Vec<WireFailure> = pending
+        .values()
+        .filter(|(method, _)| method != "BYE")
+        .map(|(method, at_ms)| WireFailure { at_ms: *at_ms, method: method.clone(), code: None })
+        .collect();
+    left.sort_by_key(|f| f.at_ms);
+    left
 }
 
 /// A call's wire observer: hand [`tap`](Self::tap) to its mux network,
@@ -289,6 +303,8 @@ impl WireFacts {
                 self.legs[i].cancelled = true;
             }
             (Dir::In, false, Some(i)) => self.legs[i].received_request(raw, now),
+            (Dir::Out, false, Some(i)) => self.legs[i].sent_request(raw, now),
+            (Dir::In, true, Some(i)) => self.legs[i].own_final(raw, now),
             (Dir::Out, true, Some(i)) if cseq_method_token(raw).as_deref() == Some("INVITE") => {
                 let leg = &mut self.legs[i];
                 let Some(code) = resp_status(raw) else { return };
@@ -307,6 +323,26 @@ impl WireFacts {
 }
 
 impl LegFacts {
+    /// An in-dialog request the leg sent (ACK and CANCEL aside), first sending.
+    fn sent_request(&mut self, raw: &[u8], now: i64) {
+        let (Some(method), Some(cseq)) = (req_method(raw), cseq_number(raw)) else { return };
+        if method != "ACK" && method != "CANCEL" && !to_tag(raw).is_empty() {
+            self.pending.entry(cseq).or_insert((method, now));
+        }
+    }
+
+    /// A final to one of the leg's own in-dialog requests.
+    fn own_final(&mut self, raw: &[u8], now: i64) {
+        let (Some(code), Some(cseq)) = (resp_status(raw), cseq_number(raw)) else { return };
+        if code < 200 {
+            return;
+        }
+        let Some((method, _)) = self.pending.remove(&cseq) else { return };
+        if code >= 300 {
+            self.failures.push(WireFailure { at_ms: now, method, code: Some(code) });
+        }
+    }
+
     fn received_request(&mut self, raw: &[u8], now: i64) {
         let (Some(method), Some(cseq)) = (req_method(raw), cseq_number(raw)) else { return };
         let in_dialog = !to_tag(raw).is_empty();

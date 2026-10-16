@@ -234,3 +234,54 @@ async fn a_leg_keeps_what_its_in_dialog_requests_said() {
     assert_eq!(r.subscription_state.as_deref(), Some("terminated"));
     assert_eq!(r.body, frag.as_bytes());
 }
+
+/// A callee leg's own in-dialog request answered non-2xx is a failure of the
+/// leg, and one still unanswered when the facts are read is one without a
+/// code; one answered 2xx is none.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_leg_s_own_failed_in_dialog_request_is_a_failure_of_the_leg() {
+    let wire = CallWire::new(Clock::test_at(9_000));
+    let f = feed(
+        &wire,
+        &[
+            (Side::Leg("callee"), Dir::In, msg("INVITE sip:q@h SIP/2.0", "b1", "1 INVITE", "", "")),
+            (Side::Leg("callee"), Dir::Out, msg("SIP/2.0 200 OK", "b1", "1 INVITE", "q1", "")),
+            (
+                Side::Leg("callee"),
+                Dir::Out,
+                msg("REFER sip:a@h SIP/2.0", "b1", "2001 REFER", "f1", ""),
+            ),
+            (
+                Side::Leg("callee"),
+                Dir::Out,
+                msg("REFER sip:a@h SIP/2.0", "b1", "2001 REFER", "f1", ""),
+            ),
+            (
+                Side::Leg("callee"),
+                Dir::In,
+                msg("SIP/2.0 503 Service Unavailable", "b1", "2001 REFER", "f1", ""),
+            ),
+            (
+                Side::Leg("callee"),
+                Dir::Out,
+                msg("INFO sip:a@h SIP/2.0", "b1", "2002 INFO", "f1", ""),
+            ),
+            (Side::Leg("callee"), Dir::In, msg("SIP/2.0 200 OK", "b1", "2002 INFO", "f1", "")),
+            (
+                Side::Leg("callee"),
+                Dir::Out,
+                msg("INFO sip:a@h SIP/2.0", "b1", "2003 INFO", "f1", ""),
+            ),
+        ],
+    );
+    let leg = &f.legs[0];
+    assert_eq!(
+        leg.failures,
+        vec![WireFailure { at_ms: 9_000, method: "REFER".into(), code: Some(503) }]
+    );
+    assert_eq!(
+        leg.unanswered(),
+        vec![WireFailure { at_ms: 9_000, method: "INFO".into(), code: None }]
+    );
+}

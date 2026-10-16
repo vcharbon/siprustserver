@@ -186,7 +186,8 @@ def classify(r: Json, shape: Shape) -> Classified:
         kind = jv.string(f, "kind")
         cls = DIALOG_REQUEST_FAILED if kind == "dialog_request" else PROTOCOL_ANOMALY
         method = jv.opt_string(f, "method") or ""
-        detail = " ".join(x for x in (method, str(jv.opt_int(f, "code") or ""), jv.opt_string(f, "detail") or "") if x)
+        parts = (jv.opt_string(f, "leg") or "", method, str(jv.opt_int(f, "code") or ""), jv.opt_string(f, "detail") or "")
+        detail = " ".join(x for x in parts if x)
         out.impacts.append(
             Impact(cls, stream, call_id, jv.number(f, "at_ms"), started, code=jv.opt_int(f, "code"), detail=detail)
         )

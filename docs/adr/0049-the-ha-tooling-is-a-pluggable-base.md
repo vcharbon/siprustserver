@@ -278,7 +278,9 @@ made. A run profile joins the two.
    Unopened with any other answer, or with any other failure in the call, it
    stays an in-dialog impact; the call's other impacts and its CDRs are
    judged as any call's. The generator records what each leg received
-   in dialog for this (`legs[].received`).
+   in dialog for this (`legs[].received`), and a leg's own in-dialog request
+   that failed as a `failures` entry naming the leg (`leg`), so a consult
+   that never ran (its request refused by a hop) is named as such.
 3. **Keys.** A `setup_failed` or `unexpected_ending` entry names `stream` (or
    `*`, each stream separately), `code`, `reason` (or `*`) and either
    `max_calls` or `max_seconds`. `max_seconds` is the allowance in seconds of

@@ -129,3 +129,17 @@ def test_outside_a_window_that_allows_it_the_refusal_is_a_finding() -> None:
     impacts = classify(call("b"), shape()).impacts
     k = judge([other], impacts, [], {"strict": strict}, 1000, {"xfer": 1.0})
     assert [(r["reason"], r["allowed"], r["finding"]) for r in k.per_window["001-decision_fault"]] == [("leg:target", 0, True)]
+
+
+def test_the_asking_leg_s_own_failed_request_is_named() -> None:
+    # The transferor's REFER answered 503 by a hop: no consult ran, the call is
+    # a finding, and the failure says whose request failed.
+    refer: Json = {"at_ms": T0 + 7_000, "kind": "dialog_request", "method": "REFER", "code": 503, "leg": "asker"}
+    r = call("a", failures=[refer])
+    jv.objs(r, "legs")[0].pop("received")
+    j = run([r])
+    assert rows(j) == []
+    assert sorted((i["class"], i.get("detail")) for i in j.in_dialog) == [
+        ("dialog_request_failed", "asker REFER 503"),
+        ("unexpected_ending", "leg never opened"),
+    ]

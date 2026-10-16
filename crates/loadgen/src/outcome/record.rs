@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 use crate::class::{CallOutcome, ResultClass};
-use crate::outcome::wire::{LegRequest, WireFacts};
+use crate::outcome::wire::{LegRequest, WireFacts, WireFailure};
 use scenario_harness::StepError;
 
 /// The record schema this module writes.
@@ -161,11 +161,28 @@ pub fn build(
     }))
 }
 
-/// The caller's failed in-dialog requests: each one answered non-2xx, then
-/// each one (the BYE aside) still unanswered when the call ended.
+/// The caller's failed in-dialog requests, then each callee leg's own (naming
+/// the leg): each one answered non-2xx, then each one (the BYE aside) still
+/// unanswered when the call ended.
 fn dialog_failures(wire: &WireFacts, ended_at_ms: i64) -> Vec<Value> {
-    let answered = wire.failures.iter().map(|f| (f, f.at_ms));
-    let unanswered = wire.unanswered();
+    let mut out = request_failures(&wire.failures, &wire.unanswered(), ended_at_ms);
+    for leg in &wire.legs {
+        let mut own = request_failures(&leg.failures, &leg.unanswered(), ended_at_ms);
+        for v in &mut own {
+            v["leg"] = json!(leg.role);
+        }
+        out.extend(own);
+    }
+    out
+}
+
+/// Each request answered non-2xx, then each one still unanswered at `ended_at_ms`.
+fn request_failures(
+    answered: &[WireFailure],
+    unanswered: &[WireFailure],
+    ended_at_ms: i64,
+) -> Vec<Value> {
+    let answered = answered.iter().map(|f| (f, f.at_ms));
     let left = unanswered.iter().map(|f| (f, ended_at_ms));
     answered
         .chain(left)
