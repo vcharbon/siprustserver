@@ -18,7 +18,7 @@ from hakit.scenario_lint import key_defaults
 
 PEERS = Path(__file__).parent / "sipp_peers"
 SCENARIOS = BASE_CONTENT / "scenarios"
-UAC = SCENARIOS / "uac-call.xml"
+UAC = SCENARIOS / "uac-basic-hold.xml"
 UAS = SCENARIOS / "uas-basic.xml"
 SIPP = shutil.which("sipp")
 # The keys every UAC pairing passes: a 3 s setup deadline, a 1.5 s hold.

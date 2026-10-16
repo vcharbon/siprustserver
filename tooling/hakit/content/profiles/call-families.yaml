@@ -1,7 +1,7 @@
 schema: profile.v1
 name: call-families
 description: >-
-  Every call family of the base UAC at a modest rate, side by side, with a
+  Every call family of the base UAC at 2 to 4 calls a second, side by side, with a
   worker crash every 150 s: the plain hold and its emergency variant, the
   limited call, the caller's re-INVITEs, a long call the far end may end, the
   callee's re-INVITEs, the ghost and the two floods. The ghost is released by
@@ -16,14 +16,14 @@ preflight:
   min_free_memory_gib: 4
   min_free_disk_gib: 10
 streams:
-  - { name: basic, driver: sipp, shape: basic, scenario: uac-call.xml, cps: 4, setup_deadline_s: 32, ring_s: 2, hold_s: 20 }
-  - { name: emergency, driver: sipp, shape: basic_em, scenario: uac-call.xml, cps: 2, setup_deadline_s: 32, ring_s: 2, hold_s: 20 }
-  - { name: limited, driver: sipp, shape: limited, scenario: uac-call.xml, cps: 2, setup_deadline_s: 32, ring_s: 2, hold_s: 30 }
+  - { name: basic, driver: sipp, shape: basic, scenario: uac-basic-hold.xml, cps: 4, setup_deadline_s: 32, ring_s: 2, hold_s: 20 }
+  - { name: emergency, driver: sipp, shape: basic_em, scenario: uac-basic-hold.xml, cps: 2, setup_deadline_s: 32, ring_s: 2, hold_s: 20 }
+  - { name: limited, driver: sipp, shape: limited, scenario: uac-basic-hold.xml, cps: 2, setup_deadline_s: 32, ring_s: 2, hold_s: 30 }
   - name: reinvite
     driver: sipp
     shape: basic
-    scenario: uac-call.xml
-    cps: 1
+    scenario: uac-basic-hold.xml
+    cps: 2
     setup_deadline_s: 32
     ring_s: 2
     hold_s: 30
@@ -31,8 +31,8 @@ streams:
   - name: long
     driver: sipp
     shape: basic
-    scenario: uac-call.xml
-    cps: 0.5
+    scenario: uac-basic-hold.xml
+    cps: 2
     setup_deadline_s: 32
     ring_s: 2
     hold_s: 120
@@ -40,8 +40,8 @@ streams:
   - name: callee_reinvite
     driver: sipp
     shape: callee_reinvite
-    scenario: uac-call.xml
-    cps: 1
+    scenario: uac-basic-hold.xml
+    cps: 2
     setup_deadline_s: 32
     ring_s: 2
     hold_s: 60
@@ -49,8 +49,8 @@ streams:
   - name: options_flood
     driver: sipp
     shape: basic
-    scenario: uac-call.xml
-    cps: 0.5
+    scenario: uac-basic-hold.xml
+    cps: 2
     setup_deadline_s: 32
     ring_s: 2
     hold_s: 1
@@ -58,8 +58,8 @@ streams:
   - name: reinvite_flood
     driver: sipp
     shape: basic
-    scenario: uac-call.xml
-    cps: 0.3
+    scenario: uac-basic-hold.xml
+    cps: 2
     setup_deadline_s: 32
     ring_s: 2
     hold_s: 1
@@ -67,8 +67,8 @@ streams:
   - name: ghost
     driver: sipp
     shape: basic
-    scenario: uac-call.xml
-    cps: 0.5
+    scenario: uac-basic-hold.xml
+    cps: 2
     setup_deadline_s: 32
     ring_s: 2
     hold_s: 600

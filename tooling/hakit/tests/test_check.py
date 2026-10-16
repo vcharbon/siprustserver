@@ -17,7 +17,7 @@ STREAM: Json = {
     "name": "basic",
     "driver": "sipp",
     "shape": "basic",
-    "scenario": "uac-call.xml",
+    "scenario": "uac-basic-hold.xml",
     "cps": 10,
     "setup_deadline_s": 32,
     "ring_s": 5,
