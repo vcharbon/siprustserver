@@ -34,6 +34,9 @@ def run(records: list[Json], windows: list[Window], cps: float = 10) -> tuple[di
         if c.latency is not None:
             latencies.append(c.latency)
     j = judge(windows, impacts, latencies, {"kill": KILL, "strict": STRICT}, 1000, {"basic": cps, "other": cps})
+    # The full Call-ID list rides apart from the verdict's rows (test_attribution).
+    for row in [r for rows in j.per_window.values() for r in rows] + j.unattributed:
+        row.pop("all_call_ids")
     return j.per_window, j.in_dialog, j.unattributed
 
 

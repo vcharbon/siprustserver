@@ -26,6 +26,7 @@ from .stalls import Stall
 from .windows import Window
 
 MAX_CALL_IDS = 50
+ALL_CALL_IDS = "all_call_ids"
 
 type StallOf = Callable[[SetupLatency], Stall | None]
 
@@ -48,6 +49,8 @@ def _row(cls: str, stream: str, items: Sequence[Impact | SetupLatency], allowed:
         "allowed": allowed,
         "finding": count > allowed,
         "call_ids": [i.call_id for i in items if i.call_id][:MAX_CALL_IDS],
+        # Every Call-ID, kept apart from the verdict (`impact-calls.jsonl`).
+        ALL_CALL_IDS: [i.call_id for i in items if i.call_id],
     }
     if cps > 0:
         row["seconds"] = round(count / cps, 3)

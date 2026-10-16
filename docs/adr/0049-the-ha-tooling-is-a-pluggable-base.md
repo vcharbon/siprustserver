@@ -421,7 +421,8 @@ made. A run profile joins the two.
     `status` is `invalid` when an integrity finding exists, else `fail` when
     any impact is a finding, else `pass`. A human `summary.md` is rendered
     from it: the status and why, then per window and per stream each class
-    against its allowance.
+    against its allowance, and each window's in-dialog impacts it is a
+    candidate of.
 12. **Generator health.** A generator stall is a time the generator did not
     run: it placed no call and read no message. It has two signals. In the
     records: two consecutive calls of a stream started more than 1/cps +
@@ -636,7 +637,9 @@ made. A run profile joins the two.
    `events.jsonl`, `events/<event>/`, `integrity.jsonl` (each finding appended
    as the runner finds it, the file rewritten whole at the end),
    `steps.jsonl` (the rate steps applied), the exported records,
-   `cdrs.jsonl`, `verdict.json`, `summary.md`, and with
+   `cdrs.jsonl`, `verdict.json` (each impact row lists 50 Call-IDs; the full
+   lists are in `impact-calls.jsonl`), `summary.md`, `verdict-tree.json` (the
+   tree that computed the verdict, which may be later than the run's), and with
    a profile's `capture` the packet rings (`pcap/ring/<source>/`, on the
    callers' bridge and in the nodes it names) and, at each window's close, the
    ring files written since it opened (`pcap/windows/<event>/`). The run
@@ -668,7 +671,9 @@ made. A run profile joins the two.
    `--spec` YAML the product keeps in its own repository, never a search-path
    family. `drift` judges memory, CPU per call, setup latency per shape (from
    the records, a setup measured across a generator stall left out), the
-   gauges after the drain and one CDR outcome per call, on samples outside
+   gauges after the drain (at 0, or for a gauge traffic outside the load
+   holds, such as a proxy's probe transactions, back to its value before the
+   load within a stated tolerance) and one CDR outcome per call, on samples outside
    the verdict's windows, and exits non-zero on a `fail` or `na`; `chart` draws a range query with the
    run's windows and phases; `logs` reads every container incarnation's lines
    back from VictoriaLogs; `obs-check` checks the series of named scopes;

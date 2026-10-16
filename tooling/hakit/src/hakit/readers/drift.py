@@ -222,6 +222,27 @@ class Drift:
             fits[shape] = fit(stats.get("mean", []))
         self.chart("setup-latency.svg", "setup latency per shape, window means (ms)", series[:6], fits, " ms")
 
+    def drained_baseline(self) -> None:
+        """Each baseline gauge after the drain against its value just before the load."""
+        sp = self.spec
+        if not sp.drained_baseline:
+            return
+        before_t, after_t = self.view.load_start_s - 1, self.view.ended_s + sp.drained_settle_s
+        rows: list[str] = []
+        verdict = "pass"
+        for m in sp.drained_baseline:
+            before = self.vm.at(f"sum({m}{{{self.ns}}})", before_t)
+            after = self.vm.at(f"sum({m}{{{self.ns}}})", after_t)
+            if not before or not after:
+                verdict = "na" if verdict == "pass" else verdict
+                rows.append(f"{m} unread")
+                continue
+            b, a = before[0][1], after[0][1]
+            ok = a <= b + sp.drained_baseline_tolerance
+            verdict = verdict if ok else "fail"
+            rows.append(f"{m} {a:g} {sp.drained_settle_s:g} s after the run vs {b:g} before the load (tolerance {sp.drained_baseline_tolerance:g})")
+        self.check("gauges back to their baseline", verdict, "; ".join(rows))
+
     def drained(self) -> None:
         """After the drain: the zero gauges, then worker memory against its last loaded span."""
         sp, t = self.spec, self.view.ended_s
@@ -236,6 +257,7 @@ class Drift:
         else:
             report = ", ".join(f"{m}={values[m]}" for m in sp.drained_report)
             self.check("gauges after drain", "pass", f"{', '.join(sp.drained_zero)} at 0; {report}", gauges=values)
+        self.drained_baseline()
         metric, title = sp.memory_metrics[0]
         for c in [c for c in self.checks if c.name.startswith(f"{title} ") and isinstance(c.extra.get("fit"), dict)]:
             pod = c.name.split()[-1]

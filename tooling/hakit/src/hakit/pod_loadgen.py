@@ -136,12 +136,14 @@ class PodLoadgenStream:
         return None
 
     def _gen_state(self) -> Json | None:
+        """The `gen` container's state; `{"gone": {}}` when the pod no longer
+        exists; None when it could not be read."""
         res = self._kubectl("get", "pod", self.name, "-o", "json", timeout_s=30)
+        if res.rc != 0:
+            return {"gone": {}} if "NotFound" in res.stderr else None
         try:
-            status = as_obj(as_obj(json.loads(res.stdout)).get("status", {})) if res.rc == 0 else None
+            status = as_obj(as_obj(json.loads(res.stdout)).get("status", {}))
         except ValueError:
-            status = None
-        if status is None:
             return None
         for c in as_list(status.get("containerStatuses", [])):
             cs = as_obj(c)
@@ -150,8 +152,11 @@ class PodLoadgenStream:
         return None
 
     def running(self) -> bool:
+        """False only once the binary is known to have stopped (terminated, or
+        its pod gone): a state the API server did not answer is read again at
+        the next tick, never taken for a dead generator."""
         state = self._gen_state()
-        return state is not None and "running" in state
+        return state is None or not ("terminated" in state or "gone" in state)
 
     def exit_code(self) -> int | None:
         state = self._gen_state()

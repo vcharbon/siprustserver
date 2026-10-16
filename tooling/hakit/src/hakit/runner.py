@@ -39,7 +39,7 @@ from .schedule import PlannedEvent, plan
 from .schemas import SchemaSet
 from .streams import StreamLoad, StreamSet
 from .summary import render as render_summary
-from .verdict import compute
+from .verdict import compute_with_calls
 from .verdict_series import verdict_lines
 from .vlogs import VictoriaLogs
 from .vm import QueryFailed, VictoriaMetrics
@@ -288,18 +288,31 @@ class Runner:
         return run_dir
 
     def write_verdict(self, run_dir: Path) -> Json:
-        v = compute(run_dir, self.schemas)
+        """`verdict.json`, `summary.md`, every impact row's full Call-ID list
+        (`impact-calls.jsonl`) and the tree that computed them
+        (`verdict-tree.json`: a verdict may be recomputed by a later tree)."""
+        v, calls = compute_with_calls(run_dir, self.schemas)
         errs = self.schemas.errors("verdict.v1", v)
         if errs:
             raise AssertionError(f"the verdict breaks verdict.v1: {errs[:3]}")
         _dump(run_dir / "verdict.json", v)
-        (run_dir / "summary.md").write_text(render_summary(v))
+        write_jsonl(run_dir / "impact-calls.jsonl", calls)
+        tree = self._tree()
+        _dump(run_dir / "verdict-tree.json", {**tree, "computed_at_ms": self.clock.now_ms()})
+        dirty = f", {tree['dirty_files']} files uncommitted" if tree["dirty_files"] else ""
+        (run_dir / "summary.md").write_text(render_summary(v) + f"\nComputed by tree {tree['head']}{dirty}.\n")
         if not self.vm.push(verdict_lines(v, self.clock.now_ms())):
             note = f"the verdict series did not reach VictoriaMetrics ({self.lab.vm_url}): the dashboards miss this verdict"
             self.say(f"hakit: {note}")
             with (run_dir / "summary.md").open("a") as fh:
                 fh.write(f"\n> {note}\n")
         return v
+
+    def _tree(self) -> Json:
+        """The commit of the tooling's tree and how many files differ from it."""
+        head = self.executor.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], timeout_s=10)
+        dirty = self.executor.run(["git", "-C", str(REPO_ROOT), "status", "--porcelain"], timeout_s=30)
+        return {"head": head.stdout.strip(), "dirty_files": len(dirty.stdout.splitlines())}
 
     def _write_inputs(
         self, run_dir: Path, run: str, profile: Profile, facts: Json, held: float, started: int
@@ -314,14 +327,12 @@ class Runner:
             _dump(run_dir / "budgets" / f"{name}.json", self.content.budgets[name].raw)
         for name in profile.catalogs:
             _dump(run_dir / "catalogs" / f"{name}.json", self.content.catalogs[name].raw)
-        head = self.executor.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], timeout_s=10)
-        dirty = self.executor.run(["git", "-C", str(REPO_ROOT), "status", "--porcelain"], timeout_s=30)
         meta: Json = {
             "run": run,
             "profile": profile.name,
             "started_at_ms": started,
             "ended_at_ms": started,
-            "tree": {"head": head.stdout.strip(), "dirty_files": len(dirty.stdout.splitlines())},
+            "tree": self._tree(),
             "search_path": [str(p) for p in self.content.path],
             "host": facts,
             "sut_calls_at_start": held,

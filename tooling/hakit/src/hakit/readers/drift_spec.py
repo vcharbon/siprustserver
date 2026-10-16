@@ -52,6 +52,13 @@ class DriftSpec:
         default_factory=lambda: ["b2bua_active_calls", "b2bua_census_dialogs", "b2bua_txn_active_transactions"]
     )
     drained_report: list[str] = field(default_factory=lambda: ["b2bua_census_timers", "b2bua_timer_live"])
+    # Gauges that traffic outside the load keeps above 0 (a front proxy's
+    # health probes hold transactions): after the drain each returns to its
+    # value just before the load, within `drained_baseline_tolerance`, read
+    # `drained_settle_s` after the run ended (the last teardowns' timers).
+    drained_baseline: list[str] = field(default_factory=lambda: [])
+    drained_baseline_tolerance: float = 0
+    drained_settle_s: float = 0
     # One CDR outcome (written or dropped) per completed call, per worker.
     cdr_written: str = "b2bua_cdr_written_total"
     cdr_dropped: str = "b2bua_cdr_dropped_total"
@@ -101,6 +108,9 @@ def load_spec(path: Path | None) -> DriftSpec:
         completed_calls=jv.string(d, "completed_calls", spec.completed_calls),
         drained_zero=jv.strings(d, "drained_zero") if "drained_zero" in d else spec.drained_zero,
         drained_report=jv.strings(d, "drained_report") if "drained_report" in d else spec.drained_report,
+        drained_baseline=jv.strings(d, "drained_baseline") if "drained_baseline" in d else spec.drained_baseline,
+        drained_baseline_tolerance=jv.number(d, "drained_baseline_tolerance", spec.drained_baseline_tolerance),
+        drained_settle_s=jv.number(d, "drained_settle_s", spec.drained_settle_s),
         cdr_written=jv.string(d, "cdr_written", spec.cdr_written),
         cdr_dropped=jv.string(d, "cdr_dropped", spec.cdr_dropped),
         warmup_s=int(jv.number(d, "warmup_s", spec.warmup_s)),

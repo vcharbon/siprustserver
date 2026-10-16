@@ -90,3 +90,27 @@ def test_the_summary_says_why_then_each_window_class_and_stream(tmp_path: Path) 
     assert "- `setup_failed` basic 0 timeout: 1 (0.05 s of offered rate), allowed 40.0 — ok" in text
     clean = compute(run_dir(tmp_path / "b", [record("ok", T0)], calls=1, events=[]), SCHEMAS)
     assert "- every impact within its allowance, measurement intact" in render(clean)
+
+
+def test_a_window_with_in_dialog_candidates_says_so_in_why_and_in_its_section(tmp_path: Path) -> None:
+    # A call up across the kill is cut after it: no budget row of the window
+    # finds anything, yet its in-dialog impacts fail the run.
+    bye = [{"at_ms": T0 + 102_000, "kind": "dialog_request", "method": "BYE", "code": 481}]
+    cut = record("cut", T0 + 90_000, "cut", ended=12_000, failures=bye)
+    v = compute(run_dir(tmp_path, [cut], calls=1, events=kill(1, T0 + 100_000)), SCHEMAS)
+    text = render(v)
+    why = text.split("## Why\n\n")[1].split("\n\n")[0]
+    assert "- window 001-kill_worker is a candidate of 2 in-dialog impacts: `call_cut` basic x1, `dialog_request_failed` basic x1 — FINDING" in why
+    assert "0 findings, candidate of 2 in-dialog impacts" in text
+    assert "- in-dialog `call_cut` basic: 1 (this window a candidate) — FINDING" in text
+
+
+def test_the_verdict_keeps_50_call_ids_a_row_and_the_full_list_apart(tmp_path: Path) -> None:
+    from hakit.verdict import compute_with_calls
+
+    recs = [rejected(f"r{i}", T0 + 400_000 + i, 480, "480") for i in range(60)]
+    v, calls = compute_with_calls(run_dir(tmp_path, recs, calls=60, events=[]), SCHEMAS)
+    (u,) = jv.objs(v, "unattributed")
+    assert len(jv.strings(u, "call_ids")) == 50 and "all_call_ids" not in u
+    (kept,) = calls
+    assert (kept["window"], kept["class"], len(jv.strings(kept, "call_ids"))) == (None, "setup_failed", 60)

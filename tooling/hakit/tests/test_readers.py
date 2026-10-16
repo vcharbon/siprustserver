@@ -269,3 +269,41 @@ def test_drift_exits_non_zero_on_a_failing_or_unjudged_run(tmp_path: Path, monke
     d = soak_dir(tmp_path, True)
     # The slow shape fails from the records; the series, unread, are na.
     assert main(["drift", str(d)]) == 1
+
+
+class ProbedLab(Lab):
+    """A front proxy's health probes hold 128 transactions with no call; the
+    run's last teardowns hold `at_end` more when the run ends, `settled` more
+    `settle` seconds later."""
+
+    def __init__(self, at_end: float, settled: float, settle: float) -> None:
+        super().__init__()
+        self.at_end, self.settled, self.settle = at_end, settled, settle
+
+    def rule(self, c: Call) -> HttpResult | None:
+        if c.kind == "http" and "b2bua_txn_active_transactions" in c.url and "/query_range" not in c.url:
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query)
+            t = float(qs["time"][0])
+            ended = (T0 + (LOAD_S + 200) * 1000) / 1000
+            extra = 0.0 if t < ended - 3600 else (self.at_end if t < ended + self.settle else self.settled)
+            return HttpResult(200, vector([({}, 128 + extra)]))
+        return super().rule(c)
+
+
+def test_a_baseline_gauge_must_return_to_its_value_before_the_load(tmp_path: Path) -> None:
+    spec = DriftSpec(
+        drained_zero=["b2bua_active_calls"],
+        drained_baseline=["b2bua_txn_active_transactions"],
+        drained_baseline_tolerance=4,
+        drained_settle_s=47,
+    )
+
+    def baseline(sub: str, lab: ProbedLab) -> Json:
+        d = soak_dir(tmp_path / sub, True)
+        return checks(Drift(read_run(d), Vm(FakeExecutor([lab.rule]), "vm"), spec, d / "drift").run())["gauges back to their baseline"]
+
+    # 41 more at the run's end, back to the probes' 128 once the timers ran.
+    assert baseline("settled", ProbedLab(41, 0, 47))["verdict"] == "pass"
+    # Still 20 above it after the settle: a leak.
+    held = baseline("held", ProbedLab(41, 20, 47))
+    assert held["verdict"] == "fail" and "148 47 s after the run vs 128 before the load" in jv.string(held, "detail")

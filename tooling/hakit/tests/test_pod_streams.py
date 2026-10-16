@@ -179,6 +179,29 @@ def test_a_finding_is_in_integrity_jsonl_while_the_run_still_runs(tmp_path: Path
     assert "load_started_at_ms" in meta
 
 
+def test_an_unread_pod_state_is_no_dead_generator(tmp_path: Path) -> None:
+    # The API server does not answer three reads: the generator is not
+    # declared dead; a pod that is gone is.
+    misses = [3]
+
+    def flaky(c: Call) -> ProcResult | None:
+        if c.argv[:1] == ["kubectl"] and "get" in c.argv and "pod" in c.argv and "json" in c.argv and misses[0] > 0:
+            misses[0] -= 1
+            return ProcResult(1, "", "Unable to connect to the server: connection refused")
+        return None
+
+    run_dir, _ = run(tmp_path / "flaky", [cell("cell_a")], [flaky])
+    assert read_jsonl(run_dir / "integrity.jsonl") == []
+
+    def gone(c: Call) -> ProcResult | None:
+        if c.argv[:1] == ["kubectl"] and "get" in c.argv and "pod" in c.argv and "json" in c.argv:
+            return ProcResult(1, "", 'Error from server (NotFound): pods "hakit-cell-a" not found')
+        return None
+
+    run_dir, _ = run(tmp_path / "gone", [cell("cell_a")], [gone])
+    assert [i["kind"] for i in read_jsonl(run_dir / "integrity.jsonl")][:1] == ["stream_died"]
+
+
 def test_a_load_incident_stream_takes_no_steps(tmp_path: Path) -> None:
     c = content(tmp_path, [cell("cell_a")])
     p = parse_profile({**c.profiles["pods"].raw, "streams": [cell("cell_a", start="incident", steps=[{"at_s": 1, "cps": 2}])]})

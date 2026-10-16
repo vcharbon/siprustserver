@@ -37,6 +37,16 @@ def _budget(w: Json) -> str:
     return f"budget `{w['budget']}`" if w["budget"] else "no budget (allows nothing)"
 
 
+def _in_dialog_of(v: Json, event: str) -> dict[str, int]:
+    """The in-dialog impacts that name `event` among their candidate windows, by class and stream."""
+    out: dict[str, int] = {}
+    for i in jv.objs(v, "in_dialog"):
+        if event in jv.strings(i, "candidate_windows"):
+            key = f"`{i['class']}` {i['stream']}"
+            out[key] = out.get(key, 0) + 1
+    return out
+
+
 def _why(v: Json) -> list[str]:
     status = jv.string(v, "status")
     if status == "invalid":
@@ -44,9 +54,13 @@ def _why(v: Json) -> list[str]:
     out: list[str] = []
     for w in jv.objs(v, "windows"):
         out += [f"- window {w['event']}: {_impact(r)[2:]}" for r in jv.objs(w, "impacts") if r.get("finding") is True]
+        dialog = _in_dialog_of(v, str(w["event"]))
+        if dialog:
+            listed = ", ".join(f"{k} x{n}" for k, n in sorted(dialog.items()))
+            out.append(f"- window {w['event']} is a candidate of {sum(dialog.values())} in-dialog impacts: {listed} — FINDING")
     n_dialog = len(jv.objs(v, "in_dialog"))
     if n_dialog:
-        out.append(f"- {n_dialog} in-dialog impacts")
+        out.append(f"- {n_dialog} in-dialog impacts in all")
     out += [f"- unattributed: {_impact(r)[2:]}" for r in jv.objs(v, "unattributed")]
     return out or ["- every impact within its allowance, measurement intact"]
 
@@ -66,10 +80,11 @@ def _streams(v: Json) -> list[str]:
     return out
 
 
-def _window(w: Json) -> list[str]:
+def _window(w: Json, dialog: dict[str, int]) -> list[str]:
+    candidates = f", candidate of {sum(dialog.values())} in-dialog impacts" if dialog else ""
     out = [
         f"### {w['event']} ({w['source']}, {w['status']}, {_budget(w)}): "
-        f"{_t(jv.number(w, 'opened_at_ms'))} to {_t(jv.number(w, 'closed_at_ms'))}, {w['findings']} findings",
+        f"{_t(jv.number(w, 'opened_at_ms'))} to {_t(jv.number(w, 'closed_at_ms'))}, {w['findings']} findings{candidates}",
         "",
     ]
     out += [f"- {_t(jv.number(p, 'at_ms'))} {p['step']} {p['phase']}" for p in jv.objs(w, "phases")]
@@ -81,6 +96,7 @@ def _window(w: Json) -> list[str]:
         out.append(f"- {r['stream']} back {'never' if got is None else f'{got} s after healed'}")
     rows = jv.objs(w, "impacts")
     out += [_impact(r) for r in rows] or ["- no impact"]
+    out += [f"- in-dialog {k}: {n} (this window a candidate) — FINDING" for k, n in sorted(dialog.items())]
     out.append("")
     return out
 
@@ -104,7 +120,7 @@ def render(v: Json) -> str:
         "",
     ]
     for w in jv.objs(v, "windows"):
-        out += _window(w)
+        out += _window(w, _in_dialog_of(v, str(w["event"])))
     out += ["## In-dialog impacts", ""]
     out += [
         f"- `{i['class']}` {i['stream']} {i['call_id']} at {_t(jv.number(i, 'at_ms'))}, "

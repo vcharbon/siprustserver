@@ -19,7 +19,7 @@ from .cdrjoin import DIFFERS
 from .classes import read_counts
 from .jsonl import read_jsonl
 from .classify import SETUP_FAILED, Classified, Impact, SetupLatency, classify
-from .judge import judge
+from .judge import ALL_CALL_IDS, judge
 from .jsonval import Json, as_obj
 from .model import Budget, Shape, parse_budget, parse_catalog
 from .profile import Profile, parse_profile
@@ -168,6 +168,29 @@ def recovery_samples(run_dir: Path, schemas: SchemaSet) -> dict[str, StreamSampl
 
 
 def compute(run_dir: Path, schemas: SchemaSet) -> Json:
+    return compute_with_calls(run_dir, schemas)[0]
+
+
+def _take_calls(where: str | None, rows: list[Json], out: list[Json]) -> None:
+    """Moves each row's full Call-ID list out of it, into `out` with its key."""
+    for row in rows:
+        ids = row.pop(ALL_CALL_IDS, [])
+        if ids:
+            key = {k: row[k] for k in ("class", "stream", "code", "reason", "retry_after") if k in row}
+            out.append({"window": where, **key, "call_ids": ids})
+
+
+def compute_with_calls(run_dir: Path, schemas: SchemaSet) -> tuple[Json, list[Json]]:
+    """The verdict, and every impact row's full Call-ID list (the verdict keeps 50)."""
+    v = _compute(run_dir, schemas)
+    calls: list[Json] = []
+    for w in jv.objs(v, "windows"):
+        _take_calls(str(w["event"]), jv.objs(w, "impacts"), calls)
+    _take_calls(None, jv.objs(v, "unattributed"), calls)
+    return v, calls
+
+
+def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
     run = _Run(run_dir, schemas)
     meta, profile, budgets, calls, stalls = run.meta, run.profile, run.budgets, run.calls, run.stalls
     streams_doc = [as_obj(s) for s in jv.as_list(json.loads((run_dir / "streams.json").read_text()))]

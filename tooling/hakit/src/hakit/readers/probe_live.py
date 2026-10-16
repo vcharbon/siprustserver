@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .. import jsonval as jv
 from ..classify import Impact, SetupLatency, classify
-from ..judge import Judged, judge
+from ..judge import ALL_CALL_IDS, Judged, judge
 from ..jsonl import read_jsonl
 from ..jsonval import Json, as_obj
 from ..model import Budget, Shape, parse_budget, parse_catalog
@@ -137,6 +137,8 @@ def judge_recent(files: RunFiles, records: list[Json]) -> Json:
     judged: Judged = judge(
         files.windows, impacts, latencies, files.budgets, files.profile.setup_slow_ms, cps, run_cps=run_cps
     )
+    for row in [r for rows in judged.per_window.values() for r in rows] + judged.unattributed:
+        row.pop(ALL_CALL_IDS, None)
     in_dialog: dict[tuple[str, str], list[str]] = defaultdict(list)
     for e in judged.in_dialog:
         in_dialog[(jv.string(e, "class"), jv.string(e, "stream"))].append(jv.string(e, "call_id"))
