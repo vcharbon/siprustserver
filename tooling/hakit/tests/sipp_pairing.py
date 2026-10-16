@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,8 @@ def exit_note(rc: int | None, pid: int) -> str:
     if rc < 0:
         name = signal.Signals(-rc).name
         return f"was killed by {name} (pid {pid}; core: `coredumpctl info {pid}`, journal: `journalctl _PID={pid}`)"
+    if rc == 254:
+        return "could not bind its port (exit 254)"
     return f"exited {rc}"
 
 
@@ -63,11 +66,27 @@ class Pairing:
         return exit_note(self.peer_rc, self.peer_pid)
 
 
+_TAKEN: set[int] = set()
+_TAKEN_LOCK = threading.Lock()
+
+
 def _free_port_pair() -> int:
+    """A pair of adjacent free UDP ports no other pairing of this process got:
+    the pairings run in parallel, and a port probed free is bound by SIPp
+    only later."""
+    with _TAKEN_LOCK:
+        port = _probe_pair()
+        _TAKEN.update((port, port + 1))
+        return port
+
+
+def _probe_pair() -> int:
     for _ in range(200):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as a, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as b:
             a.bind(("127.0.0.1", 0))
             port = a.getsockname()[1]
+            if port in _TAKEN or port + 1 in _TAKEN:
+                continue
             try:
                 b.bind(("127.0.0.1", port + 1))
             except OSError:
