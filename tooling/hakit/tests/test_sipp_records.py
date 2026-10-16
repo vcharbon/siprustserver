@@ -74,9 +74,9 @@ def pairings() -> dict[str, Pairing]:
 @pytest.mark.parametrize("case", CASES, ids=[c.peer.removesuffix(".xml") for c in CASES])
 def test_every_exit_writes_one_valid_record(case: Case, pairings: dict[str, Pairing]) -> None:
     p = pairings[case.peer]
-    assert p.uac_rc == 0, f"{case.peer}: sipp exited {p.uac_rc}"
+    assert p.uac_rc == 0, f"{case.peer}: sipp {p.uac_exit}"
     if case.peer not in PEER_MAY_FAIL:
-        assert p.peer_rc == 0, f"{case.peer}: the peer exited {p.peer_rc}"
+        assert p.peer_rc == 0, f"{case.peer}: the peer {p.peer_exit}"
     assert len(p.records) == 1, f"{case.peer}: {len(p.records)} records"
     r = p.records[0]
     assert SchemaSet.load().errors("call-outcome.v1", r) == []
@@ -95,7 +95,7 @@ def test_a_response_landing_on_a_deadline_check_is_acted_on(pairings: dict[str, 
     """The peer answers 1 s after its 180, where the caller checks its deadline:
     every call is answered, ACKed and torn down."""
     p = pairings["bulk"]
-    assert p.peer_rc == 0
+    assert p.peer_rc == 0, f"the peer {p.peer_exit}"
     assert len(p.records) == BULK_CALLS
     assert {str(r["ending"]) for r in p.records} == {"answered"}
     assert p.counter("TotalCallCreated") == BULK_CALLS

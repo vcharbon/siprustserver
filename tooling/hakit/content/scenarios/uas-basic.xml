@@ -16,13 +16,19 @@
     - anything else: it answers what the dialog brings (a re-INVITE with an SDP
       answer; OPTIONS, INFO, UPDATE, NOTIFY, MESSAGE with a 200) until the BYE.
 
-  RFC 3261: an INVITE retransmission during the ring is answered with the 180
-  again (section 17.2.1); a CANCEL during the ring is answered 200 and the
+  RFC 3261: a byte-identical INVITE retransmission during the ring gets the
+  100 again (SIPp re-sends the first message it sent after a receive), a
+  differing copy the 180 (section 17.2.1); an INVITE copy without a To tag
+  after the 200 is absorbed (RFC 6026: the 200 is retransmitted until its ACK
+  anyway); a CANCEL during the ring is answered 200 and the
   INVITE 487, whose ACK is awaited (section 9.2); a 200 is retransmitted until
   its ACK, and a dialog whose 2xx never gets its ACK is ended with a BYE
   (section 13.3.1.4), the call counted failed; a BYE before the dialog's ACK is
   answered and the call counted failed; a re-INVITE crossing the callee's own
-  is answered 491 (section 14.2).
+  is answered 491 (section 14.2). The callee's requests carry the dialog's
+  local URI (the INVITE's To) in From (section 12.2.1.1), each its own branch
+  (section 8.1.1.7), and every session description of the callee is the same,
+  so its version never changes (RFC 3264 section 8).
 
   SIPp sends nothing while a send of its own is retransmitting, and a message
   landing while the call runs `_unexp.main` aborts the call. So a request that
@@ -43,6 +49,8 @@
       <ereg regexp="[Cc]ontact:[^&lt;[:cntrl:]]*&lt;([^&gt;]+)&gt;" search_in="msg" assign_to="ct_all,ct_angle"/>
       <ereg regexp="[Cc]ontact:[[:blank:]]*([^;&lt;&gt;[:space:]]+)" search_in="msg" assign_to="cb_all,ct_bare"/>
       <ereg regexp=";tag=([^;&gt;[:space:]]+)" search_in="hdr" header="From:" assign_to="tg_all,caller_tag"/>
+      <ereg regexp="&lt;([^&gt;]+)&gt;" search_in="hdr" header="To:" assign_to="la_all,local_angle"/>
+      <ereg regexp="^[[:blank:]]*([^;&lt;&gt;[:space:]]+)" search_in="hdr" header="To:" assign_to="lb_all,local_bare"/>
       <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="inv_from"/>
       <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="inv_to"/>
       <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="inv_cseq"/>
@@ -186,7 +194,7 @@
       Content-Length: [len]
 
       v=0
-      o=callee 53655765 2353687638 IN IP[local_ip_type] [local_ip]
+      o=callee 53655765 2353687637 IN IP[local_ip_type] [local_ip]
       s=-
       c=IN IP[media_ip_type] [media_ip]
       t=0 0
@@ -221,9 +229,9 @@
   <send retrans="500" ontimeout="callee_bye">
     <![CDATA[
       INVITE [$ct_angle][$ct_bare] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[$caller_tag]-c[cseq];rport
       [routes]
-      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      From: <[$local_angle][$local_bare]>;tag=[pid]-[call_number]-callee
       To: <[$caller_uri]>;tag=[$caller_tag]
       Call-ID: [call_id]
       CSeq: [cseq] INVITE
@@ -233,7 +241,7 @@
       Content-Length: [len]
 
       v=0
-      o=callee 53655765 2353687639 IN IP[local_ip_type] [local_ip]
+      o=callee 53655765 2353687637 IN IP[local_ip_type] [local_ip]
       s=-
       c=IN IP[media_ip_type] [media_ip]
       t=0 0
@@ -274,9 +282,9 @@
   <send next="orig_done">
     <![CDATA[
       ACK [$ct_angle][$ct_bare] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[$caller_tag]-a[cseq];rport
       [routes]
-      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      From: <[$local_angle][$local_bare]>;tag=[pid]-[call_number]-callee
       To: <[$caller_uri]>;tag=[$caller_tag]
       Call-ID: [call_id]
       CSeq: [cseq] ACK
@@ -291,7 +299,7 @@
       ACK [$ct_angle][$ct_bare] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[$orig_branch];rport
       [routes]
-      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      From: <[$local_angle][$local_bare]>;tag=[pid]-[call_number]-callee
       To: <[$caller_uri]>;tag=[$caller_tag]
       Call-ID: [call_id]
       CSeq: [cseq] ACK
@@ -329,9 +337,9 @@
   <send retrans="500" ontimeout="done">
     <![CDATA[
       BYE [$ct_angle][$ct_bare] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[$caller_tag]-c[cseq];rport
       [routes]
-      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      From: <[$local_angle][$local_bare]>;tag=[pid]-[call_number]-callee
       To: <[$caller_uri]>;tag=[$caller_tag]
       Call-ID: [call_id]
       CSeq: [cseq] BYE
@@ -404,9 +412,9 @@
   <send retrans="500" ontimeout="fail">
     <![CDATA[
       BYE [$ct_angle][$ct_bare] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-[$caller_tag]-c[cseq];rport
       [routes]
-      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]-[call_number]-callee
+      From: <[$local_angle][$local_bare]>;tag=[pid]-[call_number]-callee
       To: <[$caller_uri]>;tag=[$caller_tag]
       Call-ID: [call_id]
       CSeq: [cseq] BYE
@@ -446,14 +454,18 @@
   </send>
   <recv request="ACK" crlf="true" next="done"/>
 
-  <!-- Unexpected messages: an INVITE copy before the answer gets the 180
-       again, a re-INVITE is answered (a 491 while the callee's own is
-       pending); a CANCEL before the
-       answer cancels; an ACK or a response is let go; another request is
-       answered 200; a BYE ends the call. -->
+  <!-- Unexpected messages: an INVITE copy without a To tag gets the 180
+       before the answer and is absorbed after it; an INVITE with one is a
+       re-INVITE, answered (491 while the callee's own is pending); a CANCEL
+       before the answer cancels; an ACK or a response is let go; another
+       request is answered 200; a BYE ends the call. -->
   <nop next="done"/>
   <label id="_unexp.main"/>
-  <recv request="INVITE" optional="true" crlf="true" next="ux_invite"/>
+  <recv request="INVITE" optional="true" crlf="true" next="ux_invite">
+    <action>
+      <ereg regexp=";[[:blank:]]*tag=" search_in="hdr" header="To:" assign_to="ux_to_tag"/>
+    </action>
+  </recv>
   <recv request="CANCEL" optional="true" crlf="true" next="ux_cancel"/>
   <recv request="ACK" optional="true" crlf="true" next="ux_resume"/>
   <recv request="BYE" optional="true" crlf="true" next="ux_bye"/>
@@ -462,8 +474,8 @@
 
   <nop/>
   <label id="ux_invite"/>
-  <nop test="orig_pending" next="ux_reinvite"/>
-  <nop test="answered" next="ux_answer"/>
+  <nop test="ux_to_tag" next="ux_in_dialog"/>
+  <nop test="answered" next="ux_resume"/>
   <send>
     <![CDATA[
       SIP/2.0 180 Ringing
@@ -481,6 +493,10 @@
       <assign assign_to="_unexp.retaddr" value="0"/>
     </action>
   </send>
+  <nop/>
+  <label id="ux_in_dialog"/>
+  <nop test="orig_pending" next="ux_reinvite"/>
+  <nop next="ux_answer"/>
   <nop/>
   <label id="ux_reinvite"/>
   <send>
@@ -557,7 +573,7 @@
   <label id="done"/>
   <nop/>
 
-  <Reference variables="ru_all,fr_all,ct_all,cb_all,tg_all,br_all"/>
+  <Reference variables="la_all,lb_all,ru_all,fr_all,ct_all,cb_all,tg_all,br_all"/>
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000"/>
 </scenario>

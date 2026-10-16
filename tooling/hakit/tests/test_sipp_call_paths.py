@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from sipp_pairing import SIPP, UAS, Pairing, run_pair
+from sipp_pairing import SIPP, UAS, Pairing, exit_note, run_pair, sent_requests
 
 from hakit import jsonval as jv
 from hakit.schemas import SchemaSet
@@ -70,6 +70,28 @@ CASES = [
         {"abuse": "options_flood", "flood_count": "50", "flood_gap_ms": "1000"},
     ),
     Case("plain-vs-uas", UAS, "answered", "answered", {}, UAS_FAST),
+    Case(
+        "final-crossing-bye-unanswered",
+        "peer-final-crossing-bye-unanswered.xml",
+        "stranded",
+        "bye_no_final",
+        failures=["protocol", "dialog_request"],
+        phase="answered",
+    ),
+    Case("glare", "peer-glare.xml", "answered", "answered", {"reinvites": "1"}),
+    Case("info-before-provisional", "peer-info-before-provisional.xml", "failed", "unexpected_request", {"reinvites": "1"}, failures=["protocol"]),
+    Case("2xx-retrans-in-flood", "peer-2xx-retrans-in-flood.xml", "answered", "answered", {"abuse": "options_flood", "flood_count": "1", "flood_gap_ms": "100"}),
+    Case("stray-200-mid-hold", "peer-stray-200-mid-hold.xml", "answered", "answered"),
+    Case("stray-200-during-bye", "peer-stray-200-during-bye.xml", "answered", "answered"),
+    Case(
+        "request-before-answer",
+        "peer-request-before-answer.xml",
+        "failed",
+        "unexpected_request",
+        failures=["protocol"],
+        phase="provisional",
+    ),
+    Case("reinvite-crosses-bye", "peer-reinvite-crosses-bye.xml", "answered", "answered"),
     Case("setup-timeout-vs-uas", UAS, "timeout", "setup_timeout", {"setup_ms": "1000"}, {"ring_ms": "5000"}, phase="provisional"),
 ]
 RACE = Case("options-on-hold-deadline", "peer-uas-options-on-hold-deadline.xml", "answered", "answered", {"hold_ms": "2000"}, calls=300, rate=50)
@@ -91,8 +113,8 @@ def pairings() -> dict[str, Pairing]:
 @pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
 def test_each_path_writes_its_record(case: Case, pairings: dict[str, Pairing]) -> None:
     p = pairings[case.id]
-    assert p.uac_rc == 0, f"{case.id}: sipp exited {p.uac_rc}"
-    assert p.peer_rc == 0, f"{case.id}: the peer exited {p.peer_rc}"
+    assert p.uac_rc == 0, f"{case.id}: sipp {p.uac_exit}"
+    assert p.peer_rc == 0, f"{case.id}: the peer {p.peer_exit}"
     assert len(p.records) == 1, f"{case.id}: {len(p.records)} records"
     r = p.records[0]
     assert SchemaSet.load().errors("call-outcome.v1", r) == []
@@ -104,6 +126,40 @@ def test_options_on_the_hold_deadline_never_cost_a_call(pairings: dict[str, Pair
     """Across 300 calls the peer's OPTIONS lands before, on and across the
     caller's BYE: every call is answered, every OPTIONS answered."""
     p = pairings[RACE.id]
-    assert (p.uac_rc, p.peer_rc) == (0, 0)
+    assert (p.uac_rc, p.peer_rc) == (0, 0), f"sipp {p.uac_exit}, the peer {p.peer_exit}"
     assert len(p.records) == RACE.calls
     assert {str(r["ending"]) for r in p.records} == {"answered"}
+
+
+def test_a_pairing_names_a_peer_killed_by_a_signal() -> None:
+    """A SIPp crash (SIGSEGV under load) reads as a crash with its core, not a mismatch."""
+    note = exit_note(-11, 4242)
+    assert note.startswith("was killed by SIGSEGV") and "coredumpctl info 4242" in note
+    assert exit_note(1, 4242) == "exited 1"
+
+
+@pytest.mark.parametrize(
+    ("peer", "keys", "peer_keys", "ruri"),
+    [
+        (UAS, {"reinvites": "2", "hold_ms": "3000"}, UAS_FAST, "service"),
+        ("peer-flood-target.xml", {"abuse": "options_flood", "flood_count": "4", "flood_gap_ms": "100"}, {}, "service"),
+        ("peer-flood-target.xml", {"abuse": "reinvite_flood", "flood_count": "4", "flood_gap_ms": "100"}, {}, "service"),
+    ],
+    ids=["reinvites", "options-flood", "reinvite-flood"],
+)
+def test_every_request_of_the_caller_has_its_own_branch(
+    peer: str | Path, keys: dict[str, str], peer_keys: dict[str, str], ruri: str, tmp_path: Path
+) -> None:
+    """RFC 3261 section 8.1.1.7: a new request, a re-INVITE or a flood request
+    included, takes a new branch; only a copy of the same request (a re-sent
+    BYE) and the ACK of a non-2xx or the CANCEL share the INVITE's."""
+    p = run_pair(peer, tmp_path, keys=keys, peer_keys=peer_keys, ruri_user=ruri, trace=True)
+    assert p.uac_rc == 0, f"sipp {p.uac_exit}"
+    by_request: dict[tuple[str, str], set[str]] = {}
+    for method, cseq, branch in sent_requests(p.messages):
+        if method not in ("ACK", "CANCEL"):
+            by_request.setdefault((method, cseq), set()).add(branch)
+    assert len(by_request) >= 3
+    assert all(len(b) == 1 for b in by_request.values()), by_request
+    branches = [next(iter(b)) for b in by_request.values()]
+    assert len(set(branches)) == len(branches), by_request
