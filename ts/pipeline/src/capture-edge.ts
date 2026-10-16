@@ -11,13 +11,14 @@
  * correlation joined to the family and no vantage plays is in no replay. A case
  * is complete when every such leg is terminated inside the capture:
  *
- * - a BYE closed the dialog, with or without its final. A BYE retransmitted
- *   without a final is one still being retried, so it terminates the leg only
+ * - a BYE closed the dialog, with or without its final. The leg's last fresh
+ *   BYE is the one judged; retransmitted without a final of its own, it is
+ *   still being retried, so it terminates the leg only
  *   once {@link RETRANSMISSION_TAIL_US} separates the leg's last message from the
  *   end of the capture;
  * - a non-2xx final ended the attempt, whatever its ACK (RFC 3261 §17.1.1.3:
  *   that ACK belongs to the final's transaction and ends nothing the final did
- *   not);
+ *   not), unless a fresh 2xx answered the same attempt;
  * - the source GAVE UP — a CANCEL, or a request nothing ever answered — and
  *   {@link GIVE_UP_SILENCE_US} separates the leg's last message from the end of
  *   the capture, so the silence is the source's own and not the file's.
@@ -27,16 +28,16 @@
  * or a request carrying a To-tag, before any request opened one — began before
  * the capture did and is refused as truncated at the head.
  *
- * A leg the SUT dialled is not judged at its tail once a BYE closed every
- * caller-side dialog of the case: its teardown is the SUT's own at replay, the
- * exemption `./call-completeness.ts` grants it.
+ * A leg the SUT dialled before the call's teardown is not judged at its tail
+ * once a BYE closed every caller-side dialog of the case: its teardown is the
+ * SUT's own at replay, the exemption `./call-completeness.ts` grants it.
  *
  * "End of the capture" is the last SIP datagram the document holds, which for
  * a per-call export is the call's own last message: a complete termination is
  * never charged for the file ending on it.
  */
 import { Flows } from "@sip/contracts"
-import { closedByBye } from "./call-completeness.js"
+import { closingBye } from "./call-completeness.js"
 import type { CaseRule, RefusalInput } from "./case-rules.js"
 import { type CutVantage, vantageIsInbound, vantageIsOutbound } from "./cut.js"
 import { findingOf, type Finding } from "./refusal-rule.js"
@@ -173,10 +174,17 @@ const missingTermination = (
     for (let i = from; i < msgs.length; i++) if (test(msgs[i]!)) return i
     return -1
   }
-  const bye = after((m) => Flows.isMethod(m, "BYE"))
+  // The BYE transaction the leg ends on: the last fresh BYE, so one retried
+  // after a challenge is judged on the retry and never on the challenge.
+  let bye = -1
+  for (let i = from; i < msgs.length; i++) {
+    if (!msgs[i]!.retx && Flows.isMethod(msgs[i]!, "BYE")) bye = i
+  }
   if (bye >= 0) {
-    if (msgs.some((m, i) => i > bye && isFinalTo(m, "BYE"))) return undefined
-    if (!msgs.some((m, i) => i > bye && m.retx && Flows.isMethod(m, "BYE"))) return undefined
+    const byeSeq = msgs[bye]!.summary.cseq.seq
+    const ofBye = (m: Flows.Msg): boolean => m.summary.cseq.seq === byeSeq
+    if (msgs.some((m, i) => i > bye && ofBye(m) && isFinalTo(m, "BYE"))) return undefined
+    if (!msgs.some((m, i) => i > bye && ofBye(m) && m.retx && Flows.isMethod(m, "BYE"))) return undefined
     if (endUs - last.ts_us >= RETRANSMISSION_TAIL_US) return undefined
     return {
       leg: index,
@@ -188,10 +196,12 @@ const missingTermination = (
     }
   }
 
-  let final = -1
-  msgs.forEach((m, i) => {
-    if (i >= from && !m.retx && Flows.isFinalToInvite(m) && m.summary.cseq.seq === seq) final = i
-  })
+  // A fresh 2xx to the attempt establishes the dialog whatever non-2xx another
+  // branch drew (RFC 3261 §16.7), so it wins over a later final.
+  const finals = msgs.flatMap((m, i) =>
+    i >= from && !m.retx && Flows.isFinalToInvite(m) && m.summary.cseq.seq === seq ? [i] : []
+  )
+  const final = finals.find((i) => (Flows.statusOf(msgs[i]!) ?? 0) < 300) ?? finals[finals.length - 1] ?? -1
   if (final < 0) {
     const cancel = after((m) => Flows.isMethod(m, "CANCEL"))
     return gaveUp(
@@ -213,8 +223,10 @@ const missingTermination = (
 
 /**
  * The legs the SUT dialled whose tail is exempt: every leg a vantage anchors
- * outbound and none anchors inbound, where the case has a caller-side vantage
- * and a BYE closed the dialog at each.
+ * outbound and none anchors inbound, where the case has a caller-side vantage,
+ * a BYE closed the dialog at each, and the leg's first message precedes the
+ * earliest of those BYEs — a leg dialled once the call was being torn down is
+ * no part of the call the teardown ends.
  */
 const exemptTails = (
   flows: Flows.FlowsDoc,
@@ -222,10 +234,16 @@ const exemptTails = (
   vantages: ReadonlyArray<CutVantage>
 ): ReadonlySet<number> => {
   const inbound = vantages.filter((v) => vantageIsInbound(flows, sut, v))
-  if (inbound.length === 0 || !inbound.every((v) => closedByBye(flows, sut, v))) return new Set()
+  if (inbound.length === 0) return new Set()
+  const byes = inbound.map((v) => closingBye(flows, sut, v))
+  if (byes.some((b) => b === undefined)) return new Set()
+  const teardownUs = Math.min(...byes.map((b) => b!.ts_us))
   const callerLegs = new Set(inbound.map((v) => v.leg))
   return new Set(
-    vantages.filter((v) => !callerLegs.has(v.leg) && vantageIsOutbound(flows, sut, v)).map((v) => v.leg)
+    vantages
+      .filter((v) => !callerLegs.has(v.leg) && vantageIsOutbound(flows, sut, v))
+      .filter((v) => (flows.legs[v.leg]!.msgs[0]?.ts_us ?? Infinity) < teardownUs)
+      .map((v) => v.leg)
   )
 }
 

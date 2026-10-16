@@ -19,8 +19,8 @@ export const SOURCE_CALL_INCOMPLETE = "source-call-incomplete"
 
 /**
  * The dialog the capture ESTABLISHED at one vantage — the index of its
- * establishing 2xx — and whether a BYE closed it; `undefined` where no 2xx
- * answered the vantage's INVITE.
+ * establishing 2xx — and the index of the BYE that closed it; `undefined` where
+ * no 2xx answered the vantage's INVITE.
  *
  * Read off the datagrams the CUT gives this vantage rather than off the leg's
  * `final_status` / `terminated_by` summary: those are leg-wide, so on a leg the
@@ -36,17 +36,19 @@ const establishedDialog = (
   flows: Flows.FlowsDoc,
   sut: SutSet,
   v: CutVantage
-): { readonly answered: number; readonly closed: boolean } | undefined => {
+): { readonly answered: number; readonly closedBy: number | undefined } | undefined => {
   const leg = vantageLeg(flows, v)
   const idxs = vantageMsgIdxs(flows, v.leg, v.hop, sut)
   const answered = idxs.filter((i) => !leg.msgs[i]!.retx && Flows.isSuccessToInvite(leg.msgs[i]!)).pop()
   if (answered === undefined) return undefined
-  return { answered, closed: idxs.some((i) => i > answered && Flows.isMethod(leg.msgs[i]!, "BYE")) }
+  return { answered, closedBy: idxs.find((i) => i > answered && Flows.isMethod(leg.msgs[i]!, "BYE")) }
 }
 
-/** Whether the capture established the dialog at this vantage and a BYE closed it. */
-export const closedByBye = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): boolean =>
-  establishedDialog(flows, sut, v)?.closed === true
+/** The BYE that closed the dialog the capture established at this vantage, where one did. */
+export const closingBye = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): Flows.Msg | undefined => {
+  const closedBy = establishedDialog(flows, sut, v)?.closedBy
+  return closedBy === undefined ? undefined : vantageLeg(flows, v).msgs[closedBy]
+}
 
 /**
  * The dialog at one vantage where the capture ESTABLISHED it and never tore it
@@ -54,7 +56,7 @@ export const closedByBye = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): 
  */
 const unterminatedDialog = (flows: Flows.FlowsDoc, sut: SutSet, v: CutVantage): RefusalEvidence | undefined => {
   const dialog = establishedDialog(flows, sut, v)
-  if (dialog === undefined || dialog.closed) return undefined
+  if (dialog === undefined || dialog.closedBy !== undefined) return undefined
   const leg = vantageLeg(flows, v)
   const answered = dialog.answered
   const summary = leg.msgs[answered]!.summary
