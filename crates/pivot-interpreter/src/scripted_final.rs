@@ -121,8 +121,9 @@ pub fn scripts_reject_ack(
 }
 
 /// Whether `leg`'s flow scripts the ACK to the non-2xx INVITE final its step
-/// `took` took: a pending (`!complete`) ACK `send` on the leg behind that step,
-/// before the next step sending an INVITE.
+/// `took` took or was retired by: a pending (`!complete`) ACK `send` on the leg
+/// behind that step, before the next step sending an INVITE. An ACK in an
+/// `alt` branch that never runs stays pending, so it counts as scripted.
 pub fn scripts_final_ack(
     steps: &[&CompiledStep],
     leg: &str,

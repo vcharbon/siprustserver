@@ -305,8 +305,10 @@ impl<'a, 'p> Runner<'a, 'p> {
         });
         // What the leg owes for this datagram is the scripted tail's where
         // the run goes on past a retired step; otherwise it is composed here,
-        // as for any arrival the flow refused.
-        if retired.is_empty() || ends {
+        // as for any arrival the flow refused. A reject's ACK the tail does
+        // not state is composed here too (§17.1.1.3).
+        let unscripted_ack = retired.iter().any(|id| self.unscripted_final_ack(leg, id, message));
+        if retired.is_empty() || ends || unscripted_ack {
             self.answer_unscripted(leg, message).await;
         }
         // A final ended the transaction the charged step waits on: the step

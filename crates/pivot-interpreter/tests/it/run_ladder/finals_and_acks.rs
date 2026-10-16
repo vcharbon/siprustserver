@@ -118,6 +118,35 @@ async fn a_reject_whose_ack_the_document_states_is_acked_by_that_step_alone() {
     scene.finish().await;
 }
 
+/// A reject of another status than the caller's expect names ends the
+/// transaction that expect waits on (RFC 3261 §17.1.3): the expect is retired,
+/// the run goes on, and the reject is still the client transaction's to ACK
+/// (§17.1.1.3) where no step behind the retired one states the ACK.
+#[tokio::test(start_paused = true)]
+async fn a_reject_that_retires_an_expect_is_acked_where_the_document_states_no_ack() {
+    let scene = api_scene("pivot-reject-retires-unacked").await;
+    let mut case = fixture("unscripted-final.v3.json");
+    case.document.case.id = "reject-retires-no-ack-step".into();
+    let expected = step_of(&mut case, "s5");
+    expected.msg.status = Some(481);
+    expected.msg.reason = None;
+    let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
+
+    assert_eq!(outcome.verdict.retired, ["s5"], "{:#?}", outcome.verdict);
+    assert!(outcome.verdict.abandoned.is_none(), "{:#?}", outcome.verdict.abandoned);
+    let a = &outcome.recording.legs()["A"];
+    let invite = a.iter().find(|m| m.dir == Dir::Out && text(m).starts_with("INVITE ")).unwrap();
+    let acks: Vec<_> =
+        a.iter().filter(|m| m.dir == Dir::Out && text(m).starts_with("ACK ")).collect();
+    assert_eq!(acks.len(), 1, "leg A ACKed the 486 once: {a:#?}");
+    assert!(acks[0].step.is_none(), "no step scripts it: {:#?}", acks[0]);
+    assert_eq!(via_branch(&text(acks[0])), via_branch(&text(invite)), "§17.1.1.3: same branch");
+    assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
 /// `unscripted-final.v3.json` with the caller's last step taking the 486 the
 /// callee sends, and nothing behind it.
 fn take_the_reject(case: &mut Case) {

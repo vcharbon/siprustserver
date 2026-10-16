@@ -89,8 +89,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         })
     }
 
-    /// Whether `message` is a non-2xx INVITE final the step `took` took and
-    /// `leg`'s flow scripts no ACK for ([`scripted_final::scripts_final_ack`]).
+    /// Whether `message` is a non-2xx INVITE final the step `took` took or was
+    /// retired by, and `leg`'s flow scripts no ACK for
+    /// ([`scripted_final::scripts_final_ack`]).
     /// RFC 3261 §17.1.1.3 makes that ACK the client transaction's own, so a
     /// document stating none stopped where its capture did and the leg sends
     /// it all the same.
