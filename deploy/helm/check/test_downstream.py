@@ -5,7 +5,9 @@ dependency's condition) reach the render through the parent's values. A null
 in user-supplied values (-f, --set) removes an env the parent sets; Helm keeps
 a subchart default a parent chart's own values.yaml sets to null, so there a
 product overrides it."""
+import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from charts import SIPRUST, Doc, container, env, find, helm, names, pod_spec
+from charts import HELM_DIR, SIPRUST, Doc, container, env, find, helm, names, pod_spec
 
 PRODUCT_VALUES: dict[str, Any] = {
     "siprust": {
@@ -129,6 +131,40 @@ class DownstreamChart(unittest.TestCase):
 
     def test_the_dependency_condition_drops_the_whole_chart(self) -> None:
         self.assertEqual(self.render("--set", "siprust.enabled=false"), [])
+
+
+class DownstreamKindLab(unittest.TestCase):
+    """kind-lab.sh deploys a product chart as the SUT release: the siprust kind
+    values nested under the dependency, the product's values-kind.yaml over
+    them, the helm args over both."""
+
+    def test_the_value_set_nests_the_lab_values_under_the_dependency_in_order(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="helm-downstream-lab-"))
+        self.addCleanup(shutil.rmtree, root)
+        chart = root / "product"
+        chart.mkdir()
+        (chart / "Chart.yaml").write_text(yaml.safe_dump({
+            "apiVersion": "v2", "name": "product", "version": "0.1.0",
+            "dependencies": [{"name": "siprust", "version": "0.1.0",
+                              "repository": f"file://{SIPRUST}"}],
+        }))
+        (chart / "values.yaml").write_text(yaml.safe_dump(
+            {"siprust": {"worker": {"command": ["/usr/local/bin/product-runner"]}}}))
+        (chart / "values-kind.yaml").write_text(yaml.safe_dump(
+            {"siprust": {"worker": {"env": {"B2BUA_KEEPALIVE_SEC": "700"}}}}))
+        out = subprocess.run(
+            [str(HELM_DIR / "kind-lab.sh"), "template", "--set", "siprust.worker.replicas=3"],
+            capture_output=True, text=True,
+            env={**os.environ, "SUT_CHART": str(chart), "SUT_RELEASE": "product",
+                 "SUT_SUBCHART": "siprust"})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        docs: list[Doc] = [d for d in yaml.safe_load_all(out.stdout) if d]
+        worker = find(docs, "StatefulSet", "b2bua-worker")
+        e = env(container(worker, "b2bua-worker"))
+        self.assertEqual(e["B2BUA_UDP_SNDBUF"], "4194304", "the nested kind values apply")
+        self.assertEqual(e["B2BUA_KEEPALIVE_SEC"], "700", "the product's kind values win")
+        self.assertEqual(worker["spec"]["replicas"], 3, "the helm args win")
+        self.assertIn(("DaemonSet", "masq-exempt"), names(docs))
 
 
 if __name__ == "__main__":

@@ -91,10 +91,20 @@ the Secret itself and names it in `existingSecret`.
 
 ```bash
 deploy/helm/kind-lab.sh up       # cluster, sipext bridge, host preflight, images kind-loaded (run.sh up)
+deploy/helm/kind-lab.sh image <tag> [docker build args]   # one more image, built and kind-loaded
 deploy/helm/kind-lab.sh deploy   # both releases, Chaos Mesh, SIPp UAS (hakit uas-basic.xml), VIP + isolation smokes, series check
+deploy/helm/kind-lab.sh template # the SUT release as deploy would install it, rendered
 deploy/helm/kind-lab.sh chaos-mesh   # Chaos Mesh alone, pinned, chaos-mesh-values-kind.yaml
 deploy/helm/kind-lab.sh down
 ```
+
+A product chart that depends on `siprust` is the SUT release instead with
+`SUT_CHART` (its directory), `SUT_RELEASE` (its release name) and
+`SUT_SUBCHART` (the name of its `siprust` dependency): `deploy` and `template`
+build its dependencies, pass the siprust kind values nested under that name,
+then the product chart's own `values-kind.yaml`, then the helm args. A namespace
+holds one SUT release: `deploy` refuses one another release owns. The VIP and
+isolation smokes run when the release deploys the front proxy.
 
 `up` and the SIPp generators are `deploy/k8s/run.sh`'s library functions;
 `deploy` is the two helm invocations:
