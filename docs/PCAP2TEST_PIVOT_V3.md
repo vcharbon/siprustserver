@@ -70,6 +70,20 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-10-16 — the settle waits on the scripted legs' own INVITE client
+transactions, and a leg ACKs every non-2xx final it takes.** An INVITE a
+scripted leg sent holds a client transaction until its final (RFC 3261
+§17.1.1.2), so a run whose caller script ends at a provisional settled before
+the system's final reached it, and that final went un-ACKed. No document field
+changes; the verdict gains one failure.
+
+| change | where |
+|---|---|
+| the settle floor: an INVITE a scripted leg sent with no final keeps the run open — in Calling until Timer B from its first emission, in Proceeding until its final or the budget. A budget that runs out names it (`leg A: INVITE CSeq 1 awaits its final`) | §10, `pivot-interpreter` |
+| past Timer B in Calling the transaction timed out with no response at all: the run settles and states `invite-unanswered` (`leg`, `cseq`), a structural failure a declared divergence never carries | §10, `pivot-schema` verdict |
+| a final that arrives in the settle window after a completed flow stays `datagram-after-flow`, and the leg ACKs a non-2xx one on the INVITE's branch (§17.1.1.3) | §10, `pivot-interpreter` |
+| a non-2xx INVITE final a step takes is ACKed by the leg where the flow scripts no ACK `send` for it before the leg's next INVITE (§17.1.1.3) | §6.3, `pivot-interpreter` |
+
 **2026-10-14 — a scripted leg's dialog opens on a 2xx to a dialog-creating
 request alone, and a tolerated absence binds no transaction's turn.** The 200
 to a CANCEL and a non-2xx final open no dialog; a non-2xx final ends the early
@@ -1270,6 +1284,14 @@ the two paragraphs applies — never the body the ACK carries, and never whether
 it CONFIRMS the dialog. Both shapes are pinned in
 `crates/b2bua-harness/tests/it/repeated_2xx_before_caller_ack.rs` and
 `crates/b2bua-harness/tests/it/ack_body_relayed.rs`.
+
+**Owed where no step states it.** The ACK to a non-2xx final a step took is
+the client transaction's whatever the document states (§17.1.1.3), so a
+document with no ACK `send` for it on the leg — behind the step that took the
+final, before the leg's next INVITE — stopped where its capture did. The leg
+composes that ACK itself, as the auto ACK would, the instant the step takes the
+final; it belongs to no step. A document that states the ACK keeps it, and the
+leg sends no second one.
 
 An auto PRACK acknowledges the reliable provisionals outstanding on its leg
 OLDEST FIRST: N provisionals are acknowledged by N PRACKs, in arrival order.
@@ -2611,6 +2633,16 @@ from the final's first emission (§17.2.1), whichever comes first; that ACK is
 recorded as the transaction's own closer, never as a datagram after the flow.
 Past Timer H the transaction is gone and the missing ACK is the system's
 failure, `final-unacknowledged`: the run settles and states it.
+
+An INVITE a scripted leg sent keeps the run open until its final (§17.1.1.2):
+while it is in Calling (no provisional yet), until Timer B from its first
+emission; once a provisional has arrived (Proceeding), until the final or the
+settle budget, whose `settle-timed-out` then names it (`leg A: INVITE CSeq 1
+awaits its final`). Past Timer B in Calling the transaction timed out with no
+response at all, the system's failure `invite-unanswered`: the run settles and
+states it. A final arriving in the window after a completed flow is still the
+`datagram-after-flow` it is, and the leg ACKs a non-2xx one on the INVITE's
+branch (§17.1.1.3).
 
 **Failing to settle is always test failure. There is no soft mode.**
 

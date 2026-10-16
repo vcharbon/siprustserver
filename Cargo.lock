@@ -3035,6 +3035,7 @@ dependencies = [
 name = "pivot-interpreter"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "b2bua",
  "b2bua-harness",
  "base64 0.22.1",

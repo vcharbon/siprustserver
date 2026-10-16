@@ -31,6 +31,10 @@ use sip_message::{Method, SipMessage, SipParser, SipRequest, SipResponse};
 use crate::recording::Recording;
 use crate::stack;
 
+mod transactions;
+
+pub use transactions::{pending_invites, unacked_finals, PendingInvite, UnackedFinal};
+
 /// What one scripted leg still owes once its script has ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Owed {
@@ -111,29 +115,6 @@ pub fn obligations(recording: &Recording) -> BTreeMap<String, Owed> {
     recording.legs().iter().map(|(leg, messages)| (leg.clone(), owed(messages))).collect()
 }
 
-/// A non-2xx final this leg SENT to an INVITE it took and the peer has not
-/// acknowledged: the server transaction is Completed (RFC 3261 §17.2.1) until
-/// the ACK the peer owes on the INVITE's branch (§17.1.1.3) or Timer H, which
-/// runs from `sent_at_us`, the final's first emission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnackedFinal {
-    pub cseq: u32,
-    pub status: u16,
-    pub sent_at_us: u64,
-}
-
-/// The non-2xx INVITE finals one leg sent and is still owed an ACK for, by
-/// CSeq, read off its recorded ladder. A 2xx is not here: its ACK is the
-/// peer's own request (§13.2.2.4), not the transaction's closer. Nothing else
-/// the leg answers is owed an ACK, so a non-INVITE final never appears.
-pub fn unacked_finals(messages: &[RecordedMessage]) -> Vec<UnackedFinal> {
-    view(messages)
-        .sent_finals
-        .into_iter()
-        .map(|(cseq, (status, sent_at_us))| UnackedFinal { cseq, status, sent_at_us })
-        .collect()
-}
-
 /// The recording note on a request a leg refused as naming no dialog it holds
 /// (RFC 3261 §12.2.2).
 pub(crate) const FOREIGN_DIALOG: &str =
@@ -147,6 +128,9 @@ pub(crate) const FOREIGN_DIALOG_481: &str = "481: the request names no dialog th
 struct LegView {
     /// The CSeq of the INVITE this leg SENT, where it sent one.
     sent_invite: Option<u32>,
+    /// Every INVITE this leg SENT that no final has answered, by CSeq: the
+    /// instant of its first emission, and whether a provisional has arrived.
+    pending_invites: BTreeMap<u32, (u64, bool)>,
     /// Whether anything answered that INVITE, provisionally or finally.
     heard_response: bool,
     /// The final that answered it, where one has.
@@ -488,6 +472,7 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                     Method::Invite => {
                         view.sent_invite = Some(cseq);
                         view.own_tag = request.from().tag().map(str::to_string);
+                        view.pending_invites.entry(cseq).or_insert((recorded.at_us, false));
                     }
                     Method::Ack => {
                         view.acked.insert(cseq);
@@ -606,6 +591,14 @@ fn view(messages: &[RecordedMessage]) -> LegView {
             }
             (Dir::In, SipMessage::Response(response)) => {
                 let cseq = response.cseq();
+                if cseq.method() == Method::Invite {
+                    if response.status() >= 200 {
+                        view.pending_invites.remove(&cseq.seq());
+                    } else if let Some((_, proceeding)) = view.pending_invites.get_mut(&cseq.seq())
+                    {
+                        *proceeding = true;
+                    }
+                }
                 if cseq.method() != Method::Invite || Some(cseq.seq()) != view.sent_invite {
                     continue;
                 }

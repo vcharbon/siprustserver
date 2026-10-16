@@ -172,6 +172,9 @@ struct Runner<'a, 'p> {
     /// `(leg, CSeq)` of every non-2xx INVITE final whose Timer H the settle has
     /// already reported expired: the failure is stated once, not once per turn.
     timer_h_reported: std::collections::BTreeSet<(String, u32)>,
+    /// `(leg, CSeq)` of every INVITE a leg sent whose Timer B the settle has
+    /// already reported expired in Calling, stated once likewise.
+    timer_b_reported: std::collections::BTreeSet<(String, u32)>,
     /// The ladder rungs still owed, each with the instant it is due. A ladder
     /// is a peer's own transaction timer and gates nothing: it waits BESIDE the
     /// loop, never inside it, so every other leg keeps its own clock while a
@@ -270,6 +273,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             close_refused: std::collections::BTreeSet::new(),
             byes_sent: std::collections::BTreeSet::new(),
             timer_h_reported: std::collections::BTreeSet::new(),
+            timer_b_reported: std::collections::BTreeSet::new(),
             pending_repeats: Vec::new(),
             held: None,
             started,

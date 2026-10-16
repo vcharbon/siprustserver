@@ -224,6 +224,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         // run goes on (§11.2) — gating fails the run, not the script.
         self.run_checks(&step, &inbound);
         self.complete(&step);
+        if self.unscripted_final_ack(&leg, &step.id, &message) {
+            self.answer_unscripted(&leg, &message).await;
+        }
         true
     }
 

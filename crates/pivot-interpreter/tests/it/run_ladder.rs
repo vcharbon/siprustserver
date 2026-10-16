@@ -22,6 +22,7 @@ mod limiter;
 mod matching;
 mod negative;
 mod retransmissions;
+mod settle_floor;
 mod unscripted;
 
 use std::collections::BTreeMap;
@@ -676,6 +677,14 @@ pub(crate) fn assert_bundle_is_complete(outcome: &Outcome, dir: &std::path::Path
     }
     assert!(dir.join("recording/A.jsonl").is_file());
     assert!(dir.join("recording/B.jsonl").is_file());
+}
+
+/// A message's topmost Via branch.
+fn via_branch(raw: &str) -> String {
+    raw.lines()
+        .find_map(|line| line.split_once("branch="))
+        .map(|(_, branch)| branch.trim().to_string())
+        .expect("every emission carries a Via branch")
 }
 
 /// The recording note an emission no step scripts carries.

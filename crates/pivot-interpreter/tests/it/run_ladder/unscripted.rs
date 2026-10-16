@@ -497,11 +497,3 @@ async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200()
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
-
-/// A message's topmost Via branch.
-fn via_branch(raw: &str) -> String {
-    raw.lines()
-        .find_map(|line| line.split_once("branch="))
-        .map(|(_, branch)| branch.trim().to_string())
-        .expect("every emission carries a Via branch")
-}

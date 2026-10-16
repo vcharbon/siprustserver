@@ -92,6 +92,11 @@
       "status": 487
     },
     {
+      "cseq": 1,
+      "failure": "invite-unanswered",
+      "leg": "A"
+    },
+    {
       "expected": "answered",
       "failure": "check-failed",
       "field": "cdr[0].disposition",

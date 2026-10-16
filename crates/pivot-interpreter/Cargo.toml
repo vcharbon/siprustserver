@@ -34,6 +34,8 @@ base64 = { workspace = true }
 # The system under test the interpreter's integration ladder replays against.
 b2bua-harness = { path = "../b2bua-harness" }
 b2bua = { path = "../b2bua" }
+# A ladder rung wraps the demo system's routing backend to pace its answers.
+async-trait = { workspace = true }
 # The demo system's own feature vocabulary: a ladder rung selects the 18x
 # strategy the document it replays was written against.
 call = { path = "../call" }

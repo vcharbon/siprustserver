@@ -42,14 +42,17 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// What every scripted leg still holds open (§10, §11.2) — the close's own
     /// half of the settle condition, and the work of its next turn. Empty on a
     /// run whose script was not abandoned, and on one whose dialogs are all
-    /// terminal.
+    /// terminal. An INVITE awaiting its final is the settle floor's to hold
+    /// ([`settle::floor`](crate::settle::floor)), bounded by its own timers.
     pub(super) fn close_obligations(&self) -> BTreeMap<String, Owed> {
         if self.abandoned.is_none() {
             return BTreeMap::new();
         }
         close::obligations(&self.instance.recording())
             .into_iter()
-            .filter(|(leg, owed)| owed.open() && self.agent_of_leg(leg).is_some())
+            .filter(|(leg, owed)| {
+                owed.open() && *owed != Owed::AwaitFinal && self.agent_of_leg(leg).is_some()
+            })
             .collect()
     }
 

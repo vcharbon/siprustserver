@@ -65,6 +65,67 @@ async fn a_final_the_document_scripts_is_not_absorbed_when_its_status_differs() 
     scene.finish().await;
 }
 
+/// A non-2xx final a step takes is ACKed whether or not the document states the
+/// ACK (RFC 3261 §17.1.1.3: the client transaction ACKs every non-2xx final).
+/// A document with no ACK step for it has a gap where its capture stopped, not
+/// a behaviour to reproduce: the leg ACKs on the INVITE's own branch, out of no
+/// step, and the run is green.
+#[tokio::test(start_paused = true)]
+async fn a_reject_a_step_took_is_acked_where_the_document_states_no_ack() {
+    let scene = api_scene("pivot-reject-taken-unacked").await;
+    let mut case = fixture("unscripted-final.v3.json");
+    case.document.case.id = "reject-taken-no-ack-step".into();
+    take_the_reject(&mut case);
+    let (outcome, dir) = replay_case(&scene, case, BTreeMap::new()).await;
+    assert_bundle_is_complete(&outcome, &dir);
+    assert_eq!(outcome.verdict.completed_steps.len(), 5, "{:?}", outcome.verdict.completed_steps);
+
+    let a = &outcome.recording.legs()["A"];
+    let invite = a.iter().find(|m| m.dir == Dir::Out && text(m).starts_with("INVITE ")).unwrap();
+    let acks: Vec<_> =
+        a.iter().filter(|m| m.dir == Dir::Out && text(m).starts_with("ACK ")).collect();
+    assert_eq!(acks.len(), 1, "leg A ACKed the 486 once: {a:#?}");
+    assert!(acks[0].step.is_none(), "no step scripts it: {:#?}", acks[0]);
+    assert!(text(acks[0]).contains("\r\nCSeq: 1 ACK\r\n"), "{}", text(acks[0]));
+    assert_eq!(via_branch(&text(acks[0])), via_branch(&text(invite)), "§17.1.1.3: same branch");
+    scene.finish().await;
+}
+
+/// The same reject with the ACK the document DOES state: the step owns it, and
+/// the leg sends no second one of its own.
+#[tokio::test(start_paused = true)]
+async fn a_reject_whose_ack_the_document_states_is_acked_by_that_step_alone() {
+    let scene = api_scene("pivot-reject-taken-acked").await;
+    let mut case = fixture("unscripted-final.v3.json");
+    case.document.case.id = "reject-taken-ack-step".into();
+    take_the_reject(&mut case);
+    let ack: pivot_schema::flow::Step = serde_json::from_value(serde_json::json!({
+        "auto": true,
+        "delay": { "compressible": true, "from": "step:s5", "ms": 0, "timer_linked": false },
+        "id": "s6", "leg": "A", "msg": { "cseq": 1, "method": "ACK" }, "op": "send"
+    }))
+    .expect("an ACK step");
+    case.document.flow.push(pivot_schema::flow::FlowNode::Message(Box::new(ack)));
+    let (outcome, dir) = replay_case(&scene, case, BTreeMap::new()).await;
+    assert_bundle_is_complete(&outcome, &dir);
+    assert_eq!(outcome.verdict.completed_steps.len(), 6, "{:?}", outcome.verdict.completed_steps);
+
+    let a = &outcome.recording.legs()["A"];
+    let acks: Vec<_> =
+        a.iter().filter(|m| m.dir == Dir::Out && text(m).starts_with("ACK ")).collect();
+    assert_eq!(acks.len(), 1, "one ACK, the document's: {a:#?}");
+    assert_eq!(acks[0].step.as_deref(), Some("s6"), "{:#?}", acks[0]);
+    scene.finish().await;
+}
+
+/// `unscripted-final.v3.json` with the caller's last step taking the 486 the
+/// callee sends, and nothing behind it.
+fn take_the_reject(case: &mut Case) {
+    let taken = step_of(case, "s5");
+    taken.msg.status = Some(486);
+    taken.msg.reason = Some("Busy Here".into());
+}
+
 /// An auto ACK finds the final it acknowledges in LEG STATE, never in the
 /// step's `cseq`.
 ///

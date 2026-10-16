@@ -1,5 +1,6 @@
-//! Which INVITE a final a send step scripts answers, and whether that INVITE
-//! already has its final (RFC 3261 §17.2.1: one per server transaction).
+//! Which INVITE a final a send step scripts answers, whether that INVITE
+//! already has its final (RFC 3261 §17.2.1: one per server transaction), and
+//! whether the flow scripts the ACK a non-2xx final is owed (§17.1.1.3).
 //!
 //! A scripted final answers the INVITE its leg took at the last `expect` of an
 //! INVITE ahead of it on that leg; the ladder names that INVITE through the
@@ -117,6 +118,27 @@ pub fn scripts_reject_ack(
             && matches!(&s.discriminator, Discriminator::Request { method }
                     if Method::from_wire(method) == Method::Ack)
     })
+}
+
+/// Whether `leg`'s flow scripts the ACK to the non-2xx INVITE final its step
+/// `took` took: a pending (`!complete`) ACK `send` on the leg behind that step,
+/// before the next step sending an INVITE.
+pub fn scripts_final_ack(
+    steps: &[&CompiledStep],
+    leg: &str,
+    took: &str,
+    complete: impl Fn(&str) -> bool,
+) -> bool {
+    let Some(at) = steps.iter().position(|s| s.id == took) else { return false };
+    let is_method = |s: &CompiledStep, wanted: Method| {
+        matches!(&s.discriminator, Discriminator::Request { method }
+            if Method::from_wire(method) == wanted)
+    };
+    steps[at + 1..]
+        .iter()
+        .filter(|s| s.leg == leg)
+        .take_while(|s| !(s.is_send() && is_method(s, Method::Invite)))
+        .any(|s| s.is_send() && !complete(&s.id) && is_method(s, Method::Ack))
 }
 
 fn parse(wire: &[u8]) -> Option<SipMessage> {
@@ -271,6 +293,46 @@ mod tests {
         assert!(scripts_reject_ack(&steps, "B", 2, &rec, pending));
         assert!(!scripts_reject_ack(&steps, "B", 2, &rec, |_| true), "a2 already took its ACK");
         assert!(!scripts_reject_ack(&steps, "B", 3, &rec, pending), "no step took CSeq 3");
+    }
+
+    fn on_a(step: String) -> String {
+        step.replace(r#""leg":"B""#, r#""leg":"A""#)
+    }
+
+    fn send_request(id: &str, method: &str) -> String {
+        on_a(format!(
+            r#"{{"id":"{id}","leg":"B","op":"send","msg":{{"method":"{method}"}},"delay":{D}}}"#
+        ))
+    }
+
+    fn expect_final(id: &str, status: u16) -> String {
+        on_a(format!(
+            r#"{{"id":"{id}","leg":"B","op":"expect","check":"record","msg":{{"status":{status},"cseq-method":"INVITE"}},"delay":{D}}}"#
+        ))
+    }
+
+    /// The ACK to a final a step took is scripted only by an ACK `send` on the
+    /// same leg between that step and the leg's next INVITE.
+    #[test]
+    fn a_final_ack_is_scripted_only_before_the_leg_s_next_invite() {
+        let flow = format!(
+            "[{},{},{},{},{},{},{}]",
+            send_request("i1", "INVITE"),
+            expect_final("f1", 486),
+            take("t1"),
+            send_request("i2", "INVITE"),
+            expect_final("f2", 486),
+            answer("r1", 200),
+            send_request("k2", "ACK")
+        );
+        let plan = plan(&flow);
+        let steps = plan.steps();
+        let pending = |id: &str| id != "k2";
+        assert!(!scripts_final_ack(&steps, "A", "f1", pending), "k2 is behind i2, not f1's");
+        assert!(scripts_final_ack(&steps, "A", "f2", pending));
+        assert!(!scripts_final_ack(&steps, "A", "f2", |_| true), "k2 already ran");
+        assert!(!scripts_final_ack(&steps, "B", "f2", pending), "another leg's ACK");
+        assert!(!scripts_final_ack(&steps, "A", "nope", pending), "no such step");
     }
 
     /// §9.2: a scripted 2xx is no answer to a CANCELled INVITE.

@@ -30,7 +30,10 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// answered here as it is mid-flow, so the peer's transaction ends instead
     /// of retransmitting to its timer while the run waits on the call to end.
     /// The ACK a non-2xx final this leg sent is owed (§17.1.1.3) is what the
-    /// settle floor waits for: absorbed, never a late arrival.
+    /// settle floor waits for: absorbed, never a late arrival. The final an
+    /// INVITE this leg sent is owed is waited for too, and stays the late
+    /// arrival it is after a completed flow: the document scripted no outcome
+    /// for that call, and the leg ACKs a non-2xx one all the same.
     pub(super) async fn record_during_settle(
         &mut self,
         actor: &str,
@@ -184,8 +187,10 @@ impl<'a, 'p> Runner<'a, 'p> {
             let flow_done = self.instance.cursor().is_done() || self.abandoned.is_some();
             let owed = self.close_obligations();
             // A non-2xx INVITE final a leg sent is a server transaction the
-            // system's ACK ends (RFC 3261 §17.2.1); past Timer H it is gone
-            // and the ACK never came, which is the system's failure to state.
+            // system's ACK ends (RFC 3261 §17.2.1), and an INVITE a leg sent is
+            // a client transaction the system's final ends (§17.1.1.2). Past
+            // Timer H, or Timer B in Calling, the transaction is gone and what
+            // it awaited never came: the system's failure to state, once.
             let floor = settle::floor(&self.instance.recording(), self.now_us());
             for expired in &floor.expired {
                 if self.timer_h_reported.insert((expired.leg.clone(), expired.owed.cseq)) {
@@ -196,12 +201,19 @@ impl<'a, 'p> Runner<'a, 'p> {
                     });
                 }
             }
+            for unanswered in &floor.unanswered {
+                let leg = unanswered.leg.clone();
+                if self.timer_b_reported.insert((leg.clone(), unanswered.invite.cseq)) {
+                    self.instance
+                        .fail(Failure::InviteUnanswered { leg, cseq: unanswered.invite.cseq });
+                }
+            }
             // A rung still owed keeps the run open: the flow ending does not
             // end a transaction's own timer, and `drive` counts the ladders
             // only after settle for exactly that reason.
             if owed.is_empty()
                 && self.pending_repeats.is_empty()
-                && floor.held.is_empty()
+                && !floor.holds()
                 && settle::is_settled(flow_done, sut, post.as_ref())
             {
                 break;

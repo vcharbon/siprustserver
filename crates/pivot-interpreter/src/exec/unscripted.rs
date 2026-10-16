@@ -3,7 +3,7 @@
 
 use pivot_schema::bundle::{Dir, Failure};
 use scenario_harness::dialogs::DialogVerdict;
-use sip_message::SipMessage;
+use sip_message::{Method, SipMessage};
 
 use super::Runner;
 use crate::close::{self, Owed, FOREIGN_DIALOG, FOREIGN_DIALOG_481};
@@ -87,6 +87,21 @@ impl<'a, 'p> Runner<'a, 'p> {
         !scripted_final::scripts_reject_ack(&steps, leg, inbound.cseq, &ladder, |id| {
             cursor.node_complete(id)
         })
+    }
+
+    /// Whether `message` is a non-2xx INVITE final the step `took` took and
+    /// `leg`'s flow scripts no ACK for ([`scripted_final::scripts_final_ack`]).
+    /// RFC 3261 §17.1.1.3 makes that ACK the client transaction's own, so a
+    /// document stating none stopped where its capture did and the leg sends
+    /// it all the same.
+    pub(super) fn unscripted_final_ack(&self, leg: &str, took: &str, message: &SipMessage) -> bool {
+        let SipMessage::Response(response) = message else { return false };
+        if response.status() < 300 || *response.cseq().method() != Method::Invite {
+            return false;
+        }
+        let steps = self.instance.plan().steps();
+        let cursor = self.instance.cursor();
+        !scripted_final::scripts_final_ack(&steps, leg, took, |id| cursor.node_complete(id))
     }
 
     /// The leg of `message` and the verdict the dialog table of the UA that

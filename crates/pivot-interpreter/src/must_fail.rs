@@ -146,6 +146,7 @@ fn class(failure: &Failure) -> Class {
         // call a teardown exactly like any other run.
         Failure::SettleTimedOut { .. }
         | Failure::FinalUnacknowledged { .. }
+        | Failure::InviteUnanswered { .. }
         | Failure::BackgroundCount { .. }
         | Failure::CdrMismatch { .. }
         | Failure::FlowIncomplete { .. } => Class::Structural,
