@@ -19,6 +19,7 @@ import { checkRefusalRoster } from "./refusal-roster.js"
 import type { Finding, RuleIdentity } from "./refusal-rule.js"
 import { CALL_COMPLETENESS_RULE } from "./call-completeness.js"
 import { CAPTURE_EDGE_RULE } from "./capture-edge.js"
+import { CAPTURE_ORDER_RULE } from "./capture-order.js"
 import { IDENTITY_REOFFERED, reofferClause, reofferLine, reoffers } from "./reoffer.js"
 
 /** What a CASE-TIER refusal is decided from: the capture, plus the cut's vantages. */
@@ -34,8 +35,13 @@ export interface CaseRule extends RuleIdentity {
 /**
  * Every case-tier refusal the pipeline states on its own account: what no
  * document of a vantage can state, whatever the deployment.
+ *
+ * The misordered capture is decided here, at a tier that refuses before any
+ * document exists, so the document tier never charges the same inversion as a
+ * message the capture did not hold.
  */
 export const CASE_RULES: ReadonlyArray<CaseRule> = [
+  CAPTURE_ORDER_RULE,
   CAPTURE_EDGE_RULE,
   {
     id: IDENTITY_REOFFERED,

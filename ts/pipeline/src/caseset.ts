@@ -27,7 +27,8 @@
  * QUARANTINE is the refusal lane's falsifier and nothing else: under it, a
  * refused case is assembled anyway and the document rides {@link
  * CaseOutcome.quarantined} so a caller can replay what the refusal deleted,
- * unless an `unrunnable` document rule says no run of it can end. It never
+ * unless an `unrunnable` document rule says no run of it can end or an
+ * `untrusted` refusal says no run of it speaks to the call. It never
  * changes which cases are generated — `built` and `refused` answer
  * identically with it on and off — because a falsifier that moved the corpus
  * would be measuring itself.
@@ -115,17 +116,22 @@ const build = (
 
 /**
  * What a refused case carries under quarantine: the document the refusal
- * deleted, or the reason there is none. A document an `unrunnable` rule fires
- * on is none — no run of it can be driven to its end, so it is no replay of the
- * refusal — and the rule's own line says why. Nothing under quarantine off.
+ * deleted, or the reason there is none. A case an `untrusted` refusal drops
+ * has none — a run of a document the capture cannot be trusted to state
+ * replays no call the wire carried — and neither has a document an
+ * `unrunnable` rule fires on — no run of it can be driven to its end; either
+ * rule's own line says why. Nothing under quarantine off.
  */
 const quarantineOf = (
   input: CaseSetInput,
   index: CaptureIndex,
   spec: CaseSpec,
+  refused: ReadonlyArray<Refusal>,
   already?: Assembled
 ): Pick<CaseOutcome, "quarantined" | "quarantineError"> => {
   if (input.quarantine !== true) return {}
+  const untrusted = refused.find((r) => r.disposition === "untrusted")
+  if (untrusted !== undefined) return { quarantineError: untrusted.line }
   const attempt = already === undefined ? build(input, index, spec) : { built: already }
   if (!("built" in attempt)) return { quarantineError: attempt.error }
   const unrunnable = [...DOCUMENT_RULES, ...input.policy.refuseOnDocument]
@@ -212,7 +218,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     // A case refused on a rule no declaration can answer is never assembled, so
     // its deferred refusals stand with it: there is no document to declare in.
     if (refusals.some((r) => r.disposition !== "defers")) {
-      outcomes.push({ spec, legs, callIds, refused: refusals, ...quarantineOf(input, index, spec) })
+      outcomes.push({ spec, legs, callIds, refused: refusals, ...quarantineOf(input, index, spec, refusals) })
       continue
     }
     const attempt = build(input, index, spec)
@@ -237,7 +243,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     ]
     outcomes.push(
       standing.length > 0
-        ? { spec, legs, callIds, refused: standing, ...quarantineOf(input, index, spec, built) }
+        ? { spec, legs, callIds, refused: standing, ...quarantineOf(input, index, spec, standing, built) }
         : { spec, legs, callIds, built, refused: [] }
     )
   }

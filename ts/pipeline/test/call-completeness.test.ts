@@ -128,6 +128,7 @@ describe("source-call completeness", () => {
 
   it("is the pipeline's case-tier rule, after the re-offer rule", () => {
     expect(CASE_RULES.map((r) => r.id)).toEqual([
+      "source-capture-misordered",
       "source-truncated-at-edge",
       "scope-identity-reoffered",
       SOURCE_CALL_INCOMPLETE

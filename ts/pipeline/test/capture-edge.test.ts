@@ -269,6 +269,16 @@ describe("the capture edge: a leg the file cut through", () => {
     expect(found[0]).toMatch(/opens on an in-dialog BYE \(msg 0\): head-truncated, the dialog began before the capture/)
   })
 
+  it("a leg opening on a response whose request it captures later is misordered, not head-truncated", () => {
+    const msgs = [res(100, "INVITE", 1, 0), req("INVITE", 1, 3), res(200, "INVITE", 1, 500), req("ACK", 1, 505, "callee"), req("BYE", 2, 5_000, "callee"), res(200, "BYE", 2, 5_005)]
+    expect(details(family(msgs, 5_005 + SILENCE_MS))).toEqual([])
+  })
+
+  it("a leg opening on an in-dialog request whose dialog's INVITE it captures later is misordered, not head-truncated", () => {
+    const msgs = [req("INFO", 2, 0, "callee"), req("INVITE", 1, 3), res(200, "INVITE", 1, 500), req("ACK", 1, 505, "callee"), res(200, "INFO", 2, 506), req("BYE", 3, 5_000, "callee"), res(200, "BYE", 3, 5_005)]
+    expect(details(family(msgs, 5_005 + SILENCE_MS))).toEqual([])
+  })
+
   it("a leg cut at both edges carries both findings", () => {
     const msgs = [res(200, "INVITE", 1, 0), req("ACK", 1, 5, "callee")]
     expect(details(family(msgs, 10_000))).toEqual([

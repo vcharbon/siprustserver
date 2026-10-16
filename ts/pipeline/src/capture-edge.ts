@@ -26,7 +26,9 @@
  * A dialog the source answered and never closed is refused whatever the
  * silence: a call can be up for hours. A leg that OPENS mid-dialog — a response,
  * or a request carrying a To-tag, before any request opened one — began before
- * the capture did and is refused as truncated at the head.
+ * the capture did and is refused as truncated at the head, unless the leg
+ * captures what that first message follows later on, which is a misordered
+ * leg (`./capture-order.ts`) and not a truncated one.
  *
  * A leg the SUT dialled before the call's teardown is not judged at its tail
  * once a BYE closed every caller-side dialog of the case: its teardown is the
@@ -38,6 +40,7 @@
  */
 import { Flows } from "@sip/contracts"
 import { closingBye } from "./call-completeness.js"
+import { inversionsOf } from "./capture-order.js"
 import type { CaseRule, RefusalInput } from "./case-rules.js"
 import { type CutVantage, vantageIsInbound, vantageIsOutbound } from "./cut.js"
 import { findingOf, type Finding } from "./refusal-rule.js"
@@ -94,11 +97,14 @@ const secondsBeforeEnd = (m: Flows.Msg, endUs: number): string =>
 
 /**
  * The leg opened by something other than a fresh request: its first message
- * answers, or continues, a dialog the capture never saw open.
+ * answers, or continues, a dialog the capture never saw open. A first message
+ * captured before the message it follows is misordered (`./capture-order.ts`),
+ * not truncated: what it follows is in the capture.
  */
 const headTruncation = (leg: Flows.Leg, index: number): RefusalEvidence | undefined => {
   const first = leg.msgs[0]
   if (first === undefined) return undefined
+  if (inversionsOf(leg).some((inv) => inv.first === 0)) return undefined
   const summary = first.summary
   if (summary.kind === "response") {
     return {

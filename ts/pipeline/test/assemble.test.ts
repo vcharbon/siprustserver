@@ -308,6 +308,21 @@ describe("deciding a whole capture", () => {
     expect(out.outcomes[0]!.quarantineError).toBe(`${SPEC.id}: no run of it can end`)
   })
 
+  it("quarantines no document an untrusted refusal stands on, and says why", () => {
+    const refusal: Refusal = {
+      caseId: SPEC.id,
+      capture: CAPTURE,
+      reason: "scope-order-untrusted",
+      disposition: "untrusted",
+      line: "refused: the capture's order of the call cannot be trusted"
+    }
+    const out = decide([refusal], neutralPolicy.declare, true)
+    expect(out.refused).toEqual([refusal])
+    expect(out.outcomes[0]!.built).toBeUndefined()
+    expect(out.outcomes[0]!.quarantined).toBeUndefined()
+    expect(out.outcomes[0]!.quarantineError).toBe(refusal.line)
+  })
+
   it("quarantines nothing for a case nothing refused", () => {
     const out = decide([], neutralPolicy.declare, true)
     expect(out.outcomes[0]!.built).toBeDefined()

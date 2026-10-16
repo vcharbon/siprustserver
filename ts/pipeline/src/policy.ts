@@ -150,8 +150,11 @@ export interface RefusalEvidence {
  * - `unrunnable` — the document exists, but no run of it can be driven to its
  *   end, so no replay can falsify it either. A quarantine carries no document
  *   such a rule fires on.
+ * - `untrusted` — the capture's record of the call cannot be trusted, so the
+ *   case is dropped whatever a run of it would do: the refusal claims nothing
+ *   a replay could contradict, and a quarantine carries no document for it.
  */
-export type Disposition = "refuses" | "defers" | "not-proposed" | "unreachable" | "unrunnable"
+export type Disposition = "refuses" | "defers" | "not-proposed" | "unreachable" | "unrunnable" | "untrusted"
 
 /**
  * One reason a proposed case is not generated, in the one shape every tier
