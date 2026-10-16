@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from hakit.cli import main
 from hakit.content import discover
 from hakit.paths import BASE_CONTENT
 from hakit.scenario_lint import lint, lint_all, scenario_keys
@@ -165,3 +166,9 @@ def test_the_keys_a_scenario_reads_leave_out_sipp_keywords_and_regexps(tmp_path:
         '<assignstr assign_to="x" value="[ring_ms] [$v] [field1] [last_Via:]"/></action></nop>\n</scenario>')
     )
     assert scenario_keys(p) == {"run", "hold_ms", "ring_ms"}
+
+
+def test_hakit_sipp_keys_prints_the_declared_defaults(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["sipp-keys", "uas-basic.xml"]) == 0
+    assert capsys.readouterr().out.split("\n") == ["-key", "gap_ms", "60000", "-key", "ring_ms", "5000", ""]
+    assert main(["sipp-keys", "absent.xml"]) == 2

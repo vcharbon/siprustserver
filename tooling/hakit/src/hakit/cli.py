@@ -30,7 +30,7 @@ from .preflight import open_events
 from .profile import Profile, parse_profile
 from .readers import cli as readers
 from .runner import Runner, RunRefused
-from .scenario_lint import lint_all
+from .scenario_lint import key_defaults, lint_all
 from .schedule import PlannedEvent, plan, plan_event
 from .schemas import SchemaSet
 from .jsonl import read_jsonl
@@ -78,6 +78,18 @@ def cmd_inject(content: Content, env: Mapping[str, str], shape: str, callees: Se
     except InjectionError as e:
         print(f"hakit: {e}", file=sys.stderr)
         return 2
+    return 0
+
+
+def cmd_sipp_keys(content: Content, scenario: str) -> int:
+    """Print `-key <name> <default>` for each key a scenario declares, one
+    argument per line, for a launcher outside the runner."""
+    path = content.scenarios.get(scenario)
+    if path is None:
+        print(f"hakit: no scenario {scenario!r} on the search path", file=sys.stderr)
+        return 2
+    for k, v in sorted(key_defaults(path).items()):
+        print(f"-key\n{k}\n{v}")
     return 0
 
 
@@ -200,6 +212,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_inj = sub.add_parser("inject", help="print the SIPp injection file of a catalog shape")
     p_inj.add_argument("shape")
     p_inj.add_argument("--callee", action="append", default=[], help="host[:port] of a callee (default: the lab's)")
+    p_keys = sub.add_parser("sipp-keys", help="print the -key defaults a scenario declares, one argument per line")
+    p_keys.add_argument("scenario")
     p_clean = sub.add_parser("cleanup", help="heal every event a crashed run left open")
     p_clean.add_argument("run_dirs", type=Path, nargs="*")
     content_cli.add_parsers(sub)
@@ -221,6 +235,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_run(schemas, content, env, str(args.profile), dry)
     if cmd == "inject":
         return cmd_inject(content, env, str(args.shape), [str(c) for c in args.callee])
+    if cmd == "sipp-keys":
+        return cmd_sipp_keys(content, str(args.scenario))
     if cmd == "verdict":
         return cmd_verdict(schemas, content, env, Path(args.run_dir))
     if cmd == "pcap":

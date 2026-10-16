@@ -6,8 +6,11 @@
 #     sipp UAC  --INVITE-->  b2bua-runner  --INVITE-->  sipp UAS
 #     :5062                   :5080                      :5070
 #
-# Scenarios are the k8s charts' uac-basic.xml / uas-basic.xml (INVITE / 180 /
-# 5s ring / 200 / ACK / 500ms / BYE), reused verbatim.
+# Scenarios are the HA tooling's base UAC and UAS (tooling/hakit/content/
+# scenarios: INVITE / 180 / 5 s ring / 200 / ACK / 500 ms hold / BYE), their
+# key defaults and the injection file of the catalog shape `basic` from
+# `hakit sipp-keys` and `hakit inject` (needs `uv`). The UAC writes one
+# call-outcome record per call into results/<cap>_records.jsonl.
 #
 # For each call-attempt rate (CAPS) we run steady-state load and sample the
 # B2BUA process's CPU% and RSS with pidstat. A fresh B2BUA is started per cap so
@@ -20,7 +23,9 @@ cd "$(dirname "$0")"
 
 BIN="${B2BUA_BIN:-$(cd ../.. && pwd)/target/release/b2bua-runner}"
 RESULTS="results"
-SCN="scenarios"
+HAKIT_DIR="$(cd ../../tooling/hakit && pwd)"
+SCN="$HAKIT_DIR/content/scenarios"
+hakit() { uv run --quiet --locked --project "$HAKIT_DIR" hakit "$@"; }
 RAMP="${RAMP:-8}"        # seconds to reach steady state before sampling
 SAMPLE="${SAMPLE:-20}"   # seconds of pidstat sampling
 CAPS=("${@:-}")
@@ -31,6 +36,9 @@ B2BUA_PORT=5080
 UAC_PORT=5062
 
 mkdir -p "$RESULTS"
+hakit inject basic --callee "127.0.0.1:$UAS_PORT" > "$RESULTS/inject.csv" || exit 1
+mapfile -t UAC_KEYS < <(hakit sipp-keys uac-basic-hold.xml)
+mapfile -t UAS_KEYS < <(hakit sipp-keys uas-basic.xml)
 SUMMARY="$RESULTS/summary.txt"
 : > "$SUMMARY"
 
@@ -47,7 +55,7 @@ for cap in "${CAPS[@]}"; do
   tag="cap${cap}"
 
   # Fresh downstream UAS
-  sipp -sf "$SCN/uas-basic.xml" -i 127.0.0.1 -p "$UAS_PORT" -trace_err \
+  sipp -sf "$SCN/uas-basic.xml" "${UAS_KEYS[@]}" -i 127.0.0.1 -p "$UAS_PORT" -trace_err \
        > "$RESULTS/${tag}_uas.log" 2>&1 &
   UASPID=$!
   sleep 0.4
@@ -59,7 +67,10 @@ for cap in "${CAPS[@]}"; do
   sleep 0.6
 
   # UAC at the target call rate, steady-state (no -m: runs until killed)
-  sipp 127.0.0.1:$B2BUA_PORT -sf "$SCN/uac-basic.xml" -s service \
+  sipp 127.0.0.1:$B2BUA_PORT -sf "$SCN/uac-basic-hold.xml" -inf "$RESULTS/inject.csv" \
+       "${UAC_KEYS[@]}" -key run "$tag" -key stream bench -key shape basic \
+       -key hold_ms 500 -key setup_ms 32000 -cid_str "%u-%p-$tag@%s" \
+       -trace_logs -log_file "$RESULTS/${tag}_records.jsonl" \
        -i 127.0.0.1 -p "$UAC_PORT" -r "$cap" -rp 1000 -fd 1 \
        -trace_stat -stf "$RESULTS/${tag}_uac_stat.csv" -trace_err \
        > "$RESULTS/${tag}_uac.log" 2>&1 &
