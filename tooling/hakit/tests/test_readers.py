@@ -283,6 +283,7 @@ class ProbedLab(Lab):
     def rule(self, c: Call) -> HttpResult | None:
         if c.kind == "http" and "b2bua_txn_active_transactions" in c.url and "/query_range" not in c.url:
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query)
+            self.queries.append(qs["query"][0])
             t = float(qs["time"][0])
             ended = (T0 + (LOAD_S + 200) * 1000) / 1000
             extra = 0.0 if t < ended - 3600 else (self.at_end if t < ended + self.settle else self.settled)
@@ -303,7 +304,10 @@ def test_a_baseline_gauge_must_return_to_its_value_before_the_load(tmp_path: Pat
         return checks(Drift(read_run(d), Vm(FakeExecutor([lab.rule]), "vm"), spec, d / "drift").run())["gauges back to their baseline"]
 
     # 41 more at the run's end, back to the probes' 128 once the timers ran.
-    assert baseline("settled", ProbedLab(41, 0, 47))["verdict"] == "pass"
+    settled = ProbedLab(41, 0, 47)
+    assert baseline("settled", settled)["verdict"] == "pass"
+    # The baseline is the median of the span before the load, not one scrape.
+    assert any(q.startswith("quantile_over_time(0.5, sum(b2bua_txn_active_transactions") for q in settled.queries)
     # Still 20 above it after the settle: a leak.
     held = baseline("held", ProbedLab(41, 20, 47))
     assert held["verdict"] == "fail" and "148 47 s after the run vs 128 before the load" in jv.string(held, "detail")

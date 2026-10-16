@@ -25,8 +25,9 @@ def detected(seq: int, at: int, budget: str = "") -> list[Json]:
 
 def test_an_impact_on_the_close_instant_is_in_the_window_and_one_after_is_not(tmp_path: Path) -> None:
     close = T0 + 100_000 + 5_000 + 40_000
-    # A timeout's instant is its deadline: started 32 s before.
-    recs = [timed_out("edge", close - 32_000), timed_out("after", close - 32_000 + 1)]
+    # A timeout's instant is its deadline: started 32 s before. One sent after
+    # the close was never pending in the window.
+    recs = [timed_out("edge", close - 32_000), timed_out("after", close + 1)]
     v = compute(run_dir(tmp_path, recs, calls=2, events=kill(1, T0 + 100_000)), SCHEMAS)
     (w,) = jv.objs(v, "windows")
     assert w["closed_at_ms"] == close

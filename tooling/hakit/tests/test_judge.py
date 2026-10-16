@@ -158,3 +158,24 @@ def test_a_window_holding_the_failure_is_a_candidate_for_a_call_started_after_it
         ("dialog_request_failed", ["001-kill_worker"]),
     ]
     assert unatt == []
+
+
+def test_a_setup_timeout_ending_after_the_window_is_charged_to_the_window_it_was_pending_in() -> None:
+    # The INVITE went out just after the kill and no hop ever answered: the
+    # generator gives up 32 s later, after the window closed.
+    w = window("001-kill_worker", T0 + 60_000, T0 + 85_000)
+    per, _, unatt = run([timed_out("a", T0 + 60_040)], [w])
+    assert [(r["class"], r["reason"], r["count"]) for r in per["001-kill_worker"]] == [("setup_failed", "timeout", 1)]
+    assert unatt == []
+    # A setup pending in no window stays unattributed.
+    per, _, unatt = run([timed_out("b", T0 + 90_000)], [w])
+    assert per["001-kill_worker"] == [] and [u["reason"] for u in unatt] == ["timeout"]
+
+
+def test_a_setup_no_hop_answered_takes_no_setup_latency() -> None:
+    # The generator's giving up is no latency of the system under test: the
+    # call is a failed setup, never also a slow one.
+    assert classify({**timed_out("a", T0), "first_provisional_at_ms": None}, ANSWER).latency is None
+    late = {**timed_out("b", T0), "first_provisional_at_ms": T0 + 1500}
+    lat = classify(late, ANSWER).latency
+    assert lat is not None and lat.ms == 1500

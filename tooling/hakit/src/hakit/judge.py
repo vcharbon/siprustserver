@@ -112,6 +112,17 @@ def _holding(windows: list[Window], at_ms: float) -> Window | None:
     return next((w for w in windows if w.holds(at_ms)), None)
 
 
+def _budget_window(windows: list[Window], imp: Impact) -> Window | None:
+    """The window a budgetable impact belongs to: the one holding its instant;
+    for a setup that timed out outside every window, the first window open
+    while it was pending (its INVITE went out into the fault no hop answered,
+    and the generator gave up after the window closed)."""
+    w = _holding(windows, imp.at_ms)
+    if w is not None or imp.cls != SETUP_FAILED or imp.reason != "timeout":
+        return w
+    return next((w for w in windows if w.opened_at_ms <= imp.at_ms and imp.started_at_ms <= w.closed_at_ms), None)
+
+
 def _counted_window(windows: list[Window], imp: Impact, in_flight_ms: float) -> Window | None:
     """The window a counted impact belongs to: the one holding its instant; for
     a missing CDR outside every window, the first opening within `in_flight_ms`
@@ -156,7 +167,7 @@ def judge(
 
     for imp in impacts:
         if imp.budgetable:
-            w = _holding(windows, imp.at_ms)
+            w = _budget_window(windows, imp)
             if w is None:
                 outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "", imp.retry_after)].append(imp)
             else:

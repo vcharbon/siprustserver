@@ -126,9 +126,13 @@ def _consult_refused(r: Json, leg: Leg, seen: dict[str, Json], unopened: Impact)
 
 
 def setup_latency(r: Json) -> SetupLatency | None:
-    """From `started_at_ms` to the first provisional, or to the setup's end when none
-    came; None when the setup never ended."""
+    """From `started_at_ms` to the first provisional, or to the final when none
+    came; None when the setup never ended, or ended with no answer at all (the
+    generator giving up measures nothing of the system under test)."""
     first_prov = jv.opt_number(r, "first_provisional_at_ms")
+    unanswered = jv.opt_int(r, "final_code") is None and jv.string(r, "ending") != "answered"
+    if first_prov is None and unanswered:
+        return None
     measured_at = first_prov if first_prov is not None else jv.opt_number(r, "setup_ended_at_ms")
     if measured_at is None:
         return None

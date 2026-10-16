@@ -54,7 +54,8 @@ class DriftSpec:
     drained_report: list[str] = field(default_factory=lambda: ["b2bua_census_timers", "b2bua_timer_live"])
     # Gauges that traffic outside the load keeps above 0 (a front proxy's
     # health probes hold transactions): after the drain each returns to its
-    # value just before the load, within `drained_baseline_tolerance`, read
+    # median over the two minutes before the load, within
+    # `drained_baseline_tolerance`, read
     # `drained_settle_s` after the run ended (the last teardowns' timers).
     drained_baseline: list[str] = field(default_factory=lambda: [])
     drained_baseline_tolerance: float = 0

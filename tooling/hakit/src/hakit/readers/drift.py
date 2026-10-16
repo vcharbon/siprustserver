@@ -56,6 +56,10 @@ def quantile(values: list[float], q: float) -> float:
     return ordered[max(0, min(len(ordered) - 1, int(-(-q * len(ordered) // 1)) - 1))]
 
 
+# The span before the load a baseline gauge is read over.
+BASELINE_SPAN = "2m"
+
+
 @dataclass
 class Check:
     name: str
@@ -231,7 +235,9 @@ class Drift:
         rows: list[str] = []
         verdict = "pass"
         for m in sp.drained_baseline:
-            before = self.vm.at(f"sum({m}{{{self.ns}}})", before_t)
+            # The median of the two minutes before the load: one scrape the
+            # run's own start disturbed is no baseline.
+            before = self.vm.at(f"quantile_over_time(0.5, sum({m}{{{self.ns}}})[{BASELINE_SPAN}:15s])", before_t)
             after = self.vm.at(f"sum({m}{{{self.ns}}})", after_t)
             if not before or not after:
                 verdict = "na" if verdict == "pass" else verdict
