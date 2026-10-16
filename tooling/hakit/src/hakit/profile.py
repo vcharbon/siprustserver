@@ -123,6 +123,7 @@ class Profile:
     defaults: dict[str, Json]
     raw: Json = field(compare=False)
     cdr_required: list[CdrRequired] = field(default_factory=lambda: [])
+    cdr_in_flight_s: float = 0.0
 
     def stream(self, name: str) -> Stream | None:
         return next((s for s in self.streams if s.name == name), None)
@@ -199,6 +200,7 @@ def parse_profile(d: Json) -> Profile:
             CdrRequired(jv.string(m, "ending"), jv.opt_int(m, "code"), jv.opt_bool(m, "retry_after"))
             for m in jv.objs(d, "cdr_required")
         ],
+        cdr_in_flight_s=jv.number(d, "cdr_in_flight_s", 0),
         capture=_capture(jv.opt_obj(d, "capture")),
         catalogs=jv.strings(d, "catalogs"),
         preflight=Preflight(

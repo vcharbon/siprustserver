@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "budget.v1.schema.json",
-  "$comment": "minor 3",
+  "$comment": "minor 4",
   "title": "budget.v1",
   "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
   "type": "object",
@@ -43,20 +43,15 @@
       "not": { "required": ["max_calls", "max_seconds"] }
     },
     "cdr_mismatch": {
-      "description": "CDR mismatches in the window: `max_calls`, or `max_seconds` of the summed offered rate of the run's `run` streams (calls end at the rate they start), optionally beyond the window's outage.",
+      "description": "CDR mismatches in the window, by kind: `missing` (a call that owes a CDR has none), `extra` (a CDR no call of the run owns), `duplicate` (a second distinct CDR of a call), `differs` (a disposition or a duration other than the caller saw). A kind not named allows 0.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "max_calls": { "type": "integer", "minimum": 0 },
-        "max_seconds": { "type": "number", "minimum": 0 },
-        "over_outage": {
-          "description": "max_seconds counts beyond the window's outage, from its first inject to its last recovered.",
-          "type": "boolean"
-        }
-      },
-      "if": { "properties": { "over_outage": { "const": true } }, "required": ["over_outage"] },
-      "then": { "required": ["max_seconds"] },
-      "oneOf": [{ "required": ["max_calls"] }, { "required": ["max_seconds"] }]
+        "missing": { "$ref": "#/$defs/counted" },
+        "extra": { "$ref": "#/$defs/counted" },
+        "duplicate": { "$ref": "#/$defs/counted" },
+        "differs": { "$ref": "#/$defs/counted" }
+      }
     },
     "recovery": {
       "description": "How traffic comes back after `healed`. Without `max_s`, it must be back before the window closes.",
@@ -166,6 +161,23 @@
         { "required": ["max_calls"] },
         { "required": ["max_seconds"] }
       ]
+    },
+    "counted": {
+      "description": "One kind of a counted class: `max_calls`, or `max_seconds` of the summed offered rate of the run's `run` streams (calls end at the rate they start), optionally beyond the window's outage; for `differs`, `excess_ms` also allows every duration that differs from the caller's by at most that much past the join's own tolerance.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_calls": { "type": "integer", "minimum": 0 },
+        "max_seconds": { "type": "number", "minimum": 0 },
+        "over_outage": {
+          "description": "max_seconds counts beyond the window's outage, from its first inject to its last recovered.",
+          "type": "boolean"
+        },
+        "excess_ms": { "type": "number", "minimum": 0 }
+      },
+      "if": { "properties": { "over_outage": { "const": true } }, "required": ["over_outage"] },
+      "then": { "required": ["max_seconds"] },
+      "not": { "required": ["max_calls", "max_seconds"] }
     }
   }
 }

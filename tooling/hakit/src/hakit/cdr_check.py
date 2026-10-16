@@ -6,7 +6,7 @@ consumer could not read). What makes the CDR measurement doubtful is a
 `class_failed` integrity finding: an export cut with CDRs still owed (whose
 missing CDRs are then not charged), unreadable payloads or observations, and no
 observation at all while answered calls exist. The CDRs of a firing stopped
-with `abandon` are left out: its killed calls wrote no record.
+with `abandon` join the firing instead of records (`cdr_firings`).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from . import jsonval as jv
+from .cdr_firings import abandoned_firings, firing_impacts, split
 from .cdrjoin import join
 from .classify import Impact
 from .jsonval import Json, as_obj
@@ -26,18 +27,6 @@ from .jsonl import read_jsonl
 
 def _failed(detail: str) -> Json:
     return integrity("class_failed", f"cdr_mismatch: {detail}")
-
-
-def abandoned_firings(run_dir: Path, run: str) -> list[str]:
-    """The Call-ID marks (`<run>-<event>`) of the load incidents' firings stopped
-    with `abandon`: their calls wrote no record, so their CDRs join none."""
-    return [
-        f"{run}-{jv.string(line, 'event')}"
-        for line in read_jsonl(run_dir / "events.jsonl")
-        if line.get("kind") == "facts"
-        and line.get("executable") == "heal"
-        and jv.obj(line, "facts").get("stop") == "abandon"
-    ]
 
 
 def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas: SchemaSet) -> tuple[list[Impact], list[Json]]:
@@ -56,20 +45,24 @@ def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas
     unread = jv.opt_number(collect, "unread") or 0
     if unread:
         found.append(_failed(f"the consumer could not read {unread:g} CDR payloads"))
-    good: list[Json] = []
+    valid: list[Json] = []
     bad = 0
-    run = jv.string(as_obj(json.loads((run_dir / "run-meta.json").read_text())), "run")
-    abandoned = abandoned_firings(run_dir, run)
     for line in read_jsonl(p):
         if schemas.errors("cdr-observation.v1", line):
             bad += 1
-        elif not any(mark in str(line.get("call_id")) for mark in abandoned):
-            good.append(line)
+        else:
+            valid.append(line)
     if bad:
         found.append(_failed(f"{bad} observations break cdr-observation.v1"))
+    run = jv.string(as_obj(json.loads((run_dir / "run-meta.json").read_text())), "run")
+    firings = abandoned_firings(run_dir, run)
+    good, of_firings = split(valid, firings)
     answered = sum(1 for r in records if jv.opt_number(r, "answered_at_ms") is not None)
     if not good and answered:
         found.append(_failed(f"no CDR observation for {answered} answered calls; is the consumer shipping?"))
         return [], found
     required = profile.cdr_required
-    return join(records, good, charge_missing=complete, required=lambda r: any(m.matches(r) for m in required)), found
+    out = join(records, good, charge_missing=complete, required=lambda r: any(m.matches(r) for m in required))
+    for f in firings:
+        out += firing_impacts(f, of_firings.get(f.mark, []), complete)
+    return out, found

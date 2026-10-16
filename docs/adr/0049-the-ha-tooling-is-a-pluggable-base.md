@@ -348,36 +348,48 @@ made. A run profile joins the two.
    §6.4) into `cdrs.jsonl`, once the consumer has consumed every CDR the
    system under test wrote (the lab's written and consumed counters over the
    run) and the shipped observations have stopped growing for 10 s, at most
-   300 s, long enough for a broker thawing late. The CDRs of a firing stopped
-   with `abandon` (their Call-IDs carry its event) join nothing: its killed
-   calls wrote no record. `cdrs-collect.json` keeps
+   300 s, long enough for a broker thawing late. The consumer acknowledges a
+   CDR only once its observation has landed, so a consumer killed in between
+   leaves the CDR to the broker's redelivery. `cdrs-collect.json` keeps
    whether that happened and the counts. Byte-identical observations (a
-   redelivery, a re-post) count once. Joined on `call_id`:
-   - an answered call with no CDR is charged at its `ended_at_ms`;
-   - a CDR with no record at its own `end_ms`;
-   - each distinct CDR after the first of a call at the record's
-     `ended_at_ms`;
-   - a CDR whose disposition differs from the record's at the record's
-     `ended_at_ms`;
-   - for a record ending `answered` (a planned teardown, timed by the
-     caller), a duration that differs from `ended_at_ms` − `answered_at_ms`
-     by more than 1 s plus the CDR's unit, at the record's `ended_at_ms`;
-   - for a `cut` or `stranded` call, an impact already, a CDR ending more
-     than 1 s plus its unit after the record's `ended_at_ms`: the call was
-     billed past the caller's end.
+   redelivery, a re-post) count once. Joined on `call_id`, each mismatch of a
+   kind:
+   - `missing`: an answered call with no CDR, charged at its `ended_at_ms`;
+   - `extra`: a CDR with no record, at its own `end_ms`;
+   - `duplicate`: each distinct CDR after the first of a call, at the
+     record's `ended_at_ms`;
+   - `differs`: a CDR whose disposition differs from the record's; for a
+     record ending `answered` (a planned teardown, timed by the caller), a
+     duration that differs from `ended_at_ms` − `answered_at_ms` by more than
+     1 s plus the CDR's unit; for a `cut` or `stranded` call, an impact
+     already, a CDR ending more than 1 s plus its unit after the record's
+     `ended_at_ms` (the call billed past the caller's end); each at the
+     record's `ended_at_ms`, with its excess past that tolerance.
 
    An unanswered call without a CDR is no mismatch, unless the profile's
    `cdr_required` names its ending (and optionally its final's code and
-   whether that final carried a Retry-After): such a call without a CDR is
-   charged at its `ended_at_ms`. A window allows `cdr_mismatch.max_calls`,
-   or `max_seconds` of the summed offered rate of the run's `run` streams
-   (calls end at the rate they start), with `over_outage` beyond the window's
-   outage as for `setup_failed`: a best-effort sink loses the CDRs of the
-   calls that end while its broker is gone. What leaves the CDR measurement in doubt is a
-   `class_failed` integrity finding, never impacts: an export cut with CDRs
-   still owed (its missing CDRs are not charged), payloads the consumer could
-   not read, observations off the schema, and no observation at all while
-   answered calls exist.
+   whether that final carried a Retry-After): such a call is `missing`. The
+   CDRs of a firing stopped with `abandon` (their Call-IDs carry its event)
+   join the firing instead of records: each call it placed owes one CDR, and
+   a second one of a Call-ID, fewer or more Call-IDs than calls placed are
+   charged at the instant its generator exited. A missing CDR whose call
+   ended outside every window but within the profile's `cdr_in_flight_s`
+   before a window opened belongs to that window: its CDR was still in the
+   sink when the fault hit; the value is stated from the system under test's
+   publish and confirm timeouts, never fitted. A `differs` whose caller
+   answer or end instant fell in a generator stall of its stream was measured
+   by the generator: it is listed in that stall's `generator_stall` finding,
+   never charged. A window allows each kind separately
+   (`cdr_mismatch.<kind>`): `max_calls`, or `max_seconds` of the summed
+   offered rate of the run's `run` streams (calls end at the rate they start),
+   with `over_outage` beyond the window's outage as for `setup_failed`; a
+   `differs` allowance may add `excess_ms`, every duration past the join's
+   tolerance by at most that much (a bound the budget derives, such as the
+   retransmission timers of a lossy plane). What leaves the CDR measurement in
+   doubt is a `class_failed` integrity finding, never impacts: an export cut
+   with CDRs still owed (its missing CDRs are not charged), payloads the
+   consumer could not read, observations off the schema, and no observation
+   at all while answered calls exist.
 9. **Events off the schedule.** `hakit fire <incident>` during a run and a
    `detected` event (named after what was detected, such as `stream_died`)
    open windows under the same rules. Their ids are `m<seq>-<incident>` and

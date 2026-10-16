@@ -1,19 +1,23 @@
 """The CDR join: the run's `cdr-observation.v1` lines against its records (ADR-0049 §3.8).
 
 Byte-identical observations (a broker redelivery, a re-post) count once.
-Joined on `call_id`: an answered call with no CDR is charged at its
-`ended_at_ms` (unless the export was cut with CDRs still owed); a CDR with no
-record at its own `end_ms`; each distinct CDR after the first of a call, a
-disposition that differs, and for a planned teardown (`ending: answered`) a
-duration that differs from the caller's by more than 1 s plus the CDR's unit,
-at the record's `ended_at_ms`. For a `cut` or `stranded` call the CDR may not
-end later than the caller's end plus that tolerance. An unanswered call
-without a CDR is no mismatch, unless the profile's `cdr_required` names it.
+Joined on `call_id`, each mismatch of a kind (its impact's `reason`):
+`missing`, an answered call with no CDR, charged at its `ended_at_ms` (unless
+the export was cut with CDRs still owed), and an unanswered one the
+profile's `cdr_required` names; `extra`, a CDR with no record, at its own
+`end_ms`; `duplicate`, each distinct CDR after the first of a call, at the
+record's `ended_at_ms`; `differs`, a disposition other than the caller saw,
+and for a planned teardown (`ending: answered`) a duration that differs from
+the caller's by more than 1 s plus the CDR's unit, at the record's
+`ended_at_ms` (for a `cut` or `stranded` call, a CDR ending later than the
+caller's end plus that tolerance). A `differs` impact carries its excess past
+the tolerance (`excess_ms`); a disposition that differs carries none.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from collections.abc import Callable
 
@@ -23,34 +27,40 @@ from .jsonval import Json
 
 CDR_MISMATCH = "cdr_mismatch"
 DURATION_TOLERANCE_MS = 1000
+MISSING, EXTRA, DUPLICATE, DIFFERS = "missing", "extra", "duplicate", "differs"
+KINDS = (MISSING, EXTRA, DUPLICATE, DIFFERS)
 NO_CDR = "answered call without a CDR"
 NO_REQUIRED_CDR = "a call that must have a CDR without one"
 
 
-def _impact(stream: str, call_id: str, at_ms: float, detail: str) -> Impact:
-    return Impact(CDR_MISMATCH, stream, call_id, at_ms, at_ms, detail=detail)
+def impact(stream: str, call_id: str, at_ms: float, kind: str, detail: str, excess_ms: float = math.inf) -> Impact:
+    return Impact(CDR_MISMATCH, stream, call_id, at_ms, at_ms, reason=kind, detail=detail, excess_ms=excess_ms)
 
 
-def _compare(r: Json, cdr: Json) -> str | None:
-    """Why `cdr` does not match record `r`, or None."""
+def _compare(r: Json, cdr: Json) -> tuple[str, float] | None:
+    """Why `cdr` does not match record `r`, with its excess past the
+    tolerance (infinite for a disposition), or None."""
     answered_at = jv.opt_number(r, "answered_at_ms")
     disposition = jv.string(cdr, "disposition")
     expected = "answered" if answered_at is not None else "not_answered"
     if disposition != expected:
-        return f"CDR {disposition}, the caller saw the call {expected.replace('_', ' ')}"
+        return f"CDR {disposition}, the caller saw the call {expected.replace('_', ' ')}", math.inf
     if answered_at is None:
         return None
     allowed = DURATION_TOLERANCE_MS + jv.number(cdr, "duration_unit_ms")
     ending = jv.string(r, "ending")
     if ending in ("cut", "stranded"):
         over = jv.number(cdr, "end_ms") - jv.number(r, "ended_at_ms")
-        return f"CDR ends {over:.0f} ms after the caller's end (allowed {allowed:g} ms)" if over > allowed else None
+        if over <= allowed:
+            return None
+        return f"CDR ends {over:.0f} ms after the caller's end (allowed {allowed:g} ms)", over - allowed
     if ending != "answered":
         return None
     caller_ms = jv.number(r, "ended_at_ms") - answered_at
     cdr_ms = jv.number(cdr, "duration_ms")
-    if abs(cdr_ms - caller_ms) > allowed:
-        return f"CDR duration {cdr_ms:g} ms, the caller's {caller_ms:g} ms (allowed {allowed:g} ms apart)"
+    apart = abs(cdr_ms - caller_ms)
+    if apart > allowed:
+        return f"CDR duration {cdr_ms:g} ms, the caller's {caller_ms:g} ms (allowed {allowed:g} ms apart)", apart - allowed
     return None
 
 
@@ -90,15 +100,15 @@ def join(
         mine = by_call.get(call_id, [])
         if not mine:
             if charge_missing and jv.opt_number(r, "answered_at_ms") is not None:
-                out.append(_impact(stream, call_id, ended, NO_CDR))
+                out.append(impact(stream, call_id, ended, MISSING, NO_CDR))
             elif charge_missing and required(r):
-                out.append(_impact(stream, call_id, ended, NO_REQUIRED_CDR))
+                out.append(impact(stream, call_id, ended, MISSING, NO_REQUIRED_CDR))
             continue
         why = _compare(r, mine[0])
         if why is not None:
-            out.append(_impact(stream, call_id, ended, why))
-        out += [_impact(stream, call_id, ended, f"CDR {i + 2} of the call") for i in range(len(mine) - 1)]
+            out.append(impact(stream, call_id, ended, DIFFERS, why[0], why[1]))
+        out += [impact(stream, call_id, ended, DUPLICATE, f"CDR {i + 2} of the call") for i in range(len(mine) - 1)]
     for call_id, mine in sorted(by_call.items()):
         if call_id not in seen:
-            out += [_impact("", call_id, jv.number(c, "end_ms"), "CDR without a record") for c in mine]
+            out += [impact("", call_id, jv.number(c, "end_ms"), EXTRA, "CDR without a record") for c in mine]
     return out

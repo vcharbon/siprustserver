@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "profile.v1.schema.json",
-  "$comment": "minor 5",
+  "$comment": "minor 6",
   "title": "profile.v1",
   "description": "A file `profiles/<name>.yaml`: one run. The load streams, the schedule of incident events, the budget of each event's window, and the defaults of an event the schedule did not fire. Impact outside every window is `unattributed`. ADR-0049.",
   "type": "object",
@@ -58,6 +58,12 @@
       "description": "Join the CDR consumer's observations of the run with its records (`cdr_mismatch`); the lab must offer the capability `cdr`.",
       "type": "boolean",
       "default": false
+    },
+    "cdr_in_flight_s": {
+      "description": "With `cdr_join`: how long a CDR stays in the system under test's sink after its call ended before the sink has delivered or dropped it (its publish and confirm timeouts), stated from the system's settings. A CDR missing for a call that ended this long or less before a window opened belongs to that window.",
+      "type": "number",
+      "minimum": 0,
+      "default": 0
     },
     "cdr_required": {
       "description": "With `cdr_join`: the calls never answered that must still have a CDR, each a matcher on the record (its `ending`, and optionally its `final_code` and whether its final carried a Retry-After). An answered call always must; a call no matcher names may have none.",

@@ -148,12 +148,15 @@ class SetupSlowAllowance:
 
 @dataclass(frozen=True)
 class CountAllowance:
-    """A counted class's allowance (`cdr_mismatch`): `max_calls`, or
-    `max_seconds` of an offered rate, optionally beyond the window's outage."""
+    """One kind of a counted class's allowance (a `cdr_mismatch` kind):
+    `max_calls`, or `max_seconds` of an offered rate, optionally beyond the
+    window's outage; `excess_ms` also allows every impact whose excess past
+    the join's tolerance is at most that much."""
 
     max_calls: int | None = 0
     max_seconds: float | None = None
     over_outage: bool = False
+    excess_ms: float | None = None
 
     def allowed(self, cps: float, outage_s: float = 0.0) -> float:
         if self.max_calls is not None:
@@ -181,7 +184,7 @@ class Budget:
     unexpected_ending: list[Allowance]
     setup_slow: SetupSlowAllowance
     raw: Json = field(compare=False)
-    cdr_mismatch: CountAllowance = CountAllowance()
+    cdr_mismatch: dict[str, CountAllowance] = field(default_factory=lambda: {})
     recovery: RecoveryRule = RecoveryRule()
     classes: dict[str, float] = field(default_factory=lambda: {})
 
@@ -214,6 +217,7 @@ def _count_allowance(d: Json) -> CountAllowance:
         max_calls=calls if calls is not None or seconds is not None else 0,
         max_seconds=seconds,
         over_outage=jv.boolean(d, "over_outage"),
+        excess_ms=jv.opt_number(d, "excess_ms"),
     )
 
 
@@ -231,7 +235,7 @@ def parse_budget(d: Json) -> Budget:
             over_outage=jv.boolean(slow, "over_outage"),
         ),
         raw=d,
-        cdr_mismatch=_count_allowance(jv.obj(d, "cdr_mismatch")),
+        cdr_mismatch={k: _count_allowance(jv.as_obj(v, k)) for k, v in jv.obj(d, "cdr_mismatch").items()},
         recovery=RecoveryRule(
             max_s=jv.opt_number(rec, "max_s"),
             tolerance=jv.number(rec, "tolerance", 0.1),

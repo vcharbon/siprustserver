@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import jsonval as jv
 from .cdr_check import cdr_impacts_of
+from .cdrjoin import DIFFERS
 from .classes import read_counts
 from .jsonl import read_jsonl
 from .classify import SETUP_FAILED, Classified, Impact, SetupLatency, classify
@@ -45,6 +46,7 @@ class _Calls:
         self.per_stream: Counter[str] = Counter()
         self.bad: dict[str, list[str]] = defaultdict(list)
         self.dups = 0
+        self.by_id: dict[str, Json] = {}
         seen: set[str] = set()
         for r in records:
             stream = str(r.get("stream", "?"))
@@ -58,6 +60,7 @@ class _Calls:
             if call_id in seen:
                 self.dups += 1
             seen.add(call_id)
+            self.by_id.setdefault(call_id, r)
             self.valid.append((r, classify(r, shape)))
 
     def starts(self) -> dict[str, list[float]]:
@@ -74,6 +77,21 @@ def _spoiled_timeout(imp: Impact, stalls: list[Stall], profile: Profile) -> Stal
     if imp.cls != SETUP_FAILED or imp.reason != "timeout" or s is None:
         return None
     return stall_holding(stalls, imp.stream, imp.started_at_ms + s.setup_deadline_s * 1000)
+
+
+def _spoiled_cdr(imp: Impact, by_id: dict[str, Json], stalls: list[Stall]) -> Stall | None:
+    """The stall a CDR that differs from its record was compared across: the
+    caller's answer or end instant fell in a stall of its stream, so the
+    generator, not the system under test, measured the call."""
+    r = by_id.get(imp.call_id)
+    if imp.reason != DIFFERS or r is None:
+        return None
+    for key in ("answered_at_ms", "ended_at_ms"):
+        at = jv.opt_number(r, key)
+        st = None if at is None else stall_holding(stalls, imp.stream, at)
+        if st is not None:
+            return st
+    return None
 
 
 def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, StreamSamples]:
@@ -180,7 +198,14 @@ def compute(run_dir: Path, schemas: SchemaSet) -> Json:
         found.append(integrity("record_gap", f"{calls.dups} records repeat a Call-ID already recorded"))
 
     recovered = recover_windows(windows, _samples(calls, stalls, profile), budgets)
-    cdr_impacts, cdr_found = cdr_impacts_of(run_dir, profile, [r for r, _ in calls.valid], schemas)
+    cdr_all, cdr_found = cdr_impacts_of(run_dir, profile, [r for r, _ in calls.valid], schemas)
+    cdr_impacts: list[Impact] = []
+    for imp in cdr_all:
+        st = _spoiled_cdr(imp, calls.by_id, stalls)
+        if st is None:
+            cdr_impacts.append(imp)
+        else:
+            stalled[st].append(imp.call_id)
     class_impacts, class_found = read_counts(run_dir, jv.strings(meta, "classes"))
     found += cdr_found + class_found
 
@@ -195,6 +220,7 @@ def compute(run_dir: Path, schemas: SchemaSet) -> Json:
         counted=cdr_impacts + class_impacts,
         stall_of=lambda lat: stall_of(stalls, lat.stream, lat.at_ms - lat.ms, lat.at_ms),
         run_cps=sum(jv.number(s, "cps") for s in streams_doc if s.get("start", "run") == "run"),
+        cdr_in_flight_ms=profile.cdr_in_flight_s * 1000,
     )
     for lat, st in judged.stalled:
         stalled[st].append(lat.call_id)

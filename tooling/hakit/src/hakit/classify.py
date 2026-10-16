@@ -7,6 +7,7 @@ generator saw ended as its leg expects. `producer_verdict` is never read.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 
 from . import jsonval as jv
@@ -38,6 +39,8 @@ class Impact:
     detail: str = ""
     # The final carried a `Retry-After` (the record's `retry_after_s` is set).
     retry_after: bool = False
+    # How far a counted impact went past its own tolerance (a CDR duration).
+    excess_ms: float = math.inf
 
     @property
     def budgetable(self) -> bool:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kit import T0, record, rejected
+from kit import T0, paced, record, rejected
 from rundir import SCHEMAS, kill, run_dir
 
 from hakit import jsonval as jv
@@ -76,10 +76,10 @@ def test_a_cut_call_compares_presence_and_disposition_only() -> None:
     assert details([cut], []) == [("c", T0 + 9_000, "answered call without a CDR")]
 
 
-def test_the_verdict_charges_mismatches_to_their_window_and_outside_as_unattributed(tmp_path: Path) -> None:
+def test_the_verdict_charges_mismatches_by_kind_to_their_window_and_outside_as_unattributed(tmp_path: Path) -> None:
     inside = record("in", T0 + 100_000)  # ends at +130 s, inside the window [+100 s, +145 s]
     outside = record("out", T0 + 300_000)
-    budget: Json = {"schema": "budget.v1", "name": "cdr", "description": "d", "cdr_mismatch": {"max_calls": 1}}
+    budget: Json = {"schema": "budget.v1", "name": "cdr", "description": "d", "cdr_mismatch": {"missing": {"max_calls": 1}}}
     d = run_dir(
         tmp_path,
         [inside, outside],
@@ -92,20 +92,21 @@ def test_the_verdict_charges_mismatches_to_their_window_and_outside_as_unattribu
     v = compute(d, SCHEMAS)
     assert SCHEMAS.errors("verdict.v1", v) == []
     (w,) = jv.objs(v, "windows")
-    rows = [(r["class"], r["count"], r["allowed"], r["finding"], r["call_ids"]) for r in jv.objs(w, "impacts")]
-    assert rows == [("cdr_mismatch", 2, 1.0, True, ["in", "ghost"])]
+    rows = [(r["reason"], r["count"], r["allowed"], r["finding"], r["call_ids"]) for r in jv.objs(w, "impacts")]
+    # The missing CDR is within its kind's allowance; an extra one allows none.
+    assert rows == [("extra", 1, 0.0, True, ["ghost"]), ("missing", 1, 1.0, False, ["in"])]
     (u,) = jv.objs(v, "unattributed")
-    assert (u["class"], u["count"], u["call_ids"], "stream" in u) == ("cdr_mismatch", 1, ["out"], False)
+    assert (u["class"], u["reason"], u["count"], u["call_ids"], "stream" in u) == ("cdr_mismatch", "missing", 1, ["out"], False)
 
 
 def test_a_mismatch_allowance_in_seconds_reads_the_run_rate_beyond_the_outage(tmp_path: Path) -> None:
     # The window's outage is its inject to its recovered: 5 s. At 0.2 cps,
-    # (5 s + 5 s) allows 2 mismatches; a third is a finding.
+    # (5 s + 5 s) allows 2 missing CDRs; a third is a finding.
     budget: Json = {
         "schema": "budget.v1",
         "name": "sink",
         "description": "d",
-        "cdr_mismatch": {"max_seconds": 5, "over_outage": True},
+        "cdr_mismatch": {"missing": {"max_seconds": 5, "over_outage": True}},
     }
     billed = record("billed", T0)
     lost = [record(f"l{i}", T0 + 100_000 + i * 1_000, ended=1_000) for i in range(3)]
@@ -128,26 +129,96 @@ def test_a_mismatch_allowance_in_seconds_reads_the_run_rate_beyond_the_outage(tm
     assert rows("three", 3) == [(3, 2.0, True)]
 
 
-def test_the_cdrs_of_an_abandoned_firing_join_no_record(tmp_path: Path) -> None:
-    # An `orphan` firing's calls were killed with the generator: no record,
-    # and their CDRs are no mismatch. A CDR of no firing still is.
+def test_a_cdr_lost_in_the_sink_just_before_a_window_belongs_to_that_window(tmp_path: Path) -> None:
+    # The call ended 0.5 s before the inject: its CDR was still in the sink
+    # (2 s in flight) when the fault hit. 3 s before, it was not.
+    budget: Json = {"schema": "budget.v1", "name": "sink", "description": "d", "cdr_mismatch": {"missing": {"max_calls": 5}}}
+    at = T0 + 100_000
+    lost = [record("late", at - 30_500), record("early", at - 33_000)]  # each ends 30 s after its start
+    d = run_dir(
+        tmp_path,
+        [record("billed", T0), *lost],
+        calls=3,
+        events=kill(1, at, budget="sink"),
+        budgets=[budget],
+        profile={"cdr_join": True, "generator_stall_ms": 3_600_000, "cdr_in_flight_s": 2},
+        cdrs=[cdr("billed", T0, 100, 30_000)],
+    )
+    v = compute(d, SCHEMAS)
+    (w,) = jv.objs(v, "windows")
+    assert [(r["reason"], r["call_ids"]) for r in jv.objs(w, "impacts")] == [("missing", ["late"])]
+    assert [(u["reason"], u["call_ids"]) for u in jv.objs(v, "unattributed")] == [("missing", ["early"])]
+
+
+def test_a_duration_within_the_kinds_excess_is_allowed(tmp_path: Path) -> None:
+    # A BYE retransmitted once on a lossy plane ends the CDR 1.5 s after the
+    # caller's end; excess_ms 1500 past the join's 1 s + unit allows it.
+    budget: Json = {"schema": "budget.v1", "name": "lossy", "description": "d", "cdr_mismatch": {"differs": {"excess_ms": 1500}}}
+    at = T0 + 100_000
+    calls = [record("near", at + 1_000, ended=10_000), record("far", at + 2_000, ended=10_000)]
+    d = run_dir(
+        tmp_path,
+        calls,
+        calls=2,
+        events=kill(1, at, budget="lossy"),
+        budgets=[budget],
+        profile={"cdr_join": True, "generator_stall_ms": 3_600_000},
+        cdrs=[cdr("near", at + 1_000, 100, 12_400), cdr("far", at + 2_000, 100, 12_600)],
+    )
+    (w,) = jv.objs(compute(d, SCHEMAS), "windows")
+    assert [(r["reason"], r["count"], r["allowed"], r["finding"]) for r in jv.objs(w, "impacts")] == [("differs", 2, 1.0, True)]
+
+
+def test_the_cdrs_of_an_abandoned_firing_join_its_calls(tmp_path: Path) -> None:
+    # An `orphan` firing placed 3 calls, killed with the generator: no record.
+    # Each owes one CDR: one has two, one has none, and a CDR of no firing
+    # stays a CDR without a record.
+    at = T0 + 100_000
     heal: Json = {
         "kind": "facts",
-        "event": "009-orphan",
+        "event": "001-kill_worker",
         "step": "orphan",
         "executable": "heal",
-        "facts": {"stream": "orphaned", "stop": "abandon"},
+        "facts": {"stream": "orphaned", "stop": "abandon", "calls": 3, "exited_at_ms": at + 105},
     }
+    budget: Json = {"schema": "budget.v1", "name": "loose", "description": "d"}
     d = run_dir(
         tmp_path,
         [ANSWERED],
         calls=1,
-        events=[heal],
+        events=[*kill(1, at, budget="loose"), heal],
+        budgets=[budget],
         profile={"cdr_join": True, "generator_stall_ms": 3_600_000},
-        cdrs=[cdr("a", T0, 100, 30_000), cdr("7-1-r-009-orphan@h", T0, 100, 5_000), cdr("ghost", T0, None, 500)],
+        cdrs=[
+            cdr("a", T0, 100, 30_000),
+            cdr("7-1-r-001-kill_worker@h", at, 100, 5_000),
+            cdr("7-1-r-001-kill_worker@h", at, 100, 6_000),
+            cdr("8-1-r-001-kill_worker@h", at, 100, 5_000),
+            cdr("ghost", T0, None, 500),
+        ],
     )
-    (u,) = jv.objs(compute(d, SCHEMAS), "unattributed")
-    assert (u["class"], u["count"], u["call_ids"]) == ("cdr_mismatch", 1, ["ghost"])
+    v = compute(d, SCHEMAS)
+    (w,) = jv.objs(v, "windows")
+    rows = {r["reason"]: (r["count"], r["call_ids"]) for r in jv.objs(w, "impacts")}
+    assert rows == {"duplicate": (1, ["7-1-r-001-kill_worker@h"]), "missing": (1, [])}
+    (u,) = jv.objs(v, "unattributed")
+    assert (u["reason"], u["call_ids"]) == ("extra", ["ghost"])
+
+
+def test_a_cdr_that_differs_from_a_call_measured_across_a_stall_is_spoiled(tmp_path: Path) -> None:
+    # 20 cps with no start for 1 s from +60 s: the generator stalled. A call it
+    # read the end of in that stall is compared to its CDR by the generator's
+    # clock: no impact, a generator_stall finding.
+    stall_at = T0 + 60_000
+    recs = [r for r in paced("p", T0, T0 + 120_000, 20) if not stall_at < jv.number(r, "started_at_ms") < stall_at + 1000]
+    late = record("late", stall_at - 30_100, ended=30_600)  # its end is read 500 ms into the stall
+    recs.append(late)
+    cdrs = [cdr(jv.string(r, "call_id"), jv.number(r, "started_at_ms"), 100, 30_000) for r in recs if r is not late]
+    cdrs.append(cdr("late", stall_at - 30_100, 100, 28_000))
+    d = run_dir(tmp_path, recs, calls=len(recs), events=[], profile={"cdr_join": True}, cdrs=cdrs)
+    v = compute(d, SCHEMAS)
+    assert jv.objs(v, "unattributed") == []
+    assert [(i["kind"], i["call_ids"]) for i in jv.objs(v, "integrity")] == [("generator_stall", ["late"])]
 
 
 def test_cdrs_off_the_schema_or_missing_make_the_run_invalid(tmp_path: Path) -> None:
