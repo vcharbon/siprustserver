@@ -76,8 +76,9 @@ impl Consumer {
             tracing::warn!(error = %e, "CDR payload parse error");
         }
         if let Some(sink) = &self.sink {
-            if let Some(obs) = self.view.observe(data) {
-                sink.offer(obs);
+            match self.view.observe(data) {
+                Some(obs) => sink.offer(obs),
+                None => sink.note_unread(),
             }
         }
     }
@@ -166,5 +167,67 @@ pub async fn run(view: Arc<dyn ObservationView>) {
             );
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observation::JsonRecordView;
+    use crate::shipper::{spawn_with, Pacing};
+
+    const RECORD: &[u8] = br#"{"call_ref":"r","created_at":1000,"terminated_at":3000,"a_leg":{"call_id":"c1","from_tag":"f","state":"terminated"},"b_legs":[],"events":[],"decision_log":[],"termination":null}"#;
+
+    fn consumer(sink: Option<ObservationSink>) -> Consumer {
+        Consumer {
+            payload: Payload::Json,
+            metrics: Arc::new(Metrics::default()),
+            view: Arc::new(JsonRecordView),
+            sink,
+        }
+    }
+
+    /// A sink whose shipper posts nowhere reachable for 10 s: what is offered stays queued.
+    fn parked_sink(ship: &Arc<ShipMetrics>, queue: usize) -> ObservationSink {
+        let pacing = Pacing {
+            flush: Duration::from_secs(10),
+            retry: Duration::from_secs(10),
+            post_timeout: Duration::from_secs(10),
+        };
+        spawn_with(
+            crate::shipper::Endpoint { host: "127.0.0.1".into(), port: 9 },
+            ship.clone(),
+            pacing,
+            queue,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_readable_delivery_is_offered_and_an_unreadable_one_is_counted() {
+        let ship = Arc::new(ShipMetrics::default());
+        let c = consumer(Some(parked_sink(&ship, 1)));
+        c.deliver(RECORD);
+        c.deliver(b"<cdr/>");
+        // The second readable one finds the one-slot queue taken: dropped, never waited on.
+        c.deliver(RECORD);
+        c.deliver(RECORD);
+        let text = ship.prometheus_text();
+        assert!(text.contains("cdr_observations_unread_total 1"), "{text}");
+        // The shipper task has not run between the synchronous deliveries: the
+        // first stays queued, the next two find the queue full.
+        assert!(text.contains("cdr_observations_dropped_total 2"), "{text}");
+        assert!(c.metrics.prometheus_text().contains("cdr_consumed_total 3"));
+    }
+
+    #[test]
+    fn without_a_sink_a_delivery_is_only_counted() {
+        let c = consumer(None);
+        c.deliver(RECORD);
+        c.deliver(b"<cdr/>");
+        let text = c.metrics.prometheus_text();
+        assert!(
+            text.contains("cdr_consumed_total 1") && text.contains("cdr_parse_errors_total 1"),
+            "{text}"
+        );
     }
 }

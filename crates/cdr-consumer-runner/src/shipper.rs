@@ -23,9 +23,25 @@ use crate::observation::CdrObservation;
 pub const BATCH: usize = 1000;
 /// Observations waiting to be shipped before new ones are dropped.
 pub const QUEUE: usize = 100_000;
-const FLUSH: Duration = Duration::from_secs(1);
-const RETRY: Duration = Duration::from_secs(2);
-const POST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// When a batch goes out and how a failed post is retried.
+#[derive(Debug, Clone, Copy)]
+pub struct Pacing {
+    /// A batch goes out this long after its first observation, or full.
+    pub flush: Duration,
+    /// A failed post is posted again after this.
+    pub retry: Duration,
+    /// A post that has not answered by then failed.
+    pub post_timeout: Duration,
+}
+
+impl Pacing {
+    pub const DEFAULT: Pacing = Pacing {
+        flush: Duration::from_secs(1),
+        retry: Duration::from_secs(2),
+        post_timeout: Duration::from_secs(10),
+    };
+}
 const INSERT: &str = "/insert/jsonline?_stream_fields=source&_msg_field=_msg&_time_field=_time";
 
 /// Observations shipped.
@@ -49,14 +65,22 @@ pub const POST_FAILURES: Family = Family::counter(
     "posts of a batch of CDR observations that failed (the batch is posted again)",
 );
 
+/// Payloads the observation view could not read: CDRs the join never sees.
+pub const UNREAD: Family = Family::counter(
+    "cdr_observations_unread_total",
+    Labels::None,
+    "CDR payloads the observation view could not read, so no observation was shipped for them",
+);
+
 /// Every family [`ShipMetrics::prometheus_text`] renders, in order.
-pub const FAMILIES: &[Family] = &[SHIPPED, DROPPED, POST_FAILURES];
+pub const FAMILIES: &[Family] = &[SHIPPED, DROPPED, POST_FAILURES, UNREAD];
 
 #[derive(Default)]
 pub struct ShipMetrics {
     shipped: AtomicU64,
     dropped: AtomicU64,
     post_failures: AtomicU64,
+    unread: AtomicU64,
 }
 
 impl ShipMetrics {
@@ -65,6 +89,7 @@ impl ShipMetrics {
         SHIPPED.render_value(&mut s, self.shipped.load(Ordering::Relaxed));
         DROPPED.render_value(&mut s, self.dropped.load(Ordering::Relaxed));
         POST_FAILURES.render_value(&mut s, self.post_failures.load(Ordering::Relaxed));
+        UNREAD.render_value(&mut s, self.unread.load(Ordering::Relaxed));
         s
     }
 }
@@ -106,17 +131,33 @@ pub struct ObservationSink {
 }
 
 impl ObservationSink {
+    /// Queues one observation; a full queue drops it and counts it.
     pub fn offer(&self, obs: CdrObservation) {
         if self.tx.try_send(obs).is_err() {
             self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    /// Counts a payload the observation view could not read.
+    pub fn note_unread(&self) {
+        self.metrics.unread.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Starts the shipping task on the current runtime.
 pub fn spawn(endpoint: Endpoint, metrics: Arc<ShipMetrics>) -> ObservationSink {
-    let (tx, rx) = mpsc::channel(QUEUE);
-    tokio::spawn(ship(endpoint, rx, metrics.clone()));
+    spawn_with(endpoint, metrics, Pacing::DEFAULT, QUEUE)
+}
+
+/// [`spawn`] with its pacing and queue bound given.
+pub fn spawn_with(
+    endpoint: Endpoint,
+    metrics: Arc<ShipMetrics>,
+    pacing: Pacing,
+    queue: usize,
+) -> ObservationSink {
+    let (tx, rx) = mpsc::channel(queue);
+    tokio::spawn(ship(endpoint, rx, metrics.clone(), pacing));
     ObservationSink { tx, metrics }
 }
 
@@ -169,10 +210,11 @@ async fn ship(
     endpoint: Endpoint,
     mut rx: mpsc::Receiver<CdrObservation>,
     metrics: Arc<ShipMetrics>,
+    pacing: Pacing,
 ) {
     while let Some(first) = rx.recv().await {
         let mut batch = vec![line(&first)];
-        let deadline = tokio::time::Instant::now() + FLUSH;
+        let deadline = tokio::time::Instant::now() + pacing.flush;
         while batch.len() < BATCH {
             match tokio::time::timeout_at(deadline, rx.recv()).await {
                 Ok(Some(obs)) => batch.push(line(&obs)),
@@ -181,12 +223,12 @@ async fn ship(
         }
         let body = batch.join("\n") + "\n";
         loop {
-            match tokio::time::timeout(POST_TIMEOUT, post(&endpoint, &body)).await {
+            match tokio::time::timeout(pacing.post_timeout, post(&endpoint, &body)).await {
                 Ok(Ok(true)) => break,
                 outcome => {
                     metrics.post_failures.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(?outcome, host = %endpoint.host, "CDR observation post failed; retrying");
-                    tokio::time::sleep(RETRY).await;
+                    tokio::time::sleep(pacing.retry).await;
                 }
             }
         }
@@ -238,5 +280,67 @@ mod tests {
             sink.offer(CdrObservation::new("c".into(), 0, None, 0, 1));
         }
         assert!(metrics.prometheus_text().contains("cdr_observations_dropped_total 2"));
+    }
+
+    /// One HTTP request off `stream`: its headers, then `Content-Length` bytes of body.
+    async fn read_request(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            buf.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&buf).to_string();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Content-Length: "))
+                    .map_or(0, |v| v.trim().parse().unwrap());
+                if body.len() >= len || n == 0 {
+                    return text;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_post_is_posted_again_and_counted_shipped_once_it_lands() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for status in ["500 Internal Server Error", "204 No Content"] {
+                let (mut s, _) = listener.accept().await.unwrap();
+                bodies.push(read_request(&mut s).await);
+                s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            bodies
+        });
+        let metrics = Arc::new(ShipMetrics::default());
+        let pacing = Pacing {
+            flush: Duration::from_millis(50),
+            retry: Duration::from_millis(20),
+            post_timeout: Duration::from_secs(5),
+        };
+        let sink =
+            spawn_with(Endpoint { host: "127.0.0.1".into(), port }, metrics.clone(), pacing, 16);
+        for i in 0..3 {
+            sink.offer(CdrObservation::new(format!("c{i}"), 0, None, 1000, 1));
+        }
+        let bodies = tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap();
+        for b in &bodies {
+            assert!(b.starts_with(&format!("POST {INSERT} HTTP/1.1")), "{b}");
+            assert_eq!(b.matches("\"source\":\"cdr-consumer\"").count(), 3, "{b}");
+        }
+        for _ in 0..100 {
+            if metrics.prometheus_text().contains("cdr_observations_shipped_total 3") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let text = metrics.prometheus_text();
+        assert!(text.contains("cdr_observations_shipped_total 3"), "{text}");
+        assert!(text.contains("cdr_observation_post_failures_total 1"), "{text}");
     }
 }

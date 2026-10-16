@@ -349,6 +349,7 @@ cdr-consumer-runner cdr_parse_errors_total counter fixed {}
 cdr-consumer-runner cdr_observations_shipped_total counter fixed {}
 cdr-consumer-runner cdr_observations_dropped_total counter fixed {}
 cdr-consumer-runner cdr_observation_post_failures_total counter fixed {}
+cdr-consumer-runner cdr_observations_unread_total counter fixed {}
 cdr-consumer-runner log_lines_dropped_total counter fixed {}
 cdr-consumer-runner trace_dropped_no_exporter_total counter fixed {}
 cdr-consumer-runner trace_denied_rate_total counter fixed {}

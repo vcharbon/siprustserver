@@ -20,8 +20,6 @@ pub struct CdrObservation {
     pub duration_unit_ms: i64,
     /// `answered` or `not_answered`.
     pub disposition: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub final_code: Option<i64>,
 }
 
 impl CdrObservation {
@@ -45,7 +43,6 @@ impl CdrObservation {
             duration_ms: answer_ms.map_or(0, |a| (end_ms - a).max(0)),
             duration_unit_ms,
             disposition: if answer_ms.is_some() { "answered" } else { "not_answered" },
-            final_code: None,
         }
     }
 }
