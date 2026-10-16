@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 
 from . import jsonval as jv
 from .jsonval import Json
-from .model import ExpectedEnding, Shape
+from .model import ExpectedEnding, Leg, Shape
 
 SETUP_FAILED = "setup_failed"
 UNEXPECTED_ENDING = "unexpected_ending"
@@ -41,11 +41,15 @@ class Impact:
     retry_after: bool = False
     # How far a counted impact went past its own tolerance (a CDR duration).
     excess_ms: float = math.inf
+    # A leg that opens after an in-dialog consult stayed unopened, and the
+    # consult's asking leg received the contract's refusal (at `at_ms`).
+    consult_refused: bool = False
 
     @property
     def budgetable(self) -> bool:
-        """Takes a budget: a failed or unexpected setup before answer."""
-        return self.cls == SETUP_FAILED or (self.cls == UNEXPECTED_ENDING and not self.answered)
+        """Takes a budget: a failed or unexpected setup before answer, or a
+        consult's contract refusal on an otherwise clean call."""
+        return self.cls == SETUP_FAILED or (self.cls == UNEXPECTED_ENDING and not self.answered) or self.consult_refused
 
 
 @dataclass(frozen=True)
@@ -94,7 +98,8 @@ def _leg_impacts(r: Json, shape: Shape, base: Impact) -> list[Impact]:
             continue
         got = seen.get(leg.role)
         if got is None:
-            out.append(replace(base, code=0, reason=f"leg:{leg.role}", detail="leg never opened", retry_after=False))
+            unopened = replace(base, code=0, reason=f"leg:{leg.role}", detail="leg never opened", retry_after=False)
+            out.append(_consult_refused(r, leg, seen, unopened))
             continue
         code = jv.opt_int(got, "final_code")
         ending = jv.string(got, "ending")
@@ -103,6 +108,21 @@ def _leg_impacts(r: Json, shape: Shape, base: Impact) -> list[Impact]:
                 replace(base, code=code or 0, reason=f"leg:{leg.role}", detail=f"leg ended {ending}", retry_after=False)
             )
     return out
+
+
+def _consult_refused(r: Json, leg: Leg, seen: dict[str, Json], unopened: Impact) -> Impact:
+    """The unopened leg of an answered call, charged at its consult's refusal
+    when the leg opens after a consult (`after_consult`), its asking leg
+    received one of the contract's refusals and the call holds no other
+    failure; otherwise unchanged."""
+    consult = leg.after_consult
+    asking = seen.get(consult.by) if consult is not None else None
+    if consult is None or asking is None or not unopened.answered or jv.objs(r, "failures"):
+        return unopened
+    for req in jv.objs(asking, "received"):
+        if any(refusal.matches(req) for refusal in consult.refusals):
+            return replace(unopened, at_ms=jv.number(req, "at_ms"), detail="consult refused", consult_refused=True)
+    return replace(unopened, detail="leg never opened; its consult drew no contract refusal")
 
 
 def setup_latency(r: Json) -> SetupLatency | None:

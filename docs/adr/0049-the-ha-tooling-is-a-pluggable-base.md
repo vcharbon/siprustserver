@@ -243,7 +243,7 @@ made. A run profile joins the two.
    | class | from the record | instant | budget |
    |---|---|---|---|
    | `setup_failed` | the shape expects `answered` and the call ended before answer some other way: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0). Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms` | per key |
-   | `unexpected_ending` | any other caller ending not in `expected` (`rejected` with another code, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing | per key before answer; 0 after answer |
+   | `unexpected_ending` | any other caller ending not in `expected` (`rejected` with another code, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing; a consult's contract refusal (§3.2) at the refusal | per key before answer; 0 after answer but a consult's contract refusal |
    | `setup_slow` | from `started_at_ms` to `first_provisional_at_ms` (to `setup_ended_at_ms` when no provisional came) above the threshold; ring time never counts | that instant | count |
    | `dialog_request_failed` | each `failures` entry of kind `dialog_request` | its `at_ms` | 0 |
    | `call_cut` | `ending: cut` | the failure that cut it, else `ended_at_ms` | 0 |
@@ -267,7 +267,18 @@ made. A run profile joins the two.
    `protocol_anomaly`) and an `unexpected_ending` after answer take no budget
    at all, and the budget schema has no place for them: an established call
    is what HA protects, and a call answered where the treatment should have
-   refused it is a treatment that stopped working.
+   refused it is a treatment that stopped working. One exception: a catalog
+   leg declared `after_consult` opens only after an in-dialog consult of a
+   decision service that another leg (`by`) asks for, and the catalog states
+   the answers the consult's contract gives `by` when that service fails
+   (`refusals`: method, subscription state, body prefix). On an answered call
+   with no `failures` entry, that leg unopened while `by` received one of
+   them is the consult's failure: an `unexpected_ending` keyed `leg:<role>`,
+   code 0, at the refusal's instant, which a window's budget may allow.
+   Unopened with any other answer, or with any other failure in the call, it
+   stays an in-dialog impact; the call's other impacts and its CDRs are
+   judged as any call's. The generator records what each leg received
+   in dialog for this (`legs[].received`).
 3. **Keys.** A `setup_failed` or `unexpected_ending` entry names `stream` (or
    `*`, each stream separately), `code`, `reason` (or `*`) and either
    `max_calls` or `max_seconds`. `max_seconds` is the allowance in seconds of
@@ -569,7 +580,9 @@ made. A run profile joins the two.
    legs it opens (`legs`: a role, the R-URI prefixes that select it on the
    generator's callee socket, the leg endings expected, and with `when` the
    caller endings under which the treatment opens the leg: a call refused
-   before any leg opens judges none), the caller endings that count as
+   before any leg opens judges none, and with `after_consult` the leg that
+   asks for the in-dialog consult the leg waits on and that consult's
+   contract refusals, §3.2), the caller endings that count as
    success (`expected`) and whether it is `load_safe`.
 2. The runner, the SIPp injection-file renderer, loadgen and the classifier
    read the same catalog, so the treatment a stream asks for and the ending it

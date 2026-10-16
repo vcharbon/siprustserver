@@ -255,12 +255,37 @@ class ExpectedEnding:
 
 
 @dataclass(frozen=True)
+class Refusal:
+    """One answer a consult's contract gives the asking leg when the decision service fails."""
+
+    method: str
+    subscription_state: str | None = None
+    body_hex_prefix: str | None = None
+
+    def matches(self, req: Json) -> bool:
+        if jv.string(req, "method").upper() != self.method.upper():
+            return False
+        if self.subscription_state is not None and jv.opt_string(req, "subscription_state") != self.subscription_state:
+            return False
+        return self.body_hex_prefix is None or (jv.opt_string(req, "body_hex") or "").startswith(self.body_hex_prefix)
+
+
+@dataclass(frozen=True)
+class AfterConsult:
+    """The leg opens only after an in-dialog consult the leg `by` asks for."""
+
+    by: str
+    refusals: list[Refusal]
+
+
+@dataclass(frozen=True)
 class Leg:
     role: str
     ruri_prefixes: list[str]
     expected: list[ExpectedEnding]
     # The caller endings under which the leg opens; None: every expected one.
     when: list[ExpectedEnding] | None = None
+    after_consult: AfterConsult | None = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +325,20 @@ def _endings(items: list[Json]) -> list[ExpectedEnding]:
     return out
 
 
+def _after_consult(d: Json) -> AfterConsult:
+    return AfterConsult(
+        by=jv.string(d, "by"),
+        refusals=[
+            Refusal(
+                method=jv.string(r, "method"),
+                subscription_state=jv.opt_string(r, "subscription_state"),
+                body_hex_prefix=jv.opt_string(r, "body_hex_prefix"),
+            )
+            for r in jv.objs(d, "refusals")
+        ],
+    )
+
+
 def parse_catalog(d: Json) -> Catalog:
     name = jv.string(d, "name")
     shapes: list[Shape] = []
@@ -317,6 +356,7 @@ def parse_catalog(d: Json) -> Catalog:
                         ruri_prefixes=jv.strings(leg, "ruri_prefixes"),
                         expected=_endings(jv.objs(leg, "expected")),
                         when=_endings(jv.objs(leg, "when")) if "when" in leg else None,
+                        after_consult=_after_consult(jv.obj(leg, "after_consult")) if "after_consult" in leg else None,
                     )
                     for leg in jv.objs(s, "legs")
                 ],

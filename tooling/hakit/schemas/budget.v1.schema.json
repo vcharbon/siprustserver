@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "budget.v1.schema.json",
-  "$comment": "minor 4",
+  "$comment": "minor 5",
   "title": "budget.v1",
-  "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
+  "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer (but a consult's contract refusal, below) and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "name", "description"],
@@ -21,7 +21,7 @@
       "items": { "$ref": "#/$defs/keyed" }
     },
     "unexpected_ending": {
-      "description": "Allowances for pre-answer endings the catalog does not expect for a shape that does not expect an answer either (a reject with another code). After answer an unexpected ending takes no budget: the codes here are never 2xx.",
+      "description": "Allowances for pre-answer endings the catalog does not expect for a shape that does not expect an answer either (a reject with another code). After answer an unexpected ending takes no budget, with one exception: a catalog leg that opens only after an in-dialog consult (`after_consult`), left unopened while its asking leg received the consult's contract refusal on a call with no other failure, is allowed by code 0 and reason `leg:<role>`. The codes here are never 2xx.",
       "type": "array",
       "items": { "$ref": "#/$defs/keyed" }
     },

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "call-outcome.v1.schema.json",
-  "$comment": "minor 2",
+  "$comment": "minor 3",
   "title": "call-outcome.v1",
   "description": "One record per call a caller-side generator placed, written once when the generator is done with the call, whatever path it took. It states what the caller observed; it never judges it. The classifier compares it with the treatment catalog. Times are Unix epoch milliseconds. ADR-0049.",
   "type": "object",
@@ -233,6 +233,29 @@
           "description": "The leg sent an 18x with a session description before its final.",
           "type": "boolean",
           "default": false
+        },
+        "received": {
+          "description": "The in-dialog requests the leg received (ACK and CANCEL aside), a retransmission once, the first 8: what each said, for a treatment whose leg opens only after an in-dialog consult (treatment-catalog.v1 `after_consult`).",
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["at_ms", "method"],
+            "properties": {
+              "at_ms": { "type": "number" },
+              "method": { "type": "string" },
+              "subscription_state": {
+                "description": "The `Subscription-State` value's state token (RFC 6665 §8.2.3), lower case.",
+                "type": "string"
+              },
+              "body_hex": {
+                "description": "The body's first 64 bytes, in lower-case hex.",
+                "type": "string",
+                "pattern": "^([0-9a-f]{2}){1,64}$"
+              }
+            }
+          }
         }
       }
     }
