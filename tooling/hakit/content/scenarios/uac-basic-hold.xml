@@ -425,6 +425,8 @@
       <ereg regexp="[A-Z]+" search_in="hdr" header="CSeq:" assign_to="meth"/>
       <strcmp assign_to="meth_c" variable="meth" value="BYE"/>
       <test assign_to="is_bye" variable="meth_c" compare="equal" value="0"/>
+      <strcmp assign_to="meth_i" variable="meth" value="INVITE"/>
+      <test assign_to="is_inv" variable="meth_i" compare="equal" value="0"/>
       <gettimeofday assign_to="now_s,now_us"/>
       <multiply assign_to="now_s" value="1000"/>
       <divide assign_to="now_us" value="1000"/>
@@ -464,7 +466,20 @@
   <nop/>
   <label id="bye_failed"/>
   <nop test="is_bye" next="bye_failed_bye"/>
+  <nop test="is_inv" next="bye_wait_final_after_2xx"/>
   <nop next="bye_wait"/>
+  <!-- A non-2xx final for the INVITE crossing the BYE: the same protocol
+       failure as one during the hold, once per call. -->
+  <nop/>
+  <label id="bye_wait_final_after_2xx"/>
+  <nop test="late_final_seen" next="bye_wait"/>
+  <nop next="bye_wait">
+    <action>
+      <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;method&quot;:&quot;INVITE&quot;,&quot;code&quot;:[$bye_code],&quot;detail&quot;:&quot;second final after 2xx&quot;}"/>
+      <assignstr assign_to="r_sep" value=","/>
+      <assign assign_to="late_final_seen" value="1"/>
+    </action>
+  </nop>
   <nop/>
   <label id="bye_failed_bye"/>
   <nop test="keep_ending" next="released">

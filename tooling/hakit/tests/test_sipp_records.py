@@ -53,6 +53,7 @@ CASES = [
     Case("peer-bye-no-final.xml", "stranded", 200, None, "answered", failures=["dialog_request"]),
     Case("peer-info-mid-hold.xml", "failed", 200, None, "released", failures=["protocol"], provisional=False),
     Case("peer-final-after-2xx.xml", "answered", 200, None, "released", failures=["protocol"]),
+    Case("peer-final-crossing-bye.xml", "answered", 200, None, "released", failures=["protocol"]),
 ]
 # Peers that never complete their side by design.
 PEER_MAY_FAIL = {"peer-silent.xml", "peer-bye-no-final.xml"}

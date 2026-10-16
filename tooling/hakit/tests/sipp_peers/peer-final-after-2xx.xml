@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
-<!-- Answers, then sends a 487 for the same INVITE during the hold, a second final the INVITE transaction no longer takes (RFC 3261 section 17.1.1.2), and fails without the caller's BYE. -->
+<!-- Answers, then sends a 487 for the same INVITE during the hold, a second final the INVITE transaction no longer takes (RFC 3261 section 17.1.1.2), and its retransmission per Timer G; fails without the caller's BYE. The copy differs by a header: SIPp discards a byte-identical copy of the message it last received, which would leave the caller's own dedupe untested. -->
 <scenario name="peer-final-after-2xx">
   <recv request="INVITE" crlf="true" rrs="true">
     <action>
@@ -54,6 +54,19 @@
       To:[$inv_to];tag=[pid]P[call_number]
       Call-ID: [call_id]
       CSeq: 1 INVITE
+      Content-Length: 0
+    ]]>
+  </send>
+  <pause milliseconds="500"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 487 Request Terminated
+      Via:[$inv_via]
+      From:[$inv_from]
+      To:[$inv_to];tag=[pid]P[call_number]
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Server: loopback-peer
       Content-Length: 0
     ]]>
   </send>
