@@ -56,6 +56,19 @@ class RecordShipTest(unittest.TestCase):
         with open(self.path, "a") as fh:
             fh.write(text)
 
+    def test_every_record_field_ships_at_top_level_as_loadgen_does(self):
+        """The dashboards group SIPp and loadgen records by the same field names."""
+        rec = {"schema": "call-outcome.v1", "run": "r1", "source": "sipp", "stream": "basic", "shape": "basic",
+               "call_id": "a", "started_at_ms": 1767261600000.0, "ended_at_ms": 1767261600123.5,
+               "ending": "rejected", "final_code": 503, "reason": "q.850;cause=34", "phase_reached": "invited",
+               "failures": [], "producer_verdict": "rejected"}
+        self.append(json.dumps(rec) + "\n")
+        self.shipper.poll()
+        line = self.sink.lines()[0]
+        for k, v in rec.items():
+            self.assertEqual(line[k], v, k)
+        self.assertEqual(json.loads(line["_msg"]), rec)
+
     def test_each_record_ships_once_verbatim(self):
         self.append(record("a") + "\n" + record("b", "rejected") + "\n")
         self.shipper.poll()

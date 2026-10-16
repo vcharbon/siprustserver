@@ -2,9 +2,10 @@
 Ships the call-outcome records a SIPp UAC writes (one JSON line per call, its
 `<log>` action into -log_file) to VictoriaLogs, and counts them.
 
-Each record goes out as one /insert/jsonline line: the record verbatim in
-`_msg`, `_time` from its `ended_at_ms`, and `run`, `source`, `stream` (the
-stream fields), `shape`, `ending`, `call_id` beside it. A line that is not a
+Each record goes out as one /insert/jsonline line: every field of the record
+at top level, as loadgen ships its records (`run`, `source`, `stream` the
+stream fields), the record verbatim in `_msg`, and `_time` from its
+`ended_at_ms`. A line that is not a
 JSON object still ships, with `unparsed` set, so a reader sees it and counts
 it. Lines that fail to post stay queued and go out with the next poll; nothing
 is dropped while the process lives.
@@ -42,6 +43,7 @@ def to_line(raw, run, stream, shape):
         return json.dumps(out), None
     ended = rec.get("ended_at_ms")
     out = {
+        **rec,
         "_msg": raw,
         "_time": _iso(ended if isinstance(ended, (int, float)) else time.time() * 1000),
         "run": str(rec.get("run", run)),
