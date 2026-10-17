@@ -2675,11 +2675,11 @@ async fn loadgen_loss_soak_all_bodies_recover() {
         // obligation holds the settle barrier — and thus the recording window —
         // until a lost reject hop-ACK is recovered by the Timer-G 486 retransmit +
         // the SUT's §17.1.1.2 re-ACK, which the call-eviction path does not
-        // purge). Deterministic gate:
-        // `loadgen_abandoned_reject_leg_recovery_lands_on_recording`.
+        // purge). Deterministic gate: `loadgen_abandoned_reject_leg_recovery_lands_on_recording`.
         assert_eq!(
-            audit, 0,
-            "body {id}: {audit} rfc_audit_fail under loss — a retransmitted INVITE final never re-ACKed (§13.2.2.4 2xx / §17.1.1.3 non-2xx → `unacked-invite-non-2xx-final`):\n{}",
+            audit,
+            0,
+            "body {id}: {audit} rfc_audit_fail under loss, by rule in the report's summary.md:\n{}",
             reporter.render_prometheus()
         );
         assert_eq!(panic, 0, "body {id}: {panic} panic:\n{}", reporter.render_prometheus());
