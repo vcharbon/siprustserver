@@ -30,6 +30,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .. import jsonval as jv
+from ..clock import Clock, RealClock
 from ..classify import setup_latency
 from ..jsonval import Json
 from ..stalls import stall_of
@@ -92,8 +93,10 @@ def latency_points(view: RunView) -> dict[str, list[tuple[float, float]]]:
 
 
 class Drift:
-    def __init__(self, view: RunView, vm: Vm, spec: DriftSpec, out_dir: Path) -> None:
+    def __init__(self, view: RunView, vm: Vm, spec: DriftSpec, out_dir: Path, clock: Clock | None = None) -> None:
         self.view = view
+        # The drained reads wait on it for the settle.
+        self.clock = clock or RealClock()
         self.vm = vm
         self.spec = spec
         self.out = out_dir
@@ -249,11 +252,46 @@ class Drift:
             rows.append(f"{m} {a:g} {sp.drained_settle_s:g} s after the run vs {b:g} before the load (tolerance {sp.drained_baseline_tolerance:g})")
         self.check("gauges back to their baseline", verdict, "; ".join(rows))
 
+    def quiet_zero(self) -> None:
+        """Each `quiet_zero_increase` counter grows by nothing between the
+        padded windows, from the load's start to the drained read."""
+        sp = self.spec
+        spans: list[tuple[float, float]] = []
+        t = self.view.load_start_s + sp.quiet_pad_s
+        for w in sorted(self.view.windows, key=lambda w: w.opened_s):
+            if w.opened_s > t:
+                spans.append((t, w.opened_s))
+            t = max(t, w.closed_s + sp.quiet_pad_s)
+        end = self.view.ended_s + sp.drained_settle_s
+        if end > t:
+            spans.append((t, end))
+        for m in sp.quiet_zero_increase:
+            grew: list[str] = []
+            unread = 0
+            for a, b in spans:
+                r = self.vm.at(f"sum(increase({m}{{{self.ns}}}[{int(b - a)}s]))", b)
+                if not r:
+                    unread += 1
+                elif round(r[0][1]) > 0:
+                    grew.append(f"{round(r[0][1])} in {a:.0f}..{b:.0f}")
+            name = f"{m} quiet outside windows"
+            if grew:
+                self.check(name, "fail", "; ".join(grew))
+            elif unread:
+                self.check(name, "na", f"{unread} of {len(spans)} spans unread")
+            else:
+                self.check(name, "pass", f"0 over {len(spans)} spans")
+
     def drained(self) -> None:
         """After the drain: the zero gauges, read once the last teardowns'
         timers ran (`drained_settle_s`), then worker memory against its last
         loaded span."""
         sp, t = self.spec, self.view.ended_s + self.spec.drained_settle_s
+        # A run is read after it ended, so the wait is at most the settle; a
+        # read instant further ahead is no run of this clock's.
+        wait = t - self.clock.now_ms() / 1000
+        if 0 < wait <= sp.drained_settle_s:
+            self.clock.sleep(wait)
         gauges = {m: self.vm.at(f"sum({m}{{{self.ns}}})", t) for m in sp.drained_zero + sp.drained_report}
         values = {m: (r[0][1] if r else None) for m, r in gauges.items()}
         unread = [m for m in sp.drained_zero if values[m] is None]
@@ -268,6 +306,7 @@ class Drift:
             report = ", ".join(f"{m}={values[m]}" for m in sp.drained_report)
             self.check("gauges after drain", "pass", f"{', '.join(sp.drained_zero)} at 0; {report}", gauges=values)
         self.drained_baseline()
+        self.quiet_zero()
         metric, title = sp.memory_metrics[0]
         for c in [c for c in self.checks if c.name.startswith(f"{title} ") and isinstance(c.extra.get("fit"), dict)]:
             pod = c.name.split()[-1]

@@ -64,6 +64,12 @@ class DriftSpec:
     drained_baseline: list[str] = field(default_factory=lambda: [])
     drained_baseline_tolerance: float = 0
     drained_settle_s: float = 47
+    # Counters that must not grow outside the windows: each gap between the
+    # windows, each padded by `quiet_pad_s` after its close (and the load's
+    # start), up to the read. A call limiter's lease lapses count a release it
+    # never received, one lease after it was due.
+    quiet_zero_increase: list[str] = field(default_factory=lambda: [])
+    quiet_pad_s: float = 0
     # One CDR outcome (written or dropped) per completed call, per worker.
     cdr_written: str = "b2bua_cdr_written_total"
     cdr_dropped: str = "b2bua_cdr_dropped_total"
@@ -118,6 +124,8 @@ def load_spec(path: Path | None) -> DriftSpec:
         drained_baseline=jv.strings(d, "drained_baseline") if "drained_baseline" in d else spec.drained_baseline,
         drained_baseline_tolerance=jv.number(d, "drained_baseline_tolerance", spec.drained_baseline_tolerance),
         drained_settle_s=jv.number(d, "drained_settle_s", spec.drained_settle_s),
+        quiet_zero_increase=jv.strings(d, "quiet_zero_increase") if "quiet_zero_increase" in d else spec.quiet_zero_increase,
+        quiet_pad_s=jv.number(d, "quiet_pad_s", spec.quiet_pad_s),
         cdr_written=jv.string(d, "cdr_written", spec.cdr_written),
         cdr_dropped=jv.string(d, "cdr_dropped", spec.cdr_dropped),
         warmup_s=int(jv.number(d, "warmup_s", spec.warmup_s)),

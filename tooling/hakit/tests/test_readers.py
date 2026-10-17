@@ -12,6 +12,7 @@ from kit import T0, record, write_jsonl
 from rundir import SCHEMAS, kill, run_dir
 
 from hakit import jsonval as jv
+from hakit.clock import FakeClock
 from hakit.executor import Call, FakeExecutor, HttpResult, ProcResult
 from hakit.jsonval import Json
 from hakit.readers.chart import ChartRequest, chart
@@ -315,7 +316,6 @@ def test_a_baseline_gauge_must_return_to_its_value_before_the_load(tmp_path: Pat
     assert held["verdict"] == "fail" and "148 47 s after the run vs 128 before the load" in jv.string(held, "detail")
 
 
-
 class HeldLimiterLab(Lab):
     """The call limiter still holds 3 after the drain."""
 
@@ -349,3 +349,56 @@ def test_a_zero_gauge_is_read_once_the_last_teardowns_settled(tmp_path: Path) ->
     d = soak_dir(tmp_path, True)
     c = checks(Drift(read_run(d), Vm(FakeExecutor([TailLab().rule]), "vm"), spec, d / "drift").run())["gauges after drain"]
     assert c["verdict"] == "pass", c["detail"]
+
+
+def test_the_default_settle_is_timer_j_and_one_scrape() -> None:
+    assert DriftSpec().drained_settle_s == 47
+
+
+def test_a_drift_read_before_the_settle_waits_for_it(tmp_path: Path) -> None:
+    d = soak_dir(tmp_path, True)
+    ended = (T0 + (LOAD_S + 200) * 1000) // 1000
+    clock = FakeClock(ended * 1000)
+    c = checks(Drift(read_run(d), Vm(FakeExecutor([TailLab().rule]), "vm"), DriftSpec(drained_zero=["b2bua_txn_active_transactions"]), d / "drift", clock=clock).run())
+    assert clock.now_ms() >= (ended + 47) * 1000
+    assert c["gauges after drain"]["verdict"] == "pass"
+
+
+class LapseLab(Lab):
+    """Lease lapses of the limiter counted inside a window's padded span only,
+    or also in a quiet span when `leak_at` names an instant of one."""
+
+    def __init__(self, leak_at: float | None) -> None:
+        super().__init__()
+        self.leak_at = leak_at
+        self.spans: list[tuple[float, float]] = []
+
+    def rule(self, c: Call) -> HttpResult | None:
+        if c.kind == "http" and "limiter_lease_expired_calls_total" in c.url and "/query_range" not in c.url:
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query)
+            t = float(qs["time"][0])
+            span = float(qs["query"][0].split("[")[1].split("s]")[0])
+            self.spans.append((t - span, t))
+            held = self.leak_at is not None and t - span <= self.leak_at <= t
+            return HttpResult(200, vector([({}, 2 if held else 0)]))
+        return super().rule(c)
+
+
+def test_lease_lapses_outside_the_padded_windows_are_a_leak(tmp_path: Path) -> None:
+    spec = DriftSpec(quiet_zero_increase=["limiter_lease_expired_calls_total"], quiet_pad_s=135)
+    window_end = T0 / 1000 + WINDOW_AT + 640
+
+    def check(sub: str, leak_at: float | None) -> tuple[Json, LapseLab]:
+        d = soak_dir(tmp_path / sub, True)
+        lab = LapseLab(leak_at)
+        doc = Drift(read_run(d), Vm(FakeExecutor([lab.rule]), "vm"), spec, d / "drift").run()
+        return checks(doc)["limiter_lease_expired_calls_total quiet outside windows"], lab
+
+    clean, lab = check("clean", None)
+    assert clean["verdict"] == "pass"
+    # Two quiet spans: from the load's start plus the pad to the window, and
+    # from the window's close plus the pad to the read.
+    assert [round(a) for a, _ in lab.spans] == [round(T0 / 1000 + 135), round(window_end + 135)]
+    assert check("in-pad", window_end + 100)[0]["verdict"] == "pass"
+    leaked = check("leaked", window_end + 600)[0]
+    assert leaked["verdict"] == "fail" and jv.string(leaked, "detail").startswith("2 in ")
