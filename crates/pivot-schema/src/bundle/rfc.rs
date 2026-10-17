@@ -37,8 +37,9 @@ pub struct RfcFinding {
     /// rule pinpoints one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offending: Option<usize>,
-    /// The socket the rule holds RESPONSIBLE: the one that emitted the
-    /// offending message, or owed the one never emitted. `lane` is where the
+    /// The bind the rule holds RESPONSIBLE (`ip:port`, or `ip:port#label` for
+    /// a labelled sub-lane): the one that emitted the offending message, or
+    /// owed the one never emitted. `lane` is where the
     /// finding was reported, which for a taker-vantage rule is the other party.
     /// Absent ⇒ the rule names no culprit, and the finding is gated as the
     /// SUT's.
