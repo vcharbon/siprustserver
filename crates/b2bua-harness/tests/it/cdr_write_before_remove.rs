@@ -35,6 +35,7 @@ impl CdrWriter for ProbeCdr {
     async fn read_all(&self) -> Vec<CdrRecord> {
         Vec::new()
     }
+    async fn close(&self, _deadline: tokio::time::Instant) {}
 }
 
 #[tokio::test]

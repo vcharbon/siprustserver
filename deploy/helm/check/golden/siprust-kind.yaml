@@ -837,6 +837,8 @@ spec:
           value: amqp://guest:guest@rabbitmq.sip-test.svc.cluster.local:5672/%2f
         - name: B2BUA_DEST
           value: 192.168.60.21:5060
+        - name: B2BUA_DRAIN_CDR_FLUSH_MS
+          value: '3000'
         - name: B2BUA_DRAIN_GRACE_MS
           value: '5000'
         - name: B2BUA_DRAIN_MIN_MS

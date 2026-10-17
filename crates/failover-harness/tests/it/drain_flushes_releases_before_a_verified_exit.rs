@@ -56,6 +56,7 @@ const BOUNDS: DrainBounds = DrainBounds {
     grace: Duration::from_secs(5),
     floor: FLOOR,
     release_flush: Duration::from_secs(3),
+    cdr_flush: Duration::ZERO,
 };
 /// When the limiter may answer the queued release, from the drain's start.
 const ANSWERED_AT: Duration = Duration::from_millis(2_500);

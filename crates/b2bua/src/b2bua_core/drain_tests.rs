@@ -13,6 +13,7 @@ const BOUNDS: DrainBounds = DrainBounds {
     grace: Duration::from_secs(5),
     floor: Duration::from_secs(1),
     release_flush: Duration::from_secs(3),
+    cdr_flush: Duration::ZERO,
 };
 
 #[tokio::test(start_paused = true)]

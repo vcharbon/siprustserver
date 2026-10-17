@@ -61,9 +61,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use b2bua::admission::Refusals;
-use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrRecord, CdrWriter};
+use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrWriter};
 use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::destination_allowlist::{classify_admission, AdmissionVerdict};
@@ -73,7 +72,6 @@ use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
 use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
-use call::Call;
 use http_net::{RealHttpNetwork, SystemResolver};
 use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
@@ -88,6 +86,7 @@ mod drain_env;
 mod limiter_client;
 mod limiter_env;
 mod liveness_env;
+mod null_cdr;
 mod outbound_proxy_env;
 mod probe;
 mod replication;
@@ -98,23 +97,10 @@ pub use cdr_rabbitmq::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
+pub use null_cdr::NullCdrWriter;
 pub use outbound_proxy_env::{parse_outbound_proxy, validate_outbound_proxy_requirement};
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
 pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
-
-/// A CDR sink that discards every record. The default sink when a runner wires
-/// no external CDR store — for load/endurance the process must not accumulate
-/// records in memory. Always wrapped by `BufferedCdrWriter` (see
-/// [`RunnerBase::deps`]) so the buffer/drainer machinery is still exercised.
-pub struct NullCdrWriter;
-
-#[async_trait]
-impl CdrWriter for NullCdrWriter {
-    async fn write(&self, _call: &Call, _terminated_at: i64) {}
-    async fn read_all(&self) -> Vec<CdrRecord> {
-        Vec::new()
-    }
-}
 
 /// Env var with a default when unset.
 pub fn env_or(key: &str, default: &str) -> String {
@@ -424,8 +410,9 @@ pub struct RunnerEnv {
     pub limiter_backend: http_net::BackendConfig,
     /// The planned exit's bounds, the grammar in `drain_env`:
     /// `B2BUA_DRAIN_GRACE_MS` (the wait for the live calls), `B2BUA_DRAIN_MIN_MS`
-    /// (the floor of a withdrawn worker's caught-up exit, ADR-0031 D2) and
-    /// `B2BUA_DRAIN_RELEASE_FLUSH_MS` (the wait for the queued limiter releases).
+    /// (the floor of a withdrawn worker's caught-up exit, ADR-0031 D2),
+    /// `B2BUA_DRAIN_RELEASE_FLUSH_MS` (the wait for the queued limiter releases)
+    /// and `B2BUA_DRAIN_CDR_FLUSH_MS` (the wait for the CDRs the sink holds).
     pub drain: b2bua::drain::DrainBounds,
     /// The memory ceilings (ADR-0037), every one off unless stated; the
     /// grammar is in `capacity_env`.

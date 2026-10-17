@@ -3,7 +3,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Grace only, no withdrawal — the shape every non-orchestrated shutdown has.
 fn bounds(grace: Duration) -> DrainBounds {
-    DrainBounds { grace, floor: Duration::ZERO, release_flush: Duration::ZERO }
+    DrainBounds {
+        grace,
+        floor: Duration::ZERO,
+        release_flush: Duration::ZERO,
+        cdr_flush: Duration::ZERO,
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -66,7 +71,12 @@ async fn a_withdrawn_node_whose_peers_are_current_waits_out_the_floor() {
     let start = tokio::time::Instant::now();
     let out = drain_until_quiescent(
         DrainInputs::new(|| 1, || true, || true),
-        DrainBounds { grace: Duration::from_secs(5), floor, release_flush: Duration::ZERO },
+        DrainBounds {
+            grace: Duration::from_secs(5),
+            floor,
+            release_flush: Duration::ZERO,
+            cdr_flush: Duration::ZERO,
+        },
     )
     .await;
     assert_eq!(out.exit, DrainExit::CaughtUp);
@@ -80,7 +90,12 @@ async fn a_withdrawn_node_whose_peers_stay_behind_runs_to_the_grace() {
     let start = tokio::time::Instant::now();
     let out = drain_until_quiescent(
         DrainInputs::new(|| 1, || false, || true),
-        DrainBounds { grace, floor: Duration::from_secs(1), release_flush: Duration::ZERO },
+        DrainBounds {
+            grace,
+            floor: Duration::from_secs(1),
+            release_flush: Duration::ZERO,
+            cdr_flush: Duration::ZERO,
+        },
     )
     .await;
     assert_eq!(out.exit, DrainExit::GracePeersBehind, "a flush window was lost");
@@ -96,7 +111,12 @@ async fn a_node_that_is_not_withdrawn_keeps_quiescence_or_grace() {
     let start = tokio::time::Instant::now();
     let out = drain_until_quiescent(
         DrainInputs::new(|| 1, || true, || false),
-        DrainBounds { grace, floor: Duration::from_secs(1), release_flush: Duration::ZERO },
+        DrainBounds {
+            grace,
+            floor: Duration::from_secs(1),
+            release_flush: Duration::ZERO,
+            cdr_flush: Duration::ZERO,
+        },
     )
     .await;
     assert_eq!(out.exit, DrainExit::Grace);
@@ -111,7 +131,12 @@ async fn the_grace_wins_over_a_floor_set_past_it() {
     let start = tokio::time::Instant::now();
     let out = drain_until_quiescent(
         DrainInputs::new(|| 1, || true, || true),
-        DrainBounds { grace, floor: Duration::from_secs(5), release_flush: Duration::ZERO },
+        DrainBounds {
+            grace,
+            floor: Duration::from_secs(5),
+            release_flush: Duration::ZERO,
+            cdr_flush: Duration::ZERO,
+        },
     )
     .await;
     assert_eq!(out.exit, DrainExit::GracePeersBehind);
@@ -155,6 +180,7 @@ async fn a_quiescent_exit_returns_once_the_release_flush_is_done() {
             grace: Duration::from_secs(5),
             floor: Duration::ZERO,
             release_flush: Duration::from_secs(3),
+            cdr_flush: Duration::ZERO,
         },
     )
     .await;
@@ -179,6 +205,7 @@ async fn a_grace_exit_flushes_within_its_bound_and_no_longer() {
             grace: Duration::from_secs(5),
             floor: Duration::ZERO,
             release_flush: Duration::from_secs(3),
+            cdr_flush: Duration::ZERO,
         },
     )
     .await;
@@ -214,6 +241,7 @@ async fn a_caught_up_exit_is_taken_at_a_moment_verified_after_the_flush() {
             grace: Duration::from_secs(5),
             floor: Duration::from_secs(1),
             release_flush: Duration::from_secs(3),
+            cdr_flush: Duration::ZERO,
         },
     )
     .await;
@@ -243,6 +271,7 @@ async fn a_caught_up_exit_lost_during_a_long_flush_is_bounded_by_the_grace_and_t
         grace: Duration::from_secs(2),
         floor: Duration::from_secs(1),
         release_flush: Duration::from_secs(3),
+        cdr_flush: Duration::ZERO,
     };
     let out = drain_until_quiescent(inputs, bounds).await;
     assert_eq!(out.exit, DrainExit::GracePeersBehind, "the caught-up moment was not verified");
@@ -278,6 +307,7 @@ async fn a_release_pushed_after_the_flush_emptied_the_queue_is_flushed_before_th
             grace: Duration::from_secs(5),
             floor: Duration::ZERO,
             release_flush: Duration::from_secs(3),
+            cdr_flush: Duration::ZERO,
         },
     )
     .await;
@@ -305,6 +335,7 @@ async fn a_queue_that_never_settles_ends_the_drain_at_its_ceiling() {
         grace: Duration::from_secs(2),
         floor: Duration::ZERO,
         release_flush: Duration::from_secs(1),
+        cdr_flush: Duration::ZERO,
     };
     let out = drain_until_quiescent(inputs, bounds).await;
     assert_eq!(out.exit, DrainExit::Grace);

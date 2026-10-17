@@ -8,17 +8,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use b2bua::cdr::InMemoryCdrWriter;
+use b2bua::cdr::{BufferedCdrWriter, CdrRecord, CdrWriter, InMemoryCdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::decision::ScriptedDecisionEngine;
+use b2bua::initial_invite::build_initial_call;
 use b2bua::limiter::release_queue::ReleaseFlushOutcome;
 use b2bua::limiter::NoopLimiter;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{FnPeerResolver, PullerConfig, ReplicatingCallStore, ServeConfig};
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaDeps, ReplicationSetup};
+use call::Call;
 use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
+use sip_message::parser::custom::CustomParser;
+use sip_message::{SipMessage, SipParser};
 use sip_net::{
     BindUdpOpts, SendError, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint,
     UdpEndpointCounters, UdpPacket,
@@ -39,6 +43,7 @@ const BOUNDS: DrainBounds = DrainBounds {
     grace: Duration::from_secs(5),
     floor: Duration::from_secs(1),
     release_flush: Duration::from_secs(3),
+    cdr_flush: Duration::from_secs(3),
 };
 
 #[tokio::test]
@@ -106,6 +111,13 @@ struct Worker {
 }
 
 async fn worker() -> Worker {
+    worker_with_cdr(|_| Arc::new(InMemoryCdrWriter::new())).await
+}
+
+/// [`worker`] writing its CDRs to the sink `cdr` builds over the core's
+/// metrics registry.
+async fn worker_with_cdr(cdr: impl FnOnce(&B2buaMetrics) -> Arc<dyn CdrWriter>) -> Worker {
+    let metrics = B2buaMetrics::new();
     let clock = Clock::test_at(0);
     let net = SimulatedSignalingNetwork::new(1);
     let (close, closed) = watch::channel(false);
@@ -139,7 +151,7 @@ async fn worker() -> Worker {
             CALLEE.port(),
         )),
         limiter: Arc::new(NoopLimiter),
-        cdr: Arc::new(InMemoryCdrWriter::new()),
+        cdr: cdr(&metrics),
         store: Arc::new(InMemoryCallStore::new()),
         store_faults: Default::default(),
         wire_faults: Default::default(),
@@ -148,7 +160,7 @@ async fn worker() -> Worker {
         refusals: None,
         deferred_ceilings: None,
         replication: Some(setup),
-        metrics: B2buaMetrics::new(),
+        metrics,
         adaptation_http: None,
         compose: Default::default(),
         capacity: None,
@@ -258,4 +270,109 @@ async fn a_loop_task_that_ends_mid_drain_cuts_it_short_and_exits_non_zero() {
     for reason in ["quiescent", "caught_up", "grace", "grace_peers_behind"] {
         assert_eq!(w.core.metrics().drain_exits(reason), 0, "no drain exit: {reason}");
     }
+}
+
+/// A sink that takes `per_record` to write each record.
+struct SlowSink {
+    per_record: Duration,
+    written: InMemoryCdrWriter,
+}
+
+#[async_trait]
+impl CdrWriter for SlowSink {
+    async fn write(&self, call: &Call, terminated_at: i64) {
+        tokio::time::sleep(self.per_record).await;
+        self.written.write(call, terminated_at).await;
+    }
+
+    async fn read_all(&self) -> Vec<CdrRecord> {
+        self.written.read_all().await
+    }
+
+    async fn close(&self, _deadline: tokio::time::Instant) {}
+}
+
+/// A worker whose CDRs go through the production buffer to a sink taking
+/// `per_record` per record.
+async fn worker_with_slow_sink(per_record: Duration) -> (Worker, Arc<SlowSink>) {
+    let sink = Arc::new(SlowSink { per_record, written: InMemoryCdrWriter::new() });
+    let inner = sink.clone();
+    let w = worker_with_cdr(|metrics| {
+        Arc::new(BufferedCdrWriter::spawn(inner, 1_024, metrics.clone()))
+    })
+    .await;
+    (w, sink)
+}
+
+fn a_terminated_call(n: usize) -> Call {
+    let raw = format!(
+        "INVITE sip:bob@example.com SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-cdr{n}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:alice@example.com>;tag=alice{n}\r\n\
+         To: <sip:bob@example.com>\r\n\
+         Call-ID: cdr{n}@10.0.0.9\r\n\
+         CSeq: 1 INVITE\r\n\
+         Contact: <sip:alice@10.0.0.9:5060>\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let req = match CustomParser::new().parse(raw.as_bytes()).expect("parse") {
+        SipMessage::Request(r) => r,
+        _ => panic!("expected a request"),
+    };
+    let cfg = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+    build_initial_call(&req, CALLER, &cfg, &IdGen::seeded(n as u64), 1_000)
+}
+
+/// The CDRs queued when a SIGTERM drain ends are written before the worker
+/// exits, within the CDR flush bound.
+#[tokio::test(start_paused = true)]
+async fn sigterm_exits_once_the_queued_cdrs_are_written() {
+    let (w, sink) = worker_with_slow_sink(Duration::from_millis(500)).await;
+    for n in 0..4 {
+        w.core.cdr().write(&a_terminated_call(n), 2_000).await;
+    }
+    let code = serve_until_stop(&w.core, "test", BOUNDS, pending(), ready(())).await;
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(sink.written.snapshot().len(), 4, "every queued CDR is written before the exit");
+    assert_eq!(w.core.metrics().cdr_dropped_total(), 0);
+}
+
+/// A sink slower than the CDR flush bound: what the bound leaves unwritten is
+/// counted dropped, so no record leaves the process uncounted.
+#[tokio::test(start_paused = true)]
+async fn the_cdrs_the_flush_bound_gives_up_are_counted_dropped() {
+    let (w, sink) = worker_with_slow_sink(Duration::from_secs(1)).await;
+    for n in 0..10 {
+        w.core.cdr().write(&a_terminated_call(n), 2_000).await;
+    }
+    let start = tokio::time::Instant::now();
+    let code = serve_until_stop(&w.core, "test", BOUNDS, pending(), ready(())).await;
+    assert_eq!(code, ExitCode::SUCCESS);
+    let written = sink.written.snapshot().len() as u64;
+    let dropped = w.core.metrics().cdr_dropped_total();
+    assert!(written < 10, "the bound cut the flush short: {written} written");
+    assert_eq!(written + dropped, 10, "{written} written, {dropped} dropped");
+    assert!(start.elapsed() <= BOUNDS.grace + BOUNDS.release_flush + BOUNDS.cdr_flush);
+}
+
+/// The exits that run no drain close the CDR sink too.
+#[tokio::test(start_paused = true)]
+async fn an_interrupt_and_an_ended_loop_exit_once_the_queued_cdrs_are_written() {
+    let (w, sink) = worker_with_slow_sink(Duration::from_millis(500)).await;
+    for n in 0..4 {
+        w.core.cdr().write(&a_terminated_call(n), 2_000).await;
+    }
+    let code = serve_until_stop(&w.core, "test", BOUNDS, ready(()), pending()).await;
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(sink.written.snapshot().len(), 4, "interrupt");
+
+    let (w, sink) = worker_with_slow_sink(Duration::from_millis(500)).await;
+    for n in 0..4 {
+        w.core.cdr().write(&a_terminated_call(n), 2_000).await;
+    }
+    w.close_sip();
+    let code = serve_until_stop(&w.core, "test", BOUNDS, pending(), pending()).await;
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(sink.written.snapshot().len(), 4, "loop ended");
 }

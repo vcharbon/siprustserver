@@ -1,7 +1,7 @@
 //! How the worker process stops: what ends its service, and the exit it takes.
 //!
-//! - **Ctrl-C** (interactive): Draining, then only the limiter release flush,
-//!   which a second Ctrl-C cuts short. Exit 0.
+//! - **Ctrl-C** (interactive): Draining, then no wait for the live calls,
+//!   only the limiter release flush, which a second Ctrl-C cuts short. Exit 0.
 //! - **SIGTERM**, or the worker's **own endpoint withdrawn** with no SIGTERM
 //!   (ADR-0031 D5, D6): the same D2 drain — Draining, then the first of the
 //!   live calls clearing, a withdrawn worker's backups holding them past
@@ -12,10 +12,17 @@
 //!   was aborted or panicked, before or during a drain: nothing serves any
 //!   more. The queued limiter releases are flushed within the same bound,
 //!   and the process exits non-zero; the orchestrator restarts it.
+//!
+//! Every exit then closes the CDR sink within `B2BUA_DRAIN_CDR_FLUSH_MS`, which
+//! no signal cuts short: the records of the calls that ended are delivered or
+//! counted dropped, never left in a queue the exit discards. The close logs
+//! the records the sink counted written (a broker sink counts them) and
+//! dropped.
 
 use std::future::Future;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use b2bua::drain::{DrainBounds, DrainExit};
 use b2bua::B2buaCore;
@@ -90,6 +97,7 @@ async fn interrupted(core: &B2buaCore, name: &str, bounds: DrainBounds) -> ExitC
             tracing::warn!(service = name, given_up, "second SIGINT: release flush cut short");
         }
     }
+    close_cdr(core, name, bounds.cdr_flush).await;
     ExitCode::SUCCESS
 }
 
@@ -128,6 +136,7 @@ async fn drained(core: &B2buaCore, name: &str, bounds: DrainBounds, stop: Stop) 
             );
         }
     }
+    close_cdr(core, name, bounds.cdr_flush).await;
     ExitCode::SUCCESS
 }
 
@@ -151,7 +160,25 @@ async fn loop_ended(
         releases_given_up = flush.given_up,
         "exiting non-zero"
     );
+    close_cdr(core, name, bounds.cdr_flush).await;
     ExitCode::FAILURE
+}
+
+/// Close the CDR sink within `bound` and log what the close delivered and
+/// dropped.
+async fn close_cdr(core: &B2buaCore, name: &str, bound: Duration) {
+    let metrics = core.metrics();
+    let (written, dropped) = (metrics.cdr_written_total(), metrics.cdr_dropped_total());
+    let started = tokio::time::Instant::now();
+    core.cdr().close(started + bound).await;
+    let cdr_written = metrics.cdr_written_total() - written;
+    let cdr_dropped = metrics.cdr_dropped_total() - dropped;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if cdr_dropped == 0 {
+        tracing::info!(service = name, cdr_written, elapsed_ms, "CDR sink closed");
+    } else {
+        tracing::warn!(service = name, cdr_written, cdr_dropped, elapsed_ms, "CDR sink closed");
+    }
 }
 
 /// Await a SIGTERM (k8s sends this on pod termination). On non-unix this future

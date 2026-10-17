@@ -5,6 +5,7 @@
 //! | `B2BUA_DRAIN_GRACE_MS` | the most a drain waits for the live calls | 5000 |
 //! | `B2BUA_DRAIN_MIN_MS` | the floor a withdrawn worker's caught-up exit waits out | 1000 |
 //! | `B2BUA_DRAIN_RELEASE_FLUSH_MS` | the most one release flush waits | 3000 |
+//! | `B2BUA_DRAIN_CDR_FLUSH_MS` | the most the CDR sink's close waits before the exit | 3000 |
 //!
 //! Unset or blank takes the default; a value that is not a non-negative
 //! integer refuses boot. Zero is a bound like any other: no wait.
@@ -33,6 +34,7 @@ pub(crate) fn drain_from_lookup(
         grace: millis("B2BUA_DRAIN_GRACE_MS", 5_000)?,
         floor: millis("B2BUA_DRAIN_MIN_MS", 1_000)?,
         release_flush: millis("B2BUA_DRAIN_RELEASE_FLUSH_MS", 3_000)?,
+        cdr_flush: millis("B2BUA_DRAIN_CDR_FLUSH_MS", 3_000)?,
     })
 }
 
@@ -52,6 +54,7 @@ mod tests {
             grace: Duration::from_millis(5_000),
             floor: Duration::from_millis(1_000),
             release_flush: Duration::from_millis(3_000),
+            cdr_flush: Duration::from_millis(3_000),
         };
         assert_eq!(from(&[]), Ok(defaults));
         assert_eq!(from(&[("B2BUA_DRAIN_RELEASE_FLUSH_MS", "  ")]), Ok(defaults));
@@ -63,6 +66,7 @@ mod tests {
             ("B2BUA_DRAIN_GRACE_MS", "8000"),
             ("B2BUA_DRAIN_MIN_MS", "0"),
             ("B2BUA_DRAIN_RELEASE_FLUSH_MS", "500"),
+            ("B2BUA_DRAIN_CDR_FLUSH_MS", "0"),
         ])
         .unwrap();
         assert_eq!(
@@ -71,13 +75,19 @@ mod tests {
                 grace: Duration::from_millis(8_000),
                 floor: Duration::ZERO,
                 release_flush: Duration::from_millis(500),
+                cdr_flush: Duration::ZERO,
             }
         );
     }
 
     #[test]
     fn a_value_that_is_not_a_count_of_milliseconds_refuses_boot() {
-        for key in ["B2BUA_DRAIN_GRACE_MS", "B2BUA_DRAIN_MIN_MS", "B2BUA_DRAIN_RELEASE_FLUSH_MS"] {
+        for key in [
+            "B2BUA_DRAIN_GRACE_MS",
+            "B2BUA_DRAIN_MIN_MS",
+            "B2BUA_DRAIN_RELEASE_FLUSH_MS",
+            "B2BUA_DRAIN_CDR_FLUSH_MS",
+        ] {
             for value in ["3s", "-1", "1.5", "abc"] {
                 let e = from(&[(key, value)]).expect_err(value);
                 assert!(e.contains(key), "{e}");

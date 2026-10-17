@@ -157,6 +157,9 @@ pub struct DrainBounds {
     /// The most one release flush waits for the limiter release queue to
     /// empty; the drain never returns later than `grace + release_flush`.
     pub release_flush: Duration,
+    /// The most the CDR sink's close waits, after the drain, for the records
+    /// it holds (`CdrWriter::close`); the drain itself does not read it.
+    pub cdr_flush: Duration,
 }
 
 /// Latch nothing here — the caller has already moved the node to `Draining` (so

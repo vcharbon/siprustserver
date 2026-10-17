@@ -15,6 +15,7 @@ pub use memory::InMemoryCdrWriter;
 
 use async_trait::async_trait;
 use serde::Serialize;
+use tokio::time::Instant;
 
 use call::{Call, CdrEvent, DecisionMark, LegDisposition, LegState, Termination};
 
@@ -107,6 +108,13 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
 pub trait CdrWriter: Send + Sync {
     async fn write(&self, call: &Call, terminated_at: i64);
     async fn read_all(&self) -> Vec<CdrRecord>;
+    /// The exit barrier: deliver the records this sink holds and take no more.
+    /// When it returns, every record whose `write` returned before the close
+    /// began is delivered or counted in `cdr_dropped_total`, and every later
+    /// one is counted there too; it never waits past `deadline`, and a later
+    /// close's deadline does not move the first one's. A sink that writes
+    /// inline holds nothing to close.
+    async fn close(&self, deadline: Instant);
 }
 
 #[cfg(test)]

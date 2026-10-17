@@ -14,7 +14,8 @@ use lapin::{
     uri::AMQPUri,
     BasicProperties, Channel, Connection, ConnectionProperties,
 };
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, watch, Semaphore};
+use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 
 use super::confirms::{track_confirms, Pending};
@@ -94,14 +95,18 @@ pub(super) struct Session {
     _connection: Connection,
     confirm_timeout: Duration,
     /// Unbounded, yet never holds more than the window: each entry owns a slot.
-    pending: mpsc::UnboundedSender<Pending>,
+    /// `None` once the session is closing.
+    pending: Option<mpsc::UnboundedSender<Pending>>,
+    /// The confirm tracker, awaited by [`Session::close`].
+    tracker: Option<JoinHandle<()>>,
     health: Arc<Health>,
 }
 
 impl Session {
     /// Resolves the broker through `resolver`, connects, opens a channel,
     /// selects publisher confirms and declares the queue, then spawns the
-    /// confirm tracker recording into `metrics`. Resolution and the TCP connect
+    /// confirm tracker recording into `metrics`, bounded by the writer's close
+    /// deadline `close_by`. Resolution and the TCP connect
     /// stop at `deadline`; the caller bounds the rest by it, and dropping this
     /// future (or a failure half-way) shuts down whatever socket it connected.
     // `HandshakeResult` is the AMQP client's connector contract.
@@ -111,6 +116,7 @@ impl Session {
         resolver: &mut BrokerResolver,
         deadline: Instant,
         metrics: &B2buaMetrics,
+        close_by: watch::Receiver<Option<Instant>>,
     ) -> Result<Self, OpenError> {
         let uri: AMQPUri = settings.url.parse().map_err(OpenError::Uri)?;
         let addrs = resolver
@@ -142,14 +148,31 @@ impl Session {
             socket,
         });
         let (pending, rx) = mpsc::unbounded_channel();
-        tokio::spawn(track_confirms(rx, health.clone(), metrics.clone()));
+        let tracker = tokio::spawn(track_confirms(rx, health.clone(), close_by, metrics.clone()));
         Ok(Self {
             channel,
             _connection: connection,
             confirm_timeout: settings.bounds.confirm_timeout,
-            pending,
+            pending: Some(pending),
+            tracker: Some(tracker),
             health,
         })
+    }
+
+    /// Publishes no more and waits for the confirm tracker to resolve every
+    /// publish of this session, which it does by the writer's close deadline,
+    /// then ends the session.
+    pub(super) async fn close(mut self) {
+        self.pending = None;
+        if let Some(tracker) = self.tracker.take() {
+            let _ = tracker.await;
+        }
+    }
+
+    /// Ends the session and hands back its confirm tracker, which resolves
+    /// the publishes still outstanding without waiting.
+    pub(super) fn into_tracker(mut self) -> Option<JoinHandle<()>> {
+        self.tracker.take()
     }
 
     /// When the session ended, `None` while it lives; an ended session never
@@ -205,7 +228,10 @@ impl Session {
         };
         let pending =
             Pending { confirm, deadline: Instant::now() + self.confirm_timeout, _slot: slot };
-        if self.pending.send(pending).is_err() {
+        let Some(tracker) = &self.pending else {
+            return Err(PublishRefused::Ended);
+        };
+        if tracker.send(pending).is_err() {
             self.health.end("the confirm tracker is gone");
             return Err(PublishRefused::Ended);
         }

@@ -647,7 +647,9 @@ for one that is, which means a flush window was lost (ADR-0031 D2, D6). The four
 reasons are the `reason` label of `b2bua_drain_exits_total`. Before exiting the
 worker flushes its queued limiter releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS`,
 re-checks a clean exit after the flush, and gives up, counted, what is left
-(ADR-0031 D2, ADR-0040 decision 9).
+(ADR-0031 D2, ADR-0040 decision 9). Every exit then closes the CDR sink within
+`B2BUA_DRAIN_CDR_FLUSH_MS`: the queued records are written and the broker's
+outstanding confirms awaited; what the bound leaves counts in `cdr_dropped_total`.
 
 ## HTTP call-decision adaptation
 

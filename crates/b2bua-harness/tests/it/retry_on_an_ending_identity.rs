@@ -41,6 +41,7 @@ impl CdrWriter for GatedCdr {
     async fn read_all(&self) -> Vec<CdrRecord> {
         Vec::new()
     }
+    async fn close(&self, _deadline: tokio::time::Instant) {}
 }
 
 /// The scene of a callee challenging the first INVITE, the CDR writes gated

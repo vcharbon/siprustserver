@@ -92,6 +92,7 @@ pub(crate) const BOUNDS: failover_harness::DrainBounds = failover_harness::Drain
     grace: GRACE,
     floor: Duration::from_millis(1000),
     release_flush: Duration::from_secs(3),
+    cdr_flush: Duration::ZERO,
 };
 
 /// The deployed shape: a failover-capable route (callback context) arming the

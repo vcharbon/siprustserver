@@ -1,5 +1,6 @@
 //! The confirm tracker of one session: it turns each publish's confirm into
-//! exactly one `cdr_written_total` or `cdr_dropped_total`.
+//! exactly one `cdr_written_total` or `cdr_dropped_total`, by the writer's
+//! close deadline at the latest.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::time::Duration;
 
 use b2bua::metrics::B2buaMetrics;
 use lapin::publisher_confirm::{Confirmation, PublisherConfirm};
-use tokio::sync::{mpsc, OwnedSemaphorePermit};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit};
 use tokio::time::{timeout, timeout_at, Instant};
 
 use super::session::Health;
@@ -29,17 +30,21 @@ enum Outcome {
     Lost(String),
     /// No confirm within the confirm bound.
     TimedOut,
+    /// No confirm by the writer's close deadline.
+    Closed,
     /// The session ended before the confirm arrived.
     SessionEnded,
 }
 
 /// Resolves every tracked publish, in publish order, to exactly one written
-/// or dropped record. A publish still unconfirmed when the session ends is
-/// dropped without waiting; one already confirmed keeps its confirm. Exits
-/// once the session is gone and every tracked publish is resolved.
+/// or dropped record. A publish still unconfirmed when the session ends, or
+/// at the writer's close deadline (`close_by`), is dropped without waiting;
+/// one already confirmed keeps its confirm. Exits once the session's
+/// publishes stopped and every tracked publish is resolved.
 pub(super) async fn track_confirms(
     mut rx: mpsc::UnboundedReceiver<Pending>,
     health: Arc<Health>,
+    mut close_by: watch::Receiver<Option<Instant>>,
     metrics: B2buaMetrics,
 ) {
     while let Some(Pending { confirm, deadline, _slot }) = rx.recv().await {
@@ -50,10 +55,7 @@ pub(super) async fn track_confirms(
                 Err(_) => Outcome::SessionEnded,
             }
         } else {
-            match timeout_at(deadline, confirm).await {
-                Ok(result) => outcome_of(result),
-                Err(_) => Outcome::TimedOut,
-            }
+            resolve(confirm, deadline, &mut close_by).await
         };
         match outcome {
             Outcome::Acked => {
@@ -78,7 +80,29 @@ pub(super) async fn track_confirms(
                 metrics.bump_cdr_dropped();
                 health.end("no confirm within the confirm bound");
             }
-            Outcome::SessionEnded => metrics.bump_cdr_dropped(),
+            Outcome::Closed | Outcome::SessionEnded => metrics.bump_cdr_dropped(),
+        }
+    }
+}
+
+/// `confirm`'s outcome by `deadline`, or by the close deadline when one is set,
+/// before or during the wait, and comes first.
+async fn resolve(
+    confirm: PublisherConfirm,
+    deadline: Instant,
+    close_by: &mut watch::Receiver<Option<Instant>>,
+) -> Outcome {
+    tokio::pin!(confirm);
+    loop {
+        let close = *close_by.borrow_and_update();
+        let by = close.map_or(deadline, |close| close.min(deadline));
+        tokio::select! {
+            result = timeout_at(by, &mut confirm) => return match result {
+                Ok(result) => outcome_of(result),
+                Err(_) if by < deadline => Outcome::Closed,
+                Err(_) => Outcome::TimedOut,
+            },
+            Ok(()) = close_by.changed() => {}
         }
     }
 }

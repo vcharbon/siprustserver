@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tokio::time::Instant;
 
 use call::Call;
 
@@ -34,4 +35,6 @@ impl CdrWriter for InMemoryCdrWriter {
     async fn read_all(&self) -> Vec<CdrRecord> {
         self.records.lock().unwrap().clone()
     }
+
+    async fn close(&self, _deadline: Instant) {}
 }
