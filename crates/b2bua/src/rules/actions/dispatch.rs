@@ -21,7 +21,9 @@ use super::unrelayed::Unrelayed;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    pub(super) fn apply(
+    /// Apply one action; `Break` ends the rule's list (a `CreateLeg` whose
+    /// leg is refused).
+    pub(super) fn step(
         &self,
         action: &RuleAction,
         ctx: &RuleContext,
@@ -29,6 +31,48 @@ impl ActionExecutor<'_> {
         fx: &mut HandlerEffects,
     ) -> ControlFlow<()> {
         match action {
+            RuleAction::CreateLeg {
+                destination,
+                new_ruri,
+                new_from,
+                new_to,
+                callback_context,
+                body_override,
+                header_updates,
+                header_adds,
+                kind,
+                attempt,
+            } => self.create_leg(
+                call,
+                fx,
+                ctx,
+                destination,
+                new_ruri.as_deref(),
+                new_from.as_deref(),
+                new_to.as_deref(),
+                callback_context.as_deref(),
+                body_override.as_ref(),
+                header_updates,
+                header_adds,
+                *kind,
+                attempt.as_ref(),
+            ),
+            _ => {
+                self.apply(action, ctx, call, fx);
+                ControlFlow::Continue(())
+            }
+        }
+    }
+
+    pub(super) fn apply(
+        &self,
+        action: &RuleAction,
+        ctx: &RuleContext,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+    ) {
+        match action {
+            RuleAction::CreateLeg { .. } => unreachable!("a CreateLeg is stepped, never applied"),
             RuleAction::RelayToPeer { transform } => match resolve_peer(call, ctx) {
                 RelayPeer::Leg { leg_id, dialog } => {
                     self.relay_to(call, fx, ctx, &leg_id, transform, dialog);
@@ -88,34 +132,6 @@ impl ActionExecutor<'_> {
             }
             RuleAction::Split { leg_id } => {
                 *call = split_leg(call.clone(), leg_id);
-            }
-            RuleAction::CreateLeg {
-                destination,
-                new_ruri,
-                new_from,
-                new_to,
-                callback_context,
-                body_override,
-                header_updates,
-                header_adds,
-                kind,
-                attempt,
-            } => {
-                return self.create_leg(
-                    call,
-                    fx,
-                    ctx,
-                    destination,
-                    new_ruri.as_deref(),
-                    new_from.as_deref(),
-                    new_to.as_deref(),
-                    callback_context.as_deref(),
-                    body_override.as_ref(),
-                    header_updates,
-                    header_adds,
-                    *kind,
-                    attempt.as_ref(),
-                );
             }
             RuleAction::DestroyLeg { leg_id, headers } => {
                 self.destroy_leg(call, fx, ctx, leg_id, headers);
@@ -416,7 +432,6 @@ impl ActionExecutor<'_> {
                 );
             }
         }
-        ControlFlow::Continue(())
     }
 
     /// Relay the current event to `target_leg` (response → regenerate on the

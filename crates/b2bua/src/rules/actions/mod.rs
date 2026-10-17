@@ -78,7 +78,7 @@ impl ActionExecutor<'_> {
         let mut call = call.clone();
         let mut fx = HandlerEffects::new();
         for action in actions {
-            if self.apply(action, ctx, &mut call, &mut fx).is_break() {
+            if self.step(action, ctx, &mut call, &mut fx).is_break() {
                 break;
             }
         }
