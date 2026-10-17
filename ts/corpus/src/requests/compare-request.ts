@@ -4,18 +4,14 @@
  * lane they ran on, each call by the key its case id is frozen to, so the
  * request names calls and survives a re-cut. With `--repeat N` every job of
  * the request replays its cells N times over, and a comparison of the job's
- * runs classes a call whose passes disagree `unstable`. A moved call whose id
- * is frozen to no key is said so, not dropped silently.
+ * runs classes a call whose passes disagree `unstable`. The request carries
+ * its lane's default knobs. A moved call whose id is frozen to no key is said
+ * so, not dropped silently.
  */
 import { CaseIds, type Compare, Requests } from "@sip/store"
 import * as Effect from "effect/Effect"
-import {
-  DEFAULT_BATCH,
-  DEFAULT_CLEANUP,
-  DEFAULT_CONCURRENCY,
-  DEFAULT_MEMORY_MAX,
-  DEFAULT_STARTS_PER_SECOND
-} from "../knobs.js"
+import { DEFAULT_CLEANUP, DEFAULT_MEMORY_MAX } from "../knobs.js"
+import * as KnobResolution from "../replay/knob-resolution.js"
 
 /** What the request is asked to be. */
 export interface Asked {
@@ -66,15 +62,14 @@ export const request = Effect.fn("CompareRequest.request")(function*(comparison:
     return { _tag: "refused", why: `no moved call has a frozen id to key it by: ${unkeyed.join(", ")}` } satisfies Made
   }
   const lanes = [...new Set(moved.map((move) => move.after.lane))]
+  const lane = lanes.length === 1 ? lanes[0]! : asked.lane
   const requests = yield* Requests.Service
   const created = yield* requests.create({
-    lane: lanes.length === 1 ? lanes[0]! : asked.lane,
+    lane,
     selection: { kind: "cells", file: named, whole: [] },
     knobs: {
-      concurrency: DEFAULT_CONCURRENCY,
-      batchSize: DEFAULT_BATCH,
+      ...(yield* KnobResolution.forLane(lane)),
       memoryMax: DEFAULT_MEMORY_MAX,
-      startsPerSecond: DEFAULT_STARTS_PER_SECOND,
       cleanup: DEFAULT_CLEANUP,
       repeat: Math.max(1, Math.floor(asked.repeat))
     },

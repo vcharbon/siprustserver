@@ -25,8 +25,10 @@
  *
  * `--request <id>` replays a request on the request's own lane: its cells
  * resolved against the pin, one run row per capture — `full` or `cases` as
- * resolved — and batches of `--batch` CELLS across captures. The request's
- * knobs apply; a knob stated on the line other than its default overrides it.
+ * resolved — and batches of `--batch` CELLS across captures. A knob stated on
+ * the line overrides the request's; one neither states is the lane's default,
+ * else the generic one (`options.ts`). A work list's unstated knobs are its
+ * lane's defaults likewise.
  * `--dry-run` prints the resolution and runs nothing. A work list
  * (`<capture>`, `--known`, `--all`, `--standing`) is planned off the cut store
  * and runs through the same batches.
@@ -65,12 +67,6 @@ import * as HookKeep from "@sip/corpus/jobs/hook-keep"
 import * as Hooks from "@sip/corpus/jobs/hooks"
 import * as Job from "@sip/corpus/jobs/job"
 import { DEFAULT_GRACE } from "@sip/corpus/jobs/job"
-import {
-  DEFAULT_BATCH,
-  DEFAULT_CONCURRENCY,
-  DEFAULT_MEMORY_MAX,
-  DEFAULT_STARTS_PER_SECOND
-} from "@sip/corpus/knobs"
 import { errorsFail, type Options } from "@sip/corpus/options"
 import * as Population from "@sip/corpus/population"
 import * as ReplayBuild from "@sip/corpus/replay/build"
@@ -95,7 +91,7 @@ import { Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
 import { triageFlags } from "../flags.js"
 import * as IdFlags from "../id-flags.js"
-import { optionsOf, USAGE_TAIL } from "../options.js"
+import { replayOptionsOf, requestOptionsOf, USAGE_TAIL } from "../options.js"
 import * as Refusals from "../refusals.js"
 import { exit } from "../runner.js"
 import * as CaseSelection from "./case-selection.js"
@@ -137,33 +133,6 @@ export const flags = (facts: CliFacts) => ({
 })
 
 type Input = Command.Command.Config.Infer<ReturnType<typeof flags>>
-
-/** A knob as the line states it, or as the request carries it where the line left the default. */
-const knob = <A>(stated: A, fallback: A, requested: A): A => (stated === fallback ? requested : stated)
-
-/**
- * The request's lane and knobs as the phase's options. The selection is the
- * request's own: a universe request sweeps and tidies after itself, any other
- * is a named list and pays for no walk of the tree.
- */
-const requestOptions = Effect.fn("Replay.requestOptions")(function*(input: Input, row: Requests.Row) {
-  const base = yield* optionsOf(input)
-  return {
-    ...base,
-    lane: row.lane,
-    selection: {
-      ...base.selection,
-      universe: row.selection.kind === "universe" ? row.selection.universe : "named",
-      positional: [],
-      cases: []
-    },
-    batchSize: knob(input.batch, DEFAULT_BATCH, row.knobs.batchSize),
-    concurrency: knob(input.concurrency, DEFAULT_CONCURRENCY, row.knobs.concurrency),
-    memoryMax: knob(input.memoryMax, DEFAULT_MEMORY_MAX, row.knobs.memoryMax),
-    startsPerSecond: knob(input.startsPerSecond, DEFAULT_STARTS_PER_SECOND, row.knobs.startsPerSecond),
-    cleanup: input.cleanup && row.knobs.cleanup
-  } satisfies Options
-})
 
 const noPrep = (facts: CliFacts, named: number | undefined): string =>
   named === undefined
@@ -267,7 +236,7 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     yield* Console.error(`[replay] refused: there is no request ${id}`)
     return 2
   }
-  const options = yield* requestOptions(input, shown.request)
+  const options = yield* requestOptionsOf(input, shown.request)
   const unstated = yield* Refusals.lane(options.lane)
   if (unstated !== null) {
     yield* Console.error(`[replay] refused: ${unstated}`)
@@ -439,7 +408,7 @@ const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Inpu
     yield* Console.error(`[replay] refused: ${unstated}`)
     return 2
   }
-  const stated = yield* optionsOf(input)
+  const stated = yield* replayOptionsOf(input)
   const away = yield* Refusals.environment(facts, stated.lane, stated.selection.universe, stated.dryRun)
   if (away !== null) {
     yield* Console.error(`[replay] refused: ${away}`)

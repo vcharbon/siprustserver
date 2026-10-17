@@ -7,15 +7,17 @@ import { CaseIds, type Compare, Requests } from "@sip/store"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import { describe, expect, it } from "vitest"
+import { LaneHosting } from "../../src/deployment/index.js"
+import { DEFAULT_BATCH, DEFAULT_CONCURRENCY, DEFAULT_STARTS_PER_SECOND } from "../../src/knobs.js"
 import * as CompareRequest from "../../src/requests/compare-request.js"
 
 const C = "trace.pcap.gz"
 
-const cell = (caseId: string, passed: boolean): Compare.Cell => ({
+const cell = (caseId: string, passed: boolean, lane = "fake"): Compare.Cell => ({
   capture: C,
   caseId,
   runId: 1,
-  lane: "fake",
+  lane,
   env: "integration",
   branch: "main",
   laneHash: "l1",
@@ -31,15 +33,15 @@ const cell = (caseId: string, passed: boolean): Compare.Cell => ({
   code: []
 })
 
-const move = (caseId: string, moveClass: Compare.MoveClass): Compare.Move => ({
+const move = (caseId: string, moveClass: Compare.MoveClass, lane = "fake"): Compare.Move => ({
   class: moveClass,
   capture: C,
   caseId,
   document: "same",
   code: "different",
   lane: "same",
-  before: cell(caseId, moveClass !== "red→green"),
-  after: cell(caseId, moveClass === "red→green")
+  before: cell(caseId, moveClass !== "red→green", lane),
+  after: cell(caseId, moveClass === "red→green", lane)
 })
 
 const side: Compare.Side = { selector: "@current", runs: 1, sweeps: [], cells: [], elsewhere: { captures: 0, calls: 0, keys: [] } }
@@ -58,7 +60,20 @@ const created: Array<Requests.CreateRequest> = []
 
 const refuse = Effect.die("not in this test")
 
+/** `fake` states no default of its own; `wall` defaults every knob a lane may. */
+const hosting = LaneHosting.layerWith({
+  lanes: ["fake", "wall"],
+  lane: (lane) =>
+    lane === "wall"
+      ? Effect.succeed({ clock: "real", exclusive: true, defaults: { concurrency: 100, batchSize: 4000, startsPerSecond: 10 } })
+      : Effect.succeed(LaneHosting.NEUTRAL_LANE),
+  standBatch: () => Effect.succeed(undefined),
+  standSut: () => Effect.succeed(undefined),
+  preflight: () => Effect.succeed(null)
+})
+
 const services = Layer.mergeAll(
+  hosting,
   Layer.succeed(
     CaseIds.Service,
     CaseIds.Service.of({
@@ -111,6 +126,21 @@ describe("CompareRequest.request", () => {
     expect(created[0]!.lane).toBe("fake")
     expect(created[0]!.knobs.repeat).toBe(3)
     expect(created[0]!.selection).toEqual({ kind: "cells", file: "compare @current @env:task-1", whole: [] })
+  })
+
+  it("states the lane's own knob defaults on a lane that has them, the generic ones on a lane that has none", async () => {
+    created.length = 0
+    await Effect.runPromise(
+      CompareRequest.request(comparison([move(`${C}-case1`, "red→green", "wall")]), asked).pipe(Effect.provide(services))
+    )
+    await Effect.runPromise(
+      CompareRequest.request(comparison([move(`${C}-case1`, "red→green")]), asked).pipe(Effect.provide(services))
+    )
+    expect(created.map((one) => [one.lane, one.knobs.concurrency, one.knobs.batchSize, one.knobs.startsPerSecond]))
+      .toEqual([
+        ["wall", 100, 4000, 10],
+        ["fake", DEFAULT_CONCURRENCY, DEFAULT_BATCH, DEFAULT_STARTS_PER_SECOND]
+      ])
   })
 
   it("refuses where nothing moved: there is nothing to replay", async () => {

@@ -17,22 +17,20 @@ import { Jobs, type Removal, type Requests } from "@sip/store"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { Identity, Launcher } from "../deployment/index.js"
-import {
-  DEFAULT_BATCH,
-  DEFAULT_CLEANUP,
-  DEFAULT_CONCURRENCY,
-  DEFAULT_MEMORY_MAX,
-  DEFAULT_STARTS_PER_SECOND
-} from "../knobs.js"
+import { DEFAULT_CLEANUP } from "../knobs.js"
 import * as Job from "./job.js"
 
-/** The knobs a replay job is launched with: what its row's `args` keeps. */
+/**
+ * The knobs a replay job is launched with: what its row's `args` keeps. A
+ * knob `null` is unstated, and the replay resolves it off the request and its
+ * lane (`knob-resolution.ts`).
+ */
 export interface ReplayKnobs {
   readonly prep: number | null
-  readonly batch: number
-  readonly concurrency: number
-  readonly memoryMax: string
-  readonly startsPerSecond: number
+  readonly batch: number | null
+  readonly concurrency: number | null
+  readonly memoryMax: string | null
+  readonly startsPerSecond: number | null
   readonly cleanup: boolean
   readonly wait: number | null
   /** A resume: the request's unrun cells alone, as cases sets. */
@@ -41,13 +39,13 @@ export interface ReplayKnobs {
   readonly after: number | null
 }
 
-/** The knobs a row's `args` keeps, each read back with the start line's default where it is missing. */
+/** The knobs a row's `args` keeps; a knob it does not carry reads back unstated. */
 export const replayKnobsOf = (args: Readonly<Record<string, unknown>>): ReplayKnobs => ({
   prep: typeof args["prep"] === "number" ? args["prep"] : null,
-  batch: typeof args["batch"] === "number" ? args["batch"] : DEFAULT_BATCH,
-  concurrency: typeof args["concurrency"] === "number" ? args["concurrency"] : DEFAULT_CONCURRENCY,
-  memoryMax: typeof args["memoryMax"] === "string" ? args["memoryMax"] : DEFAULT_MEMORY_MAX,
-  startsPerSecond: typeof args["startsPerSecond"] === "number" ? args["startsPerSecond"] : DEFAULT_STARTS_PER_SECOND,
+  batch: typeof args["batch"] === "number" ? args["batch"] : null,
+  concurrency: typeof args["concurrency"] === "number" ? args["concurrency"] : null,
+  memoryMax: typeof args["memoryMax"] === "string" ? args["memoryMax"] : null,
+  startsPerSecond: typeof args["startsPerSecond"] === "number" ? args["startsPerSecond"] : null,
   cleanup: typeof args["cleanup"] === "boolean" ? args["cleanup"] : DEFAULT_CLEANUP,
   wait: typeof args["wait"] === "number" ? args["wait"] : null,
   unran: false,
@@ -115,7 +113,7 @@ export class NotStarted extends Schema.TaggedError<NotStarted>()("JobStart.NotSt
 
 export const isNotStarted = (error: unknown): error is NotStarted => error instanceof NotStarted
 
-/** The arguments a replay job runs its entry point with: the request, the row, and the knobs as stated. */
+/** The arguments a replay job runs its entry point with: the request, the row, and the knobs stated, no other. */
 export const replayArgs = (jobId: number, requestId: number, knobs: ReplayKnobs): ReadonlyArray<string> => [
   "--request",
   String(requestId),
@@ -124,14 +122,10 @@ export const replayArgs = (jobId: number, requestId: number, knobs: ReplayKnobs)
   ...(knobs.unran ? ["--unran"] : []),
   ...(knobs.after === null ? [] : ["--after", String(knobs.after)]),
   ...(knobs.prep === null ? [] : ["--prep", String(knobs.prep)]),
-  "--batch",
-  String(knobs.batch),
-  "--concurrency",
-  String(knobs.concurrency),
-  "--memory-max",
-  knobs.memoryMax,
-  "--starts-per-second",
-  String(knobs.startsPerSecond),
+  ...(knobs.batch === null ? [] : ["--batch", String(knobs.batch)]),
+  ...(knobs.concurrency === null ? [] : ["--concurrency", String(knobs.concurrency)]),
+  ...(knobs.memoryMax === null ? [] : ["--memory-max", knobs.memoryMax]),
+  ...(knobs.startsPerSecond === null ? [] : ["--starts-per-second", String(knobs.startsPerSecond)]),
   knobs.cleanup ? "--cleanup" : "--no-cleanup",
   ...(knobs.wait === null ? [] : ["--wait", String(knobs.wait)])
 ]

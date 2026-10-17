@@ -5,13 +5,7 @@
  * the same things, so a two-command session is the one-command session with a
  * cut in front of it.
  */
-import {
-  DEFAULT_BATCH,
-  DEFAULT_CLEANUP,
-  DEFAULT_CONCURRENCY,
-  DEFAULT_MEMORY_MAX,
-  DEFAULT_STARTS_PER_SECOND
-} from "@sip/corpus/knobs"
+import { DEFAULT_CLEANUP } from "@sip/corpus/knobs"
 import * as Locks from "@sip/corpus/locks"
 import * as Option from "effect/Option"
 import { Argument, type Command, Flag } from "effect/unstable/cli"
@@ -112,21 +106,22 @@ export const triageFlags = (facts: CliFacts) => ({
     Flag.withDefault(false)
   ),
   lane: laneFlag(facts),
+  // Absent is unstated, never a default: what a knob comes to is `options.ts`'s.
   batch: Flag.integer("batch").pipe(
-    Flag.withDescription("Captures per batch"),
-    Flag.withDefault(DEFAULT_BATCH)
+    Flag.withDescription("Cells per replay batch, captures per cut batch (default: the lane's on a replay)"),
+    Flag.optional
   ),
   concurrency: Flag.integer("concurrency").pipe(
-    Flag.withDescription("Cells at once"),
-    Flag.withDefault(DEFAULT_CONCURRENCY)
+    Flag.withDescription("Cells at once (default: the lane's on a replay)"),
+    Flag.optional
   ),
   startsPerSecond: Flag.float("starts-per-second").pipe(
-    Flag.withDescription("Cell starts per second (0: as fast as slots free)"),
-    Flag.withDefault(DEFAULT_STARTS_PER_SECOND)
+    Flag.withDescription("Cell starts per second, 0 as fast as slots free (default: the lane's)"),
+    Flag.optional
   ),
   memoryMax: Flag.string("memory-max").pipe(
     Flag.withDescription("The memory scope the cut and the driver run under"),
-    Flag.withDefault(DEFAULT_MEMORY_MAX)
+    Flag.optional
   ),
   wait: waitFlag,
   slice: Flag.integer("slice").pipe(

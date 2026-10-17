@@ -1,8 +1,10 @@
 /**
  * The request builder's pure half (§5 R1, R6, R9): what the filter bar, the
  * ticked rows and the population predicates come to as ONE selection the
- * server takes; the knobs as typed, held to numbers; and what a lane's
- * ceilings say about them. The page holds the state, this names its meaning.
+ * server takes; the knobs as typed, held to numbers, and sent only where
+ * typed, so the server resolves the rest per lane; and what a lane's own
+ * defaults and ceilings say about them. The page holds the state, this names
+ * its meaning.
  */
 import type {
   LaneView,
@@ -164,14 +166,27 @@ export interface KnobsInput {
 
 export const NO_KNOBS: KnobsInput = { concurrency: "", batchSize: "", memoryMax: "", startsPerSecond: "", cleanup: true }
 
-/** The knobs a request is created with: what was typed, over the defaults. */
-export const knobsOf = (input: KnobsInput, defaults: RequestKnobs): RequestKnobs => ({
-  concurrency: Math.max(1, Math.floor(number(input.concurrency) ?? defaults.concurrency)),
-  batchSize: Math.max(1, Math.floor(number(input.batchSize) ?? defaults.batchSize)),
-  memoryMax: blank(input.memoryMax.trim()) ?? defaults.memoryMax,
-  startsPerSecond: Math.max(0, number(input.startsPerSecond) ?? defaults.startsPerSecond),
-  cleanup: input.cleanup
-})
+/** The knobs as typed, held to whole positive numbers; an untyped one is absent. */
+export const statedKnobs = (input: KnobsInput): Partial<RequestKnobs> => {
+  const concurrency = number(input.concurrency)
+  const batchSize = number(input.batchSize)
+  const memoryMax = blank(input.memoryMax.trim())
+  const startsPerSecond = number(input.startsPerSecond)
+  return {
+    ...(concurrency === undefined ? {} : { concurrency: Math.max(1, Math.floor(concurrency)) }),
+    ...(batchSize === undefined ? {} : { batchSize: Math.max(1, Math.floor(batchSize)) }),
+    ...(memoryMax === undefined ? {} : { memoryMax }),
+    ...(startsPerSecond === undefined ? {} : { startsPerSecond: Math.max(0, startsPerSecond) }),
+    cleanup: input.cleanup
+  }
+}
+
+/** The knobs a request comes to: what was typed, over the defaults. */
+export const knobsOf = (input: KnobsInput, defaults: RequestKnobs): RequestKnobs => ({ ...defaults, ...statedKnobs(input) })
+
+/** What a request on `lane` comes to: what was typed, over the lane's defaults, over the generic ones. */
+export const laneKnobs = (input: KnobsInput, lane: LaneView, generic: RequestKnobs): RequestKnobs =>
+  knobsOf(input, { ...generic, ...lane.defaults })
 
 /** What a lane's ceilings say of the knobs: one line per clamp the lane will apply, none where none. */
 export const ceilingNotes = (knobs: RequestKnobs, lane: LaneView): ReadonlyArray<string> => [
@@ -183,6 +198,24 @@ export const ceilingNotes = (knobs: RequestKnobs, lane: LaneView): ReadonlyArray
     : []),
   ...(lane.exclusive ? [`${lane.lane} runs one replay at a time; a second waits by name`] : [])
 ]
+
+/** The lane's own defaults the untyped knobs take, where they differ from the generic ones; `undefined` where none does. */
+const defaultsNote = (input: KnobsInput, lane: LaneView, generic: RequestKnobs): string | undefined => {
+  const stated = statedKnobs(input)
+  const own = (key: keyof LaneView["defaults"]): boolean => stated[key] === undefined && lane.defaults[key] !== generic[key]
+  const said = [
+    ...(own("concurrency") ? [`${lane.defaults.concurrency} cells at once`] : []),
+    ...(own("batchSize") ? [`${lane.defaults.batchSize} per batch`] : []),
+    ...(own("startsPerSecond") ? [`${lane.defaults.startsPerSecond} starts/s`] : [])
+  ]
+  return said.length === 0 ? undefined : `${lane.lane} defaults to ${said.join(", ")}`
+}
+
+/** What a lane says of the knobs as typed: its own defaults for the untyped ones, then its ceilings over what it will take. */
+export const laneNotes = (input: KnobsInput, lane: LaneView, generic: RequestKnobs): ReadonlyArray<string> => {
+  const note = defaultsNote(input, lane, generic)
+  return [...(note === undefined ? [] : [note]), ...ceilingNotes(laneKnobs(input, lane, generic), lane)]
+}
 
 /** The preview's one line for a lane: cells, captures, and the rows no cut names a key for. */
 export const previewLine = (preview: RequestLanePreview): string => {

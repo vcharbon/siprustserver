@@ -3,14 +3,15 @@
  * into the options its phases share (`@sip/corpus` `options.ts`), with each
  * bound's arithmetic applied once here rather than in every phase.
  */
-import { DEFAULT_STARTS_PER_SECOND } from "@sip/corpus/knobs"
+import { DEFAULT_MEMORY_MAX } from "@sip/corpus/knobs"
 import type { Options } from "@sip/corpus/options"
+import * as KnobResolution from "@sip/corpus/replay/knob-resolution"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import { type Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
 import { patienceOf, triageFlags } from "../flags.js"
-import { pathsOf } from "../options.js"
+import { cutAndReplayDefaults, pathsOf, statedKnobs } from "../options.js"
 
 export const usage = (facts: CliFacts): string =>
   `usage: ${facts.invocation("campaign")} --pcaps P [--pcaps P …] [--set F [--set F …]] [--lane L] ` +
@@ -75,9 +76,19 @@ export type Input = Command.Command.Config.Infer<ReturnType<typeof flags>>
  * take — the universe switches, the pace — are the phase defaults: what this
  * command names is a set of PCAPS, and the captures it works on are the ones
  * they came to. The batch shape is the campaign's own, stated in the triage
- * words, so one `--memory-max` caps both the cut's child and the replay's.
+ * words, so one `--memory-max` caps both the cut's child and the replay's;
+ * unstated, its concurrency and batch are the generic ones the ingest and the
+ * cut share, and the pace is the driven lane's default.
  */
 export const optionsOf = Effect.fn("CampaignArgs.optionsOf")(function*(facts: CliFacts, input: Input) {
+  const defaults = Option.isSome(input.lane)
+    ? cutAndReplayDefaults(yield* KnobResolution.forLane(input.lane.value))
+    : KnobResolution.GENERIC
+  const knobs = KnobResolution.resolve(
+    statedKnobs({ ...input, startsPerSecond: Option.none() }),
+    undefined,
+    defaults
+  )
   return {
     paths: yield* pathsOf({ repoRoot: Option.getOrUndefined(input.repo) }),
     lane: Option.getOrUndefined(input.lane) ?? facts.defaultLane,
@@ -91,10 +102,10 @@ export const optionsOf = Effect.fn("CampaignArgs.optionsOf")(function*(facts: Cl
       limit: Option.getOrUndefined(input.limit),
       cases: []
     },
-    batchSize: Math.max(1, input.batch),
-    concurrency: Math.max(1, input.concurrency),
-    startsPerSecond: DEFAULT_STARTS_PER_SECOND,
-    memoryMax: input.memoryMax,
+    batchSize: Math.max(1, knobs.batchSize),
+    concurrency: Math.max(1, knobs.concurrency),
+    startsPerSecond: knobs.startsPerSecond,
+    memoryMax: Option.getOrElse(input.memoryMax, () => DEFAULT_MEMORY_MAX),
     patience: patienceOf(input.wait),
     dryRun: input.dryRun,
     prep: Option.getOrUndefined(input.prep),

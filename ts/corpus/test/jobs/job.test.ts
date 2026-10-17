@@ -190,6 +190,17 @@ describe("starting a replay job", () => {
       restartOf: 9
     })
   })
+
+  it("passes on the knobs the start stated and leaves the rest for the replay to resolve", () => {
+    const knobs = { ...JobStart.replayKnobsOf({}), concurrency: 8, startsPerSecond: 0 }
+    const args = JobStart.replayArgs(5, 11, knobs)
+    expect(args).toEqual(["--request", "11", "--job", "5", "--concurrency", "8", "--starts-per-second", "0", "--cleanup"])
+  })
+
+  it("reads a knob a row's args leave out as unstated, one it carries as stated", () => {
+    const read = JobStart.replayKnobsOf({ batch: 1000, memoryMax: "2G" })
+    expect([read.batch, read.concurrency, read.memoryMax, read.startsPerSecond]).toEqual([1000, null, "2G", null])
+  })
 })
 
 describe("reaping jobs", () => {

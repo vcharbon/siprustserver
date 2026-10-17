@@ -3,8 +3,9 @@
  * means to one cell (`@sip/driver` `LanePresets`, the interpreter's lane
  * block): whether its expectations are wall-clock deadlines, whether its SUT
  * is one box-wide singleton, how many cells it takes at once and how fast they
- * may start, how its batch process and its SUT are stood, and what must hold
- * on the box before it is driven.
+ * may start, the knobs a replay on it takes where its caller states none, how
+ * its batch process and its SUT are stood, and what must hold on the box
+ * before it is driven.
  *
  * A real-clock lane holds the box quiet while it runs — a neighbour's load
  * would time its cells out — and its runs cost a lab and their calls' wall
@@ -37,6 +38,20 @@ export class LaneUnready extends Schema.TaggedError<LaneUnready>()("Corpus.LaneU
   }
 }
 
+/**
+ * The replay knobs a lane defaults where neither the caller nor the request
+ * states one; a knob left out is the generic default (`knobs.ts`). A ceiling
+ * still clamps a default, as it clamps a stated value.
+ */
+export interface LaneDefaults {
+  /** Cells at once. */
+  readonly concurrency?: number
+  /** Cells per batch. */
+  readonly batchSize?: number
+  /** Cell starts per second; `0` is as fast as concurrency slots free. */
+  readonly startsPerSecond?: number
+}
+
 /** What a lane states about itself. */
 export interface Lane {
   /** `real`: wall-clock deadlines, the box held quiet, bundles kept. `paused`: none of that. */
@@ -47,6 +62,8 @@ export interface Lane {
   readonly cellCeiling?: number
   /** How many cells may start per second, where the lane bounds it. */
   readonly startCeiling?: number
+  /** The knobs a replay on it takes where nobody states them. */
+  readonly defaults?: LaneDefaults
   /** Whether a SUT outside the cell is stood up for each batch (`managed`) or found running (`standing`). */
   readonly sut?: "managed" | "standing"
 }

@@ -623,7 +623,14 @@ export interface RulesView {
   readonly rows: readonly RuleRow[]
 }
 
-/** One lane the deployment runs, and the ceilings it clamps a request's knobs to (§5 R9). */
+/** The knobs a lane defaults: what a request on it takes where the page states none. */
+export interface LaneDefaults {
+  readonly concurrency: number
+  readonly batchSize: number
+  readonly startsPerSecond: number
+}
+
+/** One lane the deployment runs, its own knob defaults, and the ceilings it clamps a request's knobs to (§5 R9). */
 export interface LaneView {
   readonly lane: string
   /** A box-wide singleton SUT: one replay at a time, the next waits by name. */
@@ -632,6 +639,7 @@ export interface LaneView {
   readonly cellCeiling: number | null
   /** Cell starts per second the lane caps at; null = as fast as slots free. */
   readonly startCeiling: number | null
+  readonly defaults: LaneDefaults
 }
 
 /** The knobs a request carries; a lane clamps them when it runs. */
@@ -645,7 +653,7 @@ export interface RequestKnobs {
 
 export interface LanesView {
   readonly lanes: readonly LaneView[]
-  /** The knobs a request takes where the page states none. */
+  /** The knobs a request takes where neither the page nor its lane states one. */
   readonly knobs: RequestKnobs
 }
 

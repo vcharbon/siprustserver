@@ -1,11 +1,13 @@
 /**
- * The replay knobs a command or a request states nothing about: how many
- * cells a batch holds and runs at once, the memory scope the cut and the
- * driver run under, how fast cells start, and whether a sweep ends with the
- * retention pass.
+ * The GENERIC knobs: what a command or a request states nothing about takes —
+ * how many cells a batch holds and runs at once, the memory scope the cut and
+ * the driver run under, how fast cells start, and whether a sweep ends with
+ * the retention pass. A lane may state its own concurrency, batch and pace
+ * for its replays (`LaneHosting.LaneDefaults`, resolved in
+ * `replay/knob-resolution.ts`); the ingest and the cut take these.
  */
 
-/** Cells per batch: one driver boot serves a batch of this many. */
+/** Cells per replay batch — one driver boot serves a batch of this many — and captures per cut batch. */
 export const DEFAULT_BATCH = 1000
 
 /**

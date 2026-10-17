@@ -1,7 +1,8 @@
 /**
  * The filter bar, the ticked rows and the predicates as ONE selection the
- * server takes; the knobs held to numbers over the defaults; the lane's
- * ceilings read against them; the preview's line.
+ * server takes; the knobs held to numbers over the defaults, and only the
+ * typed ones sent, so the server resolves the rest per lane; each lane's own
+ * defaults and ceilings read against them; the preview's line.
  */
 import { describe, expect, it } from "vitest"
 import type { TriageCallRow } from "../src/api.ts"
@@ -11,11 +12,13 @@ import {
   createLine,
   describeSelection,
   knobsOf,
+  laneNotes,
   NO_KNOBS,
   NO_PREDICATES,
   previewLine,
   rowKey,
-  selectionOf
+  selectionOf,
+  statedKnobs
 } from "../src/request-builder.ts"
 
 const row = (capture: string, caseId: string, over: Partial<TriageCallRow> = {}): TriageCallRow => ({
@@ -116,7 +119,7 @@ describe("the knobs", () => {
   })
 
   it("read a lane's ceilings against them", () => {
-    const real = { lane: "local-real", exclusive: true, cellCeiling: 600, startCeiling: 50 }
+    const real = { lane: "local-real", exclusive: true, cellCeiling: 600, startCeiling: 50, defaults }
     expect(ceilingNotes({ ...defaults, concurrency: 800 }, real)).toEqual([
       "local-real clamps concurrency to 600",
       "local-real paces starts at 50/s",
@@ -125,7 +128,40 @@ describe("the knobs", () => {
     expect(ceilingNotes({ ...defaults, startsPerSecond: 10 }, real)).toEqual([
       "local-real runs one replay at a time; a second waits by name"
     ])
-    expect(ceilingNotes(defaults, { lane: "fake", exclusive: false, cellCeiling: null, startCeiling: null })).toEqual([])
+    expect(ceilingNotes(defaults, { lane: "fake", exclusive: false, cellCeiling: null, startCeiling: null, defaults }))
+      .toEqual([])
+  })
+
+  it("send only what was typed, so each lane resolves the rest", () => {
+    expect(statedKnobs(NO_KNOBS)).toEqual({ cleanup: true })
+    expect(statedKnobs({ ...NO_KNOBS, concurrency: "8", startsPerSecond: "0", memoryMax: " 3G " })).toEqual({
+      concurrency: 8,
+      startsPerSecond: 0,
+      memoryMax: "3G",
+      cleanup: true
+    })
+  })
+
+  it("name a lane's own defaults for the knobs left untyped, and read its ceilings against what it will take", () => {
+    const wall = {
+      lane: "wall",
+      exclusive: true,
+      cellCeiling: 600,
+      startCeiling: 50,
+      defaults: { concurrency: 100, batchSize: 4000, startsPerSecond: 10 }
+    }
+    expect(laneNotes(NO_KNOBS, wall, defaults)).toEqual([
+      "wall defaults to 100 cells at once, 4000 per batch, 10 starts/s",
+      "wall runs one replay at a time; a second waits by name"
+    ])
+    expect(laneNotes({ ...NO_KNOBS, concurrency: "800", startsPerSecond: "0" }, wall, defaults)).toEqual([
+      "wall defaults to 4000 per batch",
+      "wall clamps concurrency to 600",
+      "wall paces starts at 50/s",
+      "wall runs one replay at a time; a second waits by name"
+    ])
+    const paused = { lane: "paused", exclusive: false, cellCeiling: null, startCeiling: null, defaults }
+    expect(laneNotes(NO_KNOBS, paused, defaults)).toEqual([])
   })
 })
 

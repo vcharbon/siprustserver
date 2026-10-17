@@ -28,9 +28,6 @@ export type SelectionInput =
 /** The file a ticked list is recorded as: the page is the file. */
 export const TICKED = "<ticked>"
 
-/** Cells per batch: what one driver boot carries whatever the captures. */
-export const DEFAULT_BATCH_CELLS = 1000
-
 /** What a selection came to: the cells, the selection as the row keeps it, and what it could not name. */
 export interface Frozen {
   readonly selection: Requests.Selection

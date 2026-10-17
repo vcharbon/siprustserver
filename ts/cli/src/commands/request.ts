@@ -8,6 +8,7 @@
  *   … [--repeat N]   (each job replays the cells in N passes; `compare` reads split repeats as unstable)
  *     [--prep N] [--concurrency N] [--batch N] [--memory-max SIZE] [--starts-per-second N] [--no-cleanup]
  *     [--whole-first C...] [--dry-run]
+ *   (an unstated --concurrency, --batch or --starts-per-second is the lane's default, else the generic one)
  *   request resolve <id> [--prep N]
  *   request list [--limit N]
  *   request show <id>
@@ -22,17 +23,12 @@
  * whole-capture request by what that prep holds; it runs nothing. The batch
  * that replays a request is `replay`'s.
  */
-import {
-  DEFAULT_CLEANUP,
-  DEFAULT_CONCURRENCY,
-  DEFAULT_MEMORY_MAX,
-  DEFAULT_STARTS_PER_SECOND
-} from "@sip/corpus/knobs"
+import { DEFAULT_CLEANUP, DEFAULT_MEMORY_MAX } from "@sip/corpus/knobs"
+import * as KnobResolution from "@sip/corpus/replay/knob-resolution"
 import { pin } from "@sip/corpus/replay/plan"
 import { repeatRefusal } from "@sip/corpus/requests/compare-request"
 import {
   createdLine,
-  DEFAULT_BATCH_CELLS,
   detailLines,
   freeze,
   preview,
@@ -52,7 +48,7 @@ import { Argument, Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
 import { laneFlag, pathFlags } from "../flags.js"
 import * as IdFlags from "../id-flags.js"
-import { overridesOf, pathsOf } from "../options.js"
+import { overridesOf, pathsOf, statedKnobs } from "../options.js"
 import * as Refusals from "../refusals.js"
 import { exit } from "../runner.js"
 import { createdBy } from "./compare.js"
@@ -110,20 +106,20 @@ export const createFlags = (facts: CliFacts) => ({
   ),
   prep: prepFlag,
   concurrency: Flag.integer("concurrency").pipe(
-    Flag.withDescription("Cells at once"),
-    Flag.withDefault(DEFAULT_CONCURRENCY)
+    Flag.withDescription("Cells at once (default: the lane's)"),
+    Flag.optional
   ),
   batch: Flag.integer("batch").pipe(
-    Flag.withDescription("Cells per batch"),
-    Flag.withDefault(DEFAULT_BATCH_CELLS)
+    Flag.withDescription("Cells per batch (default: the lane's)"),
+    Flag.optional
   ),
   memoryMax: Flag.string("memory-max").pipe(
     Flag.withDescription("The memory scope the driver runs under"),
     Flag.withDefault(DEFAULT_MEMORY_MAX)
   ),
   startsPerSecond: Flag.float("starts-per-second").pipe(
-    Flag.withDescription("Cell starts per second (0: as fast as slots free)"),
-    Flag.withDefault(DEFAULT_STARTS_PER_SECOND)
+    Flag.withDescription("Cell starts per second, 0 as fast as slots free (default: the lane's)"),
+    Flag.optional
   ),
   cleanup: Flag.boolean("cleanup").pipe(
     Flag.withDescription("Run the retention pass after the replay; --no-cleanup keeps the tree as it left it"),
@@ -144,6 +140,19 @@ export const createFlags = (facts: CliFacts) => ({
 })
 
 type CreateInput = Command.Command.Config.Infer<ReturnType<typeof createFlags>>
+
+/** The knobs the request is created with: each as the line states it, else the lane's default, else the generic one. */
+export const createKnobs = Effect.fn("RequestCli.createKnobs")(function*(input: CreateInput) {
+  const knobs = KnobResolution.resolve(statedKnobs(input), undefined, yield* KnobResolution.forLane(input.lane))
+  return {
+    concurrency: Math.max(1, knobs.concurrency),
+    batchSize: Math.max(1, knobs.batchSize),
+    memoryMax: input.memoryMax,
+    startsPerSecond: Math.max(0, knobs.startsPerSecond),
+    cleanup: input.cleanup,
+    ...(input.repeat > 1 ? { repeat: input.repeat } : {})
+  } satisfies Requests.Knobs
+})
 
 /** The one selection form the line states, or why it states none or two. */
 const selectionOf = (input: CreateInput): SelectionInput | Refused => {
@@ -256,14 +265,7 @@ const createOf = (facts: CliFacts, root: ReturnType<typeof rootOf>) =>
       const created = yield* requests.create({
         lane: input.lane,
         selection: frozen.selection,
-        knobs: {
-          concurrency: Math.max(1, input.concurrency),
-          batchSize: Math.max(1, input.batch),
-          memoryMax: input.memoryMax,
-          startsPerSecond: Math.max(0, input.startsPerSecond),
-          cleanup: input.cleanup,
-          ...(input.repeat > 1 ? { repeat: input.repeat } : {})
-        },
+        knobs: yield* createKnobs(input),
         createdBy: yield* createdBy,
         cells: frozen.cells
       })

@@ -4,8 +4,9 @@
  * ticked rows, those rows' captures whole, or the population under its
  * predicates — previewed on the lanes picked (one server call, no
  * row cap: the count and the captures, each full or cases),
- * then created as one request PER LANE with the knobs shown beside the
- * ceilings each lane clamps them to, and a replay job over each — with a cut
+ * then created as one request PER LANE with the knobs typed — each lane
+ * filling the untyped ones with its own defaults, shown beside the ceilings it
+ * clamps them to — and a replay job over each — with a cut
  * queued ahead where "re-cut first" says so. The jobs are linked as they start.
  *
  * Nothing is written until Create: a preview is the server reading the
@@ -15,16 +16,17 @@ import type { JSX } from "react"
 import { useState } from "react"
 import { api, type JobStarted, type LanesView, type RequestPreview, type TriageCallRow, useAsync } from "../api.ts"
 import {
-  ceilingNotes,
   createLine,
   describeSelection,
-  knobsOf,
   type KnobsInput,
+  laneKnobs,
+  laneNotes,
   type Mode,
   NO_KNOBS,
   NO_PREDICATES,
   type Predicates,
-  selectionOf
+  selectionOf,
+  statedKnobs
 } from "../request-builder.ts"
 import { useCommands } from "../commands.ts"
 import type { ChipFilter } from "../queue-filter.ts"
@@ -76,7 +78,9 @@ export const RequestBuilder = (
   const laneNames = lanesView === undefined ? known : lanesView.lanes.map((one) => one.lane)
   const selection = selectionOf(mode, { lane, scope, q, filter }, ticked, shown, predicates)
   const defaults = lanesView?.knobs ?? { concurrency: 8, batchSize: 1000, memoryMax: "4G", startsPerSecond: 0, cleanup: true }
-  const stated = knobsOf(knobs, defaults)
+  // One lane picked: its own defaults stand in the empty fields; several: the generic ones, each lane's noted below.
+  const only = picked.length === 1 ? lanesView?.lanes.find((one) => one.lane === picked[0]) : undefined
+  const placeholders = only === undefined ? defaults : laneKnobs(NO_KNOBS, only, defaults)
   const previewed = outcome.kind === "previewed" ? outcome.preview : undefined
 
   const body = () => (typeof selection === "string" ? undefined : { lanes: picked, selection })
@@ -98,7 +102,7 @@ export const RequestBuilder = (
     if (request === undefined) return
     setOutcome({ kind: "busy", what: "creating…" })
     try {
-      const { created } = await api.requestCreate({ ...request, knobs: stated })
+      const { created } = await api.requestCreate({ ...request, knobs: statedKnobs(knobs) })
       const jobs: Array<JobStarted> = []
       for (const one of created) {
         const started = await api.jobStart({
@@ -214,10 +218,10 @@ export const RequestBuilder = (
 
       <div className="request-row">
         <span className="facet-label">knobs</span>
-        {knob("concurrency", "concurrency", String(defaults.concurrency))}
-        {knob("batchSize", "batch (cells)", String(defaults.batchSize))}
-        {knob("memoryMax", "memory max", defaults.memoryMax)}
-        {knob("startsPerSecond", "starts/s", String(defaults.startsPerSecond))}
+        {knob("concurrency", "concurrency", String(placeholders.concurrency))}
+        {knob("batchSize", "batch (cells)", String(placeholders.batchSize))}
+        {knob("memoryMax", "memory max", placeholders.memoryMax)}
+        {knob("startsPerSecond", "starts/s", String(placeholders.startsPerSecond))}
         <label>
           <input type="checkbox" checked={knobs.cleanup} onChange={(e) => setKnobs({ ...knobs, cleanup: e.target.checked })} />{" "}
           cleanup after
@@ -235,7 +239,7 @@ export const RequestBuilder = (
         <ul className="request-notes muted">
           {lanesView.lanes
             .filter((one) => picked.includes(one.lane))
-            .flatMap((one) => ceilingNotes(stated, one))
+            .flatMap((one) => laneNotes(knobs, one, defaults))
             .map((note) => <li key={note}>{note}</li>)}
         </ul>
       )}

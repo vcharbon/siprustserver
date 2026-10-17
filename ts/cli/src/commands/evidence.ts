@@ -22,7 +22,9 @@
  *
  * The two phases are separate commands for a reason — one cut feeds as many
  * lanes at once as the host has. This composes them for the common case: one
- * capture, one lane, one answer.
+ * capture, one lane, one answer. Its `--concurrency` and `--batch` serve the
+ * cut too, so unstated they are the generic defaults; an unstated pace is the
+ * lane's (`options.ts`).
  *
  * The replay is pinned to the prep the cut just opened, so this command answers
  * for the documents it cut and for no others, whatever else lands beside it.
@@ -45,7 +47,7 @@ import * as Effect from "effect/Effect"
 import { Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
 import { triageFlags, type TriageInput } from "../flags.js"
-import { optionsOf, USAGE_TAIL } from "../options.js"
+import { cutAndReplayOptionsOf, USAGE_TAIL } from "../options.js"
 import * as Refusals from "../refusals.js"
 import { exit } from "../runner.js"
 import * as CaseSelection from "./case-selection.js"
@@ -61,7 +63,7 @@ export const flags = (facts: CliFacts) => ({
 type Input = TriageInput & { readonly summary: boolean }
 
 const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input) {
-  const asked = yield* optionsOf(input)
+  const asked = yield* cutAndReplayOptionsOf(input)
   const away = yield* Refusals.environment(facts, asked.lane, asked.selection.universe, asked.dryRun)
   if (away !== null) {
     yield* Console.error(`[evidence] refused: ${away}`)

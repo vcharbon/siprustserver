@@ -34,6 +34,10 @@
  * request's cells no job of it ran, every capture as a `cases` set;
  * `--again` replays every cell as the request resolves. Both re-resolve
  * against the standing prep when they run.
+ *
+ * A replay job passes on only the knobs its start states: the replay resolves
+ * the rest off the request, then its lane's defaults. An ingest or a cut job
+ * drives no lane and takes the generic defaults.
  */
 import { selectorOf } from "@sip/corpus/housekeeping/delete-runs"
 import * as Reap from "@sip/corpus/housekeeping/reap"
@@ -43,13 +47,7 @@ import * as Job from "@sip/corpus/jobs/job"
 import { DEFAULT_GRACE } from "@sip/corpus/jobs/job"
 import { listLine, showLines } from "@sip/corpus/jobs/job-lines"
 import * as JobStart from "@sip/corpus/jobs/job-start"
-import {
-  DEFAULT_BATCH,
-  DEFAULT_CLEANUP,
-  DEFAULT_CONCURRENCY,
-  DEFAULT_MEMORY_MAX,
-  DEFAULT_STARTS_PER_SECOND
-} from "@sip/corpus/knobs"
+import { DEFAULT_CLEANUP, DEFAULT_CONCURRENCY, DEFAULT_MEMORY_MAX } from "@sip/corpus/knobs"
 import type { Paths } from "@sip/corpus/paths"
 import { Jobs, Requests } from "@sip/store"
 import * as Console from "effect/Console"
@@ -76,18 +74,19 @@ const POLL_MS = 2_000
 const startFlags = {
   request: IdFlags.flag("request", "request").pipe(Flag.withDescription("The request to replay"), Flag.optional),
   prep: IdFlags.flag("prep", "prep").pipe(Flag.withDescription("The prep every capture is read as of"), Flag.optional),
-  batch: Flag.integer("batch").pipe(Flag.withDescription("Cells per batch"), Flag.withDefault(DEFAULT_BATCH)),
+  // Absent is unstated: a replay resolves it off its request and lane, an ingest or a cut takes the generic default.
+  batch: Flag.integer("batch").pipe(Flag.withDescription("Cells per batch (default: the request's)"), Flag.optional),
   concurrency: Flag.integer("concurrency").pipe(
-    Flag.withDescription("Cells at once"),
-    Flag.withDefault(DEFAULT_CONCURRENCY)
+    Flag.withDescription("Cells at once (default: the request's; ingest, cut: the generic one)"),
+    Flag.optional
   ),
   memoryMax: Flag.string("memory-max").pipe(
-    Flag.withDescription("The memory scope the driver runs under"),
-    Flag.withDefault(DEFAULT_MEMORY_MAX)
+    Flag.withDescription("The memory scope the driver runs under (default: the request's)"),
+    Flag.optional
   ),
   startsPerSecond: Flag.float("starts-per-second").pipe(
-    Flag.withDescription("Cell starts per second (0: as fast as slots free)"),
-    Flag.withDefault(DEFAULT_STARTS_PER_SECOND)
+    Flag.withDescription("Cell starts per second, 0 as fast as slots free (default: the request's)"),
+    Flag.optional
   ),
   cleanup: Flag.boolean("cleanup").pipe(
     Flag.withDescription("Run the retention pass after the replay; --no-cleanup keeps the tree as it left it"),
@@ -130,10 +129,10 @@ type StartInput = Command.Command.Config.Infer<typeof startFlags>
 
 const knobsOf = (input: StartInput): JobStart.ReplayKnobs => ({
   prep: Option.getOrNull(input.prep),
-  batch: input.batch,
-  concurrency: input.concurrency,
-  memoryMax: input.memoryMax,
-  startsPerSecond: input.startsPerSecond,
+  batch: Option.getOrNull(input.batch),
+  concurrency: Option.getOrNull(input.concurrency),
+  memoryMax: Option.getOrNull(input.memoryMax),
+  startsPerSecond: Option.getOrNull(input.startsPerSecond),
   cleanup: input.cleanup,
   wait: Option.getOrNull(input.wait),
   unran: false,
@@ -208,8 +207,8 @@ const startIngest = Effect.fn("JobCli.startIngest")(function*(facts: CliFacts, i
     set: input.set.map((one) => path.resolve(cwd, one)),
     captures: found.sources.map((source) => source.capture),
     cut: input.cut,
-    concurrency: input.concurrency,
-    memoryMax: input.memoryMax
+    concurrency: Option.getOrElse(input.concurrency, () => DEFAULT_CONCURRENCY),
+    memoryMax: Option.getOrElse(input.memoryMax, () => DEFAULT_MEMORY_MAX)
   }).pipe(Effect.catchIf(JobStart.isNotStarted, (refused) => Effect.succeed(refused)))
   if (started instanceof JobStart.NotStarted) {
     yield* Console.error(`[job] refused: ${started.message}`)
@@ -241,8 +240,8 @@ const startCut = Effect.fn("JobCli.startCut")(function*(facts: CliFacts, input: 
     known: input.known,
     mode: input.force ? "force" : "stale-only",
     slice: Option.getOrUndefined(input.slice),
-    concurrency: input.concurrency,
-    memoryMax: input.memoryMax
+    concurrency: Option.getOrElse(input.concurrency, () => DEFAULT_CONCURRENCY),
+    memoryMax: Option.getOrElse(input.memoryMax, () => DEFAULT_MEMORY_MAX)
   }
   const started = yield* JobStart.cut(paths.sessions, request).pipe(
     Effect.catchIf(JobStart.isNotStarted, (refused) => Effect.succeed(refused))
