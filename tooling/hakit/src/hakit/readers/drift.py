@@ -250,8 +250,10 @@ class Drift:
         self.check("gauges back to their baseline", verdict, "; ".join(rows))
 
     def drained(self) -> None:
-        """After the drain: the zero gauges, then worker memory against its last loaded span."""
-        sp, t = self.spec, self.view.ended_s
+        """After the drain: the zero gauges, read once the last teardowns'
+        timers ran (`drained_settle_s`), then worker memory against its last
+        loaded span."""
+        sp, t = self.spec, self.view.ended_s + self.spec.drained_settle_s
         gauges = {m: self.vm.at(f"sum({m}{{{self.ns}}})", t) for m in sp.drained_zero + sp.drained_report}
         values = {m: (r[0][1] if r else None) for m, r in gauges.items()}
         unread = [m for m in sp.drained_zero if values[m] is None]
@@ -259,7 +261,9 @@ class Drift:
         if unread:
             self.check("gauges after drain", "na", f"unread: {', '.join(unread)}", gauges=values)
         elif held:
-            self.check("gauges after drain", "fail", "held: " + ", ".join(f"{m}={v:g}" for m, v in held.items()), gauges=values)
+            notes = sp.drained_zero_notes
+            rows = ", ".join(f"{m}={v:g}" + (f" ({notes[m]})" if m in notes else "") for m, v in held.items())
+            self.check("gauges after drain", "fail", "held: " + rows, gauges=values)
         else:
             report = ", ".join(f"{m}={values[m]}" for m in sp.drained_report)
             self.check("gauges after drain", "pass", f"{', '.join(sp.drained_zero)} at 0; {report}", gauges=values)

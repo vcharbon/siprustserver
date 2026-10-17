@@ -313,3 +313,39 @@ def test_a_baseline_gauge_must_return_to_its_value_before_the_load(tmp_path: Pat
     # Still 20 above it after the settle: a leak.
     held = baseline("held", ProbedLab(41, 20, 47))
     assert held["verdict"] == "fail" and "148 47 s after the run vs 128 before the load" in jv.string(held, "detail")
+
+
+
+class HeldLimiterLab(Lab):
+    """The call limiter still holds 3 after the drain."""
+
+    def rule(self, c: Call) -> HttpResult | None:
+        if c.kind == "http" and "limiter_holds" in c.url and "/query_range" not in c.url:
+            return HttpResult(200, vector([({}, 3)]))
+        return super().rule(c)
+
+
+def test_a_drained_gauge_still_held_says_what_its_note_states(tmp_path: Path) -> None:
+    spec = DriftSpec(drained_zero=["b2bua_active_calls", "limiter_holds"], drained_zero_notes={"limiter_holds": "a release path leaked them"})
+    d = soak_dir(tmp_path, True)
+    c = checks(Drift(read_run(d), Vm(FakeExecutor([HeldLimiterLab().rule]), "vm"), spec, d / "drift").run())["gauges after drain"]
+    assert (c["verdict"], c["detail"]) == ("fail", "held: limiter_holds=3 (a release path leaked them)")
+
+
+class TailLab(Lab):
+    """The run's last teardowns hold 138 transactions when the run ends, none
+    once their Timer J (32 s) and one scrape (15 s) have passed."""
+
+    def rule(self, c: Call) -> HttpResult | None:
+        if c.kind == "http" and "b2bua_txn_active_transactions" in c.url and "/query_range" not in c.url:
+            t = float(urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query)["time"][0])
+            ended = (T0 + (LOAD_S + 200) * 1000) / 1000
+            return HttpResult(200, vector([({}, 138 if t < ended + 47 else 0)]))
+        return super().rule(c)
+
+
+def test_a_zero_gauge_is_read_once_the_last_teardowns_settled(tmp_path: Path) -> None:
+    spec = DriftSpec(drained_zero=["b2bua_txn_active_transactions"], drained_settle_s=47)
+    d = soak_dir(tmp_path, True)
+    c = checks(Drift(read_run(d), Vm(FakeExecutor([TailLab().rule]), "vm"), spec, d / "drift").run())["gauges after drain"]
+    assert c["verdict"] == "pass", c["detail"]
