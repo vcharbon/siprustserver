@@ -128,3 +128,9 @@ def test_a_window_failing_open_allows_every_offered_call() -> None:
     assert judge(level([(0, LOAD_S, CAP), (600, 690, 12)]), [window(600, 660, "fail-open")]) == []
     found = judge(level([(0, LOAD_S, CAP), (600, 690, 16)]), [window(600, 660, "fail-open")])
     assert kinds(found) == [("limiter_overshoot", "minor", "001-x")]
+
+
+def test_streams_with_no_record_leave_their_limiter_unjudged() -> None:
+    # A run without records (a dry run) measures no admission; the streams'
+    # own reconciliation reports the missing records.
+    assert judge([]) == []

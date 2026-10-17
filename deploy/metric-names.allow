@@ -43,6 +43,9 @@ k8s/sipp/: trace_*
 ../tooling/hakit/src/: cdr_unread_query
 ../tooling/hakit/src/: cdr_written
 ../tooling/hakit/src/: cdr_written_query
+../tooling/hakit/src/: limiter_errors
+../tooling/hakit/src/: limiter_overshoot
+../tooling/hakit/src/: limiter_undershoot
 ../tooling/hakit/src/: sip_target
 ../tooling/hakit/src/: trace_err
 ../tooling/hakit/src/: trace_logs

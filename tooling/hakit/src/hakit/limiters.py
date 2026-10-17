@@ -103,7 +103,9 @@ def judge_limiters(
     for spec in profile.limiters:
         start = int(load_start_ms // 1000 + spec.repair_s)
         end = int(load_end_ms // 1000)
-        if end - start < SPAN_S:
+        # No record of its streams, no admission measured: the streams' own
+        # reconciliation reports the missing records.
+        if end - start < SPAN_S or not any(jv.string(r, "stream") in spec.streams for r in records):
             continue
         active = _active(records, set(spec.streams), start, end)
         zones = [
