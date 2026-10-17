@@ -22,7 +22,7 @@ pub fn text_fields(body: &[u8]) -> Vec<TextField> {
     for line in text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)) {
         let mut chars = line.chars();
         let (Some(key), Some('=')) = (chars.next(), chars.next()) else { continue };
-        let value = &line[2..];
+        let value = &line[key.len_utf8() + 1..];
         let value = match key {
             'o' => value.split(' ').next().unwrap_or_default(),
             's' | 'i' | 'u' | 'e' | 'p' => value,
@@ -98,5 +98,10 @@ mod tests {
             ]
         );
         assert!(text_fields(b"not sdp").is_empty());
+    }
+
+    #[test]
+    fn a_line_keyed_by_a_multibyte_character_is_skipped() {
+        assert_eq!(text_fields("v=0\r\n\u{fffd}=x\r\ns=-\r\n".as_bytes()).len(), 1);
     }
 }

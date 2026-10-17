@@ -21,6 +21,7 @@ mod parser_extraction;
 mod parser_fold;
 mod parser_response_totag;
 mod parser_smoke;
+mod parser_unfold;
 mod sdp_answer;
 mod sdp_form;
 mod sdp_offer_answer_grammar;

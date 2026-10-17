@@ -300,6 +300,9 @@ pub fn is_entity_header(name: &str) -> bool {
         || (bytes.len() > CONTENT.len() && bytes[..CONTENT.len()].eq_ignore_ascii_case(CONTENT))
 }
 
+/// The longest boundary RFC 2046 §5.1.1 allows.
+const MAX_BOUNDARY_LEN: usize = 70;
+
 /// A boundary no payload contains, derived from the parts so the same parts
 /// always frame the same way. RFC 2046 §5.1.1's `bchars` set is respected: the
 /// derivation emits hex digits and `-` only.
@@ -349,8 +352,13 @@ pub struct LocatedPart {
 
 /// Locate each MIME part of `body` framed under `boundary` (RFC 2046 §5.1):
 /// split on `--boundary`, drop the preamble and the closing delimiter, then
-/// read each block's entity headers and the offsets of its content.
+/// read each block's entity headers and the offsets of its content. A boundary
+/// outside RFC 2046 §5.1.1's 1 to 70 characters frames no part, which keeps the
+/// delimiter search linear in the body.
 pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
+    if boundary.is_empty() || boundary.len() > MAX_BOUNDARY_LEN {
+        return Vec::new();
+    }
     let delim = format!("--{boundary}");
     let mut out = Vec::new();
     for (start, block) in segments(body, delim.as_bytes()).into_iter().skip(1) {

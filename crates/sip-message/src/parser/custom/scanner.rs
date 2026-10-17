@@ -215,45 +215,45 @@ impl<'a> Scanner<'a> {
     /// Read the rest of the line until CRLF, unfolding continuation lines
     /// (CRLF + WSP) to a single SP. Consumes the final CRLF. Accepts bare LF.
     /// An unfolded line is the only shape that cannot be expressed as a span.
+    /// One pass, constant stack: each line is copied once into the unfolded
+    /// value, whatever the number of continuation lines.
     pub fn read_header_value(&mut self) -> HeaderValue {
-        let start = self.pos;
+        let mut line = self.pos;
+        let mut unfolded: Option<String> = None;
         while self.pos < self.buf.len() {
-            let b = self.buf[self.pos];
-            if b == CR && self.pos + 1 < self.buf.len() && self.buf[self.pos + 1] == LF {
-                let end = self.pos;
-                if self.pos + 2 < self.buf.len() && is_wsp(self.buf[self.pos + 2]) {
-                    self.pos += 3; // skip CR LF WSP
-                    return HeaderValue::Unfolded(self.unfold_from(start..end));
+            let eol = match self.buf[self.pos] {
+                CR if self.pos + 1 < self.buf.len() && self.buf[self.pos + 1] == LF => 2,
+                LF => 1, // bare LF (lenient)
+                _ => {
+                    self.pos += 1;
+                    continue;
                 }
-                self.pos += 2; // consume CRLF
-                return HeaderValue::Span(start..end);
+            };
+            let end = self.pos;
+            self.pos += eol;
+            if self.pos >= self.buf.len() || !is_wsp(self.buf[self.pos]) {
+                return self.finish_value(line..end, unfolded);
             }
-            if b == LF {
-                // Bare LF (lenient).
-                let end = self.pos;
-                if self.pos + 1 < self.buf.len() && is_wsp(self.buf[self.pos + 1]) {
-                    self.pos += 2;
-                    return HeaderValue::Unfolded(self.unfold_from(start..end));
-                }
-                self.pos += 1; // consume LF
-                return HeaderValue::Span(start..end);
-            }
-            self.pos += 1;
+            self.pos += 1; // the fold's WSP: the fold becomes one SP
+            let out = unfolded.get_or_insert_with(String::new);
+            out.push_str(&String::from_utf8_lossy(&self.buf[line..end]));
+            out.push(' ');
+            line = self.pos;
         }
         // EOF without CRLF — the line runs to the end of the image.
-        HeaderValue::Span(start..self.pos)
+        self.finish_value(line..self.pos, unfolded)
     }
 
-    /// Continue a folded header value: `first` is the text before the fold, the
-    /// cursor already sits past `CRLF WSP`, and the fold itself becomes one SP.
-    fn unfold_from(&mut self, first: Span) -> String {
-        let mut out = decode(&self.buf[first.start..first.end]);
-        out.push(' ');
-        match self.read_header_value() {
-            HeaderValue::Span(rest) => out.push_str(&decode(&self.buf[rest.start..rest.end])),
-            HeaderValue::Unfolded(rest) => out.push_str(&rest),
+    /// The value whose last line is `last`: that span itself when nothing was
+    /// folded, else the unfolded text it completes.
+    fn finish_value(&self, last: Span, unfolded: Option<String>) -> HeaderValue {
+        match unfolded {
+            None => HeaderValue::Span(last),
+            Some(mut out) => {
+                out.push_str(&String::from_utf8_lossy(&self.buf[last]));
+                HeaderValue::Unfolded(out)
+            }
         }
-        out
     }
 
     /// Expect and consume CRLF (also accepts bare LF). Errors otherwise.

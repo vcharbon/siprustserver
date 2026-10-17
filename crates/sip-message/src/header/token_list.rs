@@ -9,6 +9,8 @@
 //! ([`HeaderName::item_separator`]) — a comma for the option-tag headers, a
 //! `;` for the RFC 3323 §4.2 priv-value set.
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use crate::error::SipParseError;
@@ -26,6 +28,27 @@ fn is_token(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(is_token_char)
 }
 
+/// A token hashed and compared case-insensitively, the way option tags compare
+/// (RFC 3261 §7.3.1).
+struct Folded(SipStr);
+
+impl PartialEq for Folded {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_str().eq_ignore_ascii_case(other.0.as_str())
+    }
+}
+
+impl Eq for Folded {}
+
+impl Hash for Folded {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for b in self.0.as_str().bytes() {
+            state.write_u8(b.to_ascii_lowercase());
+        }
+        state.write_u8(0xff);
+    }
+}
+
 /// An ordered set of tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenListHeader<K: TokenKind> {
@@ -39,11 +62,7 @@ impl<K: TokenKind> TokenListHeader<K> {
     }
 
     pub fn of(tokens: impl IntoIterator<Item = impl Into<SipStr>>) -> Self {
-        let mut set = Self::empty();
-        for token in tokens {
-            set = set.with(token);
-        }
-        set
+        Self::empty().extended(tokens.into_iter().map(Into::into))
     }
 
     /// Whether `token` is in the set, case-insensitively — option tags are
@@ -77,6 +96,18 @@ impl<K: TokenKind> TokenListHeader<K> {
         self
     }
 
+    /// The set with each of `tokens` added as [`with`](Self::with) adds it, at
+    /// one hash probe per token whatever the size of the set.
+    fn extended(mut self, tokens: impl IntoIterator<Item = SipStr>) -> Self {
+        let mut seen: HashSet<Folded> = self.tokens.iter().cloned().map(Folded).collect();
+        for token in tokens {
+            if is_token(token.as_str()) && seen.insert(Folded(token.clone())) {
+                self.tokens.push(token);
+            }
+        }
+        self
+    }
+
     pub fn without(mut self, token: &str) -> Self {
         self.tokens.retain(|t| !t.eq_ignore_ascii_case(token));
         self
@@ -93,11 +124,8 @@ impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let mut set = Self::empty();
-        for entry in K::name().item_separator().split(raw.as_str()) {
-            set = set.with(raw.reslice(entry));
-        }
-        Ok(set)
+        let entries = K::name().item_separator().split(raw.as_str());
+        Ok(Self::empty().extended(entries.map(|entry| raw.reslice(entry))))
     }
 
     fn render(&self, out: &mut Wire) {
@@ -113,13 +141,8 @@ impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
     /// Several lines of a set-like header are one set.
     fn combine(values: Vec<Self>) -> Option<Self> {
         let mut it = values.into_iter();
-        let mut merged = it.next()?;
-        for extra in it {
-            for token in extra.tokens {
-                merged = merged.with(token);
-            }
-        }
-        Some(merged)
+        let first = it.next()?;
+        Some(first.extended(it.flat_map(|extra| extra.tokens)))
     }
 }
 

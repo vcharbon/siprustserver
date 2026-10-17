@@ -168,7 +168,7 @@ fn cseq_line(raw: &[u8]) -> Option<String> {
     let s = as_str(raw);
     for line in s.lines() {
         let l = line.trim();
-        if l.len() >= 5 && l[..5].eq_ignore_ascii_case("cseq:") {
+        if l.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("cseq:")) {
             return Some(l[5..].trim().to_string());
         }
     }

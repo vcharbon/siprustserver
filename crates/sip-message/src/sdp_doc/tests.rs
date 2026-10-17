@@ -165,3 +165,11 @@ fn the_next_version_never_wraps() {
     let top = format!("v=0\r\no=alice 1 {} IN IP4 10.0.0.1\r\n", u64::MAX);
     assert_eq!(parse_origin(top.as_bytes()).expect("top").next_version_line(), None);
 }
+
+#[test]
+fn an_attribute_with_a_multibyte_character_across_a_prefix_end_is_no_rtpmap() {
+    let body = "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n\
+a=rtpmap\u{e9}0 PCMU/8000\r\na=rtpmap:0 PCMU/8000\r\n";
+    let doc = parse_sdp_body(body.as_bytes()).expect("sdp");
+    assert_eq!(extract_rtpmaps(&doc.media[0]), vec![("0".to_string(), "PCMU/8000".to_string())]);
+}

@@ -430,3 +430,14 @@ fn every_entity_header_value_is_located_in_the_body() {
         [("Content-Type", &b"text/plain"[..]), ("Content-ID", &b"<x@example.com>"[..])]
     );
 }
+
+#[test]
+fn a_boundary_longer_than_seventy_characters_frames_no_part() {
+    let framed = |boundary: &str| {
+        format!("--{boundary}\r\nContent-Type: text/plain\r\n\r\nhi\r\n--{boundary}--\r\n")
+    };
+    let longest = "b".repeat(70);
+    assert_eq!(decompose(framed(&longest).as_bytes(), &longest).len(), 1);
+    let over = "b".repeat(71);
+    assert!(decompose(framed(&over).as_bytes(), &over).is_empty());
+}

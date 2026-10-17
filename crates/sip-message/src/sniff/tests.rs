@@ -504,3 +504,9 @@ fn the_head_ends_where_the_parser_s_scanner_ends_it() {
     }
     assert_eq!(body(b"INFO sip:b SIP/2.0\rContent-Length: 3\r"), None, "unterminated by CR");
 }
+
+#[test]
+fn a_multibyte_character_before_the_cseq_line_is_read_past() {
+    let raw = "INVITE sip:bob@192.0.2.20 SIP/2.0\r\nabcd\u{e9}\r\nCSeq: 7 INVITE\r\n\r\n";
+    assert_eq!(cseq_number(raw.as_bytes()), Some(7));
+}

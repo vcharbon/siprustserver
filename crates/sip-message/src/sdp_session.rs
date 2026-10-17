@@ -14,6 +14,7 @@
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
 use crate::sdp_doc::{media_line, parse_origin, parse_sdp_body, MediaLine, Section, Sections};
+use std::collections::{HashMap, VecDeque};
 
 /// What one party has stated about its session on a dialog: the value of the
 /// `o=` line it last sent and the value of each of its `m=` lines, in order.
@@ -84,16 +85,25 @@ fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Opt
     let stated_media: Vec<MediaLine> = stated.media.iter().map(|m| media_line(m)).collect();
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
 
+    // The stated slots by preference, each queue in stated order; a slot taken
+    // through one queue is passed over by the others.
+    let mut live: HashMap<&str, VecDeque<usize>> = HashMap::new();
+    let mut of_kind: HashMap<&str, VecDeque<usize>> = HashMap::new();
+    let mut stated_rejected: VecDeque<usize> = VecDeque::new();
+    for (i, m) in stated_media.iter().enumerate() {
+        of_kind.entry(m.r#type.as_str()).or_default().push_back(i);
+        if m.port == Some(0) {
+            stated_rejected.push_back(i);
+        } else {
+            live.entry(m.r#type.as_str()).or_default().push_back(i);
+        }
+    }
     let mut slots: Vec<Option<u32>> = vec![None; stated_media.len()];
     for (j, stream) in described.iter().enumerate() {
-        let free = |i: &usize| slots[*i].is_none();
-        let same_kind = |i: &usize| stated_media[*i].r#type == stream.r#type;
-        let rejected = |i: &usize| stated_media[*i].port == Some(0);
-        let slot = (0..stated_media.len())
-            .filter(free)
-            .find(|i| same_kind(i) && !rejected(i))
-            .or_else(|| (0..stated_media.len()).filter(free).find(same_kind))
-            .or_else(|| (0..stated_media.len()).filter(free).find(rejected));
+        let kind = stream.r#type.as_str();
+        let slot = first_free(live.get_mut(kind), &slots)
+            .or_else(|| first_free(of_kind.get_mut(kind), &slots))
+            .or_else(|| first_free(Some(&mut stated_rejected), &slots));
         match slot {
             Some(i) => slots[i] = Some(j as u32),
             None => slots.push(Some(j as u32)),
@@ -120,6 +130,18 @@ fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Opt
         out.truncate(out.len() - eol.len());
     }
     Some(Restated { sdp: out.into_bytes(), slots })
+}
+
+/// The first slot of `queue` still free, the taken ones ahead of it dropped.
+fn first_free(queue: Option<&mut VecDeque<usize>>, slots: &[Option<u32>]) -> Option<usize> {
+    let queue = queue?;
+    while let Some(&i) = queue.front() {
+        if slots[i].is_none() {
+            return Some(i);
+        }
+        queue.pop_front();
+    }
+    None
 }
 
 /// `sdp`, described by the far party of a dialog whose last restatement

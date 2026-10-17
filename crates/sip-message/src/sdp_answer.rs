@@ -15,9 +15,13 @@
 
 use crate::sdp::{sdp_origin_address, sdp_session_id, BuildHeldSdpOptions};
 use crate::sdp_doc::{
-    canonical_rtpmap, direction_of, extract_cryptos, extract_direction, extract_fmtps,
-    extract_rtpmaps, parse_sdp_body, MediaLine, SdpDirection, Sections,
+    direction_of, extract_cryptos, extract_direction, extract_rtpmaps, parse_sdp_body, MediaLine,
+    SdpDirection, Sections,
 };
+
+mod formats;
+
+use formats::{is_dynamic, FormatTable};
 
 /// Whose order of preference picks the one format an answered stream keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -277,52 +281,6 @@ struct Kept {
     own: String,
 }
 
-/// The encoding a format of `media` names, lower-cased and canonical (RFC 4566
-/// §6): its `rtpmap`, else the RFC 3551 static assignment.
-fn encoding(format: &str, media: &MediaLine) -> Option<String> {
-    extract_rtpmaps(media)
-        .into_iter()
-        .find(|(pt, _)| pt == format)
-        .map(|(_, enc)| canonical_rtpmap(&media.r#type, &enc))
-        .or_else(|| static_encoding(format).map(|enc| canonical_rtpmap(&media.r#type, enc)))
-        .map(|enc| enc.to_ascii_lowercase())
-}
-
-/// Whether `format` is a dynamic RTP payload type (RFC 3551 §3: 96–127).
-fn is_dynamic(format: &str) -> bool {
-    format.parse::<u8>().is_ok_and(|pt| pt >= 96)
-}
-
-/// The `octet-align` mode an AMR or AMR-WB format states (RFC 4867 §8.1: absent
-/// is 0), or `None` for any other encoding.
-fn amr_alignment(format: &str, media: &MediaLine, enc: &str) -> Option<String> {
-    let name = enc.split('/').next()?;
-    if name != "amr" && name != "amr-wb" {
-        return None;
-    }
-    let params = extract_fmtps(media).into_iter().find(|(f, _)| f == format).map(|(_, p)| p);
-    let aligned = params.as_deref().unwrap_or_default().split(';').find_map(|p| {
-        let (k, v) = p.split_once('=')?;
-        k.trim().eq_ignore_ascii_case("octet-align").then(|| v.trim().to_string())
-    });
-    Some(aligned.unwrap_or_else(|| "0".to_string()))
-}
-
-/// The format of `other` that is the same payload format as `format` of
-/// `media`, if any.
-fn counterpart(format: &str, media: &MediaLine, other: &MediaLine) -> Option<String> {
-    let enc = encoding(format, media);
-    let same = |f: &String| {
-        if is_dynamic(format) || is_dynamic(f) {
-            let (Some(a), Some(b)) = (&enc, encoding(f, other)) else { return false };
-            *a == b && amr_alignment(format, media, a) == amr_alignment(f, other, &b)
-        } else {
-            f == format
-        }
-    };
-    other.formats.iter().find(|f| same(f)).cloned()
-}
-
 /// The formats an answered stream keeps: the first common format in the
 /// preferred order that is not `telephone-event`, then, on audio, the first
 /// common `telephone-event` in that order. `None` where no such first format
@@ -332,20 +290,27 @@ fn kept_formats(
     own: &MediaLine,
     preference: FormatPreference,
 ) -> Option<Vec<Kept>> {
+    let offered_table = FormatTable::of(offered);
+    let own_table = FormatTable::of(own);
     let common: Vec<Kept> = match preference {
         FormatPreference::Offerer => offered
             .formats
             .iter()
-            .filter_map(|f| Some(Kept { own: counterpart(f, offered, own)?, offered: f.clone() }))
+            .filter_map(|f| {
+                Some(Kept { own: own_table.counterpart(f, &offered_table)?, offered: f.clone() })
+            })
             .collect(),
         FormatPreference::Answerer => own
             .formats
             .iter()
-            .filter_map(|f| Some(Kept { offered: counterpart(f, own, offered)?, own: f.clone() }))
+            .filter_map(|f| {
+                Some(Kept { offered: offered_table.counterpart(f, &own_table)?, own: f.clone() })
+            })
             .collect(),
     };
     let events = |k: &Kept| {
-        encoding(&k.offered, offered)
+        offered_table
+            .encoding(&k.offered)
             .is_some_and(|enc| enc.split('/').next() == Some("telephone-event"))
     };
     let codec = common.iter().position(|k| !events(k))?;
@@ -552,35 +517,4 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
 fn push_line(out: &mut String, line: &str, eol: &str) {
     out.push_str(line);
     out.push_str(eol);
-}
-
-/// The encoding RFC 3551 §6 (tables 4 and 5) assigns a static payload type.
-fn static_encoding(format: &str) -> Option<&'static str> {
-    Some(match format.parse::<u8>().ok()? {
-        0 => "PCMU/8000",
-        3 => "GSM/8000",
-        4 => "G723/8000",
-        5 => "DVI4/8000",
-        6 => "DVI4/16000",
-        7 => "LPC/8000",
-        8 => "PCMA/8000",
-        9 => "G722/8000",
-        10 => "L16/44100/2",
-        11 => "L16/44100",
-        12 => "QCELP/8000",
-        13 => "CN/8000",
-        14 => "MPA/90000",
-        15 => "G728/8000",
-        16 => "DVI4/11025",
-        17 => "DVI4/22050",
-        18 => "G729/8000",
-        25 => "CelB/90000",
-        26 => "JPEG/90000",
-        28 => "nv/90000",
-        31 => "H261/90000",
-        32 => "MPV/90000",
-        33 => "MP2T/90000",
-        34 => "H263/90000",
-        _ => return None,
-    })
 }

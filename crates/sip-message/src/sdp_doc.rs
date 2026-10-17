@@ -16,6 +16,8 @@
 //!
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
+use std::collections::HashSet;
+
 /// One `m=`-rooted media description with its trailing media-level lines. The
 /// m-line shape is `m=<type> <port> <transport> <fmt> ...`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,15 +124,8 @@ fn leading_int(s: &str) -> Option<i64> {
 
 /// Case-insensitive prefix strip; `prefix` is lowercase ASCII.
 fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    if value.len() < prefix.len() {
-        return None;
-    }
-    let (head, tail) = value.split_at(prefix.len());
-    if head.eq_ignore_ascii_case(prefix) {
-        Some(tail)
-    } else {
-        None
-    }
+    let head = value.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| &value[prefix.len()..])
 }
 
 /// A media block under construction, finalised into [`MediaLine`].
@@ -292,6 +287,7 @@ pub fn direction_of(attr: &str) -> Option<SdpDirection> {
 /// occurrence of a payload type wins — a repeated binding states nothing new.
 pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "rtpmap:") else { continue };
         let tail = tail.trim();
@@ -304,7 +300,7 @@ pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
         if pt.is_empty() || enc.is_empty() {
             continue;
         }
-        if !out.iter().any(|(p, _)| p == pt) {
+        if seen.insert(pt) {
             out.push((pt.to_string(), enc.to_string()));
         }
     }
@@ -316,11 +312,12 @@ pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
 /// of a format wins.
 pub fn extract_fmtps(media: &MediaLine) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "fmtp:") else { continue };
         let tail = tail.trim();
         let (format, params) = tail.split_once(' ').unwrap_or((tail, ""));
-        if !format.is_empty() && !out.iter().any(|(f, _)| f == format) {
+        if !format.is_empty() && seen.insert(format) {
             out.push((format.to_string(), params.trim().to_string()));
         }
     }

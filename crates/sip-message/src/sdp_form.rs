@@ -5,6 +5,7 @@
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
 use crate::sdp_doc::{direction_of, media_line, Sections};
+use std::collections::HashMap;
 
 /// `sdp` in canonical form, or `None` where it already is one, states no
 /// media section, or is not a session description (no `v=` first line).
@@ -61,14 +62,19 @@ fn media_in_form<'a>(section: &'a str, session_direction: &'a str) -> Vec<&'a st
     let mut taken = vec![false; attributes.len()];
     let mut out = vec![m];
     out.extend(others);
-    for format in &formats {
-        for prefix in ["a=rtpmap:", "a=fmtp:"] {
-            for (i, attribute) in attributes.iter().enumerate() {
-                if !taken[i] && format_of(attribute, prefix) == Some(format.as_str()) {
-                    taken[i] = true;
-                    out.push(attribute);
-                }
+    // Each format's `rtpmap` then `fmtp` attributes, in wire order, read in one pass.
+    let mut bound: HashMap<&str, [Vec<usize>; 2]> = HashMap::new();
+    for (i, attribute) in attributes.iter().enumerate() {
+        for (k, prefix) in ["a=rtpmap:", "a=fmtp:"].into_iter().enumerate() {
+            if let Some(format) = format_of(attribute, prefix) {
+                bound.entry(format).or_default()[k].push(i);
             }
+        }
+    }
+    for format in &formats {
+        for i in bound.remove(format.as_str()).into_iter().flatten().flatten() {
+            taken[i] = true;
+            out.push(attributes[i]);
         }
     }
     let directions: Vec<&str> = attributes.iter().copied().filter(|a| is_direction(a)).collect();
