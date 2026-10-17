@@ -100,11 +100,15 @@ impl RabbitMqCdrWriter {
         encoder: Arc<dyn CdrEncoder>,
         metrics: B2buaMetrics,
     ) -> Self {
-        let backoff = Backoff::new(settings.bounds.backoff_min, settings.bounds.backoff_max);
+        let bounds = &settings.bounds;
+        let backoff = Backoff::new(bounds.backoff_min, bounds.backoff_max);
+        // A parked answer lives through the longest gap between two attempts
+        // while records flow.
+        let resolver = BrokerResolver::new(bounds.connect_timeout + bounds.backoff_max);
         Self {
             settings,
             encoder,
-            link: Mutex::new(Link { session: None, backoff, resolver: BrokerResolver::default() }),
+            link: Mutex::new(Link { session: None, backoff, resolver }),
             metrics,
         }
     }
