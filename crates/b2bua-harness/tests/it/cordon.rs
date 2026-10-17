@@ -79,13 +79,7 @@ fn shape(record: &CdrRecord) -> Shape {
         .events
         .iter()
         .map(|e| {
-            (
-                e.event_type.clone(),
-                e.leg_id.clone(),
-                e.status_code,
-                e.reason.clone(),
-                e.decision_ordinal,
-            )
+            (e.event_type, e.leg_id.clone(), e.status_code, e.reason.clone(), e.decision_ordinal)
         })
         .collect();
     let cause = record.termination.as_ref().expect("a terminated call holds its record").cause;
@@ -129,7 +123,7 @@ async fn a_cordoned_worker_refuses_new_calls_with_their_record_and_serves_its_di
     let [by_cordon, by_decision] = refusals.as_slice() else {
         panic!("two calls refused before any callee: {refusals:#?}");
     };
-    let last = by_cordon.0.last().map(|e| (e.0.clone(), e.2));
+    let last = by_cordon.0.last().map(|e| (e.0, e.2));
     assert_eq!(last, Some((CdrEventType::Reject, Some(503))));
     assert_eq!((by_cordon.1, by_cordon.3), (0, TerminationCause::Admission), "no decision");
     assert_eq!(by_cordon, by_decision, "the record of a call no decision reached");

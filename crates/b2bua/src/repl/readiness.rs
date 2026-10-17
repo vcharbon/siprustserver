@@ -317,6 +317,14 @@ impl Readiness {
         self.inner.cordoned.load(Ordering::SeqCst)
     }
 
+    /// The cordon gauge (`b2bua_cordoned`) as Prometheus text.
+    pub fn prometheus_text(&self) -> String {
+        let mut s = String::new();
+        crate::metrics::catalogue::worker::CORDONED
+            .render_value(&mut s, u64::from(self.is_cordoned()));
+        s
+    }
+
     fn line_transition(&self, state: &'static str, reason: &'static str) {
         tracing::info!(node = %self.inner.node, state, reason, "readiness transition");
     }

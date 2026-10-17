@@ -80,8 +80,7 @@ impl WorkerMetrics {
         text.push_str(&self.overload.prometheus_text());
         text.push_str(&self.capacity.prometheus_text());
         text.push_str(&self.loops.prometheus_text(self.loop_stall));
-        catalogue::worker::CORDONED
-            .render_value(&mut text, u64::from(self.readiness.is_cordoned()));
+        text.push_str(&self.readiness.prometheus_text());
         text.push_str(
             &NewCallCounts::read(self.core.new_calls(), &self.txn, Some(self.udp.brake()))
                 .prometheus_text(),

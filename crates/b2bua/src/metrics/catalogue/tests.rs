@@ -56,6 +56,7 @@ async fn every_family_renders_as_declared() {
         OverloadSignal::new(Arc::new(load_shed::simulated().0)).prometheus_text(),
         gate().prometheus_text(),
         loops.prometheus_text(std::time::Duration::from_secs(5)),
+        crate::repl::Readiness::always_ready().prometheus_text(),
         NewCallCounts::compose(
             core.new_calls(),
             StatelessCounts::default(),
