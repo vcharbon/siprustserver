@@ -66,9 +66,11 @@ def kinds(found: list[Json]) -> list[tuple[str, str, str | None]]:
     return [(jv.string(f, "kind"), jv.string(f, "severity"), jv.opt_string(f, "window")) for f in found]
 
 
-def test_a_limiter_at_its_cap_or_two_under_it_is_steady() -> None:
+def test_a_limiter_full_once_a_minute_is_steady() -> None:
     assert judge(level([(0, LOAD_S, CAP)])) == []
-    assert judge(level([(0, LOAD_S, CAP - 2)])) == []
+    # 2 under the cap but for one second a minute: full, so steady.
+    blips = [(s, s + 1, 2) for s in range(0, LOAD_S, 60)]
+    assert judge(level([(0, LOAD_S, CAP - 2), *blips])) == []
 
 
 def test_a_limiter_under_its_band_outside_every_window_is_a_major_undershoot() -> None:
@@ -76,7 +78,7 @@ def test_a_limiter_under_its_band_outside_every_window_is_a_major_undershoot() -
     assert kinds(found) == [("limiter_undershoot", "major", None)]
     f = found[0]
     assert (f["from_ms"], f["to_ms"]) == (T0 + 630_000, T0 + 870_000)
-    assert jv.lst(f, "bound") == [CAP - 2, CAP]
+    assert (jv.lst(f, "bound"), jv.lst(f, "maxima")[0]) == ([CAP, CAP], 1)
 
 
 def test_a_limiter_over_its_cap_outside_every_window_is_a_minor_overshoot() -> None:
@@ -128,3 +130,9 @@ def test_streams_with_no_record_leave_their_limiter_unjudged() -> None:
     # A run without records (a dry run) measures no admission; the streams'
     # own reconciliation reports the missing records.
     assert judge([]) == []
+
+
+def test_one_slot_stuck_below_the_cap_is_an_undershoot() -> None:
+    # A leaked hold: the limiter never admits more than cap - 1 for 5 minutes.
+    found = judge(level([(0, 600, CAP), (600, 900, CAP - 1), (900, LOAD_S, CAP)]))
+    assert kinds(found) == [("limiter_undershoot", "major", None)]

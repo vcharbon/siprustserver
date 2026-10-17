@@ -3,15 +3,16 @@ limiter's admissions come back to its cap after whatever lost its messages.
 
 The truth is the generator's: a limited call holds a slot from its answer to
 its end, so the calls of a limiter's streams answered and not yet ended are
-the calls it admitted. Per span of `SPAN_S` the median of that count, sampled
-each second, is judged: outside every window's zone it stays within
-[cap - `SLACK`, cap]. A window's zone runs from its opening to its close plus
-the limiter's `repair_s`; inside it the median may exceed the cap up to every
-call the streams offer, cps × (ring + hold), when the budget states
-`limiter.overshoot: offered` (callers failing open admit them all), and may
-fall under the band when the budget allows `limiter.undershoot`. A median under its bound is
-`limiter_undershoot` (callers refused calls they are entitled to), over it
-`limiter_overshoot` (more calls than the cap: minor).
+the calls it admitted, sampled each second and judged per span of `SPAN_S`.
+Outside every window's zone a saturated limiter is full at least once a
+minute (the span's max reaches the cap) and holds no more than its cap (the
+span's median). A window's zone runs from its opening to its close plus the
+limiter's `repair_s`; inside it the median may reach every call the streams
+offer, cps × (ring + hold), when the budget states `limiter.overshoot:
+offered` (callers failing open admit them all), and the max may stay under
+the cap when the budget allows `limiter.undershoot`. A max under the cap is
+`limiter_undershoot` (callers refused calls they are entitled to, a stuck
+slot included), a median over the bound `limiter_overshoot` (minor).
 """
 
 from __future__ import annotations
@@ -24,10 +25,10 @@ from .model import NO_BUDGET, Budget
 from .profile import LimiterSpec, Profile
 from .windows import Window
 
-# One coarse sample of the admitted count: the median over a minute of seconds.
+# One coarse sample of the admitted count: a minute of seconds.
 SPAN_S = 60
-# A saturated limiter runs 1 or 2 under its cap while a freed slot waits for its
-# streams' next call: 2 below the cap is still steady.
+# The streams offer at least this many calls above the cap, so the limiter
+# runs full and its max reaches the cap every minute.
 SLACK = 2
 
 
@@ -109,20 +110,22 @@ def judge_limiters(
             (w.opened_at_ms // 1000, int(w.closed_at_ms // 1000 + spec.repair_s), budgets.get(w.budget, NO_BUDGET), w.event)
             for w in windows
         ]
-        low = spec.cap - SLACK
         offered = offered_concurrency(profile, spec)
         current: Json | None = None
         for a in range(start, end - SPAN_S + 1, SPAN_S):
             b = a + SPAN_S
-            median = statistics.median(active[a - start : b - start])
+            span = active[a - start : b - start]
+            median = statistics.median(span)
             high, under_ok, event = _allowance(zones, a, b, spec.cap, offered)
-            kind = "limiter_overshoot" if median > high else "limiter_undershoot" if median < low and not under_ok else None
+            under = max(span) < spec.cap and not under_ok
+            kind = "limiter_overshoot" if median > high else "limiter_undershoot" if under else None
             if kind is None:
                 current = None
                 continue
             if current is not None and current["kind"] == kind and current["to_ms"] == a * 1000:
                 current["to_ms"] = b * 1000
                 current["medians"] = [*jv.as_list(current["medians"]), median]
+                current["maxima"] = [*jv.as_list(current["maxima"]), max(span)]
                 continue
             current = {
                 "kind": kind,
@@ -132,7 +135,8 @@ def judge_limiters(
                 "from_ms": a * 1000,
                 "to_ms": b * 1000,
                 "medians": [median],
-                "bound": [low, high],
+                "maxima": [max(span)],
+                "bound": [spec.cap, high],
                 "window": event,
             }
             out.append(current)

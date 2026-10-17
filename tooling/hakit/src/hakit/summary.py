@@ -138,13 +138,14 @@ def render(v: Json) -> str:
 
 
 def _limiter(r: Json) -> str:
-    lo, hi = (float(str(b)) for b in jv.lst(r, "bound"))
+    cap, high = (float(str(b)) for b in jv.lst(r, "bound"))
     medians = ", ".join(f"{float(str(m)):g}" for m in jv.lst(r, "medians"))
+    maxima = ", ".join(f"{float(str(m)):g}" for m in jv.lst(r, "maxima"))
     where = f"window {r['window']}" if r.get("window") else "outside every window"
     return (
         f"- `{r['kind']}` ({r['severity']}) limiter {r['limiter']} ({', '.join(jv.strings(r, 'streams'))}) "
-        f"{_t(jv.number(r, 'from_ms'))} to {_t(jv.number(r, 'to_ms'))}, {where}: minute medians {medians} "
-        f"against [{lo:g}, {hi:g}] — FINDING"
+        f"{_t(jv.number(r, 'from_ms'))} to {_t(jv.number(r, 'to_ms'))}, {where}: minute maxima {maxima}, "
+        f"medians {medians}, cap {cap:g}, median allowed {high:g} — FINDING"
     )
 
 

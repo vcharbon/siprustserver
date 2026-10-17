@@ -164,12 +164,12 @@
       "items": { "$ref": "#/$defs/impact" }
     },
     "limiters": {
-      "description": "The profile's limiters out of their bound (ADR-0049 §3.13): each entry a run of consecutive minutes whose median of admitted calls left the band, or the window's allowance. Every entry is a finding; an overshoot is minor, an undershoot major.",
+      "description": "The profile's limiters out of their bound (ADR-0049 §3.13): each entry a run of consecutive minutes whose max of admitted calls stayed under the cap (undershoot) or whose median rose over the cap or the window's allowance (overshoot); `bound` is [cap, highest median allowed]. Every entry is a finding; an overshoot is minor, an undershoot major.",
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "severity", "limiter", "streams", "from_ms", "to_ms", "medians", "bound", "window"],
+        "required": ["kind", "severity", "limiter", "streams", "from_ms", "to_ms", "medians", "maxima", "bound", "window"],
         "properties": {
           "kind": { "enum": ["limiter_overshoot", "limiter_undershoot"] },
           "severity": { "enum": ["major", "minor"] },
@@ -178,6 +178,7 @@
           "from_ms": { "type": "number" },
           "to_ms": { "type": "number" },
           "medians": { "type": "array", "items": { "type": "number" } },
+          "maxima": { "type": "array", "items": { "type": "number" } },
           "bound": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
           "window": { "type": ["string", "null"] }
         }

@@ -476,20 +476,20 @@ made. A run profile joins the two.
     its cap, and `repair_s`; its streams must offer at least cap + 2 calls
     at once (cps × (ring + hold)). The truth is the generator's: the calls
     of those streams answered and not yet ended, sampled each second from
-    the records, as a median per minute. Outside every window's zone (its
-    opening to its close plus `repair_s`) the median stays within
-    [cap − 2, cap]: a saturated limiter runs 1 or 2 under its cap while a
-    freed slot waits for the next call. Inside a zone the window's budget
-    allows each direction on its own (`limiter.overshoot: offered`: the
-    median may reach every call the streams offer, as callers failing open
-    admit them all, the base `limiter-fault` budget of an incident on the
-    limiter itself; `limiter.undershoot`: the median may fall under the
-    band); a direction not allowed is the band's. A median under its bound
+    the records, judged per minute. Outside every window's zone (its
+    opening to its close plus `repair_s`) the minute's max reaches the cap
+    (a saturated limiter is full at least once a minute, so one stuck slot
+    shows) and its median does not exceed it. Inside a zone the window's
+    budget allows each direction on its own (`limiter.overshoot: offered`:
+    the median may reach every call the streams offer, as callers failing
+    open admit them all, the base `limiter-fault` budget of an incident on
+    the limiter itself; `limiter.undershoot`: the max may stay under the
+    cap); a direction not allowed is judged as outside. A max under the cap
     is a `limiter_undershoot` finding (callers refused calls they are
-    entitled to, major); over it, a `limiter_overshoot` (more calls than
-    the cap, minor). Consecutive minutes out of bound make one entry of the
-    verdict's `limiters`, naming the limiter, its streams, the span, the
-    medians, the bound and the window.
+    entitled to, major); a median over its bound, a `limiter_overshoot`
+    (more calls than the cap, minor). Consecutive minutes out of bound make
+    one entry of the verdict's `limiters`, naming the limiter, its streams,
+    the span, the minute maxima and medians, the bound and the window.
 
 ### 4. The call-outcome record
 

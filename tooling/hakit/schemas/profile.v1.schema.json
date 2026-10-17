@@ -80,7 +80,7 @@
       }
     },
     "limiters": {
-      "description": "Call limiters whose admissions the verdict checks for self-repair from the records (ADR-0049 §3.13): every call of `streams` holds the limiter `id` of cap `cap`, and the streams saturate it; the median of their answered calls per minute stays within [cap - 2, cap] outside every window's zone, which runs to the window's close plus `repair_s`.",
+      "description": "Call limiters whose admissions the verdict checks for self-repair from the records (ADR-0049 §3.13): every call of `streams` holds the limiter `id` of cap `cap`, and the streams saturate it; per minute their answered calls reach the cap (max) and do not exceed it (median) outside every window's zone, which runs to the window's close plus `repair_s`.",
       "type": "array",
       "items": {
         "type": "object",
