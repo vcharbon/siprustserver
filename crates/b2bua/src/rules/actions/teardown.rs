@@ -656,8 +656,8 @@ fn relayed_teardown_hops(ctx: &RuleContext) -> Option<u32> {
     }
 }
 
-/// Hard-terminate every leg and the call ([`b2bua_sdk::model::RuleAction::TerminateCall`],
-/// and the `CreateLeg` admission reject): each leg is abandoned
+/// Hard-terminate every leg and the call
+/// ([`b2bua_sdk::model::RuleAction::TerminateCall`]): each leg is abandoned
 /// ([`abandon_leg`]). No wire traffic — the firing rule owns any final/BYE
 /// already sent. Writes the termination record under `cause`
 /// and `by_leg` when the call carries none yet.

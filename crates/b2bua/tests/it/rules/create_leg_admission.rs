@@ -68,7 +68,8 @@ fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult 
 }
 
 // A rule routing to a non-IP non-suffixed host is rejected — no
-// b-leg outbound, the call is terminated, and a Reject CDR records the cause.
+// b-leg outbound, the call ends with nothing left to resolve (its unanswered
+// caller takes the ADR-0022 503 as it does), and a Reject CDR records the cause.
 #[test]
 fn create_leg_to_non_allow_listed_host_is_rejected() {
     let config = B2buaConfig::default(); // default suffix list [".svc.cluster.local"]
@@ -79,6 +80,7 @@ fn create_leg_to_non_allow_listed_host_is_rejected() {
         "a rejected create-leg must emit no b-leg outbound (host never reaches the send path)"
     );
     assert!(result.call.b_legs.is_empty(), "no b-leg state is allocated on admission reject");
+    let result = invariants::finalize(result);
     assert_eq!(result.call.state, CallModelState::Terminated, "the call is torn down");
     let reject = result
         .call

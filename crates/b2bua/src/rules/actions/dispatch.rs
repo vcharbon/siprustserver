@@ -8,6 +8,7 @@ use call::helpers::{
 };
 use call::helpers::{RelayPeer, Scope};
 use call::{Call, CdrEvent};
+use std::ops::ControlFlow;
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance};
 use crate::rules::relay;
@@ -26,7 +27,7 @@ impl ActionExecutor<'_> {
         ctx: &RuleContext,
         call: &mut Call,
         fx: &mut HandlerEffects,
-    ) {
+    ) -> ControlFlow<()> {
         match action {
             RuleAction::RelayToPeer { transform } => match resolve_peer(call, ctx) {
                 RelayPeer::Leg { leg_id, dialog } => {
@@ -100,7 +101,7 @@ impl ActionExecutor<'_> {
                 kind,
                 attempt,
             } => {
-                self.create_leg(
+                return self.create_leg(
                     call,
                     fx,
                     ctx,
@@ -415,6 +416,7 @@ impl ActionExecutor<'_> {
                 );
             }
         }
+        ControlFlow::Continue(())
     }
 
     /// Relay the current event to `target_leg` (response → regenerate on the

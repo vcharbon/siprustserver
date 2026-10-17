@@ -1,6 +1,8 @@
 //! The new leg's INVITE (`CreateLeg`): behind the destination allow-list,
 //! minted under the engine's next leg id, opening the attempt it dials.
 
+use std::ops::ControlFlow;
+
 use call::helpers::{add_cdr_event, add_originated_b_leg};
 use call::{Call, CdrEvent, LegKind, TerminationCause};
 use sip_message::header::HeaderName;
@@ -10,19 +12,20 @@ use crate::rules::capabilities;
 use crate::rules::relay;
 use b2bua_sdk::model::{AttemptOpening, Body, RuleContext};
 
-use super::teardown::terminate_all;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
     /// Build and send a new b-leg INVITE toward `destination`
     /// ([`b2bua_sdk::model::RuleAction::CreateLeg`]). Admission gate — same
     /// policy as `apply_route`: a rule-driven destination that doesn't pass the
-    /// suffix allow-list is a config bug; surface it as a terminate so the call
-    /// doesn't hang waiting for an answer that will never come. No leg /
-    /// outbound is built; the call is torn down and a `Reject` CDR records the
-    /// cause. An admitted leg is recorded with its `InviteSent` as its INVITE
-    /// leaves, under the decision current at this turn. A leg dialled for an
-    /// attempt opens it and joins it.
+    /// suffix allow-list is a config bug, refused so the call doesn't hang
+    /// waiting for an answer that will never come. A refused leg is not built:
+    /// a `Reject` CDR records the cause, the call ends by
+    /// [`Self::begin_termination`] (every confirmed leg BYEd, every ringing one
+    /// CANCELled) and `Break` stops the rule's remaining actions, which
+    /// presumed the leg. An admitted leg is recorded with its `InviteSent` as
+    /// its INVITE leaves, under the decision current at this turn. A leg
+    /// dialled for an attempt opens it and joins it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn create_leg(
         &self,
@@ -39,7 +42,7 @@ impl ActionExecutor<'_> {
         header_adds: &[(String, Vec<String>)],
         kind: Option<LegKind>,
         attempt: Option<&AttemptOpening>,
-    ) {
+    ) -> ControlFlow<()> {
         if crate::destination_allowlist::classify_admission(
             &destination.0,
             &self.config.worker_allowed_target_suffixes,
@@ -56,8 +59,7 @@ impl ActionExecutor<'_> {
                     decision_ordinal: 0,
                 },
             );
-            terminate_all(call, self.now_ms, TerminationCause::Admission, None);
-            return;
+            return self.refuse_leg(call, fx, ctx);
         }
         let leg_id = call::helpers::next_b_leg_id(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
@@ -116,8 +118,7 @@ impl ActionExecutor<'_> {
                         decision_ordinal: 0,
                     },
                 );
-                terminate_all(call, self.now_ms, TerminationCause::Admission, None);
-                return;
+                return self.refuse_leg(call, fx, ctx);
             }
         };
         crate::rules::charging::uncharge_media_leg(
@@ -144,5 +145,17 @@ impl ActionExecutor<'_> {
             let id = crate::attempts::open(call, fx, opening.clone());
             call::helpers::join_attempt(call, id, &leg_id);
         }
+        ControlFlow::Continue(())
+    }
+
+    /// End the call whose rule asked for a leg that is not created.
+    fn refuse_leg(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+    ) -> ControlFlow<()> {
+        self.begin_termination(call, fx, ctx, None, (TerminationCause::Admission, None));
+        ControlFlow::Break(())
     }
 }
