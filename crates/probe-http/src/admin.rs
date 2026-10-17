@@ -7,8 +7,8 @@ use std::sync::Arc;
 /// The prefix of every operator route.
 pub(crate) const PREFIX: &str = "/admin/";
 
-/// Operator routes, called with the request's method and path (query
-/// included) for every path under `/admin/`; `None` ⇒ `404`. Cheap and
+/// Operator routes, called with the request's method and path, its query
+/// stripped, for every path under `/admin/`; `None` ⇒ `404`. Cheap and
 /// non-blocking, like every probe route.
 pub type AdminFn = Arc<dyn Fn(&str, &str) -> Option<AdminReply> + Send + Sync>;
 

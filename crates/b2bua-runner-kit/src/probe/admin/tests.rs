@@ -71,6 +71,18 @@ async fn cordon_and_uncordon_answer_204_twice_and_get_reports_the_state_and_the_
     assert_eq!(readiness.state(), b2bua::repl::ReadinessState::Ready, "uncordoned");
 }
 
+/// A query string changes no route.
+#[tokio::test]
+async fn the_cordon_routes_answer_with_a_query_string() {
+    let readiness = Readiness::always_ready();
+    let s = server(&readiness, 0).await;
+    let post = request(s.addr(), "POST", "/admin/cordon?by=operator").await;
+    assert!(post.starts_with("HTTP/1.1 204 No Content"), "{post}");
+    assert!(readiness.is_cordoned());
+    let get = request(s.addr(), "GET", "/admin/cordon?pretty").await;
+    assert!(get.starts_with("HTTP/1.1 200 OK"), "{get}");
+}
+
 #[tokio::test]
 async fn another_method_is_405_and_another_admin_path_404() {
     let s = server(&Readiness::always_ready(), 0).await;

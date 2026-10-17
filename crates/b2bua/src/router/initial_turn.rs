@@ -34,7 +34,7 @@ pub(super) enum Turn {
 /// identity guard, then build + rule the new call. A setup its caller
 /// CANCELed before this turn ran is born and ruled by no one: no decision, no
 /// limiter admit. The probe's 500, the identity guard's 500, the cancelled
-/// setup or the accept counts the INVITE's outcome once
+/// setup, the cordon's 503 or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
 pub(super) async fn initial_invite_turn(
     ctx: &Arc<RouterCtx>,
@@ -107,10 +107,14 @@ pub(super) async fn initial_invite_turn(
     // The caller CANCELed while this turn waited (marked at ingress): the
     // transaction layer already answered 487. The call is born so the queued
     // `Cancelled` turn ends it with its Cancel CDR; it is neither accepted nor
-    // treated (`adm`).
+    // treated (`adm`). A cordoned node refuses the call before its decision;
+    // the call is born only to write its record (ADR-0050 §9).
     let cancelled = ctx.state.is_setup_cancelled(call_ref, cseq);
+    let cordoned = !cancelled && ctx.readiness.state() == ReadinessState::Cordoned;
     if cancelled {
         ctx.metrics.new_calls().cancel(class);
+    } else if cordoned {
+        ctx.metrics.new_calls().reject(Refusal::Cordoned, class);
     } else {
         ctx.metrics.new_calls().accept(class);
         // The `adm` published on X-Overload counts non-emergency calls only:
@@ -144,6 +148,8 @@ pub(super) async fn initial_invite_turn(
     // invariant reaps the call + propagates the delete.
     let mut handled = if cancelled {
         crate::initial_invite::cancelled_setup(call.clone(), req.image(), now_ms)
+    } else if cordoned {
+        refused_unavailable(ctx, call.clone(), now_ms)
     } else if call.a_leg_invite.from_tag.is_empty() {
         let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
         crate::initial_invite::reject_call(
@@ -158,10 +164,6 @@ pub(super) async fn initial_invite_turn(
             now_ms,
             TerminationCause::Admission,
         )
-    } else if ctx.readiness.state() == ReadinessState::Cordoned {
-        // A cordoned node refuses every new call before its decision, the
-        // call's record written (ADR-0050 §9).
-        refused_unavailable(ctx, call.clone(), now_ms)
     } else {
         // `req.image()` is the datagram this INVITE arrived as — the only place
         // it exists (the call carries a header snapshot, not bytes), and what a

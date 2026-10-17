@@ -191,6 +191,8 @@ struct ReadinessInner {
     /// The operator's cordon: set only over a latched `Ready`, so a set flag
     /// reads `Cordoned` until it is cleared or the node drains.
     cordoned: AtomicBool,
+    /// Serialises the cordon's read-then-set with the drain latch.
+    transitions: std::sync::Mutex<()>,
     /// Whether the "still NotReady, and why" line has been emitted. The
     /// latched states are monotone (NotReady → Ready → Draining), so each
     /// transition — including the boot state — is lined exactly once
@@ -224,6 +226,7 @@ impl Readiness {
                 draining: AtomicBool::new(false),
                 ready_latched: AtomicBool::new(false),
                 cordoned: AtomicBool::new(false),
+                transitions: std::sync::Mutex::new(()),
                 not_ready_logged: AtomicBool::new(false),
                 backends: BackendGate::default(),
                 node: observe::NodeScope::current(),
@@ -260,6 +263,7 @@ impl Readiness {
     }
 
     fn latch_draining(&self, reason: &'static str) {
+        let _transition = self.transition();
         if !self.inner.draining.swap(true, Ordering::SeqCst) {
             self.line_transition("Draining", reason);
         }
@@ -287,6 +291,7 @@ impl Readiness {
     /// Cordon the node: `Ready → Cordoned`; idempotent on a cordoned node.
     /// Refused while NotReady or Draining.
     pub fn cordon(&self) -> Result<(), CordonRefused> {
+        let _transition = self.transition();
         match self.state() {
             ReadinessState::NotReady => Err(CordonRefused::NotReady),
             ReadinessState::Draining => Err(CordonRefused::Draining),
@@ -302,6 +307,7 @@ impl Readiness {
     /// Lift the cordon: `Cordoned → Ready`; idempotent on a node no cordon
     /// holds. Refused while Draining.
     pub fn uncordon(&self) -> Result<(), CordonRefused> {
+        let _transition = self.transition();
         if self.state() == ReadinessState::Draining {
             return Err(CordonRefused::Draining);
         }
@@ -323,6 +329,12 @@ impl Readiness {
         crate::metrics::catalogue::worker::CORDONED
             .render_value(&mut s, u64::from(self.is_cordoned()));
         s
+    }
+
+    /// The lock a cordon decision and the drain latch take, so a cordon is
+    /// never set on a node that latched Draining after it read the state.
+    fn transition(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.inner.transitions.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn line_transition(&self, state: &'static str, reason: &'static str) {

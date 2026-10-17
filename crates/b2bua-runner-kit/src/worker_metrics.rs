@@ -225,9 +225,6 @@ mod tests {
         }
     }
 
-    /// The deferred-backlog and lifetime series of the transaction layer are
-    /// on the first scrape, at 0, so a dashboard or probe reads a value from
-    /// startup.
     /// `b2bua_cordoned` reads the operator's cordon at each scrape.
     #[tokio::test]
     async fn the_cordon_gauge_follows_the_cordon() {
@@ -244,6 +241,9 @@ mod tests {
         assert_eq!(gauge(&w).as_deref(), Some("b2bua_cordoned 0"));
     }
 
+    /// The deferred-backlog and lifetime series of the transaction layer are
+    /// on the first scrape, at 0, so a dashboard or probe reads a value from
+    /// startup.
     #[tokio::test]
     async fn the_txn_deferred_backlog_series_are_published_at_zero_from_startup() {
         let txn = txn_layer().await;

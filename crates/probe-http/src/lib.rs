@@ -235,7 +235,8 @@ async fn handle_conn(
     let path = request_line.next().unwrap_or("/");
 
     if path.starts_with(admin::PREFIX) {
-        let reply = routes.admin.as_ref().and_then(|admin| admin(method, path));
+        let route = path.split('?').next().unwrap_or(path);
+        let reply = routes.admin.as_ref().and_then(|admin| admin(method, route));
         let reply = reply.unwrap_or_else(|| AdminReply::json(404, String::new()));
         stream.write_all(reply.render().as_bytes()).await?;
         stream.flush().await?;

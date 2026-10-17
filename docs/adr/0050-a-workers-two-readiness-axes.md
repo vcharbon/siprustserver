@@ -133,7 +133,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    - **Cordoned**: `new=refuse; cause=cordoned`. New calls that reach it are
      refused (bare `503`, its call record written); every established dialog
      is served normally. Reversible, no timer of its own: the operator's next
-     step uncordons it, sends SIGTERM, or releases its calls (10).
+     step uncordons it, sends SIGTERM, or releases its calls (10). The cordon
+     is held by the process: a restart clears it.
    - **Draining**: SIGTERM or withdrawal (ADR-0031 D6); terminal;
      `new=refuse; cause=draining`; the handover drain of ADR-0031 D2,
      unchanged. A cordoned worker that receives SIGTERM drains the same way.

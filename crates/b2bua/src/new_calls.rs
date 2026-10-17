@@ -2,7 +2,9 @@
 //! (the call is born and runs the whole call path), cancelled (its caller
 //! CANCELed it before its turn ran: the call is born and ends at once, with
 //! no decision and no limiter admit) or refused by a rung of the admission
-//! ladder ([`crate::admission`]) before any call state exists, and why.
+//! ladder ([`crate::admission`]) before any call state exists, and why. A
+//! cordoned worker's refusal is a refusal too, though its call is born to
+//! write the record of a call no decision reached.
 //!
 //! A new call is a new initial INVITE (no To-tag). Its first refusal is
 //! counted once, on `b2bua_new_calls_total`, in the class it was judged in;
@@ -59,11 +61,14 @@ pub enum Refusal {
     /// A call on the INVITE's Call-ID and From-tag, with another CSeq, is
     /// still here: answered 500 with a Retry-After (RFC 3261 §14.2).
     IdentityInUse,
+    /// An operator cordoned the worker: answered the bare 503 before any
+    /// decision. Its call is born only to write its record.
+    Cordoned,
 }
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 11] = [
+    pub const ALL: [Refusal; 12] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -75,6 +80,7 @@ impl Refusal {
         Refusal::StoreFault,
         Refusal::DispatchDiscard,
         Refusal::IdentityInUse,
+        Refusal::Cordoned,
     ];
 
     /// Stable `reason` label.
@@ -91,6 +97,7 @@ impl Refusal {
             Refusal::StoreFault => "store_fault",
             Refusal::DispatchDiscard => "dispatch_discard",
             Refusal::IdentityInUse => "identity_in_use",
+            Refusal::Cordoned => "cordoned",
         }
     }
 

@@ -55,6 +55,7 @@ assert_exposition_order!(
     StoreFault,
     DispatchDiscard,
     IdentityInUse,
+    Cordoned,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 

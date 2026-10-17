@@ -8,12 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use b2bua::admission::Class;
 use b2bua::cdr::CdrRecord;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse,
 };
+use b2bua::new_calls::Refusal;
 use b2bua::repl::ReadinessState;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::{CdrEventType, TerminationCause};
@@ -102,7 +104,13 @@ async fn a_cordoned_worker_refuses_new_calls_with_their_record_and_serves_its_di
     readiness.cordon().expect("a ready worker takes a cordon");
     assert_eq!(readiness.state(), ReadinessState::Cordoned);
     assert_eq!(options(&s).await, (200, Some(Readiness::refuse("cordoned"))));
+    let adm = s.b2bua.overload().metrics().non_emergency_admitted_total;
     refused(&s).await;
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.rejected(Refusal::Cordoned, Class::Normal), 1, "refused as cordoned");
+    assert_eq!(counts.accepted(Class::Normal), 1, "only the held call was accepted");
+    let adm_after = s.b2bua.overload().metrics().non_emergency_admitted_total;
+    assert_eq!(adm_after, adm, "the refusal is not admitted (`adm`)");
     s.hangup(&mut held).await;
 
     // ── uncordoned: accepting again ─────────────────────────────────────────

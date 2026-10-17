@@ -163,14 +163,14 @@ async fn request(addr: std::net::SocketAddr, method: &str, path: &str) -> String
     String::from_utf8_lossy(&resp).into_owned()
 }
 
-/// The operator routes receive the method and the path, query included, and
-/// their replies are framed: a body with its length, a `204` with neither.
+/// The operator routes receive the method and the path, its query stripped,
+/// and their replies are framed: a body with its length, a `204` with neither.
 #[tokio::test]
 async fn admin_routes_receive_the_method_and_path_and_their_replies_are_framed() {
     let mut r = routes("", always(ProbeState::Ready));
     r.admin = Some(Arc::new(|method: &str, path: &str| match (method, path) {
         ("POST", "/admin/x") => Some(AdminReply::no_content()),
-        ("GET", "/admin/x?y=1") => Some(AdminReply::json(200, r#"{"y":1}"#.into())),
+        ("GET", "/admin/x") => Some(AdminReply::json(200, r#"{"y":1}"#.into())),
         _ => None,
     }));
     let server = ProbeServer::start("127.0.0.1:0".parse().unwrap(), r).await.unwrap();
