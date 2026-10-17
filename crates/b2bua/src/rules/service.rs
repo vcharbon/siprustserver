@@ -9,7 +9,7 @@
 //! ([`ActionExecutor`], [`HandlerResult`]) and is re-exported through
 //! `crate::rules`.
 
-use call::MachineId;
+use call::{CallModelState, MachineId};
 
 use crate::effects::HandlerResult;
 use b2bua_sdk::event::CallEvent;
@@ -38,8 +38,10 @@ pub fn compose_rules(services: &[ServiceDef], core: Vec<RuleDefinition>) -> Vec<
 /// Run every service's `init` once at call setup and fold the returned seeds —
 /// cursor + data backing + initial actions — through the normal executor/effects
 /// pipeline (ADR-0016 X8). The cursor is keyed by the service id (== machine
-/// id). A dormant service (`init` → `None`) is skipped. With an empty service
-/// list this returns `result` unchanged.
+/// id). A dormant service (`init` → `None`) is skipped. A seed that ends the
+/// call (a refused `CreateLeg`) ends the seeding: no later service is seeded on
+/// a terminating call. With an empty service list this returns `result`
+/// unchanged.
 pub fn seed_services(
     mut result: HandlerResult,
     services: &[ServiceDef],
@@ -49,6 +51,9 @@ pub fn seed_services(
     direction: call::Direction,
 ) -> HandlerResult {
     for def in services {
+        if matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated) {
+            break;
+        }
         let Some(seed) = (def.init)(&RuleCall::new(&result.call)) else {
             continue;
         };

@@ -68,8 +68,8 @@ fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult 
 }
 
 // A rule routing to a non-IP non-suffixed host is rejected — no
-// b-leg outbound, the call ends with nothing left to resolve (its unanswered
-// caller takes the ADR-0022 503 as it does), and a Reject CDR records the cause.
+// b-leg outbound, the call ends with nothing left to resolve, and a Reject CDR
+// records the cause.
 #[test]
 fn create_leg_to_non_allow_listed_host_is_rejected() {
     let config = B2buaConfig::default(); // default suffix list [".svc.cluster.local"]
@@ -96,11 +96,12 @@ fn create_leg_to_non_allow_listed_host_is_rejected() {
     );
 }
 
-/// A refused create-leg on an answered call ends it on the wire: each
-/// confirmed leg is BYEd, and the rest of the rule's list (here a timer
-/// arm) does not run on the call it left terminating.
+/// A refused create-leg on an answered call ends it on the wire under the
+/// `Admission` cause: each confirmed leg is BYEd, each ringing leg CANCELled,
+/// and the rest of the rule's list (here a timer arm) does not run on the call
+/// it left terminating.
 #[test]
-fn create_leg_refused_mid_call_byes_every_confirmed_leg() {
+fn create_leg_refused_mid_call_ends_every_leg_on_the_wire() {
     let refusals = [
         ("admission", create_leg("kindlab", 5060)),
         (
@@ -126,20 +127,40 @@ fn create_leg_refused_mid_call_byes_every_confirmed_leg() {
         call::testkit::stage_leg(&mut b, LegState::Confirmed);
         with_dialog(&mut b, "btag");
         call = call::helpers::add_b_leg(call, b);
+        let mut ringing =
+            Leg { leg_id: "b-2".into(), call_id: "b2cid@x".into(), ..b_leg_pending() };
+        // The INVITE `b-2` rings on, which its CANCEL names (RFC 3261 §9.1).
+        let dest = call::HostPort { host: "10.0.0.2".into(), port: 5070 };
+        let handle = call::InviteTxnHandle::new("z9hG4bK-b2", 1, invite().image().to_vec(), dest);
+        ringing.outbound_invite.as_mut().expect("a dialled leg").txn = Some(handle);
+        call = call::helpers::add_b_leg(call, ringing);
         let guard = TimerKey::call(TimerType::ReferOverallSafety);
         let result =
             execute_on(&call, &[action, RuleAction::arm(guard.clone(), TimerDelay::millis(5_000))]);
 
-        let byes: Vec<&str> = result
+        let requests: Vec<(Method, &str)> = result
             .effects
             .outbound
             .iter()
-            .filter(|e| matches!(&e.body, b2bua::effects::OutboundBody::Request(r) if r.method() == Method::Bye))
-            .filter_map(|e| e.leg_id.as_deref())
+            .filter_map(|e| match &e.body {
+                b2bua::effects::OutboundBody::Request(r) => {
+                    Some((r.method().clone(), e.leg_id.as_deref()?))
+                }
+                _ => None,
+            })
             .collect();
-        assert_eq!(byes, ["a", "b-1"], "{refusal}: every confirmed leg is BYEd");
-        assert_eq!(result.call.b_legs.len(), 1, "{refusal}: no leg is created");
+        assert_eq!(
+            requests,
+            [(Method::Bye, "a"), (Method::Bye, "b-1"), (Method::Cancel, "b-2")],
+            "{refusal}: every confirmed leg is BYEd, every ringing one CANCELled",
+        );
+        assert_eq!(result.call.b_legs.len(), 2, "{refusal}: no leg is created");
         assert_eq!(result.call.state, CallModelState::Terminating, "{refusal}");
+        assert_eq!(
+            result.call.termination.as_ref().map(|t| t.cause),
+            Some(TerminationCause::Admission),
+            "{refusal}",
+        );
         assert!(
             !result.call.timers.iter().any(|t| t.key == guard),
             "{refusal}: the rest of the rule's list does not run: {:?}",
