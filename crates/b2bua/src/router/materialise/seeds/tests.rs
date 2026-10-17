@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use super::*;
 use call::{
     Dialog, DialogState, Direction, HostPort, LegKind, LegState, OutboundInvite, RemoteInfo,

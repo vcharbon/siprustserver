@@ -139,6 +139,12 @@ pub const RETRANSMITS: Family = Family::counter(
     "repeats of a retained emission that left this worker, by what paced them (ladder: the sip_retransmit class of a dialog-level ladder, or trigger for a re-send the peer provoked), the CSeq method, and the status for a response (no code label on a request); a climb names a deaf peer or a lossy path",
 ).semi_open();
 
+pub const OUTBOUND_UNADDRESSABLE: Family = Family::counter(
+    "b2bua_outbound_unaddressable_total",
+    Labels::Product(&[Dim::new("kind", &["request", "response", "datagram"])]),
+    "outbound SIP messages left unsent because their next hop is not an IP literal (the worker resolves no name), by kind; a request that opens a client transaction fails its call's attempt as a transport failure",
+);
+
 pub const UNROUTABLE_DROPPED: Family = Family::counter(
     "b2bua_unroutable_dropped_total",
     Labels::Product(&[UNROUTABLE_KIND]),

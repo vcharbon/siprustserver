@@ -88,6 +88,7 @@ mod drain_env;
 mod limiter_client;
 mod limiter_env;
 mod liveness_env;
+mod outbound_proxy_env;
 mod probe;
 mod replication;
 mod shutdown;
@@ -97,6 +98,7 @@ pub use cdr_rabbitmq::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
+pub use outbound_proxy_env::{parse_outbound_proxy, validate_outbound_proxy_requirement};
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
 pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
 
@@ -242,27 +244,6 @@ pub fn validate_ingress_brake_pct(udp_ingress_brake_pct: u32) -> Result<(), Stri
     Ok(())
 }
 
-/// Boot-time invariant for cluster-profile workers (pure, unit-testable):
-/// when `B2BUA_REQUIRE_OUTBOUND_PROXY` is set, `B2BUA_OUTBOUND_PROXY` MUST be
-/// configured — a worker without it dials b-leg R-URIs pod-direct, bypassing
-/// the front proxy and (in the dual-face network split) reaching for a plane
-/// it must not see. Checked at [`RunnerEnv::bind`]; exported for runners that
-/// assemble their own env.
-pub fn validate_outbound_proxy_requirement(
-    require_outbound_proxy: bool,
-    outbound_proxy_set: bool,
-) -> Result<(), String> {
-    if require_outbound_proxy && !outbound_proxy_set {
-        return Err("B2BUA_REQUIRE_OUTBOUND_PROXY is set but B2BUA_OUTBOUND_PROXY is unset: this \
-             profile REQUIRES every b-leg to traverse the front proxy (workers must never \
-             dial callees pod-direct — only the proxy bridges to the external plane). Set \
-             B2BUA_OUTBOUND_PROXY=host:port or unset B2BUA_REQUIRE_OUTBOUND_PROXY for \
-             local/dev"
-            .to_string());
-    }
-    Ok(())
-}
-
 /// Boot-time coherence check for runners with a **static default callee**: the
 /// b-leg admission gate (`apply_route`) classifies the callee's
 /// `destination.host`, so a default the worker's own destination allow-list
@@ -300,7 +281,7 @@ pub struct RunnerEnv {
     /// via the downward API `status.podIP`, else peers route responses to
     /// `0.0.0.0` (a storm).
     pub advertise: Option<String>,
-    /// `B2BUA_OUTBOUND_PROXY` — front-proxy `host:port` every b-leg
+    /// `B2BUA_OUTBOUND_PROXY` — front-proxy IP-literal `ip:port` every b-leg
     /// (worker→callee) request is forced through (a preloaded plain `;lr` Route).
     /// REQUIRED in the k8s cluster (pod IPs are not peer-routable); unset →
     /// b-leg goes straight to the callee (local/dev only). A malformed value is
@@ -471,14 +452,7 @@ impl RunnerEnv {
             advertise: env::var("B2BUA_ADVERTISE").ok(),
             outbound_proxy: match env::var("B2BUA_OUTBOUND_PROXY") {
                 Ok(s) if !s.trim().is_empty() => {
-                    let s = s.trim();
-                    let (h, p) = s
-                        .rsplit_once(':')
-                        .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h.to_string(), p)))
-                        .unwrap_or_else(|| {
-                            panic!("B2BUA_OUTBOUND_PROXY must be host:port, got {s:?}")
-                        });
-                    Some((h, p))
+                    Some(parse_outbound_proxy(s.trim()).unwrap_or_else(|e| panic!("{e}")))
                 }
                 _ => None,
             },

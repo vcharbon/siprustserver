@@ -5,7 +5,7 @@
 //! lookup: a hostname is read from the outbound proxy's kept addresses
 //! ([`RouterCtx::outbound_proxy`]), whose lookup runs off the task.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use http_net::ResolvedTarget;
@@ -54,9 +54,8 @@ pub(super) fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, 
 /// started off the task when none is kept); any other name gives `None`, and
 /// nothing is recorded.
 fn hop_address(proxy: Option<&ResolvedTarget>, host: &str, port: u16) -> Option<SocketAddr> {
-    let literal = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
-    if let Ok(ip) = literal.parse::<IpAddr>() {
-        return Some(SocketAddr::new(ip, port));
+    if let Some(addr) = sip_net::ip_socket_addr(host, port) {
+        return Some(addr);
     }
     let proxy = proxy.filter(|p| p.host_port() == (host.to_string(), port))?;
     let kept = proxy.address();
@@ -70,9 +69,9 @@ fn hop_address(proxy: Option<&ResolvedTarget>, host: &str, port: u16) -> Option<
 /// router task; an IP literal is never looked up.
 pub(crate) fn outbound_proxy_target(config: &B2buaConfig) -> Option<Arc<ResolvedTarget>> {
     let (host, port) = config.b2b_outbound_proxy.as_ref()?;
-    let target = match host.parse::<IpAddr>() {
-        Ok(ip) => ResolvedTarget::addr(SocketAddr::new(ip, *port)),
-        Err(_) => {
+    let target = match sip_net::ip_socket_addr(host, *port) {
+        Some(addr) => ResolvedTarget::addr(addr),
+        None => {
             ResolvedTarget::name_with(format!("{host}:{port}"), Arc::new(http_net::SystemResolver))
         }
     };

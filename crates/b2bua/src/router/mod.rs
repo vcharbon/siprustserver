@@ -69,6 +69,7 @@ pub(crate) mod test_support;
 pub(crate) mod timer_screen;
 mod turn;
 mod turn_label;
+mod unaddressable;
 mod undecided;
 mod unroutable;
 

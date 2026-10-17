@@ -17,6 +17,7 @@ mod limiter;
 mod operator;
 mod removal_class;
 mod retransmit_row;
+mod wire_drops;
 
 pub use limiter::{
     AdmitSite, LimiterCounters, LimiterFailure, LimiterOp, LimiterTask, RefreshDiscard,
@@ -178,6 +179,9 @@ struct Rows {
     // Dialog-level ladders that ran to their give-up, by the kind of
     // obligation left undischarged: the peer went deaf.
     repeat_give_ups: FixedCounts,
+    // Outbound messages left unsent: their next hop is not an IP literal
+    // (`router::unaddressable`), by kind.
+    outbound_unaddressable: FixedCounts,
     // Messages and events that resolved to no call (`router::unroutable`),
     // in three classes that never overlap: wire messages that drew no
     // answer (by kind), wire requests answered on no call's behalf (by
@@ -212,6 +216,7 @@ impl Default for Rows {
             responses: OpenRows::new(&w::RESPONSES),
             retransmits: OpenRows::new(&w::RETRANSMITS),
             repeat_give_ups: FixedCounts::new(&w::REPEAT_GIVE_UPS),
+            outbound_unaddressable: FixedCounts::new(&w::OUTBOUND_UNADDRESSABLE),
             unroutable_dropped: FixedCounts::new(&w::UNROUTABLE_DROPPED),
             unroutable_refused: OpenRows::new(&w::UNROUTABLE_REFUSED),
             unroutable_internal: OpenRows::new(&w::UNROUTABLE_INTERNAL),
@@ -474,56 +479,6 @@ impl B2buaMetrics {
         self.inner.rows.retransmits.get(&retransmit_row(ladder, method, code).as_refs())
     }
 
-    /// Count one wire message naming no call that drew no answer, for
-    /// `b2bua_unroutable_dropped_total{kind}`: `kind` is `ACK` or a response's
-    /// status class (`1xx`…`6xx`).
-    pub fn record_unroutable_dropped(&self, kind: &str) {
-        self.inner.rows.unroutable_dropped.add(&[kind], 1);
-    }
-
-    /// Wire messages naming no call that drew no answer, every kind.
-    pub fn unroutable_dropped_total(&self) -> u64 {
-        self.inner.rows.unroutable_dropped.sum()
-    }
-
-    /// Wire messages naming no call that drew no answer, of one `kind`.
-    pub fn unroutable_dropped_of(&self, kind: &str) -> u64 {
-        self.inner.rows.unroutable_dropped.get(&[kind])
-    }
-
-    /// Count one wire request naming no call that this node answered `code`,
-    /// for `b2bua_unroutable_refused_total{method,code}`.
-    pub fn record_unroutable_refused(&self, method: &str, code: u16) {
-        self.inner.rows.unroutable_refused.add(&[method, &code.to_string()], 1);
-    }
-
-    /// Wire requests naming no call answered `code`, of one `method`.
-    pub fn unroutable_refused_of(&self, method: &str, code: u16) -> u64 {
-        self.inner.rows.unroutable_refused.get(&[method, &code.to_string()])
-    }
-
-    /// Wire requests naming no call that this node answered, every kind.
-    pub fn unroutable_refused_total(&self) -> u64 {
-        self.inner.rows.unroutable_refused.sum()
-    }
-
-    /// Count one of this node's own events that named no call, for
-    /// `b2bua_unroutable_internal_total{event,method}`; `method` is the timed-out
-    /// request's, empty for an event that carries none.
-    pub fn record_unroutable_internal(&self, event: &str, method: &str) {
-        self.inner.rows.unroutable_internal.add(&[event, method], 1);
-    }
-
-    /// This node's own events that named no call, of one `event` and `method`.
-    pub fn unroutable_internal_of(&self, event: &str, method: &str) -> u64 {
-        self.inner.rows.unroutable_internal.get(&[event, method])
-    }
-
-    /// This node's own events that named no call, every kind.
-    pub fn unroutable_internal_total(&self) -> u64 {
-        self.inner.rows.unroutable_internal.sum()
-    }
-
     /// Count one dialog-level ladder that ran to its give-up, for
     /// `b2bua_repeat_give_ups_total{obligation}`.
     pub fn record_repeat_give_up(&self, obligation: &str) {
@@ -761,6 +716,7 @@ impl B2buaMetrics {
         rows.responses.render(&mut s);
         rows.requests_out.render(&mut s);
         rows.retransmits.render(&mut s);
+        rows.outbound_unaddressable.render(&mut s);
         rows.unroutable_dropped.render(&mut s);
         rows.unroutable_refused.render(&mut s);
         rows.unroutable_internal.render(&mut s);

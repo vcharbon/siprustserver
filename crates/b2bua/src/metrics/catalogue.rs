@@ -141,6 +141,7 @@ const WORKER_REST: &[Family] = &[
     worker::REQUESTS_OUT,
     worker::REQUESTS_OUT_OVERFLOW,
     worker::RETRANSMITS,
+    worker::OUTBOUND_UNADDRESSABLE,
     worker::UNROUTABLE_DROPPED,
     worker::UNROUTABLE_REFUSED,
     worker::UNROUTABLE_REFUSED_OVERFLOW,

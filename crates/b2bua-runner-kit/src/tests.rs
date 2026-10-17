@@ -131,3 +131,17 @@ fn truthy_flag_grammar() {
         assert!(!is_truthy(f), "{f:?} must be falsy");
     }
 }
+
+#[test]
+fn outbound_proxy_takes_an_ip_literal_of_either_family() {
+    assert_eq!(parse_outbound_proxy("10.0.0.9:5060"), Ok(("10.0.0.9".to_string(), 5060)));
+    assert_eq!(parse_outbound_proxy("[2001:db8::9]:5060"), Ok(("2001:db8::9".to_string(), 5060)));
+}
+
+#[test]
+fn outbound_proxy_named_or_portless_refuses_boot() {
+    for value in ["proxy.ns.svc.cluster.local:5060", "10.0.0.9", "10.0.0.9:notaport"] {
+        let e = parse_outbound_proxy(value).expect_err(value);
+        assert!(e.contains("B2BUA_OUTBOUND_PROXY"), "msg was: {e}");
+    }
+}

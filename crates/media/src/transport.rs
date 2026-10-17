@@ -118,7 +118,7 @@ struct Inner {
 }
 
 fn parse_dst(remote: &NetAddr) -> Option<SocketAddr> {
-    format!("{}:{}", remote.ip, remote.port).parse().ok()
+    sip_net::ip_socket_addr(&remote.ip, remote.port)
 }
 
 fn merge_pcm(buckets: &[&InternalBucket]) -> PcmBuffer {
@@ -168,10 +168,10 @@ impl MediaEndpoint {
         let port =
             local_port.unwrap_or_else(|| self.next_auto_port.fetch_add(2, Ordering::Relaxed));
 
-        let addr: SocketAddr = format!("{local_ip}:{port}").parse().map_err(|e| BindError {
+        let addr = sip_net::ip_socket_addr(local_ip, port).ok_or_else(|| BindError {
             reason: sip_net::BindErrorReason::OsError,
-            addr: format!("0.0.0.0:{port}").parse().unwrap(),
-            message: format!("bad media addr {local_ip}:{port}: {e}"),
+            addr: SocketAddr::from(([0, 0, 0, 0], port)),
+            message: format!("bad media addr {local_ip}:{port}: not an IP literal"),
         })?;
         let queue_max = opts.queue_max.unwrap_or(DEFAULT_QUEUE_MAX);
         let endpoint: Arc<dyn UdpEndpoint> =

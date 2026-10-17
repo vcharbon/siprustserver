@@ -2,16 +2,13 @@
 //! `src/b2bua/TargetAdmission.ts`.
 //!
 //! The b2bua worker accepts call-control's `route.destination.host` verbatim and
-//! hands it to the send path. A bogus host (e.g. `kindlab` from a misconfigured
-//! fixture, or a `.svc.cluster.local` name the runner constructs) would flow
-//! through to the UDP send path, where name resolution can block for ~5 s on
-//! `EAI_AGAIN`.
+//! resolves no name: an IP literal is sent as is, and a name reaches the wire only
+//! through the configured outbound proxy, which resolves the Request-URI (a name
+//! next hop fails its attempt at send, `router::unaddressable`).
 //!
 //! This module rejects targets whose host is neither an IP literal nor in the
 //! allow-list at the **decision boundary** — before any state is allocated for
-//! the b-leg. The admission gate emits a `503` and terminates the call. The
-//! proxy's buffered send path quarantines the blocking even when admission lets
-//! a doomed target through; admission is the cheap early filter.
+//! the b-leg. The admission gate emits a `503` and terminates the call.
 //!
 //! Allow-list semantics (`is_allowed_suffix`):
 //!   - IPv4/IPv6 literals always pass (no DNS needed) — `is_ip_literal`.
@@ -23,9 +20,6 @@
 //!     (`svc.cluster.local`) matches the host exactly or as `<label>.<suffix>`,
 //!     but NOT a look-alike sibling label like `evil-svc.cluster.local`. Empty
 //!     entries never match (a blank list element does not silently allow all).
-
-use std::net::IpAddr;
-use std::str::FromStr;
 
 /// The verdict for a destination host against the suffix allow-list. Port of the
 /// TS string union `"ip-literal" | "allow-listed" | "reject"`.
@@ -41,25 +35,16 @@ pub enum AdmissionVerdict {
     Reject,
 }
 
-/// Returns true if `host` is a valid IPv4 or IPv6 literal. Strips a single pair
-/// of brackets (for IPv6 in URI form like `[::1]`).
-///
-/// `IpAddr::from_str` accepts
-/// exactly the dotted-quad IPv4 and the canonical IPv6 forms and rejects out-of-
-/// range octets (`999.999.999.999`), an unclosed bracket (`[broken`), the empty
-/// string, and ordinary hostnames.
+/// Returns true if `host` is an IPv4 or IPv6 literal, bracketed or not: the
+/// send path's own definition ([`sip_net::ip_host`]), so a host admitted as an
+/// IP literal is one the worker can put on the wire.
 ///
 /// The std parser is the chosen definition of an IP literal. Its treatment of
 /// rare forms (leading-zero IPv4 octets, IPv6 zone/scope ids) is part of that
 /// definition; no host shape this system routes to (K8s FQDNs, canonical pod
 /// IPs) depends on it.
 fn is_ip_literal(host: &str) -> bool {
-    let stripped = if host.len() >= 2 && host.starts_with('[') && host.ends_with(']') {
-        &host[1..host.len() - 1]
-    } else {
-        host
-    };
-    IpAddr::from_str(stripped).is_ok()
+    sip_net::ip_host(host).is_some()
 }
 
 /// Returns true if any suffix in `suffixes` matches `host` (case-insensitive) at a

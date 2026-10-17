@@ -3,7 +3,6 @@
 //! with terminal eviction last (ADR-0020 X2) and fire-and-forget callouts
 //! detached at the end.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::helpers::{seal_termination_seq, seal_turn};
@@ -324,10 +323,9 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
     }
 
     for eff in &result.effects.outbound {
-        let dest: SocketAddr = match format!("{}:{}", eff.destination.0, eff.destination.1).parse()
-        {
-            Ok(d) => d,
-            Err(_) => continue,
+        let Some(dest) = sip_net::ip_socket_addr(&eff.destination.0, eff.destination.1) else {
+            super::unaddressable::fail_unaddressable(ctx, call_ref, result, eff);
+            continue;
         };
         // Meter outbound requests we originate/relay (the in-dialog keepalive
         // OPTIONS lands here) — pairs with inbound responses_total{OPTIONS,200} to

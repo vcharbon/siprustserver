@@ -11,6 +11,7 @@
 //! [`ParanoidSignalingNetwork`]. See the `effect-layer-test` SKILL for the
 //! wrapper philosophy.
 
+pub mod addr;
 pub mod contracts;
 pub mod fragmentation;
 pub mod loss;
@@ -24,6 +25,7 @@ pub mod simulated;
 pub mod socket_stats;
 pub mod types;
 
+pub use addr::{ip_host, ip_socket_addr};
 pub use contracts::{
     audit_visible_event, with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork,
     PeerAuditRule, RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome,

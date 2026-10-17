@@ -49,6 +49,7 @@ b2bua-runner b2bua_responses_overflow_total counter fixed {}
 b2bua-runner b2bua_requests_out_total counter capped:256 {method}
 b2bua-runner b2bua_requests_out_overflow_total counter fixed {}
 b2bua-runner b2bua_retransmits_total counter semi_open {ladder,method|ladder,method,code|ladder,method,code}
+b2bua-runner b2bua_outbound_unaddressable_total counter fixed {kind}
 b2bua-runner b2bua_unroutable_dropped_total counter fixed {kind}
 b2bua-runner b2bua_unroutable_refused_total counter capped:256 {method,code}
 b2bua-runner b2bua_unroutable_refused_overflow_total counter fixed {}

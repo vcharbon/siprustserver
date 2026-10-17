@@ -25,7 +25,6 @@
 //!   the 2xx and never reaches the rules.
 
 use std::collections::HashSet;
-use std::net::SocketAddr;
 
 use call::{Call, Dialog, InviteTxnHandle, Leg, PendingRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
@@ -181,8 +180,7 @@ fn client_seed(
     cancel: Option<&[(String, String)]>,
 ) -> Option<TxnSeed> {
     let invite = parse_request(&handle.original_invite)?;
-    let dest: SocketAddr =
-        format!("{}:{}", handle.destination.host, handle.destination.port).parse().ok()?;
+    let dest = sip_net::ip_socket_addr(&handle.destination.host, handle.destination.port)?;
     let cancel = cancel.map(|stated| {
         let stated: Vec<SipHeader> = stated
             .iter()

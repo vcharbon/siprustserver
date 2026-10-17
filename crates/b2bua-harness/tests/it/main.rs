@@ -217,6 +217,7 @@ mod transaction_outcome_past_bounds;
 mod unacked_2xx_reap;
 mod unacked_2xx_retransmit_is_faithful;
 mod unacked_reinvite_2xx_reap;
+mod unaddressable_next_hop;
 mod unanswered_at_release;
 mod unanswered_failure_consult;
 mod unparseable_final;

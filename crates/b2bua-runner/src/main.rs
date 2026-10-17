@@ -29,7 +29,7 @@
 //!                   In k8s inject the pod IP via downward API `status.podIP`,
 //!                   else peers route responses to 0.0.0.0 (a storm).
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
-//!   B2BUA_OUTBOUND_PROXY  front-proxy host:port every b-leg (worker→callee)
+//!   B2BUA_OUTBOUND_PROXY  front-proxy IP-literal ip:port every b-leg (worker→callee)
 //!                   request is forced through (a preloaded plain `;lr` Route).
 //!                   REQUIRED in the k8s cluster: a peer's internal pod IP is not
 //!                   routable peer-to-peer in a real deployment, so ALL outbound
@@ -126,8 +126,8 @@ async fn main() -> std::process::ExitCode {
 
     // The b-leg callee (`B2BUA_DEST`) is passed to the decision engine as an
     // unresolved host:port: the core never resolves a destination name for
-    // sending. Behind an IP-literal `B2BUA_OUTBOUND_PROXY` the proxy resolves the
-    // Request-URI name; otherwise a name destination is dropped at send.
+    // sending. Behind the `B2BUA_OUTBOUND_PROXY` the proxy resolves the
+    // Request-URI name; without it the b-leg INVITE to a name fails at send.
     let dest = env_or("B2BUA_DEST", "127.0.0.1:5070");
     let (dest_host, dest_port) = split_host_port(&dest);
 

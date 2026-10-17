@@ -313,9 +313,8 @@ pub async fn handle_initial_invite(
 /// the a-leg, defaulting to `0.0.0.0:0` if it is not an `ip:port` (init actions
 /// resolve legs from the call, not the event source).
 fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
-    let src: SocketAddr = format!("{}:{}", call.a_leg.source.address, call.a_leg.source.port)
-        .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+    let src = sip_net::ip_socket_addr(&call.a_leg.source.address, call.a_leg.source.port)
+        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
     CallEvent::Sip {
         message: Box::new(SipMessage::Request(a_invite.clone())),
         src,
