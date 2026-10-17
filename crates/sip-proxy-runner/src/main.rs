@@ -127,7 +127,7 @@ use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
-use sip_proxy::health::{FirstView, HealthProbe};
+use sip_proxy::health::FirstView;
 use sip_proxy::load_observer::{sweep_alive, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
@@ -138,7 +138,6 @@ use sip_proxy_runner::config::{refuse_to_start, ExternalFace, ProxyConfig, Worke
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
 use sip_proxy_runner::health_sampler::HealthSampler;
 use sip_proxy_runner::intake_shed::{intake_shed_hook, intake_shed_watermark};
-use sip_proxy_runner::readiness::probes;
 use sip_proxy_runner::shards::SharedRouting;
 use sip_txn::IdGen;
 
@@ -446,26 +445,8 @@ async fn main() {
         clock.clone(),
     ));
 
-    // Health probe: OPTIONS to the pool from the first listing on, feeding the
-    // band observer, and latching the first worker view the recv shards and
-    // the probe routes read (ADR-0050 §5, §11). Clone the observer first — the
-    // probe takes ownership of one `Arc` view, the stale-payload sweep task
-    // below shares the SAME `Arc<WorkerLoadObserver>`.
-    let first_view = FirstView::pending();
+    // The stale-payload sweep task below shares the probe's observer.
     let sweep_observer = observer.clone();
-    let probe = HealthProbe::new(
-        probe_ep,
-        registry.clone(),
-        health_control,
-        observer,
-        clock.clone(),
-        id_gen.clone(),
-        cfg.probe,
-    )
-    // Per-peer probe-miss attribution (sip_proxy_peer_failures_total{
-    // scope="internal",kind="response_timeout"}): worker OPTIONS timeouts.
-    .with_metrics(metrics.clone())
-    .with_first_view(first_view.clone());
 
     // The CANCEL/rtx LRU and the refusal memo are ONE instance across shards
     // (`SharedRouting`).
@@ -502,8 +483,12 @@ async fn main() {
         resolver: resolver_cfg,
         traces,
         pulse: pulse.clone(),
-        first_view: first_view.clone(),
+        first_view: FirstView::pending(),
     };
+    // Health probe: OPTIONS to the pool from the first listing on, feeding the
+    // band observer, and latching the first worker view the recv shards and
+    // the probe routes read (ADR-0050 §5, §11).
+    let probe = shared.health_probe(probe_ep, health_control, observer, cfg.probe);
     let mut cores = Vec::with_capacity(recv_shards);
     let mut ext_endpoints = ext_endpoints.into_iter();
     for (shard, endpoint) in endpoints.into_iter().enumerate() {
@@ -569,14 +554,7 @@ async fn main() {
     // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
     // flows while every activity meter reads idle: it fails `/readyz`,
     // `/healthz` and `/vrrp` (ADR-0046 D4), and raises the gauge.
-    let proxy_probes = probes(
-        draining.clone(),
-        pulse.clone(),
-        clock.clone(),
-        shard_stall_ms,
-        registry.clone(),
-        first_view,
-    );
+    let proxy_probes = shared.probes(draining.clone(), shard_stall_ms);
 
     // Health sampler: the worker-health, acceptance, shard-stall and
     // discovery gauges every 2 s.

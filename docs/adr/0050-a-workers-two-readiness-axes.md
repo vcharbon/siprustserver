@@ -99,7 +99,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    - a copy of a routed but unanswered call is dropped, not taken over: the
      departure sweep or the callee's next response hands the call over;
    - an INVITE that never replicated, from a primary that really died, gets
-     no final from the backup; the caller's transaction timers end it.
+     no final from the backup; the caller's transaction timers end it;
+   - a discovered pool whose watch never delivers a listing never has a first
+     view, so every request is dropped: an initial INVITE ends on the caller's
+     Timer B instead of a fast `503`; the drop counter and `/readyz` show it.
 6. **New calls.** A new dialog goes to an `Alive` accepting worker. When none
    accepts, it goes to an `Alive` refusing one (the fallback of ADR-0043 §12),
    which answers it with its own refusal and writes its call record. The proxy

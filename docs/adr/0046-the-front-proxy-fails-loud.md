@@ -38,7 +38,8 @@ its family.
    fails to build is built again in the background, 1 s doubling to 30 s, for
    the life of the process. There is no stand-in pool.
 2. **Readiness is "at least one worker `Alive`"**, with no hard timer. The
-   proxy is NotReady until a listed worker answers OPTIONS. A broken watch
+   proxy is NotReady until its first worker view (ADR-0050 §11) and while no
+   worker is `Alive`, whatever its acceptance. A broken watch
    never changes readiness: the last listed pool stays, and the OPTIONS probe
    keeps its health current.
 3. **Discovery reports its own health.** `sip_proxy_discovery_no_client` is 1

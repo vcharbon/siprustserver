@@ -291,7 +291,8 @@ The round leaves as soon as the listing is in. Before the view, a request
 with no target is dropped and counted, never refused: its retransmission meets
 the view. `/readyz` waits for the view; `/vrrp`, which the VRRP check reads, is
 `/healthz` and the view; `/healthz` never waits for it.
-_Avoid_: "warm-up" (no timer is involved).
+_Avoid_: "warm-up" (there is no fixed delay: the view is in when the first
+round has answered or run out its reply window).
 
 **Metric catalogue** (`metric-catalogue`):
 A process's Prometheus families declared as data: one **catalogue entry** per

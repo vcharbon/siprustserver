@@ -1,17 +1,25 @@
-//! The recv shards' shared routing state, and each shard's core built over it.
+//! The recv shards' shared routing state, and what is built over it: each
+//! shard's core, the health probe and the probe routes, all on ONE first
+//! worker view (ADR-0050 §11).
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use sip_clock::Clock;
+use sip_net::UdpEndpoint;
 use sip_proxy::cancel_lru::CancelBranchLru;
-use sip_proxy::health::FirstView;
+use sip_proxy::health::{FirstView, HealthProbe, HealthProbeConfig};
 use sip_proxy::liveness::ShardPulse;
+use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::refusals::Refusals;
+use sip_proxy::registry::control::WorkerRegistryControl;
 use sip_proxy::registry::WorkerRegistry;
 use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::{ProxyAddr, ProxyCoreBuilder, ProxyMetrics, ProxyTraces, RoutingStrategy};
 use sip_txn::IdGen;
+
+use crate::readiness::{probes, ProxyProbes};
 
 /// What every recv shard shares. Kernel flow hashing keeps one source on one
 /// shard, but a response, a CANCEL or a copy can reach another socket than
@@ -50,6 +58,43 @@ impl SharedRouting {
             .pulse(self.pulse.clone())
             .first_view(self.first_view.clone())
             .shard(shard)
+    }
+
+    /// The OPTIONS health probe over the worker pool on `endpoint`, writing
+    /// health through `control` and load payloads into `observer`; it latches
+    /// the first view the shards and the probe routes read. Its misses are
+    /// counted per peer (`sip_proxy_peer_failures_total`).
+    pub fn health_probe(
+        &self,
+        endpoint: Box<dyn UdpEndpoint>,
+        control: Arc<dyn WorkerRegistryControl>,
+        observer: Arc<WorkerLoadObserver>,
+        config: HealthProbeConfig,
+    ) -> HealthProbe {
+        HealthProbe::new(
+            endpoint,
+            self.registry.clone(),
+            control,
+            observer,
+            self.clock.clone(),
+            self.id_gen.clone(),
+            config,
+        )
+        .with_metrics(self.metrics.clone())
+        .with_first_view(self.first_view.clone())
+    }
+
+    /// The probe routes, read from the shards' pulse and the first view; a
+    /// shard stalled past `stall_ms` fails them all, `draining` fails `/readyz`.
+    pub fn probes(&self, draining: Arc<AtomicBool>, stall_ms: u64) -> ProxyProbes {
+        probes(
+            draining,
+            self.pulse.clone(),
+            self.clock.clone(),
+            stall_ms,
+            self.registry.clone(),
+            self.first_view.clone(),
+        )
     }
 }
 
