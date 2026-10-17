@@ -1,7 +1,6 @@
 # Shared network + port wiring of the kind lab — the SINGLE source of truth,
 # sourced by deploy/helm/lib/cluster.sh and restated by the charts' kind values
-# (deploy/helm/check asserts they agree; PROXY_VIP/PROXY_TARGET are defaulted
-# here once).
+# (deploy/helm/check asserts they agree; PROXY_VIP is defaulted here once).
 # Everything here is overridable from the environment.
 #
 #   SIP_SUBNET   internal kind docker bridge /16   (default 172.20.0.0/16)
@@ -11,11 +10,9 @@
 #                high so it can NEVER collide with a dynamically-allocated node
 #                IP. This top/bottom split is the invariant the layout depends
 #                on; deriving both ends from one SIP_SUBNET keeps it reproduced.
-#   PROXY_TARGET what the SIPp UAC streams dial — the VIP by default.
 #   SIP_PORT     UDP port the front-proxy LB listens on (default 5060).
 #
-# Source me AFTER `cd`-ing into deploy/k8s (all three runners do `cd "$(dirname
-# "$0")"` first). Safe to source more than once; respects pre-set overrides.
+# Safe to source more than once; respects pre-set overrides.
 
 # Internal cluster subnet. Must be a /16 for the top/bottom split below to land
 # on-subnet (a /16 gives a .0.x bottom and a .255.x top).
@@ -31,10 +28,9 @@ esac
 _sip_prefix="${SIP_SUBNET%.0.0/*}"
 SIP_GATEWAY="${SIP_GATEWAY:-${_sip_prefix}.0.1}"
 PROXY_VIP="${PROXY_VIP:-${_sip_prefix}.255.250}"
-PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
 
 # UDP port the front-proxy load balancer listens on (the b-leg workers and the
-# SIPp UAC streams all dial the VIP on this port). The internal worker/UAS SIP
+# generator streams all dial the VIP on this port). The internal worker/UAS SIP
 # port stays 5060 regardless — this knob is the externally-facing LB port only.
 SIP_PORT="${SIP_PORT:-5060}"
 
@@ -42,29 +38,27 @@ SIP_PORT="${SIP_PORT:-5060}"
 # External SIP plane ("sipext") — the no-NAT dual-plane layout.
 #
 # A dedicated docker bridge with masquerade DISABLED; only the two edge nodes
-# attach (dual-homed), plus the load generators (loadgen / sipp-uas / dnsmasq)
-# as plain docker containers. Callers reach the proxy's EXTERNAL face
+# attach (dual-homed), plus the load generators (loadgen, the SIPp UACs and
+# UASes) as plain docker containers. Callers reach the proxy's EXTERNAL face
 # (SIPEXT_VIP) same-L2 — no SNAT/DNAT/conntrack rewrite anywhere on the SIP
-# path (the masquerade-drop fix-class). The WSL host owns the bridge
-# gateway (.1) so it dials the VIP directly.
+# path (the masquerade-drop fix-class). The host owns the bridge gateway (.1)
+# so it dials the VIP directly.
 #
-# Replication contract: interface names are ENV, never hardcoded in manifests.
-# SIP_IF/SIPEXT_IF are envsubst-stamped into the keepalived conf; the kind
-# defaults (eth0 = the kind bridge at node creation, eth1 = the sipext
-# `docker network connect` done immediately after) hold on any kind bring-up.
-# Any other Linux box reproduces the run by exporting the two names for
-# whatever interfaces hold addresses in SIP_SUBNET/SIPEXT_SUBNET (dummy/bridge
-# for single-box; two real boxes need genuinely shared L2 for VRRP).
+# Interface names are never hardcoded in a template: SIP_IF/SIPEXT_IF are
+# restated as the kind values' network.internalInterface/externalInterface
+# (the chart check asserts they agree); the kind defaults (eth0 = the kind
+# bridge at node creation, eth1 = the sipext `docker network connect` done
+# immediately after) hold on any kind bring-up.
 #
 #   SIPEXT_SUBNET   external plane /24 (default 192.168.60.0/24)
-#   SIPEXT_GATEWAY  bridge gateway = the WSL host's own address (.1)
+#   SIPEXT_GATEWAY  bridge gateway = the host's own address (.1)
 #   SIPEXT_VIP      keepalived VRRP VIP on the external plane (.250, parked
 #                   high like PROXY_VIP so pinned container IPs never collide)
 #   SIPEXT_IF       optional explicit interface override (else resolved)
 #   SIPEXT_NET      docker network name
-#   Pinned container/edge addresses: edges .11/.12, sipp-uas .21, dnsmasq .53 —
-#   pinned so ladders/scenarios are reproducible and a docker restart can never
-#   reshuffle them.
+#   Pinned container/edge addresses: edges .11/.12, sipp-uas .21 — pinned so
+#   ladders/scenarios are reproducible and a docker restart can never reshuffle
+#   them.
 SIPEXT_SUBNET="${SIPEXT_SUBNET:-192.168.60.0/24}"
 case "$SIPEXT_SUBNET" in
   *.0/24) : ;;
@@ -79,7 +73,6 @@ SIPEXT_NET="${SIPEXT_NET:-sipext}"
 SIPEXT_EDGE1_IP="${SIPEXT_EDGE1_IP:-${_sipext_prefix}.11}"
 SIPEXT_EDGE2_IP="${SIPEXT_EDGE2_IP:-${_sipext_prefix}.12}"
 SIPEXT_UAS_IP="${SIPEXT_UAS_IP:-${_sipext_prefix}.21}"
-SIPEXT_DNSMASQ_IP="${SIPEXT_DNSMASQ_IP:-${_sipext_prefix}.53}"
 
 # Egress face-picker for the dual-face proxy: destinations inside these CIDRs
 # leave on the INTERNAL face (source = PROXY_VIP); everything else leaves on
@@ -87,15 +80,10 @@ SIPEXT_DNSMASQ_IP="${SIPEXT_DNSMASQ_IP:-${_sipext_prefix}.53}"
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 PROXY_FACE_INT_CIDRS="${PROXY_FACE_INT_CIDRS:-${POD_CIDR},${SIP_SUBNET}}"
 
-# What external callers dial — the EXTERNAL VIP now (PROXY_TARGET stays the
-# internal VIP: it is what in-cluster components, e.g. workers' outbound
-# proxy, keep dialing).
-SIPEXT_TARGET="${SIPEXT_TARGET:-$SIPEXT_VIP}"
-
-export SIP_SUBNET SIP_GATEWAY PROXY_VIP PROXY_TARGET SIP_PORT
+export SIP_SUBNET SIP_GATEWAY PROXY_VIP SIP_PORT
 export SIPEXT_SUBNET SIPEXT_GATEWAY SIPEXT_VIP SIP_IF SIPEXT_IF SIPEXT_NET
-export SIPEXT_EDGE1_IP SIPEXT_EDGE2_IP SIPEXT_UAS_IP SIPEXT_DNSMASQ_IP
-export POD_CIDR PROXY_FACE_INT_CIDRS SIPEXT_TARGET
+export SIPEXT_EDGE1_IP SIPEXT_EDGE2_IP SIPEXT_UAS_IP
+export POD_CIDR PROXY_FACE_INT_CIDRS
 
 # Generator stream IP plan: every stream the HA tooling runs as a docker
 # container on the sipext bridge gets ONE deterministic IP at
@@ -105,7 +93,7 @@ export POD_CIDR PROXY_FACE_INT_CIDRS SIPEXT_TARGET
 # runs in the SAME network namespace, so :9035 rides the stream's own IP; a
 # loadgen stream serves :9300 there. Full address plan for the /24:
 #   .1    gateway (the host)             .11/.12 edge nodes (SIPEXT_EDGE*_IP)
-#   .21+  sipp-uas containers            .53     dnsmasq
+#   .21+  sipp-uas containers
 #   .100+ generator streams (slots 0..35, scraped by the host VictoriaMetrics)
 #   .250  SIPEXT_VIP (parked high)
 SIPEXT_UAC_BASE_IP="${SIPEXT_UAC_BASE_IP:-${_sipext_prefix}.100}"

@@ -258,7 +258,7 @@ Timer L from the seed. A non-INVITE clears at Timer J; a failed leg at Timer B/F
 
   **NOT accepted — the protected set, which this trade-off must never touch:**
   - **Established calls** — any call confirmed more than the acceptance window
-    (default 200 ms) before the kill has already flushed its collapsed `Confirmed`
+    before the kill has already flushed its collapsed `Confirmed`
     state, so it reclaims clean. A confirmed call dropping on a kill is a **bug**,
     not this trade-off.
   - **Ringing calls** — a still-`Early` (not-yet-confirming) call has no winner to
@@ -285,22 +285,9 @@ order, call survival, clean teardown) is unchanged by this refactor.
 
 **Chaos-aware classification of the confirm-race (the accepted trade-off above).**
 Superseded by ADR-0049 §3.5: the HA tooling attributes each impact to its
-incident window and budget; loadgen carries no chaos classifier.
-The endurance load generator (`crates/loadgen`) is *chaos-aware*: the chaos driver
-flags it at each fault instant (`POST /chaos`), and every call carries dialog-state
-**phase markers** (`connected`, `reinvited`, `transferred`, …). A failed call is
-auto-bucketed `chaos="near"` (accepted) **iff** a dialog-state transition fell
-within the **acceptance window** of a fault — or the call was still mid-setup at
-the fault — exactly encoding the accepted-vs-protected boundary above. The window
-is a single knob, `--chaos-phase-tolerance-ms` (default **200 ms**,
-`LOADGEN_CHAOS_PHASE_TOL_MS` in endurance). A **stably-established** call that
-fails far from any fault stays `chaos="clear"` — the protected set. Only
-timing-independent classes (`Panic`, `Unparseable`) are never excused. So the
-confirm-race is **counted but not triaged** (`class=rfc_audit_fail,chaos="near"`),
-while a genuine bug — an established call dropping, or a post-reboot fresh call
-desyncing far from the kill — surfaces in `chaos="clear"` and must be investigated.
-This is classification, never suppression: the `near` bucket is fully retained and
-queryable.
+incident window and budget; loadgen carries no chaos classifier. Before it,
+loadgen bucketed a failed call `chaos="near"` when a dialog-state transition fell
+within 200 ms of a fault it was told of, and `chaos="clear"` otherwise.
 
 ## Terminal reconcile, deferred discharge & resurrection guard
 

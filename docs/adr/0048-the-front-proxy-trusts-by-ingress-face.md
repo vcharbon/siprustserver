@@ -38,8 +38,8 @@ but used it only for a metric.
    - on an edge node both addresses live on one host, so a caller-plane host
      that routes the internal address through the node would reach the
      internal socket. The deployment drops every packet to `PROXY_VIP` that
-     arrives on the external interface (`05-masq-exempt.yaml`, re-asserted
-     with its other rules).
+     arrives on the external interface (`deploy/helm/siprust/files/masq-exempt.sh`,
+     re-asserted with its other rules).
 2. **On the internal face a request is worker-outbound** when its direction
    entry carries `;outbound`, when its source is a registry worker, or when its
    top Via sent-by is one. The marker is what recognises a worker rebooted onto

@@ -21,8 +21,7 @@ softly across nodes. `values-kind.yaml` is the kind lab: the docker bridges
 `tier` node placement of `deploy/k8s/cluster.yaml` with one worker per app
 node, the lab's runner env (socket buffers, keepalive, limiter, drain,
 heap profiling, the loadgen relay header, the stress limiter), replication on,
-traces exported with the trace header trusted, the limiter's `NET_ADMIN` for
-network chaos, and `masq-exempt`.
+traces exported with the trace header trusted, and `masq-exempt`.
 
 The SUT chart requires its network (`network.proxyVip`, `externalVip`, both
 interfaces, `internalCidrs`, and `externalSubnet` for `masq-exempt`) while the

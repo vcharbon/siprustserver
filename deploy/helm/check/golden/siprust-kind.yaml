@@ -202,10 +202,6 @@ spec:
           requests:
             cpu: 100m
             memory: 32Mi
-        securityContext:
-          capabilities:
-            add:
-            - NET_ADMIN
       nodeSelector:
         tier: infra
       tolerations:

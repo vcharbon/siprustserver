@@ -15,9 +15,10 @@ sipp UAC ──INVITE──▶ sip-front-proxy ──INVITE──▶ b2bua-worke
                         health probe, /metrics)
 ```
 
-Every load generator (the SIPp UAC/UAS, the Rust loadgen) is a plain docker
-container on the `sipext` bridge with a pinned IP and explicit `--cpus/--memory`
-caps; the address plan is `deploy/k8s/lib/net-env.sh`.
+Every docker-placed load generator (the SIPp UAC/UAS, the Rust loadgen) is a
+plain container on the `sipext` bridge with a pinned IP and explicit
+`--cpus/--memory` caps; the address plan is `deploy/k8s/lib/net-env.sh`. A
+loadgen stream may instead run as a pod (`placement: pod` in its profile).
 
 ## Binaries (containerizable today)
 

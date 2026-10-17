@@ -129,7 +129,7 @@ cpu_ticks() { awk '{print $14 + $15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
 # Peak RSS (VmHWM) in kB.
 peak_rss_kb() { awk '/^VmHWM:/ {print $2}' "/proc/$1/status" 2>/dev/null || echo 0; }
 
-# Total completed calls across every (scenario, class, chaos) series.
+# Total completed calls across every (stream, shape, class) series.
 calls_total() {
   curl -s -m 5 "http://$LG_HTTP/metrics" \
     | awk '/^loadgen_calls_total\{/ {s += $NF} END {printf "%d", s+0}'

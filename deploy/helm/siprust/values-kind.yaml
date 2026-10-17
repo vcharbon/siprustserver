@@ -72,13 +72,9 @@ proxy:
     # Freed pages go back to the host within a second.
     _RJEM_MALLOC_CONF: "dirty_decay_ms:1000,muzzy_decay_ms:1000"
 
-# The shared dependencies sit alone on the tainted infra node. The chaos
-# tooling's limiter network cut runs `tc netem` inside the limiter pod.
+# The shared dependencies sit alone on the tainted infra node.
 callLimiter:
   leaseSeconds: 120
-  securityContext:
-    capabilities:
-      add: ["NET_ADMIN"]
   nodeSelector: { tier: infra }
   tolerations:
     - { key: tier, operator: Equal, value: infra, effect: NoSchedule }

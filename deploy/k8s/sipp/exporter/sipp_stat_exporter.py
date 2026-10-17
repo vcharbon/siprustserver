@@ -50,7 +50,7 @@ Env:
   SIPP_START      (default "")        -> label start= (`run` or `incident`: when
                                          the stream starts; omitted if empty)
                                          (NOT `job`: that is reserved and gets
-                                         overwritten by the vmagent scrape job)
+                                         overwritten by the scrape job)
   EXPORTER_PORT   (default 9035)
   SIPP_STAT_KEEP_BYTES (default 16 MiB) -> tail kept on disk by the trimmer;
                                          0 disables it (the file needs write access)

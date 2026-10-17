@@ -52,10 +52,10 @@ before coding.
 | `topology` crate | New `Peer.failure_domain` field; `peers_from_slices` reads `zone`/`node_name`. Consumed by both proxy and b2bua. | **Low** — additive field; existing tests pass an explicit domain or `None`. |
 | `sip-proxy` | `WorkerEntry.failure_domain`; `encode_stickiness` gains a foreign-domain filter + degraded fallback + metric. **Changes which worker becomes `w_bak`** for new dialogs. | **Medium** — alters backup placement; cookie *format* unchanged (still `w_pri`/`w_bak` ids), so in-flight dialogs are unaffected. |
 | `b2bua` | Periodic self-scan emitting the degraded metric. No selection change. | **Low** — read-only observability. |
-| Chart | the worker StatefulSet split into 3 zoned StatefulSets; new PDB; proxy anti-affinity key + unicast keepalived + nodeSelector; `cluster.yaml` 6 zoned nodes. | **High (operational)** — deployment topology change; needs a fresh `run.sh up`. No data migration (early project). |
+| Chart | the worker StatefulSet split into 3 zoned StatefulSets; new PDB; proxy anti-affinity key + unicast keepalived + nodeSelector; `cluster.yaml` 6 zoned nodes. | **High (operational)** — deployment topology change; needs a fresh `deploy/helm/kind-lab.sh up`. No data migration (early project). |
 | Wire / storage | **None.** Cookie fields, callRef, replication frames, `topology.bak` semantics all unchanged. | — |
 
-**Rollback:** revert the manifest split (back to one StatefulSet, hostname proxy
+**Rollback:** revert the chart split (back to one StatefulSet, hostname proxy
 anti-affinity, multicast) and the `encode_stickiness` filter; the `Peer`/
 `WorkerEntry` field is harmless if left (defaults to `None` → filter is a no-op,
 i.e. the single-zone behaviour). No persisted state to undo.
@@ -173,7 +173,7 @@ stays a config knob for degenerate clusters.
 
 > **Host memory caveat.** 6 app + control-plane ≈ 7 kind nodes is still heavier
 > than the single-zone cluster — see the OOM notes in
-> `deploy/k8s/cap-kind-memory.sh`. Run `cap-kind-memory.sh` first. A smaller
+> `deploy/k8s/cap-kind-memory.sh` (`kind-lab.sh up` runs it). A smaller
 > "mechanism-only" variant
 > (3 zones × 1 node = 3 app nodes) can validate distinct-zone selection +
 > zone-kill without the 2-per-zone density.
@@ -191,8 +191,8 @@ stays a config knob for degenerate clusters.
 4. **Serial upgrade (D4):** trigger a rolling restart; assert the PDB serialises it
    (one worker NotReady at a time) and no call is lost.
 5. **Cross-zone VIP (D5):** kill the VIP-master proxy; assert the standby (in the
-   other zone) claims the VIP via **unicast** adverts within <2s and the 90%
-   success bar holds.
+   other zone) claims the VIP via **unicast** adverts within <2s and the
+   `kill_proxy` window stays within its budget.
 
 ---
 

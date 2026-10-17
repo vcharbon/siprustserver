@@ -58,7 +58,7 @@
     },
     {
       "id": 2, "type": "stat", "title": "Concurrent (all limiter ids)",
-      "description": "`limiter_holds` — sum of live counts across ALL limiter ids. With the worker's always-on global-stress:999999 entry, every call is counted here, so this tracks total concurrency through the limiter (NOT the cap-20 endurance stream alone — that is read SIPp-side on the endurance dashboard).",
+      "description": "`limiter_holds` — sum of live counts across ALL limiter ids. With the worker's always-on global-stress:999999 entry, every call is counted here, so this tracks total concurrency through the limiter (NOT the `limited` stream's cap-20 limiter alone — that is read SIPp-side on the endurance dashboard).",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [{ "expr": "limiter_holds", "refId": "A" }],
@@ -74,7 +74,7 @@
     },
     {
       "id": 4, "type": "stat", "title": "Rejected / sec",
-      "description": "`rate(limiter_admits_total{outcome=\"rejected\"}[1m])` — admits rejected (≥1 entry over cap). Driven by the cap-20 endurance stream; drops to 0 during limiter_kill/limiter_netcut (b2bua fails open).",
+      "description": "`rate(limiter_admits_total{outcome=\"rejected\"}[1m])` — admits rejected (≥1 entry over cap). Driven by the `limited` stream's cap-20 limiter; drops to 0 during a limiter pod_kill or net_loss window (b2bua fails open).",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [{ "expr": "rate(limiter_admits_total{outcome=\"rejected\"}[1m])", "refId": "A" }],
@@ -94,7 +94,7 @@
     },
     {
       "id": 7, "type": "timeseries", "title": "Admit / admitted / rejected (per-s)",
-      "description": "admit = all requests; admitted = fully admitted; rejected = ≥1 entry over cap. admit ≈ admitted + rejected. A persistent gap of rejected/s is the cap-20 stream biting.",
+      "description": "admit = all requests; admitted = fully admitted; rejected = ≥1 entry over cap. admit ≈ admitted + rejected. A persistent gap of rejected/s is a `limited` stream over its cap.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
@@ -119,7 +119,7 @@
     },
     {
       "id": 9, "type": "timeseries", "title": "Reject ratio",
-      "description": "rejected / admit — fraction of admits the cap turned away. Spikes track the cap-20 stream's over-cap pressure; → 0 during a limiter fault (fail-open admits everything with no holds).",
+      "description": "rejected / admit — fraction of admits the cap turned away. Spikes track the `limited` streams' over-cap pressure; → 0 during a limiter fault (fail-open admits everything with no holds).",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
@@ -147,7 +147,7 @@
     },
     {
       "id": 12, "type": "timeseries", "title": "Concurrent (all ids) over time",
-      "description": "`limiter_holds` over time. During limiter_kill/limiter_netcut this dips (fail-open admits count nothing; a restarted limiter starts empty and the calls admitted before it never re-register) and refills with new calls.",
+      "description": "`limiter_holds` over time. During a limiter pod_kill or net_loss window this dips (fail-open admits count nothing; a restarted limiter starts empty and the calls admitted before it never re-register) and refills with new calls.",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [

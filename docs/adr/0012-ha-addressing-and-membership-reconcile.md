@@ -216,8 +216,8 @@ worker.
 
 > **This is the live, deployed design.** ADR-0015 D5 proposes a cross-rack
 > evolution (unicast VRRP, failure-domain anti-affinity key, worker-zone proxy
-> placement) but is **not yet implemented** — the manifests still run the
-> multicast / `tier=edge` / `hostname`-key design described here.
+> placement) but is **not yet implemented** — the SUT chart (`deploy/helm/siprust`)
+> still runs the multicast / `tier=edge` / `hostname`-key design described here.
 
 The end-state architecture is **fully resilient**: no component is a single point
 of failure. Worker HA is peer-to-peer replication (ADR-0011); this decision closes
@@ -255,18 +255,19 @@ correlation, ADR-0009 X1) **coherent** — an active/active pair behind a Cluste
 would split it and fail to ACK non-2xx finals (e.g. the limiter's 486s), so the VIP
 is the correct full-resilience design, not just the simplest.
 
-The `chaos.sh kill_proxy` event now kills **only the VIP master** (detected by
-which pod carries the VIP on `eth0`) and asserts the normal 90 % success bar —
-failover, not a tolerated outage.
+The HA tooling's `kill_proxy` incident crashes **only the VIP holder** (the pod
+carrying the VIP on an interface other than `lo`); its window's budget states
+what the failover may cost — failover, not a tolerated outage.
 
 ## Consequences
 
 - **Deploy simplification.** The `run.sh` block that `kubectl get pods … podIP`
   → bakes `PROXY_WORKERS` is **deleted**; the `chaos.sh` re-`deploy` step whose
   only purpose was refreshing stale worker IPs after a kill is **deleted**. The
-  proxy gains an RBAC manifest (ServiceAccount/Role/RoleBinding for the
-  EndpointSlice watch, mirroring `15-worker-rbac.yaml`). The pod-name-as-id
-  invariant (the big run.sh warning) is unchanged and still required.
+  proxy gains its RBAC (ServiceAccount/Role/RoleBinding for the EndpointSlice
+  watch, `templates/proxy-rbac.yaml`, mirroring the worker's). The
+  pod-name-as-id invariant (a worker's StatefulSet pod name is its ordinal,
+  `templates/worker.yaml`) is unchanged and still required.
 - **New dependency for the proxy:** an in-cluster kube client + EndpointSlice
   watch RBAC. A fixed `PROXY_WORKERS` list replaces discovery only when set; a
   kube client that fails to build is built again in the background and the

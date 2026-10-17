@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# Cap the TOTAL memory the kind cluster may use, so it can never starve the WSL2
+# Cap the TOTAL memory the kind cluster may use, so it can never starve the
 # host (a parallel `cargo` build + a leaking worker can OOM the host and kill an
 # unrelated test; on a 16 GiB box the cluster + rust-analyzer + the observability
-# stack can page-cache-thrash the VHDX). kind
+# stack can page-cache-thrash the disk). kind
 # has no native per-node memory limit, so we `docker update` the node containers
 # after the cluster exists.
 #
 # Caps are TIER-AWARE, not flat: the control-plane (etcd+apiserver) and the edge
-# nodes (front proxy — a 512 Mi pod) are cheap, so they get small caps; only the
-# app nodes (b2bua pool) and load nodes (sipp UAS 2-replica + co-located UAC
-# generators) need real headroom. A flat per-node cap forced a bad trade — big
-# enough for load = wasteful on edge/CP. Tier is read from the kube node label
-# `tier` (set in cluster.yaml); if kubectl/labels aren't available yet we fall
-# back to the conservative uniform WORKER_CAP_MB.
+# nodes (front proxy — a 512 Mi pod) are cheap, so they get small caps; the app
+# nodes (b2bua pool) and the infra node (broker, limiter, CDR consumer) need
+# real headroom. Tier is read from the kube node label `tier` (set in
+# cluster.yaml); if kubectl/labels aren't available yet we fall back to the
+# conservative uniform WORKER_CAP_MB.
 #
 # Each cap is set with `--memory-swap == --memory` (a true ceiling, no swap
 # growth), so the sum of per-node hard caps is the cluster's absolute cgroup
@@ -30,16 +29,15 @@
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-sip-e2e}"
-TOTAL_CAP_MB="${TOTAL_CAP_MB:-9728}"   # 9.5 GiB whole-cluster hard ceiling. Host is ~16 GiB
-                                       # WSL2; leave room for rust-analyzer (~2.5 GiB), the
+TOTAL_CAP_MB="${TOTAL_CAP_MB:-9728}"   # 9.5 GiB whole-cluster hard ceiling. On a ~16 GiB host,
+                                       # leave room for rust-analyzer (~2.5 GiB), the
                                        # observability stack (~1.9 GiB) and the page cache.
 CP_CAP_MB="${CP_CAP_MB:-1536}"         # control-plane reservation (etcd+apiserver ~1 GiB)
 EDGE_CAP_MB="${EDGE_CAP_MB:-768}"      # edge node: front proxy pod is 512 Mi + kubelet
-APP_POD_LIMIT_MB="${APP_POD_LIMIT_MB:-2048}"  # the worker pod's memory limit (20-worker.yaml 2Gi)
+APP_POD_LIMIT_MB="${APP_POD_LIMIT_MB:-2048}"  # the worker pod's memory limit (the chart's 2Gi)
 APP_COTENANT_MB="${APP_COTENANT_MB:-0}"       # summed limits of the other pods on one app node
 NODE_OVERHEAD_MB="${NODE_OVERHEAD_MB:-512}"   # node system.slice ~160Mi + DaemonSets ~200Mi, measured
 APP_CAP_MB="${APP_CAP_MB:-$(( APP_POD_LIMIT_MB + APP_COTENANT_MB + NODE_OVERHEAD_MB ))}"
-LOAD_CAP_MB="${LOAD_CAP_MB:-1536}"     # load node: sipp UAS + co-located UAC generators
 INFRA_CAP_MB="${INFRA_CAP_MB:-1536}"   # infra node: broker (1Gi limit) + limiter + CDR consumer
 WORKER_CAP_MB="${WORKER_CAP_MB:-1280}" # fallback when a worker's tier label is unknown
 
@@ -63,7 +61,6 @@ worker_cap_for() {  # name -> echoes capMB
   case "$(node_tier "$1")" in
     edge) echo "$EDGE_CAP_MB" ;;
     app)  echo "$APP_CAP_MB"  ;;
-    load) echo "$LOAD_CAP_MB" ;;
     infra) echo "$INFRA_CAP_MB" ;;
     *)    echo "$WORKER_CAP_MB" ;;  # unlabelled / kubectl not ready
   esac

@@ -16,7 +16,7 @@ RUN cmake .. -DUSE_PCAP=1 -DUSE_SSL=1 \
  && make -j"$(nproc)"
 
 FROM debian:bookworm-slim
-# python3 (stdlib only, no pip) powers the SIPp stat -> Prometheus sidecar
+# python3 (stdlib only, no pip) powers the SIPp stat -> Prometheus twin
 # exporter (deploy/k8s/sipp/exporter/sipp_stat_exporter.py), run from this same
 # image so the reporting path needs no second image.
 # Full `python3` (not python3-minimal — that strips the stdlib, missing

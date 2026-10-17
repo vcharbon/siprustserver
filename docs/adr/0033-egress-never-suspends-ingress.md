@@ -77,8 +77,8 @@ the one await with no timeout, no queue and no drop policy.
    from the reactor's readiness cache and reads "not writable" on a fresh
    socket until its first poll.
 2. **`SO_SNDBUF` is a stated bind option** (`BindUdpOpts::send_buffer_bytes`,
-   runner knobs `PROXY_UDP_SNDBUF` and `B2BUA_UDP_SNDBUF`). The manifests
-   request 4 MiB. The kernel clamps at `net.core.wmem_max`, which is a host
+   runner knobs `PROXY_UDP_SNDBUF` and `B2BUA_UDP_SNDBUF`). The SUT chart's
+   kind values request 4 MiB. The kernel clamps at `net.core.wmem_max`, which is a host
    sysctl (read-only in any other network namespace), so the host preflight
    requires it.
 3. **The neighbour unresolved queue is bounded** to 16 KiB per neighbour in

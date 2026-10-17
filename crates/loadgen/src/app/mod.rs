@@ -193,7 +193,7 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
         }
     });
 
-    // Live /metrics: reporter series + mux series + the current rate target + a process-memory canary (RSS) so the endurance dashboard can
+    // Live /metrics: reporter series + mux series + the current rate target + a process-memory canary (RSS) so the loadgen dashboard can
     // watch the load generator itself while full recording is on.
     let metrics_reporter = reporter.clone();
     let metrics_core = core.clone();
@@ -231,8 +231,7 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
         ..meta_base.clone()
     };
 
-    // Periodically snapshot the on-disk report so it is browsable mid-run (the
-    // endurance harness copies it out without waiting for the job to finish). Each
+    // Periodically snapshot the on-disk report so it is browsable mid-run. Each
     // snapshot rewrites index.html/summary.md AND the machine-readable
     // load-result.json (still `finished:false`), listing the same sample pages.
     // The handle is aborted+awaited before the final write below (see
@@ -318,7 +317,7 @@ fn mux_canaries(core: &MuxCore) -> Canaries {
 /// reporter's series, the mux's, the offered-rate target
 /// (what `POST /rate` last set, `0` while paused) and a process
 /// resident-memory canary — the load generator holds per-call recording
-/// buffers while full recording is on, so the endurance dashboard watches it
+/// buffers while full recording is on, so the loadgen dashboard watches it
 /// to catch a recording-memory blow-up early.
 pub fn metrics_body(
     reporter: &Reporter,

@@ -4,14 +4,14 @@
 # modern Docker runs BuildKit by default.)
 #
 # Multi-stage build for the containerized Rust SIP SUT.
-# Produces ONE image carrying all runner binaries; the k8s manifests pick which
-# one to run via the container `command`:
+# Produces ONE image carrying all runner binaries; the chart (deploy/helm/siprust)
+# picks which one to run via the container `command`:
 #   - sip-proxy-runner     (front proxy + load balancer)
 #   - b2bua-runner         (B2BUA worker)
 #   - call-limiter-runner  (shared call limiter, keyed by the call)
 #   - cdr-consumer-runner  (drains the RabbitMQ CDR queue -> Prometheus metrics)
-#   - loadgen              (multiplexed SIP load generator — the endurance
-#                           functional-perf stream that runs alongside SIPp)
+#   - loadgen              (multiplexed SIP load generator — the HA tooling's
+#                           functional-perf streams beside SIPp)
 #
 # Build context is the repo root:
 #   docker build -f deploy/docker/Dockerfile -t siprustserver:dev .
@@ -64,19 +64,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
        target/release/loadgen /out/
 
 FROM debian:bookworm-slim AS runtime
-# ca-certificates for TLS; iproute2 (`tc`) so the chaos suite can inject netem
-# packet loss on the call-limiter pod (the limiter_netcut event execs `tc` in the
-# pod). Harmless on the proxy/worker; the limiter container also gets NET_ADMIN.
+# ca-certificates for TLS. Network faults are injected from the node into the
+# pod's namespace, so the image carries no `tc`.
 RUN rm -f /etc/apt/apt.conf.d/docker-clean
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates iproute2
+    && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=builder /out/sip-proxy-runner    /usr/local/bin/sip-proxy-runner
 COPY --from=builder /out/b2bua-runner        /usr/local/bin/b2bua-runner
 COPY --from=builder /out/call-limiter-runner /usr/local/bin/call-limiter-runner
 COPY --from=builder /out/cdr-consumer-runner  /usr/local/bin/cdr-consumer-runner
 COPY --from=builder /out/loadgen              /usr/local/bin/loadgen
-# Default to the worker; manifests override `command` for the proxy.
+# Default to the worker; the chart sets `command` for every other runner.
 ENTRYPOINT []
 CMD ["/usr/local/bin/b2bua-runner"]

@@ -847,16 +847,15 @@ made. A run profile joins the two.
 
 ## Consequences
 
-- One cutover deletes the old tooling together once the runner, the charts
-  and the base content cover it: `chaos.sh`, the endurance scripts, the
-  stream launcher of `sipext-gen.sh` where the runner replaces it, the raw
-  manifests and their `envsubst` rendering. The old tooling takes no fix
-  until then.
+- One cutover deleted the old tooling together once the runner, the charts
+  and the base content covered it: `chaos.sh`, the endurance scripts, the
+  stream launcher of `sipext-gen.sh`, the raw manifests and their `envsubst`
+  rendering. The runner, the charts and `deploy/helm/kind-lab.sh` are the
+  only lab path.
 - `sip_chaos_event{type,…}` with `result` is replaced by
   `sip_chaos_event{incident,phase,source,run}`; the dashboards' annotation
   queries change with it.
-- The base's SIPp scenarios (`deploy/k8s/sipp/scenarios/`) and Grafana
-  dashboards (`deploy/observability/stack/grafana/dashboards/`) move into
+- The base's SIPp scenarios and Grafana dashboards live in
   `tooling/hakit/content/scenarios/` and `content/dashboards/`, so the base
   is the first search-path entry like any other.
 - SIPp scenarios are deduplicated with SIPp-native parameters (`-key`, `-d`,
