@@ -169,7 +169,6 @@ impl Owner {
             id: TxnId::Client(branch.clone()),
             kind: txn_type,
             method: msg.method().clone(),
-            cseq: msg.cseq().seq(),
             call_id: msg.call_id().as_str().to_string(),
             from_tag: msg.from().tag().unwrap_or_default().to_string(),
             original_request: matches!(txn_type, TxnKind::Invite).then(|| msg.clone()),

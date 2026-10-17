@@ -166,7 +166,6 @@ pub(super) struct NewTransaction {
     pub(super) id: TxnId,
     pub(super) kind: TxnKind,
     pub(super) method: Method,
-    pub(super) cseq: u32,
     pub(super) call_id: String,
     pub(super) from_tag: String,
     pub(super) original_request: Option<SipRequest>,
@@ -186,7 +185,6 @@ impl Transaction {
             id: head.id,
             kind: head.kind,
             method: head.method,
-            cseq: head.cseq,
             call_id: head.call_id,
             from_tag: head.from_tag,
             original_request: head.original_request,
@@ -230,14 +228,6 @@ impl Transaction {
         self.id.as_ref().role()
     }
 
-    /// A server transaction's identity; `None` for a client one.
-    pub(super) fn server_id(&self) -> Option<ServerTxnId<'_>> {
-        match &self.id {
-            TxnId::Server(key) => Some(key.id()),
-            TxnId::Client(_) => None,
-        }
-    }
-
     /// A server transaction's key, owned; `None` for a client one.
     pub(super) fn server_key(&self) -> Option<ServerTxnKey> {
         match &self.id {
@@ -263,9 +253,6 @@ pub(super) struct Transaction {
     /// of every message on it, and the `method` a rung of its ladder is
     /// counted under.
     pub(super) method: Method,
-    /// The CSeq number of the request this transaction is for: a CANCEL names
-    /// its INVITE by it (RFC 3261 §9.1), after the request itself is dropped.
-    pub(super) cseq: u32,
     pub(super) call_id: String,
     pub(super) from_tag: String,
     pub(super) original_request: Option<SipRequest>,

@@ -94,10 +94,6 @@ impl<'a> ServerTxnId<'a> {
         Self::new(via, &INVITE)
     }
 
-    pub(super) fn sent_by(&self) -> SentByRef<'a> {
-        self.sent_by
-    }
-
     pub(super) fn to_key(self) -> ServerTxnKey {
         ServerTxnKey {
             branch: self.branch.to_string(),

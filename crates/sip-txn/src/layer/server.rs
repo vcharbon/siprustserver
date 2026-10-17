@@ -307,7 +307,6 @@ impl Owner {
             id: TxnId::Server(id.to_key()),
             kind,
             method: req.method().clone(),
-            cseq: req.cseq().seq(),
             call_id: req.call_id().as_str().to_string(),
             from_tag: req.from().tag().unwrap_or_default().to_string(),
             // INVITE server txns keep the request for the CANCEL→487 path; a
