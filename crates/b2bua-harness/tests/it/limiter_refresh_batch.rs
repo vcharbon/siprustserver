@@ -5,9 +5,9 @@
 //! tick every key due leaves in one request, whatever the number of counted
 //! calls; the limiter's answer for each key reaches its call on the call's own
 //! turn. A stalled limiter so delays no call; a refresh the limiter did not
-//! answer is sent again at the next tick; a set that lapsed is re-registered
-//! within one tick of its refresh; an answer that finds its call ended is
-//! dropped.
+//! answer is sent again at the next tick; a set that lapsed while the limiter
+//! was out of reach is re-registered by the call's next refresh; an answer
+//! that finds its call ended is dropped.
 //!
 //! Every call holds three limiters.
 
@@ -370,24 +370,23 @@ async fn a_refresh_the_limiter_did_not_answer_is_sent_again_at_the_next_tick() {
     let _ = s.h.finish().await;
 }
 
-/// The limiter's lease (1 s) is shorter than a refresh tick: even at a third
-/// of the lease, a refresh leaves up to one tick after it falls due, so the
-/// call's set lapses before each refresh and the refresh re-registers it
-/// within one tick of falling due.
+/// The limiter (3 s lease: a refresh every second, within half a second) is
+/// cut before the call's first refresh and back past the lease: the call's
+/// set lapsed, and the call's next refresh re-registers it.
 #[tokio::test(start_paused = true)]
-async fn a_lapsed_set_is_re_registered_within_one_tick_of_its_refresh() {
-    let setup = Setup { lease_sec: 1, ..Setup::default() };
+async fn a_set_that_lapsed_while_the_limiter_was_cut_is_re_registered_by_its_next_refresh() {
+    let setup = Setup { lease_sec: 3, ..Setup::default() };
     let s = Scene::new("refresh-batch-reregister", setup).await;
     let mut dialog = s.establish().await;
     assert_eq!(s.holds(), [1, 1, 1]);
 
-    // The refresh falls due a third of the lease after the admit and leaves
-    // one tick later; the set lapsed at one lease.
-    let due = Duration::from_millis(1_000 / 3);
-    s.advance_to(Duration::from_millis(1_100)).await;
+    s.advance_to(Duration::from_millis(900)).await;
+    s.net.apply_fault(Fault::Cut { dst: laddr() });
+    s.advance_to(Duration::from_millis(3_500)).await;
     assert_eq!(s.holds(), [0, 0, 0], "the set lapsed with its lease");
-    s.advance_to(due + TICK + Duration::from_millis(200)).await;
-    assert_eq!(s.holds(), [1, 1, 1], "the refresh re-registered the set within one tick");
+    s.net.apply_fault(Fault::Resume { dst: laddr() });
+    s.advance_to(Duration::from_millis(6_000)).await;
+    assert_eq!(s.holds(), [1, 1, 1], "the next refresh re-registered the set");
     assert_eq!(s.store.stats().reregistered_calls, 1);
     assert_eq!(s.b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Reregistered), 1);
 

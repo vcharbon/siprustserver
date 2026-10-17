@@ -2,7 +2,8 @@
 //!
 //! A counted call's `LimiterRefresh` timer marks the call's key due here and
 //! the call's turn goes on: no call waits on a refresh. One sender
-//! ([`RefreshBatch::run`]) sends, one tick after a key fell due, every key
+//! ([`RefreshBatch::run`]) sends, one tick after a key fell due (the
+//! configured tick, shortened to fit the lease: [`LimiterLease`]), every key
 //! due, [`RefreshBatchConfig::max`] keys per request, one request at a time,
 //! under the client's refresh budget, each carrying the set its call last
 //! learnt it holds. Each call's answer that changes or concerns the call
@@ -16,11 +17,10 @@
 //! the doubling from `BACKOFF_INITIAL` passes it, up to `BACKOFF_MAX`;
 //! an answered request ends it. The limiter is one endpoint, so the backoff
 //! is the batch's, not the entry's. Bounds: an entry due for one lease from
-//! its first mark (never less than two ticks, so it gets its round) is given
-//! up (the call's own refresh marks it again every period), the lease being the limiter's as the worker last learnt it
+//! its first mark is given up (the call's own refresh marks it again every
+//! period), the lease being the limiter's as the worker last learnt it
 //! ([`LimiterLease`]); a mark onto a full batch gives up the oldest entry
-//! waiting, and
-//! the release of a call forgets its entry, so an ended call's set is never
+//! waiting, and the release of a call forgets its entry, so an ended call's set is never
 //! refreshed after its release was queued; all three are counted. An entry is
 //! a key, its call and its held set. The batch is not replicated:
 //! a worker that dies loses it, and a call a peer materialises marks itself.
@@ -59,7 +59,8 @@ const BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// The batch's pace and bounds.
 #[derive(Clone)]
 pub struct RefreshBatchConfig {
-    /// How long the batch collects after a key fell due before it sends.
+    /// How long the batch collects after a key fell due before it sends,
+    /// under a lease it fits.
     pub tick: Duration,
     /// Most keys one request carries.
     pub max: usize,
@@ -364,7 +365,7 @@ impl RefreshBatch {
     /// Wait one tick, or until the backoff ends, or less when the batch
     /// resumes.
     async fn wait_round(&self) {
-        let until = self.lock().retry_at.unwrap_or_else(|| Instant::now() + self.config.tick);
+        let until = self.lock().retry_at.unwrap_or_else(|| Instant::now() + self.tick());
         let resumed = async {
             while !self.lock().send_now {
                 self.resumed.notified().await;
@@ -381,22 +382,20 @@ impl RefreshBatch {
     fn back_off(&self) {
         let mut due = self.lock();
         due.failures = due.failures.saturating_add(1);
-        let wait = backoff(due.failures).max(self.config.tick);
+        let wait = backoff(due.failures).max(self.tick());
         due.retry_at = Some(Instant::now() + wait);
     }
 
     /// When the first entry waiting is given up under the current lease.
     fn first_deadline(&self) -> Option<Instant> {
         let due = self.lock();
-        let kept = self.kept_for();
+        let kept = self.config.lease.current();
         due.order.first_key_value().map(|((first_marked_at, _), _)| *first_marked_at + kept)
     }
 
-    /// How long an entry is kept after its first mark: one lease, and never
-    /// less than two ticks, so an entry gets its round under a lease shorter
-    /// than a tick.
-    fn kept_for(&self) -> Duration {
-        self.config.lease.current().max(self.config.tick * 2)
+    /// The tick under the current lease.
+    fn tick(&self) -> Duration {
+        self.config.lease.refresh_tick(self.config.tick)
     }
 
     /// Whether a key is due and the batch not held.
@@ -475,9 +474,9 @@ impl RefreshBatch {
         self.publish(&due);
     }
 
-    /// Give up every entry due for one lease (at least two ticks).
+    /// Give up every entry due for one lease.
     fn expire(&self, due: &mut Due, now: Instant) {
-        let kept = self.kept_for();
+        let kept = self.config.lease.current();
         let mut expired = false;
         while let Some(first) = due.order.first_entry() {
             if first.key().0 + kept > now {

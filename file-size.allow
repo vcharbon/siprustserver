@@ -26,7 +26,7 @@ crates/b2bua-sdk/src/config.rs 892
 crates/b2bua-sdk/src/model.rs 1284
 crates/b2bua/src/b2bua_core.rs 756
 crates/b2bua/src/decision/test_adapter.rs 818
-crates/b2bua/src/limiter/refresh_batch.rs 518
+crates/b2bua/src/limiter/refresh_batch.rs 517
 crates/b2bua/src/limiter/release_queue.rs 513
 crates/b2bua/src/metrics/limiter.rs 551
 crates/b2bua/src/metrics.rs 974
@@ -48,7 +48,7 @@ crates/b2bua/src/rules/relay/originate_tests.rs 849
 crates/b2bua/src/rules/relay/sdp_session_tests.rs 963
 crates/b2bua/src/store/mod.rs 1001
 crates/b2bua/tests/it/rules.rs 5682
-crates/call-limiter/src/store.rs 599
+crates/call-limiter/src/store.rs 584
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1186
 crates/call/tests/it/common/mod.rs 1011

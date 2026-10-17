@@ -130,7 +130,7 @@ pub struct B2buaConfig {
     /// The worker's limiter refresh tick, milliseconds: a refresh falling due
     /// is sent within one tick, with every other key due, in one request per
     /// [`limiter_refresh_batch_max`](Self::limiter_refresh_batch_max) keys.
-    /// Below the refresh period. Default 1000.
+    /// Below the refresh period; cut to a sixth of the lease when longer. Default 1000.
     pub limiter_refresh_batch_ms: u64,
     /// Most keys one limiter refresh request carries. Default 1000.
     pub limiter_refresh_batch_max: usize,

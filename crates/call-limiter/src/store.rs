@@ -50,6 +50,9 @@ use sip_clock::Clock;
 
 use crate::wire::{AdmitEntry, HeldSet};
 
+mod stats;
+pub use stats::StoreStats;
+
 /// The lease a store runs unless configured otherwise (seconds).
 pub const DEFAULT_LEASE_SEC: i64 = 120;
 
@@ -141,6 +144,8 @@ struct CallSet {
     entries: Vec<AdmitEntry>,
     change: u64,
     lease_expires_at_ms: i64,
+    /// The set's one deadline in `set_deadlines`: at or before its lease.
+    pending_deadline_ms: i64,
 }
 
 struct Inner {
@@ -151,9 +156,10 @@ struct Inner {
     counts: HashMap<String, i64>,
     /// Fenced `key` -> why, and when the fence lapses.
     fences: HashMap<String, (Fence, i64)>,
-    /// Lease deadlines of the sets, oldest first. A refresh pushes a new
-    /// deadline and leaves the old one stale: a popped deadline expires the
-    /// set only when it is still the set's own.
+    /// Lease deadlines of the sets, oldest first, one pending per set. A
+    /// refresh moves the lease only: the set's popped deadline is pushed
+    /// again at its lease when the lease moved past it. A popped deadline not
+    /// the set's pending one (the key's set was dropped) is stale.
     set_deadlines: BinaryHeap<Reverse<(i64, String)>>,
     /// `key` -> the number of the last admit answered for a key holding no
     /// set and no drop fence, and when the marker lapses. It orders admits and
@@ -405,38 +411,6 @@ impl CallStore {
     }
 }
 
-/// A snapshot of the store's metric-relevant numbers.
-#[derive(Clone, Copy, Debug)]
-pub struct StoreStats {
-    /// Calls holding a set.
-    pub calls: u64,
-    /// Sum of every live count over the ids.
-    pub current_total: i64,
-    /// The largest live count of one id: what the next admit of that id
-    /// compares with its cap. 0 when nothing is held.
-    pub admission_max: i64,
-    /// Keys fenced against refresh: released calls, and calls whose set an
-    /// admit dropped.
-    pub fences: u64,
-    /// Keys holding no set whose last admit number is kept to order later
-    /// admits.
-    pub change_markers: u64,
-    /// Cumulative sets dropped because their lease lapsed.
-    pub lease_expired_calls: u64,
-    /// Cumulative holds those sets carried.
-    pub lease_expired_holds: u64,
-    /// Cumulative sets re-created by a refresh of a call the store no longer
-    /// held.
-    pub reregistered_calls: u64,
-    /// Cumulative sets re-created by an admit, from the held set it carried,
-    /// for a key the store no longer held.
-    pub admit_reregistered_calls: u64,
-    /// Cumulative release calls, no-ops included.
-    pub releases_total: u64,
-    /// Cumulative admits refused because the call was released.
-    pub admits_refused_released: u64,
-}
-
 /// Refresh one call: extend its lease to `lease_expires_at_ms`, or re-create
 /// its set from `entries` under `change` when the store holds none and the
 /// key is not fenced.
@@ -450,7 +424,6 @@ fn refresh(
     let answered = |inner: &Inner, result| Refreshed { result, held: Some(held_set(inner, key)) };
     if let Some(set) = inner.calls.get_mut(key) {
         set.lease_expires_at_ms = lease_expires_at_ms;
-        inner.set_deadlines.push(Reverse((lease_expires_at_ms, key.to_string())));
         return answered(inner, RefreshResult::Extended);
     }
     if reregisters(inner, key, entries) {
@@ -536,7 +509,10 @@ fn insert_set(
     for e in &entries {
         *inner.counts.entry(e.id.clone()).or_insert(0) += 1;
     }
-    inner.calls.insert(key.to_string(), CallSet { entries, change, lease_expires_at_ms });
+    inner.calls.insert(
+        key.to_string(),
+        CallSet { entries, change, lease_expires_at_ms, pending_deadline_ms: lease_expires_at_ms },
+    );
     inner.set_deadlines.push(Reverse((lease_expires_at_ms, key.to_string())));
 }
 
@@ -566,13 +542,19 @@ fn sweep(inner: &mut Inner, now_ms: i64) {
         let Some(Reverse((deadline, key))) = inner.set_deadlines.pop() else {
             break;
         };
-        // Stale when a refresh moved the set's lease past this deadline.
-        let lapsed = inner.calls.get(&key).is_some_and(|s| s.lease_expires_at_ms == deadline);
-        if lapsed {
-            let holds = drop_set(inner, &key);
-            inner.lease_expired_calls += 1;
-            inner.lease_expired_holds += holds as u64;
+        let Some(set) = inner.calls.get_mut(&key).filter(|s| s.pending_deadline_ms == deadline)
+        else {
+            continue;
+        };
+        if set.lease_expires_at_ms > now_ms {
+            set.pending_deadline_ms = set.lease_expires_at_ms;
+            let lease_expires_at_ms = set.lease_expires_at_ms;
+            inner.set_deadlines.push(Reverse((lease_expires_at_ms, key)));
+            continue;
         }
+        let holds = drop_set(inner, &key);
+        inner.lease_expired_calls += 1;
+        inner.lease_expired_holds += holds as u64;
     }
     while let Some(Reverse((deadline, _))) = inner.fence_deadlines.peek() {
         if *deadline > now_ms {
@@ -597,3 +579,6 @@ fn sweep(inner: &mut Inner, now_ms: i64) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
