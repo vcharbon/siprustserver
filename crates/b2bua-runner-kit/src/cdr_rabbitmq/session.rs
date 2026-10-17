@@ -20,6 +20,7 @@ use tokio::time::{timeout_at, Instant};
 use super::confirms::{track_confirms, Pending};
 use super::connector::connect_socket;
 use super::declaration::declaration;
+use super::resolver::BrokerResolver;
 use super::settings::RabbitMqCdrSettings;
 use super::socket_kill::{KillOnDrop, SocketKill};
 
@@ -28,6 +29,8 @@ use super::socket_kill::{KillOnDrop, SocketKill};
 pub(super) enum OpenError {
     /// The URL is not an AMQP URI.
     Uri(String),
+    /// The broker host did not resolve before the connect deadline.
+    Resolve(std::io::Error),
     /// Connect, handshake, channel, `confirm.select` or declare failed.
     Amqp(lapin::Error),
 }
@@ -36,6 +39,7 @@ impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OpenError::Uri(e) => write!(f, "not an AMQP URI: {e}"),
+            OpenError::Resolve(e) => write!(f, "broker host unresolved: {e}"),
             OpenError::Amqp(e) => write!(f, "{e}"),
         }
     }
@@ -95,23 +99,30 @@ pub(super) struct Session {
 }
 
 impl Session {
-    /// Connects, opens a channel, selects publisher confirms and declares the
-    /// queue, then spawns the confirm tracker recording into `metrics`. Not
-    /// bounded here: the caller bounds it, and dropping this future (or a
-    /// failure half-way) shuts down whatever socket it connected.
+    /// Resolves the broker through `resolver`, connects, opens a channel,
+    /// selects publisher confirms and declares the queue, then spawns the
+    /// confirm tracker recording into `metrics`. Resolution and the TCP connect
+    /// stop at `deadline`; the caller bounds the rest by it, and dropping this
+    /// future (or a failure half-way) shuts down whatever socket it connected.
     // `HandshakeResult` is the AMQP client's connector contract.
     #[allow(clippy::result_large_err)]
     pub(super) async fn open(
         settings: &RabbitMqCdrSettings,
+        resolver: &mut BrokerResolver,
+        deadline: Instant,
         metrics: &B2buaMetrics,
     ) -> Result<Self, OpenError> {
         let uri: AMQPUri = settings.url.parse().map_err(OpenError::Uri)?;
+        let addrs = resolver
+            .resolve(&uri.authority.host, uri.authority.port, deadline)
+            .await
+            .map_err(OpenError::Resolve)?;
         let socket = Arc::new(SocketKill::default());
         let guard = KillOnDrop::new(socket.clone());
         let connect = {
             let socket = socket.clone();
-            let deadline = std::time::Instant::now() + settings.bounds.connect_timeout;
-            Box::new(move |uri: &AMQPUri| connect_socket(uri, deadline, &socket))
+            let deadline = deadline.into_std();
+            Box::new(move |uri: &AMQPUri| connect_socket(uri, &addrs, deadline, &socket))
         };
         let props = ConnectionProperties::default()
             .with_executor(tokio_executor_trait::Tokio::current())

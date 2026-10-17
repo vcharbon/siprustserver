@@ -16,6 +16,7 @@ mod backoff;
 mod confirms;
 mod connector;
 mod declaration;
+mod resolver;
 mod session;
 mod settings;
 mod socket_kill;
@@ -27,9 +28,10 @@ use b2bua::cdr::{CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
 use b2bua::metrics::B2buaMetrics;
 use call::Call;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Instant};
+use tokio::time::{timeout_at, Instant};
 
 use backoff::Backoff;
+use resolver::BrokerResolver;
 use session::Session;
 pub use settings::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, MAX_DRAINER_WAIT_MS, MAX_WAIT_MS,
@@ -89,6 +91,7 @@ struct Link {
     /// `None` until the first connect, and after a session ended.
     session: Option<Session>,
     backoff: Backoff,
+    resolver: BrokerResolver,
 }
 
 impl RabbitMqCdrWriter {
@@ -98,7 +101,12 @@ impl RabbitMqCdrWriter {
         metrics: B2buaMetrics,
     ) -> Self {
         let backoff = Backoff::new(settings.bounds.backoff_min, settings.bounds.backoff_max);
-        Self { settings, encoder, link: Mutex::new(Link { session: None, backoff }), metrics }
+        Self {
+            settings,
+            encoder,
+            link: Mutex::new(Link { session: None, backoff, resolver: BrokerResolver::default() }),
+            metrics,
+        }
     }
 
     /// The settings this writer publishes under.
@@ -136,9 +144,10 @@ impl RabbitMqCdrWriter {
             if !link.backoff.ready(Instant::now()) {
                 return None;
             }
-            let opened = timeout(
-                self.settings.bounds.connect_timeout,
-                Session::open(&self.settings, &self.metrics),
+            let deadline = Instant::now() + self.settings.bounds.connect_timeout;
+            let opened = timeout_at(
+                deadline,
+                Session::open(&self.settings, &mut link.resolver, deadline, &self.metrics),
             )
             .await;
             match opened {

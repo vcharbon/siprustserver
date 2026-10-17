@@ -1,9 +1,10 @@
 //! The socket connector of the RabbitMQ CDR sink's connections: the TCP
-//! connect runs here, under the connect deadline, so the connection's socket is
-//! armed on its [`SocketKill`] before the AMQP handshake starts.
+//! connect to the resolved broker addresses runs here, under the connect
+//! deadline, so the connection's socket is armed on its [`SocketKill`] before
+//! the AMQP handshake starts.
 
 use std::io;
-use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::time::Instant;
 
 use lapin::{
@@ -13,12 +14,13 @@ use lapin::{
 
 use super::socket_kill::SocketKill;
 
-/// Connects the socket of `uri`, trying each resolved address in turn until
-/// `deadline`, arms `kill` with it, then wraps it as the AMQP client expects:
-/// TLS for `amqps`, non-blocking.
+/// Connects the socket of `uri`, trying each of its resolved `addrs` in turn
+/// until `deadline`, arms `kill` with it, then wraps it as the AMQP client
+/// expects: TLS for `amqps`, non-blocking.
 #[allow(clippy::result_large_err)] // the AMQP client's connector contract
 pub(super) fn connect_socket(
     uri: &AMQPUri,
+    addrs: &[SocketAddr],
     deadline: Instant,
     kill: &SocketKill,
 ) -> HandshakeResult {
@@ -26,13 +28,13 @@ pub(super) fn connect_socket(
     let timed_out = || io::Error::new(io::ErrorKind::TimedOut, "connect deadline passed");
     let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{host} resolves to nothing"));
     let mut connected = None;
-    for addr in (host, uri.authority.port).to_socket_addrs()? {
+    for addr in addrs {
         let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero());
         let Some(left) = left else {
             last = timed_out();
             break;
         };
-        match StdTcpStream::connect_timeout(&addr, left) {
+        match StdTcpStream::connect_timeout(addr, left) {
             Ok(s) => {
                 connected = Some(s);
                 break;
@@ -60,11 +62,11 @@ mod tests {
     #[test]
     fn a_passed_deadline_connects_nothing() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let uri: AMQPUri =
-            format!("amqp://g:g@{}/%2f", listener.local_addr().unwrap()).parse().unwrap();
+        let addr = listener.local_addr().unwrap();
+        let uri: AMQPUri = format!("amqp://g:g@{addr}/%2f").parse().unwrap();
         let kill = SocketKill::default();
         let past = Instant::now() - Duration::from_millis(1);
-        let err = connect_socket(&uri, past, &kill).expect_err("no time left");
+        let err = connect_socket(&uri, &[addr], past, &kill).expect_err("no time left");
         assert!(format!("{err:?}").contains("TimedOut"), "{err:?}");
         listener.set_nonblocking(true).unwrap();
         assert!(listener.accept().is_err(), "no connection may be attempted past the deadline");
