@@ -12,7 +12,7 @@ use sip_message::header::HeaderValue;
 use sip_message::types::SipHeader;
 use sip_message::{Method, SipRequest, SipResponse};
 
-use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
+use crate::observability::metrics::{Direction, MessageResult, NoTargetDrop, RoutingDecisionKind};
 use crate::strategy::SelectError;
 use crate::trace::emit;
 
@@ -168,7 +168,9 @@ impl ProxyCore {
 
     /// Refuse the request a `select_for_new_dialog` failure leaves without a
     /// target. Each failure carries its own `Retry-After` base and reject
-    /// label; the 503 itself names neither (no `Reason`). An ACK is dropped.
+    /// label; the 503 itself names neither (no `Reason`). An ACK is dropped,
+    /// and so is any request with no target before the proxy's first worker
+    /// view: its sender's retransmission meets the view (ADR-0050 §5).
     pub(super) async fn reply_select_failure(
         &self,
         req: &SipRequest,
@@ -184,6 +186,9 @@ impl ProxyCore {
         if req.method() == Method::Ack {
             self.metrics.record_reject("ack_not_answered");
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+        }
+        if matches!(err, SelectError::NoTarget { .. }) && !self.first_view.is_in() {
+            return self.drop_without_target(NoTargetDrop::of(req));
         }
         self.refuse_new(req, src, retry_after, metric).await
     }

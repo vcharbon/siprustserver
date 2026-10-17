@@ -67,7 +67,7 @@ spec:
       {{- with include "siprust.podSecurity" $p | trim }}{{ . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: {{ int $p.terminationGracePeriodSeconds }}
       # keepalived answers ARP for the VIPs on the node's interfaces, and reads
-      # the proxy's /healthz over the shared host network.
+      # the proxy's /vrrp over the shared host network.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       affinity:
@@ -118,9 +118,12 @@ spec:
             {{- with $p.extraPorts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          # Ready on >=1 routable worker (ADR-0012 D4), never on VRRP mastership,
-          # so the warm backup stays Ready. Liveness: process up and every recv
-          # shard turning (ADR-0046 D4); an idle shard is never stalled.
+          # Ready from the first worker view on with >=1 routable worker
+          # (ADR-0012 D4, ADR-0050 §11), never on VRRP mastership, so the warm
+          # backup stays Ready. Liveness: process up and every recv shard
+          # turning (ADR-0046 D4), never the worker view, so a proxy that boots
+          # with no reachable worker is not restarted; an idle shard is never
+          # stalled.
           readinessProbe:
             httpGet: { path: /readyz, port: 9090 }
             initialDelaySeconds: 1

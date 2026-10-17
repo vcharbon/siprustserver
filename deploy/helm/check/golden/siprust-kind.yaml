@@ -9,32 +9,34 @@ data:
     \ one: one election, adverts on\n# the internal plane, so the two faces never\
     \ split across pods.\n# track_interface drives the instance to FAULT when the\
     \ external interface\n# disappears, so the peer takes both VIPs together.\n#\n\
-    # The VIPs follow proxy health (ADR-0046): chk_proxy_health GETs the proxy's\n\
-    # /healthz, weighted, never a FAULT trigger. 3 failures in a row drop this\n#\
-    \ node's priority by 50, so a dead proxy hands the VIPs to a healthy peer;\n#\
-    \ both failing leaves the priorities equal and the VIPs where they are; a\n# recovered\
-    \ proxy is back at the same priority and does not take them back.\n# init_fail:\
-    \ a starting keepalived sits at the lowered priority until its\n# proxy passes\
-    \ `rise 2`. The check is clamped to exit 0/1, so an exec failure\n# reads as one\
-    \ failed check.\n#\n# A move takes 4.6-6.6 s: d + 2*interval + master_down - e,\
-    \ d in (0, 1] the\n# check's phase, master_down = 3*advert_int + (256-100)/256\
-    \ = 3.609 s, e in\n# [0, 1) the age of the last full-priority advert at the drop.\n\
-    global_defs {\n    router_id sip-front-proxy\n    script_user root\n}\nvrrp_script\
-    \ chk_proxy_health {\n    script \"/bin/sh -c 'wget -q -T 1 -O /dev/null http://127.0.0.1:9090/healthz\
-    \ && exit 0; exit 1'\"\n    interval 1\n    timeout 1\n    fall 3\n    rise 2\n\
-    \    weight -50\n    init_fail\n}\nvrrp_instance VI_SIP {\n    state BACKUP\n\
-    \    interface eth0\n    virtual_router_id 51\n    priority 100\n    # VRRPv2\
-    \ adverts are whole seconds.\n    advert_int 1\n    # A gratuitous-ARP burst at\
-    \ election is lost while a fresh bridge's FDB\n    # settles: repeat it, and refresh\
-    \ the claim so a stale neighbour binding\n    # heals within garp_master_refresh\
-    \ seconds, per address on both planes.\n    garp_master_delay 1\n    garp_master_repeat\
-    \ 5\n    garp_master_refresh 10\n    garp_master_refresh_repeat 2\n    virtual_ipaddress\
-    \ {\n        172.20.255.250 dev eth0\n        192.168.60.250 dev eth1\n    }\n\
-    \    track_interface {\n        eth1\n    }\n    track_script {\n        chk_proxy_health\n\
-    \    }\n    # Every floating address stays on lo at all times, so either pod binds\
-    \ it\n    # and sources its egress from it.\n    notify_master \"/bin/sh -c 'ip\
-    \ addr add 172.20.255.250/32 dev lo 2>/dev/null; ip addr add 192.168.60.250/32\
-    \ dev lo 2>/dev/null; true'\"\n    notify_backup \"/bin/sh -c 'ip addr add 172.20.255.250/32\
+    # The VIPs follow proxy health (ADR-0046, ADR-0050 \xA711): chk_proxy_health GETs\n\
+    # the proxy's /vrrp (its /healthz and its first worker view), weighted, never\n\
+    # a FAULT trigger. 3 failures in a row drop this node's priority by 50, so a\n\
+    # dead proxy hands the VIPs to a healthy peer; both failing leaves the\n# priorities\
+    \ equal and the VIPs where they are; a recovered proxy is back at\n# the same\
+    \ priority and does not take them back. init_fail: a starting\n# keepalived sits\
+    \ at the lowered priority until its proxy passes `rise 2`,\n# which it does only\
+    \ once it has read its workers. The check is clamped to\n# exit 0/1, so an exec\
+    \ failure reads as one failed check.\n#\n# A move takes 4.6-6.6 s: d + 2*interval\
+    \ + master_down - e, d in (0, 1] the\n# check's phase, master_down = 3*advert_int\
+    \ + (256-100)/256 = 3.609 s, e in\n# [0, 1) the age of the last full-priority\
+    \ advert at the drop.\nglobal_defs {\n    router_id sip-front-proxy\n    script_user\
+    \ root\n}\nvrrp_script chk_proxy_health {\n    script \"/bin/sh -c 'wget -q -T\
+    \ 1 -O /dev/null http://127.0.0.1:9090/vrrp && exit 0; exit 1'\"\n    interval\
+    \ 1\n    timeout 1\n    fall 3\n    rise 2\n    weight -50\n    init_fail\n}\n\
+    vrrp_instance VI_SIP {\n    state BACKUP\n    interface eth0\n    virtual_router_id\
+    \ 51\n    priority 100\n    # VRRPv2 adverts are whole seconds.\n    advert_int\
+    \ 1\n    # A gratuitous-ARP burst at election is lost while a fresh bridge's FDB\n\
+    \    # settles: repeat it, and refresh the claim so a stale neighbour binding\n\
+    \    # heals within garp_master_refresh seconds, per address on both planes.\n\
+    \    garp_master_delay 1\n    garp_master_repeat 5\n    garp_master_refresh 10\n\
+    \    garp_master_refresh_repeat 2\n    virtual_ipaddress {\n        172.20.255.250\
+    \ dev eth0\n        192.168.60.250 dev eth1\n    }\n    track_interface {\n  \
+    \      eth1\n    }\n    track_script {\n        chk_proxy_health\n    }\n    #\
+    \ Every floating address stays on lo at all times, so either pod binds it\n  \
+    \  # and sources its egress from it.\n    notify_master \"/bin/sh -c 'ip addr\
+    \ add 172.20.255.250/32 dev lo 2>/dev/null; ip addr add 192.168.60.250/32 dev\
+    \ lo 2>/dev/null; true'\"\n    notify_backup \"/bin/sh -c 'ip addr add 172.20.255.250/32\
     \ dev lo 2>/dev/null; ip addr add 192.168.60.250/32 dev lo 2>/dev/null; true'\"\
     \n    notify_fault  \"/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null;\
     \ ip addr add 192.168.60.250/32 dev lo 2>/dev/null; true'\"\n}\n"
@@ -390,7 +392,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/keepalived: 203cd9b2155700566efdd73335a5820709512bb9ea0b1cb8d1bb14ab24d1e533
+        checksum/keepalived: 92a96e86ba1f35581f33179a977e02d7d8b0bedd0ebfae1eb3b8639e526b87c1
         prometheus.io/port: '9090'
         prometheus.io/scrape: 'true'
       labels:

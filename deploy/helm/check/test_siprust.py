@@ -84,6 +84,18 @@ class Network(unittest.TestCase):
         self.assertIn("172.20.255.250 dev eth0", conf)
         self.assertIn("192.168.60.250 dev eth1", conf)
 
+    def test_the_vips_follow_vrrp_and_the_liveness_probe_healthz(self) -> None:
+        # ADR-0050 §11: the VIP check waits for the first worker view; the
+        # livenessProbe never does, so a proxy with no reachable worker is not
+        # restarted in a loop.
+        docs = render(SIPRUST, *KIND)
+        conf = find(docs, "ConfigMap", "sip-front-proxy-keepalived")["data"]["keepalived.conf"]
+        self.assertIn("http://127.0.0.1:9090/vrrp ", conf)
+        self.assertNotIn("/healthz", conf.split("vrrp_script chk_proxy_health")[1].split("}")[0])
+        proxy = container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
+        self.assertEqual(proxy["livenessProbe"]["httpGet"]["path"], "/healthz")
+        self.assertEqual(proxy["readinessProbe"]["httpGet"]["path"], "/readyz")
+
     def test_a_keepalived_change_rolls_the_proxies(self) -> None:
         def checksum(*args: str) -> str:
             proxy = find(render(SIPRUST, *KIND, *args), "Deployment", "sip-front-proxy")

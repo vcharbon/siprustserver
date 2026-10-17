@@ -8,6 +8,7 @@ use sip_txn::IdGen;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
+use crate::health::FirstView;
 use crate::liveness::ShardPulse;
 use crate::observability::ProxyMetrics;
 use crate::refusals::Refusals;
@@ -38,6 +39,7 @@ pub struct ProxyCoreBuilder {
     shard: usize,
     traces: Option<Arc<ProxyTraces>>,
     pulse: Option<Arc<ShardPulse>>,
+    first_view: Option<Arc<FirstView>>,
 }
 
 impl ProxyCoreBuilder {
@@ -63,6 +65,7 @@ impl ProxyCoreBuilder {
             shard: 0,
             traces: None,
             pulse: None,
+            first_view: None,
         }
     }
 
@@ -141,6 +144,15 @@ impl ProxyCoreBuilder {
         self.pulse = Some(pulse);
         self
     }
+    /// The proxy's first worker view, latched by its
+    /// [`HealthProbe`](crate::health::HealthProbe) — ONE across every recv
+    /// shard. Before it, a request with no target is dropped unanswered. The
+    /// default is a view already given, for a core whose worker health its
+    /// wiring sets.
+    pub fn first_view(mut self, view: Arc<FirstView>) -> Self {
+        self.first_view = Some(view);
+        self
+    }
 
     /// Finish into a [`ProxyCore`] bound on `endpoint`.
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
@@ -169,6 +181,7 @@ impl ProxyCoreBuilder {
             shard: self.shard,
             traces,
             pulse: self.pulse.unwrap_or_else(|| Arc::new(ShardPulse::new(self.shard + 1))),
+            first_view: self.first_view.unwrap_or_else(FirstView::given),
         })
     }
 }

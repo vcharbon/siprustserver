@@ -58,6 +58,16 @@ fn stand_in_client() -> kube::Client {
     kube::Client::new(api, "lab")
 }
 
+/// A fixed pool is listed at once and reads every worker `Unknown` until it
+/// answers a probe.
+#[test]
+fn a_fixed_pool_is_listed_with_every_worker_unknown() {
+    let pool = static_pool("w0@10.0.0.1:5070,w1@10.0.0.2:5070", Clock::test_at(0)).unwrap();
+    assert!(pool.registry.synced());
+    let health: Vec<WorkerHealth> = pool.registry.snapshot().iter().map(|w| w.health).collect();
+    assert_eq!(health, [WorkerHealth::Unknown, WorkerHealth::Unknown]);
+}
+
 /// No kube client at boot: the pool is empty and the proxy NotReady, with no
 /// stand-in worker; the client is built again, the watch lists the worker,
 /// and the proxy turns Ready once that worker answers OPTIONS.
@@ -84,24 +94,26 @@ async fn a_kube_client_that_fails_then_builds_fills_the_pool_and_never_fakes_a_w
         "no worker before the watch lists one: {:?}",
         pool.registry.snapshot()
     );
-    assert_eq!(probe_state(false, false, pool.registry.as_ref()), ProbeState::NotReady);
+    assert_eq!(probe_state(false, false, true, pool.registry.as_ref()), ProbeState::NotReady);
+    assert!(!pool.registry.synced(), "no listing yet: the probe's first round waits");
     let watch = pool.discovery.as_ref().expect("a discovered pool");
     assert!(!watch.watch_health().client_built);
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 2, "the client is built again after 1 s");
     assert!(watch.watch_health().client_built);
+    assert!(pool.registry.synced(), "the first listing is in");
     let listed: Vec<String> =
         pool.registry.snapshot().iter().map(|w| format!("{}@{}", w.id, w.address)).collect();
     assert_eq!(listed, ["worker-0@10.0.0.7:5060"]);
     assert_eq!(
-        probe_state(false, false, pool.registry.as_ref()),
+        probe_state(false, false, true, pool.registry.as_ref()),
         ProbeState::NotReady,
         "listed but not yet answering OPTIONS"
     );
 
     pool.control.set_health("worker-0", WorkerHealth::Alive);
-    assert_eq!(probe_state(false, false, pool.registry.as_ref()), ProbeState::Ready);
+    assert_eq!(probe_state(false, false, true, pool.registry.as_ref()), ProbeState::Ready);
 }
 
 /// The first watch fails to start (500), the next one starts and stays quiet:

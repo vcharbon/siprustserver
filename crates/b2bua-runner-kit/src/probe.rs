@@ -44,6 +44,7 @@ impl RunnerBase {
             metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
             ready: ready_fn(move || core_ready.readiness_state(), core.loops().clone(), stall),
             heap,
+            vrrp: None,
         };
         let live = live_fn(core.loops().clone(), stall);
         match probe_http::ProbeServer::start_live(self.metrics_sa, routes, live).await {
@@ -121,8 +122,12 @@ mod tests {
         let reads = state.clone();
         let ready = ready_fn(move || *reads.lock().unwrap(), loops.clone(), STALL);
         let live = live_fn(loops, STALL);
-        let routes =
-            ProbeRoutes { metrics: Arc::new(String::new), ready: ready.clone(), heap: None };
+        let routes = ProbeRoutes {
+            metrics: Arc::new(String::new),
+            ready: ready.clone(),
+            heap: None,
+            vrrp: None,
+        };
         let server =
             ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, live).await.unwrap();
         assert!(get(server.addr(), "/ready").await.contains("200 OK"));

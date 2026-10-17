@@ -2,7 +2,9 @@
 //! the `sip-txn` non-INVITE client transaction (port of `health/HealthProbe.ts`,
 //! re-based from a hand-rolled fan-out onto the transaction layer).
 //!
-//! Per tick (every `interval_ms`): reap probes past their `timeout_ms` reply
+//! The first tick fires as soon as the registry holds its first listing, and
+//! its round latches the proxy's [`FirstView`] (ADR-0050 §11). Per tick (every
+//! `interval_ms`): reap probes past their `timeout_ms` reply
 //! window (each reap = one miss; `threshold` consecutive misses → `Dead`),
 //! prune per-worker state for departed/recreated workers, then fan one OPTIONS
 //! client transaction out to every registered worker. Replies arrive as
@@ -76,11 +78,15 @@ use sip_txn::{
 };
 use tokio::sync::mpsc;
 
+use super::first_view::{FirstRound, FirstView};
 use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
 use crate::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
+
+/// How often a probe waiting for the registry's first listing looks again.
+const LISTING_POLL: Duration = Duration::from_millis(20);
 
 /// Probe cadence (source defaults: 1 s interval, 1.5 s reply window, 2 misses
 /// → dead). `interval_ms` is the tick period; `timeout_ms` is each probe's own
@@ -171,6 +177,8 @@ pub struct HealthProbe {
     /// [`with_metrics`](Self::with_metrics) so the existing constructors and the
     /// failover harness stay untouched.
     metrics: Option<Arc<ProxyMetrics>>,
+    /// Latched once the first round over the first listing has completed.
+    first_view: Arc<FirstView>,
 }
 
 impl HealthProbe {
@@ -204,7 +212,16 @@ impl HealthProbe {
             id_gen,
             config,
             metrics: None,
+            first_view: FirstView::pending(),
         }
+    }
+
+    /// The proxy's first worker view, which this probe latches; the routing
+    /// core and the readiness routes read the same one. Without it the probe
+    /// latches a view of its own nobody reads.
+    pub fn with_first_view(mut self, view: Arc<FirstView>) -> Self {
+        self.first_view = view;
+        self
     }
 
     /// Attach a `/metrics` sink so probe misses (worker OPTIONS timeouts) record
@@ -221,22 +238,41 @@ impl HealthProbe {
 
     /// Run the probe loop forever (spawn it; abort to stop). Returns when the
     /// transaction layer closes (endpoint gone).
+    ///
+    /// The first round leaves as soon as the registry holds its first
+    /// listing, then one every `interval_ms`. The first view is latched once
+    /// every probe of the first round has left the in-flight set or the
+    /// round's reply window (`timeout_ms`) has run out, after the answers'
+    /// health is written.
     pub async fn run(mut self) {
         let mut state = ProbeState::default();
-        // First tick AFTER one full interval (interval_at, not interval — the
-        // latter fires immediately): probing at t=0 catches workers mid-boot,
-        // and their boot-time 503 would demote a pre-seeded Alive pool before
-        // any traffic flowed.
+        while !self.registry.synced() {
+            tokio::time::sleep(LISTING_POLL).await;
+        }
+        if self.tick(&mut state).await.is_err() {
+            return;
+        }
+        let mut first_round = Some(FirstRound::of(state.pending.keys().cloned()));
+        let round_window = tokio::time::sleep(Duration::from_millis(self.config.timeout_ms));
+        tokio::pin!(round_window);
         let period = Duration::from_millis(self.config.interval_ms);
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
+            if first_round.as_ref().is_some_and(|r| r.settled(|b| state.pending.contains_key(b))) {
+                self.first_view.latch();
+                first_round = None;
+            }
             tokio::select! {
                 _ = tick.tick() => {
                     if self.tick(&mut state).await.is_err() {
                         return;
                     }
+                }
+                _ = &mut round_window, if first_round.is_some() => {
+                    self.first_view.latch();
+                    first_round = None;
                 }
                 ev = self.events.recv() => match ev {
                     None => return, // transaction layer gone (endpoint closed)
@@ -449,50 +485,4 @@ impl HealthProbe {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// ADR-0050 §3: the status sets health, `X-Readiness` acceptance.
-    #[test]
-    fn an_answer_reads_on_two_axes() {
-        let read = |status, r: Option<Readiness>| read_answer(status, r.as_ref());
-        let alive = Some(WorkerHealth::Alive);
-        let (accept, refuse) = (Some(Acceptance::Accept), Some(Acceptance::Refuse));
-        assert_eq!(
-            read(200, Some(Readiness::accept())),
-            AnswerReading { health: alive, acceptance: accept }
-        );
-        assert_eq!(
-            read(200, Some(Readiness::refuse("backend"))),
-            AnswerReading { health: alive, acceptance: refuse }
-        );
-        assert_eq!(
-            read(200, None),
-            AnswerReading { health: alive, acceptance: accept },
-            "absent reads accept"
-        );
-        assert_eq!(
-            read(503, None),
-            AnswerReading { health: None, acceptance: refuse },
-            "health as it was"
-        );
-        assert_eq!(
-            read(503, Some(Readiness::accept())),
-            AnswerReading { health: None, acceptance: refuse },
-            "a 503 refuses whatever it states"
-        );
-        for status in [404, 486, 500, 603] {
-            assert_eq!(
-                read(status, None),
-                AnswerReading { health: alive, acceptance: None },
-                "{status}"
-            );
-        }
-    }
-
-    #[test]
-    fn probe_call_ref_is_branch_scoped() {
-        assert_eq!(probe_call_ref("z9hG4bK-1"), "probe:z9hG4bK-1");
-        assert_ne!(probe_call_ref("a"), probe_call_ref("b"));
-    }
-}
+mod tests;

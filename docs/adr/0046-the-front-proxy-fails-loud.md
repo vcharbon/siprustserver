@@ -51,7 +51,8 @@ its family.
    Each failure is an episode: one warning naming the cause when it starts,
    one line when it ends.
 4. **The virtual address follows proxy health.** The VRRP instance tracks a
-   script that reads the proxy's `/healthz`, wrapped in `/bin/sh -c` with its
+   script that reads the proxy's `/vrrp` (its `/healthz` and its first worker
+   view, ADR-0050 §11), wrapped in `/bin/sh -c` with its
    exit code clamped to 0/1: 1 s timeout, `interval 1`, `fall 3`, `rise 2`,
    `weight -50`, `init_fail`. A failing check lowers the node's priority and
    never puts the instance in FAULT; a starting node sits at the lowered
@@ -74,11 +75,12 @@ its family.
    ε ∈ [0, 1)   how long before the drop the last full-priority advert arrived
    ```
 
-   A kubelet restart of the dead proxy can answer `/healthz` for a moment and
+   A kubelet restart of the dead proxy can answer `/vrrp` for a moment and
    reset the fall count, which adds up to 2 s (worst about 8.6 s).
 
-   `/healthz` fails (`503 stalled`) while a recv shard has held one packet
-   longer than `PROXY_SHARD_STALL_MS` (2 s), as `/readyz` does: such a proxy
+   `/healthz`, and with it `/vrrp`, fails (`503 stalled`) while a recv shard
+   has held one packet longer than `PROXY_SHARD_STALL_MS` (2 s), as `/readyz`
+   does: such a proxy
    black-holes the flows hashed to that shard while it still answers every
    other probe. The address moves `PROXY_SHARD_STALL_MS` plus the move above
    after the shard stops, and the livenessProbe restarts the container. A
@@ -170,7 +172,8 @@ its family.
   key), `discovery::tests` (a kube client that fails then builds: NotReady
   with no stand-in worker, then the pool fills; a watch that restarts quietly
   ends its broken episode), `readiness::tests` (a stalled shard fails
-  `/healthz` and `/readyz`, a proxy with none passes both); `sip-proxy`
+  `/healthz`, `/vrrp` and `/readyz`, a proxy with none passes them; before
+  the first worker view `/vrrp` and `/readyz` fail); `sip-proxy`
   `resolver::tests` (a lookup past its
   bound, no candidate past the deadline, the address family and a dual-stack
   bind). The VRRP behaviour is checked on a lab cluster: staggered starts, a

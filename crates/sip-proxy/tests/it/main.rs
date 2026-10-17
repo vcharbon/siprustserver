@@ -8,6 +8,7 @@
 // Shared fixtures, reached from a test module as `crate::common::…`.
 mod common;
 
+mod first_view;
 mod health_probe_late_reply;
 mod ingress_trust;
 mod load_balancer;

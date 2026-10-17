@@ -164,6 +164,9 @@ impl WorkerRegistry for StaticWorkerRegistry {
     fn rearm_departed(&self, addr: &ProxyAddr) {
         self.set.rearm_departed(addr)
     }
+    fn synced(&self) -> bool {
+        self.set.synced()
+    }
 }
 
 #[cfg(test)]

@@ -86,4 +86,8 @@ pub trait WorkerRegistry: Send + Sync {
     /// left the set and its departed window is open, the window is re-armed to
     /// Timer H from now (ADR-0031 D4).
     fn rearm_departed(&self, addr: &ProxyAddr);
+    /// Whether the worker set is its source's first authoritative listing or
+    /// a later one: a fixed pool is at once, a discovered one once its watch
+    /// has listed the workers (`topology::Membership::synced`).
+    fn synced(&self) -> bool;
 }

@@ -148,7 +148,7 @@ proxy:
     extraVirtualIps: []
     # More health checks, each `{name, script}` and optional `interval`,
     # `timeout`, `fall`, `rise`, `weight` (default 1, 1, 3, 2, -50); every one
-    # weighs on the same priority as the proxy's /healthz check.
+    # weighs on the same priority as the proxy's /vrrp check.
     extraTrackScripts: []
     resources: {}
   env: {}

@@ -32,6 +32,7 @@
 //!   from the snapshot, never replays deltas).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -235,6 +236,8 @@ pub(crate) struct WorkerSet {
     annotations: WorkerAnnotations,
     tombstones: Tombstones,
     projection: ArcSwap<Vec<WorkerEntry>>,
+    /// The projection was composed from an authoritative listing.
+    listed: AtomicBool,
     default_port: u16,
     clock: Clock,
 }
@@ -248,6 +251,7 @@ impl WorkerSet {
             annotations: WorkerAnnotations::default(),
             tombstones: Tombstones::default(),
             projection: ArcSwap::from_pointee(Vec::new()),
+            listed: AtomicBool::new(false),
             default_port,
             clock,
         };
@@ -373,6 +377,21 @@ impl WorkerSet {
     }
     pub(crate) fn membership(&self) -> &Arc<dyn Membership> {
         &self.membership
+    }
+    /// Whether the projection holds the membership's first authoritative
+    /// listing. The first time the membership reads synced, the projection is
+    /// recomposed from it before this answers `true`, so a snapshot read
+    /// after a `true` never predates the listing.
+    pub(crate) fn synced(&self) -> bool {
+        if self.listed.load(Ordering::Acquire) {
+            return true;
+        }
+        if !self.membership.synced() {
+            return false;
+        }
+        self.recompose();
+        self.listed.store(true, Ordering::Release);
+        true
     }
 }
 

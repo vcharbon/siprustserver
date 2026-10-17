@@ -8,8 +8,8 @@ use std::sync::Arc;
 use sip_clock::Clock;
 use sip_proxy::registry::composed::ComposedWorkerRegistry;
 use sip_proxy::registry::control::WorkerRegistryControl;
-use sip_proxy::registry::static_reg::StaticWorkerRegistry;
-use sip_proxy::registry::WorkerRegistry;
+use sip_proxy::registry::static_reg::{parse_worker_list, StaticWorkerRegistry};
+use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use topology::{K8sMembership, Membership};
 
 /// A worker pool and its health-write seam.
@@ -20,10 +20,15 @@ pub struct WorkerPool {
     pub discovery: Option<Arc<K8sMembership>>,
 }
 
-/// The fixed pool `workers` lists (`id@host:port,..`).
+/// The fixed pool `workers` lists (`id@host:port,..`), each worker `Unknown`
+/// until it answers a probe (ADR-0050 §4).
 pub fn static_pool(workers: &str, clock: Clock) -> Result<WorkerPool, String> {
-    let reg = StaticWorkerRegistry::from_string_with_clock(workers, "PROXY_WORKERS", clock)
-        .map_err(|e| format!("bad PROXY_WORKERS {workers:?}: {e}"))?;
+    let entries = parse_worker_list("PROXY_WORKERS", workers)
+        .map_err(|e| format!("bad PROXY_WORKERS {workers:?}: {e}"))?
+        .into_iter()
+        .map(|e| WorkerEntry { health: WorkerHealth::Unknown, ..e })
+        .collect();
+    let reg = StaticWorkerRegistry::from_entries_with_clock(entries, clock);
     tracing::info!(source = "PROXY_WORKERS", %workers, "worker pool");
     let control = reg.control();
     Ok(WorkerPool { registry: Arc::new(reg), control, discovery: None })

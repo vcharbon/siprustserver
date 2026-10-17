@@ -6,18 +6,20 @@
 //!     stickiness cookie (rotation-overlap aware).
 //!   - The worker pool ([`sip_proxy_runner::discovery`]): the EndpointSlices of
 //!     the worker Service (ADR-0012 D4), or a fixed `PROXY_WORKERS` list.
-//!   - `HealthProbe` — periodic OPTIONS to workers, feeding the
-//!     `WorkerLoadObserver` band classifier (above-critical workers are excluded
-//!     from new-dialog selection). Health writes flow through the registry's
-//!     `control()` seam, so an unanswered worker is demoted (Dead/NotReady/
-//!     Draining) and routing reacts.
+//!   - `HealthProbe` — OPTIONS to workers from the pool's first listing on,
+//!     then every tick, feeding the `WorkerLoadObserver` band classifier
+//!     (above-critical workers are excluded from new-dialog selection). Health
+//!     writes flow through the registry's `control()` seam, so an unanswered
+//!     worker is demoted `Dead` and routing reacts. Its first round latches
+//!     the first worker view (ADR-0050 §11).
 //!   - `EluCpsGate` self-gate: EWMA-smoothed intake pressure
 //!     (packet age at dequeue, recorded by every recv shard) + a per-class CPS
 //!     token bucket shed external new-dialog non-emergency INVITEs under
 //!     self-overload (a stateless 503 + `Retry-After`, the same for every copy). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
-//!   - Prometheus `/metrics` + `/healthz` + `/readyz` via the shared `probe-http`.
+//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/vrrp` via the shared
+//!     `probe-http`.
 //!
 //! Config via env, read once before the first bind
 //! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
@@ -56,7 +58,7 @@
 //!                    clamps at rmem_max). Overflow is counted in
 //!                    sip_proxy_udp_kernel_rx_dropped_total
 //!   PROXY_SHARD_STALL_MS  a recv shard still on one packet past this is
-//!                    stalled: /healthz and /readyz 503, gauge
+//!                    stalled: /healthz, /readyz and /vrrp 503, gauge
 //!                    sip_proxy_recv_shards_stalled, ms ≥ 1 (default 2000);
 //!                    a shard waiting on an empty socket is never stalled
 //!   PROXY_RECV_SHARDS  N reuse-port recv sockets/cores, 1..1024 (default 1;
@@ -125,16 +127,16 @@ use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
-use sip_proxy::health::HealthProbe;
+use sip_proxy::health::{FirstView, HealthProbe};
 use sip_proxy::load_observer::{sweep_alive, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
-use sip_proxy::registry::WorkerHealth;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::strategies::LoadBalancerStrategy;
 use sip_proxy::{ExternalFaceParts, RoutingStrategy};
 use sip_proxy_runner::config::{refuse_to_start, ExternalFace, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
+use sip_proxy_runner::health_sampler::HealthSampler;
 use sip_proxy_runner::intake_shed::{intake_shed_hook, intake_shed_watermark};
 use sip_proxy_runner::readiness::probes;
 use sip_proxy_runner::shards::SharedRouting;
@@ -444,9 +446,12 @@ async fn main() {
         clock.clone(),
     ));
 
-    // Health probe: periodic OPTIONS to the pool, feeding the band observer.
-    // Clone the observer first — the probe takes ownership of one `Arc` view, the
-    // stale-payload sweep task below shares the SAME `Arc<WorkerLoadObserver>`.
+    // Health probe: OPTIONS to the pool from the first listing on, feeding the
+    // band observer, and latching the first worker view the recv shards and
+    // the probe routes read (ADR-0050 §5, §11). Clone the observer first — the
+    // probe takes ownership of one `Arc` view, the stale-payload sweep task
+    // below shares the SAME `Arc<WorkerLoadObserver>`.
+    let first_view = FirstView::pending();
     let sweep_observer = observer.clone();
     let probe = HealthProbe::new(
         probe_ep,
@@ -459,7 +464,8 @@ async fn main() {
     )
     // Per-peer probe-miss attribution (sip_proxy_peer_failures_total{
     // scope="internal",kind="response_timeout"}): worker OPTIONS timeouts.
-    .with_metrics(metrics.clone());
+    .with_metrics(metrics.clone())
+    .with_first_view(first_view.clone());
 
     // The CANCEL/rtx LRU and the refusal memo are ONE instance across shards
     // (`SharedRouting`).
@@ -496,6 +502,7 @@ async fn main() {
         resolver: resolver_cfg,
         traces,
         pulse: pulse.clone(),
+        first_view: first_view.clone(),
     };
     let mut cores = Vec::with_capacity(recv_shards);
     let mut ext_endpoints = ext_endpoints.into_iter();
@@ -549,68 +556,39 @@ async fn main() {
         "listening"
     );
 
-    // Readiness gate (ADR-0012 D4): the proxy is fit to take traffic only with
-    // ≥1 routable (`Alive`) worker. With the k8s EndpointSlice informer the pool
-    // starts empty and fills asynchronously (and stays empty if the watch is
+    // Readiness gate (ADR-0012 D4, ADR-0050 §11): the proxy is fit to take
+    // traffic only once its first worker view is in and with ≥1 routable
+    // (`Alive`) worker. With the k8s EndpointSlice informer the pool starts
+    // empty and fills asynchronously (and stays empty if the watch is
     // RBAC-forbidden / the Service name is wrong), so `/readyz` turns a
     // misconfigured watch into a loud rollout timeout. SIP reaches the proxy
-    // through the VRRP address, which follows `/healthz`, not readiness.
-    // SIGTERM latches Draining here.
+    // through the VRRP address, which follows `/vrrp` (`/healthz` and the
+    // first view), not readiness. SIGTERM latches Draining here.
     let draining = Arc::new(AtomicBool::new(false));
     // A stalled recv shard (parked on one packet past PROXY_SHARD_STALL_MS —
     // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
-    // flows while every activity meter reads idle: it fails `/readyz` and
-    // `/healthz` (ADR-0046 D4), and raises the gauge.
-    let (ready, live) =
-        probes(draining.clone(), pulse.clone(), clock.clone(), shard_stall_ms, registry.clone());
+    // flows while every activity meter reads idle: it fails `/readyz`,
+    // `/healthz` and `/vrrp` (ADR-0046 D4), and raises the gauge.
+    let proxy_probes = probes(
+        draining.clone(),
+        pulse.clone(),
+        clock.clone(),
+        shard_stall_ms,
+        registry.clone(),
+        first_view,
+    );
 
-    // Health sampler: publish the worker-health gauges, `sip_proxy_worker_pool_empty`
-    // and the discovery's own health every 2 s, so an empty or unprobed pool
-    // and the reason for it are observable in Prometheus, not only through
-    // readiness.
-    {
-        let reg = registry.clone();
-        let discovery = pool.discovery.clone();
-        let m = metrics.clone();
-        let pulse = pulse.clone();
-        let clk = clock.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(2));
-            let mut stalled_before: Vec<usize> = Vec::new();
-            loop {
-                ticker.tick().await;
-                let stalled = pulse.stalled(clk.now_ms().max(0) as u64, shard_stall_ms);
-                m.set_recv_shards_stalled(stalled.len() as u64);
-                if stalled != stalled_before {
-                    if stalled.is_empty() {
-                        tracing::info!(shards = ?stalled_before, "recv shards turning again");
-                    } else {
-                        tracing::error!(
-                            shards = ?stalled,
-                            threshold_ms = shard_stall_ms,
-                            "recv shard(s) stalled on one packet — /healthz and /readyz fail"
-                        );
-                    }
-                    stalled_before = stalled;
-                }
-                let (mut alive, mut unknown, mut dead, mut accepting) = (0, 0, 0, 0);
-                for w in reg.snapshot() {
-                    match w.health {
-                        WorkerHealth::Alive => alive += 1,
-                        WorkerHealth::Unknown => unknown += 1,
-                        WorkerHealth::Dead => dead += 1,
-                    }
-                    accepting += u64::from(w.accepts_new_calls());
-                }
-                m.set_worker_health_counts(alive, unknown, dead);
-                m.set_worker_acceptance_counts(accepting, alive - accepting);
-                match discovery.as_ref().map(|watch| watch.watch_health()) {
-                    Some(h) => m.set_discovery(h.client_failing, h.broken_since_unix_ms),
-                    None => m.set_discovery(false, None),
-                }
-            }
-        });
+    // Health sampler: the worker-health, acceptance, shard-stall and
+    // discovery gauges every 2 s.
+    HealthSampler {
+        registry: registry.clone(),
+        discovery: pool.discovery.clone(),
+        metrics: metrics.clone(),
+        pulse: pulse.clone(),
+        clock: clock.clone(),
+        stall_ms: shard_stall_ms,
     }
+    .spawn();
 
     // Stale-payload sweep. A 1 s `tokio::time::interval` ticks the observer's
     // `sweep_stale`: any Alive worker whose OPTIONS replies stop carrying a fresh
@@ -674,19 +652,23 @@ async fn main() {
                 &jemalloc_stats::prometheus_text,
             )
         }),
-        ready,
+        ready: proxy_probes.ready,
         // No heap profiling on the proxy (not the leak target; profiling build
         // feature off here). /debug/heap → 503.
         heap: None,
+        vrrp: Some(proxy_probes.vrrp),
     };
     // The listener was bound FIRST (metrics-first bind order above); this only
     // starts the accept loop. A failure here is fatal — a proxy without its
     // health endpoint gets liveness-killed 30 s later with a lying /readyz.
-    let _metrics_server = probe_http::ProbeServer::serve_on_live(metrics_listener, routes, live)
-        .unwrap_or_else(|e| {
-            panic!("sip-proxy-runner FATAL: metrics server on {metrics_sa} failed to start: {e}")
-        });
-    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz)");
+    let _metrics_server =
+        probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "sip-proxy-runner FATAL: metrics server on {metrics_sa} failed to start: {e}"
+                )
+            });
+    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, VRRP check /vrrp)");
 
     let probe_task = tokio::spawn(probe.run());
     let mut core_tasks = tokio::task::JoinSet::new();

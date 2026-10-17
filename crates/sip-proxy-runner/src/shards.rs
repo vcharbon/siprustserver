@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use sip_clock::Clock;
 use sip_proxy::cancel_lru::CancelBranchLru;
+use sip_proxy::health::FirstView;
 use sip_proxy::liveness::ShardPulse;
 use sip_proxy::refusals::Refusals;
 use sip_proxy::registry::WorkerRegistry;
@@ -29,6 +30,8 @@ pub struct SharedRouting {
     pub resolver: ResolverConfig,
     pub traces: Arc<ProxyTraces>,
     pub pulse: Arc<ShardPulse>,
+    /// The proxy's first worker view, which its health probe latches.
+    pub first_view: Arc<FirstView>,
 }
 
 impl SharedRouting {
@@ -45,6 +48,7 @@ impl SharedRouting {
             .resolver_config(self.resolver)
             .traces(self.traces.clone())
             .pulse(self.pulse.clone())
+            .first_view(self.first_view.clone())
             .shard(shard)
     }
 }

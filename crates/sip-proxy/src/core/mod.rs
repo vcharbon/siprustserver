@@ -18,6 +18,8 @@ mod departed_originator_tests;
 mod dual_face_tests;
 mod face_pick;
 #[cfg(test)]
+mod first_view_tests;
+#[cfg(test)]
 mod liveness_routing_tests;
 mod request;
 mod response;
@@ -34,6 +36,7 @@ use sip_net::UdpEndpoint;
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
 use crate::face::FaceCidrs;
+use crate::health::FirstView;
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
 use crate::observability::{ProxyMetrics, UdpShardStats};
@@ -122,6 +125,8 @@ pub(crate) struct ProxyCoreParts {
     pub traces: Arc<ProxyTraces>,
     /// Liveness stamps, one cell per shard; this core owns cell `shard`.
     pub pulse: Arc<ShardPulse>,
+    /// The proxy's first worker view, shared with its probe.
+    pub first_view: Arc<FirstView>,
 }
 
 /// The stateless proxy.
@@ -146,6 +151,7 @@ pub struct ProxyCore {
     shard: usize,
     pub(super) traces: Arc<ProxyTraces>,
     pulse: Arc<ShardPulse>,
+    first_view: Arc<FirstView>,
 }
 
 impl ProxyCore {
@@ -192,6 +198,7 @@ impl ProxyCore {
             shard: parts.shard,
             pulse: parts.pulse,
             traces: parts.traces,
+            first_view: parts.first_view,
         }
     }
 

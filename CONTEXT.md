@@ -283,6 +283,16 @@ CANCEL of a refused INVITE draws a 200 from the proxy, that INVITE's UAS, and
 goes no further; a CANCEL is never remembered. Why it was refused stays in the
 reject counters and the call's trace.
 
+**First worker view** (`sip_proxy::health::FirstView`):
+A starting front proxy's view of its workers is in once the worker registry
+holds its first listing and one OPTIONS round over it has completed, each
+listed worker having answered or run out its reply window (ADR-0050 §11).
+The round leaves as soon as the listing is in. Before the view, a request
+with no target is dropped and counted, never refused: its retransmission meets
+the view. `/readyz` waits for the view; `/vrrp`, which the VRRP check reads, is
+`/healthz` and the view; `/healthz` never waits for it.
+_Avoid_: "warm-up" (no timer is involved).
+
 **Metric catalogue** (`metric-catalogue`):
 A process's Prometheus families declared as data: one **catalogue entry** per
 family (name, kind, label sets, presence, help), its label sets a union of

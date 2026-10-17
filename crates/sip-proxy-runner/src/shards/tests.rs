@@ -37,6 +37,7 @@ fn shared() -> SharedRouting {
         resolver: ResolverConfig::default(),
         traces: Arc::new(ProxyTraces::from_env(0)),
         pulse: Arc::new(ShardPulse::new(2)),
+        first_view: FirstView::given(),
         clock,
     }
 }
