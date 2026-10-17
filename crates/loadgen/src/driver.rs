@@ -24,9 +24,8 @@ use e2e_model::LegSpec;
 use futures::FutureExt;
 use scenario_harness::{Agent, AgentBinder, EgressPolicy, WaiverScope};
 use sip_clock::Clock;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
-use crate::call_rtt::CallRtts;
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
 use crate::mix_entry::{LoadBody, MixEntry};
@@ -35,6 +34,7 @@ use crate::outcome::{CallWire, OutcomeSink};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
+use crate::{call_rtt::CallRtts, failed_call};
 use scenario_harness::actor::ScenarioVerdict;
 
 /// The mux transport the driver binds calls on.
@@ -141,6 +141,8 @@ pub struct Driver {
     overload_reject: Option<u16>,
     /// Where each placed call's outcome record goes; `None` = no records.
     outcomes: Option<Arc<OutcomeSink>>,
+    /// Read-held by each failed call's release tail; the drain write-locks it.
+    tails: Arc<RwLock<()>>,
 }
 
 /// Process-wide per-call id-seed source: a unique 100k-wide window per call so a
@@ -194,6 +196,7 @@ impl Driver {
             scenarios,
             total_weight,
             sem: Arc::new(Semaphore::new(cfg.max_in_flight)),
+            tails: Arc::default(),
             transport,
             call: Arc::new(cfg.call),
             default_tuning: cfg.default_tuning,
@@ -279,6 +282,7 @@ impl Driver {
                 self.overload_reject,
                 self.outcomes.clone(),
                 permit,
+                self.tails.clone(),
             );
             // A panic outside the scenario's own boundary (checks, sample
             // rendering, the bookkeeping) still closes the call's in-flight
@@ -294,8 +298,9 @@ impl Driver {
             });
         }
 
-        // Drain: acquiring every permit blocks until all in-flight calls release.
+        // Drain: every permit (in-flight calls), then the lock (release tails).
         let _ = self.sem.acquire_many(self.max_in_flight as u32).await;
+        let _ = self.tails.write().await;
     }
 }
 
@@ -312,6 +317,7 @@ async fn run_one(
     overload_reject: Option<u16>,
     outcomes: Option<Arc<OutcomeSink>>,
     _permit: OwnedSemaphorePermit,
+    tails: Arc<RwLock<()>>,
 ) {
     let wire = outcomes.as_ref().map(|_| CallWire::new(transport.clock.clone()));
     reporter.inc_inflight();
@@ -325,7 +331,7 @@ async fn run_one(
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
     let rtts = CallRtts::new(reporter.clone(), id);
-    let (core, dwells, banner, resolved_input, token, binder, alice, callee_agents) = loop {
+    let (core, dwells, banner, resolved_input, token, net, binder, alice, callee_agents) = loop {
         draw += 1;
         // Resolve THIS call's binding from the attached Test case (pool walk +
         // token expansion): the core From/To/R-URI to fold into the outgoing
@@ -365,16 +371,12 @@ async fn run_one(
                 tuning.drop_nth,
             )
             .with_rtt_sink(rtts.sink());
-        let mux_net = match &wire {
+        let net = Arc::new(match &wire {
             Some(w) => mux_net.with_wire_tap(w.tap()),
             None => mux_net,
-        };
-        let binder = AgentBinder::mux(
-            Arc::new(mux_net),
-            transport.clock.clone(),
-            transport.recv_timeout,
-            record,
-        );
+        });
+        let binder =
+            AgentBinder::mux(net.clone(), transport.clock.clone(), transport.recv_timeout, record);
         binder.seed_ids(next_seed(seed_base));
         if let Some(sink) = &outcomes {
             // The run (and its call-id tag) is the Call-ID nonce: no two share one.
@@ -382,7 +384,7 @@ async fn run_one(
         }
         match bind_agents(&binder, &transport, legs).await {
             Ok((alice, callees)) => {
-                break (core, dwells, banner, resolved_input, token, binder, alice, callees)
+                break (core, dwells, banner, resolved_input, token, net, binder, alice, callees)
             }
             Err(e) => match bind_refusal(&e) {
                 CallOutcome::Rejected(_) if draw < draws => continue,
@@ -466,10 +468,8 @@ async fn run_one(
     };
 
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
-    if failed && !call.teardown_quiesce.is_zero() {
-        for (_, agent) in &callee_agents {
-            agent.release_failed_call(call.teardown_quiesce).await;
-        }
+    if failed {
+        failed_call::release(tails, net, &alice, &callee_agents, call.teardown_quiesce).await;
     }
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —

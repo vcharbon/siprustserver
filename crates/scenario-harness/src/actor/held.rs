@@ -9,10 +9,10 @@ use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
 
-use super::answer::{answer_initial_invite, arm_reject_final, reject_reason};
+use super::answer::{answer_initial_invite, reject_initial, ForkAnswer};
 use super::endpoint::ForkWinner;
 use super::ledger::{ObligationKey, ObligationKind};
-use super::runner::{ActorState, ForkAnswer};
+use super::runner::ActorState;
 use super::state::Observation;
 use crate::{ServerTxn, StepError};
 
@@ -65,7 +65,7 @@ pub(super) async fn ring(
         let tag = early_tag(txn, fork);
         st.early_provisionals.insert(fork.map(str::to_string).unwrap_or_default());
         if reliable {
-            st.unpracked.insert(tag);
+            st.unpracked.entry(tag).or_insert_with(Instant::now);
         }
     }
     // A non-2xx final of a forked transaction is one rung fork's, as the
@@ -90,7 +90,7 @@ pub(super) fn answer_ready(st: &ActorState<'_>, winner: Option<ForkWinner>) -> b
         return false;
     }
     match winner {
-        Some(ForkWinner::Tag(tag)) => !st.unpracked.contains(tag),
+        Some(ForkWinner::Tag(tag)) => !st.unpracked.contains_key(tag),
         Some(ForkWinner::Unrung) | None => st.unpracked.is_empty(),
     }
 }
@@ -126,22 +126,17 @@ pub(super) async fn reject_held(st: &mut ActorState<'_>, status: u16) -> Result<
             detail: format!("Reject goal with the non-final-error status {status}"),
         });
     }
-    let Some(mut txn) = st.held.take() else {
+    let Some(txn) = st.held.take() else {
         return Err(no_held_invite(st.role, "Reject"));
     };
-    txn.respond(status, reject_reason(status)).try_send().await?;
-    arm_reject_final(st, &txn, status);
-    let now = Instant::now();
-    st.obs.record(Observation::LegTerminated { leg: st.role }, now);
-    st.scope.mark_terminated();
-    Ok(())
+    reject_initial(st, txn, status).await
 }
 
 /// Whether a callee's `GoalStep::EarlyRequest` on `fork` may fire: the
 /// INVITE is held and that early dialog's reliable provisional is PRACKed,
 /// so the caller holds the dialog (RFC 3262 §3, RFC 3311 §5.1).
 pub(super) fn early_request_ready(st: &ActorState<'_>, fork: Option<&str>) -> bool {
-    st.held.as_ref().is_some_and(|txn| !st.unpracked.contains(&early_tag(txn, fork)))
+    st.held.as_ref().is_some_and(|txn| !st.unpracked.contains_key(&early_tag(txn, fork)))
 }
 
 /// A callee's request on the early dialog of `fork` of its held INVITE. The

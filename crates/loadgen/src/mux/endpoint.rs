@@ -59,6 +59,8 @@ pub struct MuxNetwork {
     pub(super) rtt_sink: Option<RttSink>,
     /// The call's wire tap; `None` = not watched.
     pub(super) wire_tap: Option<WireTap>,
+    /// The retransmit engine of every endpoint bound on this network.
+    pub(super) engines: Mutex<Vec<Arc<CallTxns>>>,
 }
 
 impl MuxNetwork {
@@ -73,6 +75,17 @@ impl MuxNetwork {
     pub fn with_wire_tap(mut self, tap: WireTap) -> Self {
         self.wire_tap = Some(tap);
         self
+    }
+
+    /// Park until every client transaction this call's endpoints have open
+    /// has ended (final received, or Timer B/F), retransmitting meanwhile:
+    /// what a failed call waits for before its endpoints drop, so its
+    /// teardown CANCEL or BYE survives a loss. Immediate without the engine.
+    pub async fn client_txns_ended(&self) {
+        let engines: Vec<Arc<CallTxns>> = self.engines.lock().unwrap().clone();
+        for txns in engines {
+            txns.clients_ended().await;
+        }
     }
 
     /// The next per-endpoint loss RNG seed (golden-ratio stride so alice/bob/
@@ -146,6 +159,9 @@ impl SignalingNetwork for MuxNetwork {
         let txns = self.retransmit.then(|| {
             Arc::new(CallTxns::new(mux.endpoint.clone(), drop.clone(), mux.stats.clone()))
         });
+        if let Some(txns) = &txns {
+            self.engines.lock().unwrap().push(txns.clone());
+        }
         let leg = uas.as_ref().map(|(label, _)| label.as_str());
         let taps = Taps::new(self.rtt_sink.clone(), self.wire_tap.clone(), leg);
 

@@ -30,14 +30,20 @@ pub const RELEASE_HOLD: Duration = TXN_TIMEOUT;
 /// that owns it. The engine flips `stop` (and wakes the task) when the transaction
 /// is acknowledged or the call ends; the flag is authoritative (the wake is only a
 /// latency optimisation — a lost `Notify` wake is caught by the post-sleep check).
+/// The transaction times out at `deadline` (Timer B/F/H).
 struct ResendCtl {
     stop: AtomicBool,
     notify: tokio::sync::Notify,
+    deadline: tokio::time::Instant,
 }
 
 impl ResendCtl {
     fn new() -> Arc<Self> {
-        Arc::new(Self { stop: AtomicBool::new(false), notify: tokio::sync::Notify::new() })
+        Arc::new(Self {
+            stop: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+            deadline: tokio::time::Instant::now() + TXN_TIMEOUT,
+        })
     }
     fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -45,6 +51,21 @@ impl ResendCtl {
     }
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+    /// Park until the transaction ends: acknowledged, or timed out.
+    async fn ended(&self) {
+        loop {
+            let woken = self.notify.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            if self.stopped() {
+                return;
+            }
+            tokio::select! {
+                _ = woken => {}
+                _ = tokio::time::sleep_until(self.deadline) => return,
+            }
+        }
     }
 }
 
@@ -66,7 +87,7 @@ fn spawn_resender(
 ) {
     tokio::spawn(async move {
         let mut interval = T1;
-        let deadline = tokio::time::Instant::now() + TXN_TIMEOUT;
+        let deadline = ctl.deadline;
         loop {
             tokio::select! {
                 _ = ctl.notify.notified() => return,
@@ -130,9 +151,10 @@ pub(super) struct CallTxns {
 
 #[derive(Default)]
 struct TxnInner {
-    /// Our in-flight client transactions, keyed by the request's top-Via branch →
-    /// its resender (stopped when the response arrives).
-    client: HashMap<String, Arc<ResendCtl>>,
+    /// Our in-flight client transactions, keyed by the request's top-Via branch
+    /// and method (a CANCEL shares its INVITE's branch, RFC 3261 §9.1) → its
+    /// resender (stopped when the response arrives).
+    client: HashMap<(String, String), Arc<ResendCtl>>,
     /// Our proactive 2xx (INVITE server txn) resenders, keyed by (Call-ID, CSeq
     /// number) so the inbound ACK — which carries a *different* branch — can stop them.
     invite_2xx: HashMap<(String, u32), Arc<ResendCtl>>,
@@ -212,6 +234,19 @@ impl CallTxns {
             if cseq_method_label(raw) != "INVITE" {
                 return;
             }
+            // A final ends the INVITE's provisionals: none is retransmitted
+            // after it (RFC 3262 §3, the give-up's 5xx included).
+            if status >= 200 {
+                if let Some(cid) = call_id(raw) {
+                    g.reliable_1xx.retain(|(c, _), ctl| {
+                        let stays = *c != cid;
+                        if !stays {
+                            ctl.stop();
+                        }
+                        stays
+                    });
+                }
+            }
             // Proactive 2xx-until-ACK for an INVITE answer (Timer G).
             if (200..300).contains(&status) {
                 if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_number(raw)) {
@@ -256,12 +291,11 @@ impl CallTxns {
             return;
         }
         let Some(branch) = via_branch(raw) else { return };
-        if let Some(old) = g.client.remove(&branch) {
-            old.stop();
-        }
         let invite = method == "INVITE";
         let ctl = ResendCtl::new();
-        g.client.insert(branch, ctl.clone());
+        if let Some(old) = g.client.insert((branch, method), ctl.clone()) {
+            old.stop();
+        }
         spawn_resender(
             ctl,
             self.endpoint.clone(),
@@ -302,7 +336,8 @@ impl CallTxns {
         let branch = via_branch(raw).unwrap_or_default();
         if is_response(raw) {
             let status = resp_status(raw).unwrap_or(0);
-            let is_invite = cseq_method_label(raw) == "INVITE";
+            let method = cseq_method_label(raw).to_string();
+            let is_invite = method == "INVITE";
             // Stop our client resender: INVITE Timer A stops on the FIRST provisional
             // (incl. `100 Trying`, RFC 3261 §17.1.1.2); non-INVITE only on a final.
             // We deliberately do NOT keep retransmitting the INVITE to force the UAS
@@ -311,7 +346,7 @@ impl CallTxns {
             // the cross-call 18x delivery rate instead).
             let stop = if is_invite { status >= 100 } else { status >= 200 };
             if stop {
-                if let Some(ctl) = g.client.remove(&branch) {
+                if let Some(ctl) = g.client.remove(&(branch.clone(), method)) {
                     ctl.stop();
                 }
             }
@@ -382,6 +417,17 @@ impl CallTxns {
         true
     }
 
+    /// Park until every client transaction open now has ended: its final
+    /// arrived, or Timer B/F expired. Retransmission runs meanwhile, so a
+    /// teardown CANCEL or BYE lost on the wire still reaches its peer.
+    pub(super) async fn clients_ended(&self) {
+        let open: Vec<Arc<ResendCtl>> =
+            self.inner.lock().unwrap().client.values().cloned().collect();
+        for ctl in open {
+            ctl.ended().await;
+        }
+    }
+
     /// Stop every resender and drop tracked state (call ended).
     pub(super) fn shutdown(&self) {
         let mut g = self.inner.lock().unwrap();
@@ -413,5 +459,7 @@ impl CallTxns {
 // reliable-1xx-until-PRACK server obligation. These tests drive `CallTxns`
 // directly over a loopback UDP pair on the real clock (T1 = 500 ms, so each
 // stays a few seconds).
+#[cfg(test)]
+mod teardown_tests;
 #[cfg(test)]
 mod tests;

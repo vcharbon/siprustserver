@@ -18,6 +18,7 @@ mod held;
 mod rang;
 mod reception_observer;
 mod reinvite_ack_body;
+mod reliable_give_up;
 mod reneg;
 mod request_pick;
 mod script_flow;

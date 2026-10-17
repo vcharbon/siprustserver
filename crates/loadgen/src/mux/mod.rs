@@ -479,6 +479,7 @@ impl MuxCore {
             drop_nth,
             rtt_sink: None,
             wire_tap: None,
+            engines: Mutex::new(Vec::new()),
         }
     }
 }

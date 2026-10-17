@@ -1,15 +1,18 @@
 //! The UAS answer/reject primitives shared by every path that responds to an
 //! initial INVITE — the disposition entry policy ([`apply_disposition`]), the
 //! single answer-200 recipe ([`answer_initial_invite`]), the reject-final
-//! hop-ACK obligation ([`arm_reject_final`]), and the teardown discharge.
+//! hop-ACK obligation ([`arm_reject_final`]), the forking answer plan
+//! ([`ForkAnswer`]), and the teardown discharge.
 //! The reactive in-dialog answer table does NOT live here — see
 //! [`super::react`].
+
+use std::collections::HashSet;
 
 use tokio::time::Instant;
 
 use super::endpoint::{Disposition, ForkWinner};
 use super::ledger::{ObligationKey, ObligationKind};
-use super::runner::{ActorState, ForkAnswer, ParkedRequest, PendingRejectAck, TimedAnswer};
+use super::runner::{ActorState, ParkedRequest, PendingRejectAck, TimedAnswer};
 use super::script::scripted_wants_initial;
 use super::state::Observation;
 use crate::agent::top_via_branch;
@@ -29,6 +32,45 @@ pub(super) fn arm_reject_final(st: &mut ActorState<'_>, uas: &ServerTxn, code: u
         Instant::now(),
     );
     st.pending_reject_ack = Some(PendingRejectAck { key, call_id: call_id.to_string(), branch });
+}
+
+/// The forking-UAS answer plan carried from the 18x emission to the moment the
+/// INVITE is answered (the timed-answer arm, or the releasing PRACK): the `200`
+/// goes out under the `winner` (adopted as the transaction's dialog tag), then
+/// optionally a LATE `200` under `loser_late_200`.
+#[derive(Debug, Clone)]
+pub(super) struct ForkAnswer {
+    pub(super) winner: ForkWinner,
+    pub(super) loser_late_200: Option<&'static str>,
+    /// Reliable forks whose PRACK has not arrived; an unrung winner's `200`
+    /// waits until it is empty.
+    pub(super) unpracked: HashSet<&'static str>,
+}
+
+impl ForkAnswer {
+    /// Note the PRACK of fork `tag`; true when it releases the held `200`
+    /// (the winner's own PRACK, or the last fork's PRACK for an unrung winner).
+    pub(super) fn releases_on_prack(&mut self, tag: &str) -> bool {
+        self.unpracked.remove(tag);
+        match self.winner {
+            ForkWinner::Tag(w) => tag == w,
+            ForkWinner::Unrung => self.unpracked.is_empty(),
+        }
+    }
+}
+
+/// Send the non-2xx final `code` on the initial INVITE `uas`: the leg ends
+/// and the final awaits its hop-ACK.
+pub(super) async fn reject_initial(
+    st: &mut ActorState<'_>,
+    mut uas: ServerTxn,
+    code: u16,
+) -> Result<(), StepError> {
+    uas.respond(code, reject_reason(code)).try_send().await?;
+    arm_reject_final(st, &uas, code);
+    st.obs.record(Observation::LegTerminated { leg: st.role }, Instant::now());
+    st.scope.mark_terminated();
+    Ok(())
 }
 
 /// Discharge this leg's still-open in-dialog acknowledgement obligations because
@@ -142,6 +184,7 @@ pub(super) async fn apply_disposition(
     // from a previous initial (a reroute-retry to this actor) must not leak
     // into the policy snapshot. A retransmit re-inserts the same tags.
     st.early_provisionals.clear();
+    st.unpracked.clear();
     st.ctx.anchor(&st.agent, "initialInvite", uas.request());
     // The rerouted winning leg stamps `rerouted` on receiving its INVITE
     // (default NONE for every other body — see `CtxFeed::on_invite_rx`).
@@ -200,6 +243,7 @@ pub(super) async fn apply_disposition(
                         .with_sdp(sdp)
                         .try_send()
                         .await?;
+                    st.unpracked.entry((*tag).to_string()).or_insert(now);
                 } else {
                     uas.respond(180, "Ringing").with_to_tag(tag).try_send().await?;
                 }
@@ -224,12 +268,7 @@ pub(super) async fn apply_disposition(
                     Some(TimedAnswer { at: Instant::now() + ring, uas, fork: Some(fork) });
             }
         }
-        Disposition::Reject(code) => {
-            uas.respond(code, reject_reason(code)).try_send().await?;
-            arm_reject_final(st, &uas, code);
-            st.obs.record(Observation::LegTerminated { leg: st.role }, now);
-            st.scope.mark_terminated();
-        }
+        Disposition::Reject(code) => reject_initial(st, uas, code).await?,
         // RFC 3262: answer RELIABLY with a 183 (Require:100rel + RSeq:1 + the
         // answer SDP) and HOLD the INVITE txn — the 200 to the INVITE waits for
         // the PRACK (MUST-014, fired from the PRACK arm of `react_request`).
@@ -240,6 +279,7 @@ pub(super) async fn apply_disposition(
         Disposition::ReliableAnswer | Disposition::ReliableAnswerEarlyUpdate => {
             let sdp = st.answer_body();
             uas.respond(183, "Session Progress").reliable(1).with_sdp(sdp).try_send().await?;
+            st.unpracked.insert(uas.dialog().local_tag().to_string(), now);
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.pending_prack_answer = Some(uas);
@@ -289,6 +329,7 @@ pub(super) fn reject_reason(code: u16) -> &'static str {
         603 => "Decline",
         487 => "Request Terminated",
         480 => "Temporarily Unavailable",
+        504 => "Server Time-out",
         _ => "Error",
     }
 }

@@ -56,6 +56,7 @@ pub mod catalogue;
 pub mod class;
 pub mod ctx;
 pub mod driver;
+mod failed_call;
 mod hist;
 mod metrics_server;
 mod mix_entry;

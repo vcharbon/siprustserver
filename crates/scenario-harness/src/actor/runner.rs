@@ -1,8 +1,8 @@
 //! The live per-endpoint state ([`ActorState`]) and the reactor loop
 //! ([`run_actor`]) — the `select!` that races inbound reactions, the goal
-//! cursor, the timed answer, the reject-hop-ACK watch, and the glare retries
-//! on ONE task. What each arm DOES lives in its own module: reactions in
-//! [`super::react`]/[`super::response`], goal steps in [`super::drive`].
+//! cursor, the timed answer, the PRACK give-up, the reject-hop-ACK watch and
+//! the glare retries on ONE task. What each arm DOES lives in its own module:
+//! reactions in [`super::react`]/[`super::response`], goal steps in [`super::drive`].
 //!
 //! The actor owns **no retransmit timers** — it answers idempotently and keeps
 //! its inbox open; the transport (`loadgen::mux::CallTxns`) or the SUT owns
@@ -19,11 +19,12 @@ use tokio::time::Instant;
 
 use sip_message::{CseqDeviation, DelayedAutomatic};
 
-use super::answer::fire_timed_answer;
+use super::answer::{fire_timed_answer, ForkAnswer};
 use super::delta::AcceptedDeltaPolicy;
 use super::drive::drive_goal;
 use super::ending::Expect;
-use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, ForkWinner, MediaState};
+use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
+use super::give_up;
 use super::goals::{GoalCursor, GoalStep, RequestKind};
 use super::ledger::ObligationKey;
 use super::observe::ReceptionObserver;
@@ -43,31 +44,6 @@ pub(super) struct ParkedRequest {
     pub(super) txn: ServerTxn,
     /// Whether this is the dialog-creating INVITE (no To-tag).
     pub(super) initial: bool,
-}
-
-/// The forking-UAS answer plan carried from the 18x emission to the moment the
-/// INVITE is answered (the timed-answer arm, or the releasing PRACK): the `200`
-/// goes out under the `winner` (adopted as the transaction's dialog tag), then
-/// optionally a LATE `200` under `loser_late_200`.
-#[derive(Debug, Clone)]
-pub(super) struct ForkAnswer {
-    pub(super) winner: ForkWinner,
-    pub(super) loser_late_200: Option<&'static str>,
-    /// Reliable forks whose PRACK has not arrived; an unrung winner's `200`
-    /// waits until it is empty.
-    pub(super) unpracked: HashSet<&'static str>,
-}
-
-impl ForkAnswer {
-    /// Note the PRACK of fork `tag`; true when it releases the held `200`
-    /// (the winner's own PRACK, or the last fork's PRACK for an unrung winner).
-    pub(super) fn releases_on_prack(&mut self, tag: &str) -> bool {
-        self.unpracked.remove(tag);
-        match self.winner {
-            ForkWinner::Tag(w) => tag == w,
-            ForkWinner::Unrung => self.unpracked.is_empty(),
-        }
-    }
 }
 
 /// A ring/answer scheduled for `at` — held as its own interruptible arm so a
@@ -174,9 +150,9 @@ pub struct ActorState<'c> {
     /// A [`Disposition::Held`] callee's initial INVITE server transaction,
     /// rung, used for early-dialog requests and answered by its goals.
     pub(super) held: Option<ServerTxn>,
-    /// The To-tags of reliable provisionals this callee sent that no PRACK
-    /// has acknowledged yet (RFC 3262 §3).
-    pub(super) unpracked: HashSet<String>,
+    /// The To-tags of reliable provisionals no PRACK has acknowledged yet,
+    /// each with when it was first sent (RFC 3262 §3, [`super::give_up`]).
+    pub(super) unpracked: HashMap<String, Instant>,
     /// The early dialogs this callee sent requests on, by local tag: the
     /// dialog its 2xx confirms continues that dialog's CSeq (RFC 3261
     /// §12.2.1.1).
@@ -376,7 +352,7 @@ impl<'c> ActorState<'c> {
             pending_prack_answer: None,
             held_silent: None,
             held: None,
-            unpracked: HashSet::new(),
+            unpracked: HashMap::new(),
             early_dialogs: HashMap::new(),
             pracked_rseqs: HashSet::new(),
             fork_answer: None,
@@ -486,6 +462,7 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
     // endpoint — the seat its pump delivers to. Same vocabulary either way.
     let mut inbox = st.inbox.take().unwrap_or_else(|| Inbox::Own(agent.clone()));
     loop {
+        let give_up_at = give_up::due(st);
         tokio::select! {
             inbound = inbox.recv() => {
                 match inbound {
@@ -533,6 +510,10 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
                     default_react(st, m).await?;
                 }
                 fire_timed_answer(st).await?;
+            }
+            // A reliable provisional went 64·T1 without its PRACK.
+            _ = give_up::sleep(give_up_at), if give_up_at.is_some() => {
+                give_up::fire(st, &mut inbox).await?;
             }
             // Our non-2xx final's hop-ACK was sighted (the receive core claims
             // it below `recv_any`, so it never surfaces as an inbound) — close
