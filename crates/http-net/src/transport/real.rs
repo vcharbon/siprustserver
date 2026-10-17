@@ -1,8 +1,10 @@
 //! `RealHttpNetwork` — the production transport (feature `real`).
 //!
-//! Server: a tokio `TcpListener` accept loop handing each connection to hyper's
-//! HTTP/1.1 `serve_connection` (keep-alive on by default, so a client's pooled
-//! connection serves many requests). Client: a pooled `reqwest::Client` built
+//! Server: a tokio `TcpListener` (`listener`: explicit backlog, paced accept
+//! errors) handing each connection, `TCP_NODELAY` set, to hyper's HTTP/1.1
+//! `serve_connection` (keep-alive on by default, so a client's pooled
+//! connection serves many requests). Each request is answered with its remote
+//! address (`peer`) and its receipt (`receipt`) in scope. Client: a pooled `reqwest::Client` built
 //! from [`ClientSettings`] (connect timeout, idle timeout, TCP keepalive, TCP
 //! user timeout, a ceiling on every request), shared by the addressed
 //! [`request`](HttpTransport::request); a backend gets a client of its own
@@ -22,12 +24,13 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, JoinSet};
 
+use super::receipt::{self, Receipt};
 use super::{
-    BindError, HttpAnswer, HttpClient, HttpError, HttpRequest, HttpResponse, HttpServerHandle,
-    HttpService, HttpTransport,
+    listener, peer, BindError, HttpAnswer, HttpClient, HttpError, HttpRequest, HttpResponse,
+    HttpServerHandle, HttpService, HttpTransport,
 };
 use crate::resolved_target::ResolvedTarget;
 use crate::settings::ClientSettings;
@@ -83,7 +86,7 @@ impl HttpTransport for RealHttpNetwork {
         addr: SocketAddr,
         service: Arc<dyn HttpService>,
     ) -> Result<Box<dyn HttpServerHandle>, BindError> {
-        let listener = TcpListener::bind(addr).await.map_err(|e| {
+        let listener = listener::bind(addr).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
                 BindError::AlreadyInUse(addr)
             } else {
@@ -98,10 +101,19 @@ impl HttpTransport for RealHttpNetwork {
             let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
-                    accepted = listener.accept() => {
-                        let Ok((stream, peer)) = accepted else { continue };
-                        connections.spawn(serve_connection(stream, peer, service.clone()));
-                    }
+                    accepted = listener.accept() => match accepted {
+                        Ok((stream, peer)) => {
+                            // Answers are small: none waits on Nagle for the client's ACK.
+                            let _ = stream.set_nodelay(true);
+                            connections.spawn(serve_connection(stream, peer, service.clone()));
+                        }
+                        Err(e) => {
+                            if let Some(backoff) = listener::accept_backoff(&e) {
+                                tracing::debug!(error = %e, ?backoff, "http server accept failed");
+                                tokio::time::sleep(backoff).await;
+                            }
+                        }
+                    },
                     Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 }
             }
@@ -131,6 +143,8 @@ impl HttpTransport for RealHttpNetwork {
 async fn serve_connection(stream: TcpStream, peer: SocketAddr, service: Arc<dyn HttpService>) {
     let io = TokioIo::new(stream);
     let handler = service_fn(move |req: Request<Incoming>| {
+        // hyper calls this once the head is read: the receipt precedes the body.
+        let received = Receipt::now();
         let svc = service.clone();
         async move {
             let method = req.method().to_string();
@@ -149,7 +163,8 @@ async fn serve_connection(stream: TcpStream, peer: SocketAddr, service: Arc<dyn 
             let body =
                 req.into_body().collect().await.map(|c| c.to_bytes().to_vec()).unwrap_or_default();
             let req = HttpRequest { method, path, headers, body };
-            let resp = match super::peer::scope(peer, svc.answer(req)).await {
+            let answer = receipt::scope(received, peer::scope(peer, svc.answer(req)));
+            let resp = match answer.await {
                 HttpAnswer::Response(resp) => resp,
                 HttpAnswer::Abort => {
                     return Err(std::io::Error::new(

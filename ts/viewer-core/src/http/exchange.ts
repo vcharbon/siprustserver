@@ -25,6 +25,10 @@ export interface HttpExchange {
   readonly ordinal: number
   /** When the request WENT OUT: ms from the start of the run, the recording's own origin. */
   readonly atMs: number
+  /** When the server received it: absolute Unix µs; absent where the server stated none. */
+  readonly receivedAtUs?: number
+  /** µs from the server's receipt to its answer; absent where the server stated none. */
+  readonly processUs?: number
   /** Where the request went; absent where the run states no destination. */
   readonly dst?: string
   readonly method: string
@@ -51,9 +55,14 @@ export interface HttpExchanges {
 /** A run that recorded no exchange. */
 export const NO_HTTP_EXCHANGES: HttpExchanges = { exchanges: [], warnings: [] }
 
-/** The exchange's one-line head: what was asked, and how it was answered. */
+/** The server's process time as the head states it, in ms. */
+const processTime = (processUs: number | undefined): string =>
+  processUs === undefined ? "" : ` in ${(processUs / 1000).toFixed(3)} ms`
+
+/** The exchange's one-line head: what was asked, how it was answered, and how fast. */
 export const httpExchangeLabel = (exchange: HttpExchange): string =>
-  `${exchange.method} ${exchange.path} -> ${exchange.status ?? `no answer (${exchange.error ?? "unstated"})`}`
+  `${exchange.method} ${exchange.path} -> ${exchange.status ?? `no answer (${exchange.error ?? "unstated"})`}` +
+  processTime(exchange.processUs)
 
 /** A payload as the export prints it: JSON indented, a string as itself. */
 export const httpBodyText = (body: unknown): string =>

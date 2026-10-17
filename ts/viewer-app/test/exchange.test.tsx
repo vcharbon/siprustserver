@@ -62,6 +62,12 @@ describe("the exchange pane", () => {
     expect(markup).toContain("POST /route/failure -&gt; no answer (timed out")
   })
 
+  it("states the server's process time beside the status, where the server stated one", () => {
+    const timed = renderToStaticMarkup(<Exchange exchanges={[{ ...exchanges[0]!, processUs: 412 }]} />)
+    expect(timed).toContain("POST /route?debug=true -&gt; 200 in 0.412 ms")
+    expect(markup).not.toContain(" ms<")
+  })
+
   it("folds every payload away, and mounts it under the summary a click opens", () => {
     // No `<details open>`: every payload starts closed.
     expect(markup).not.toContain("<details open")

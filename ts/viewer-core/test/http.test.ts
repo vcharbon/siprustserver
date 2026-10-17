@@ -83,4 +83,11 @@ describe("fullLadderToText", () => {
     const failed = [exchange({ ordinal: 1, atMs: 0, path: "/route", status: undefined, error: "connection cut" })]
     expect(fullLadderToText(layout, failed)).toContain("POST /route -> no answer (connection cut)")
   })
+
+  it("states the server's process time beside the answer, where the server stated one", () => {
+    const timed = [exchange({ ordinal: 1, atMs: 0, path: "/route", processUs: 1874 })]
+    expect(fullLadderToText(layout, timed)).toContain("POST /route -> 200 in 1.874 ms")
+    const untimed = [exchange({ ordinal: 1, atMs: 0, path: "/route" })]
+    expect(fullLadderToText(layout, untimed)).not.toMatch(/-> 200 in /)
+  })
 })

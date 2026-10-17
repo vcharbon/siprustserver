@@ -22,7 +22,9 @@
 //!   cannot use real HTTP. This is the workhorse.
 //! - `RealHttpNetwork` — hyper server + a pooled `reqwest` client; **feature
 //!   `real`**. Its tests run on a real
-//!   (non-paused) runtime.
+//!   (non-paused) runtime. The server listens with a 4096 backlog, sets
+//!   `TCP_NODELAY` on every connection, and answers each request with its
+//!   [`Receipt`] in scope: when its head arrived, before the body.
 //! - [`RecordingHttpNetwork`] — a test decorator that records both sides of
 //!   every exchange onto the `layer-harness` `Recorder` ([`HTTP_TAG`]), so HTTP
 //!   joins the run's ladder; [`to_http_entries`] reads the channel back.
@@ -66,6 +68,6 @@ pub use transport::RealHttpNetwork;
 pub use transport::{
     to_http_entries, AddressedClient, Behaviour, BindError, CapturedExchange, ExchangeOutcome,
     Fault, HttpAnswer, HttpClient, HttpError, HttpNetworkEvent, HttpOutcome, HttpRequest,
-    HttpResponse, HttpServerHandle, HttpService, HttpTransport, RecordedHttpEntry,
+    HttpResponse, HttpServerHandle, HttpService, HttpTransport, Receipt, RecordedHttpEntry,
     RecordingHttpNetwork, SimulatedHttpNetwork, HTTP_TAG,
 };

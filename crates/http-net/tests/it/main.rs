@@ -10,6 +10,7 @@ mod backend_breaker;
 mod classify;
 mod real;
 mod real_backend;
+mod receipt;
 mod recording;
 mod scripted;
 mod scripted_codec;
