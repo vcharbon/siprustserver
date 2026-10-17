@@ -7,15 +7,15 @@ use call::helpers::{
     abandon_leg, record_dialled_invite_final, record_termination, retire_early_dialogs, Scope,
     TERMINATING_TIMEOUT_MS,
 };
-use call::{Call, Dialog, DialogId, Leg, LegKind, LegState, TerminationCause, TimerKey, TimerType};
+use call::{
+    Call, DialogId, HeldRequest, Leg, LegKind, LegState, TerminationCause, TimerKey, TimerType,
+};
 use sip_message::generators::{
-    self, GenerateInDialogRequestOpts, InDialogMethod, InviteClientTransactionHandle, RelayScope,
-    RelaySituation, RelayedMessage,
+    self, InviteClientTransactionHandle, RelayScope, RelaySituation, RelayedMessage,
 };
 use sip_message::header::{q850_cause_alone, readable_reasons, HeaderName, MediaType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{hops, Method, SipHeader, SipMessage, SipParser};
-use sip_txn::TxnKind;
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
@@ -263,117 +263,6 @@ impl ActionExecutor<'_> {
         *call = call::helpers::update_leg(call.clone(), leg_id, settle_ended_leg);
     }
 
-    /// BYE `leg_id`'s confirmed dialog carrying `reason` and `relayed`
-    /// (RFC 3261 §15): the PRACKs the leg's responders are owed leave first,
-    /// an offer left to the ACK answered rejecting (RFC 3262 §4, §5), then a
-    /// 2xx still unACKed is ACKed bare (§13.2.2.4), then the BYE.
-    fn send_bye(
-        &self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-        leg_id: &str,
-        reason: Option<&str>,
-        relayed: Relayed,
-        hops: Option<u32>,
-    ) {
-        let ack_owed = relay::owes_bare_ack(call, leg_id);
-        self.settle_owed_pracks(call, fx, Owed::Leg(leg_id), Settle::Ending);
-        if ack_owed {
-            self.ack_own_bare(call, fx, leg_id);
-        }
-        let bye = if leg_id == call.a_leg.leg_id {
-            self.bye_to_leg_a(call, reason, relayed, hops)
-        } else {
-            self.bye_to_b_leg(call, leg_id, reason, relayed, hops)
-        };
-        if let Some(e) = bye {
-            fx.outbound.push(e);
-        }
-    }
-
-    fn bye_to_b_leg(
-        &self,
-        call: &Call,
-        leg_id: &str,
-        reason: Option<&str>,
-        relayed: Relayed,
-        hops: Option<u32>,
-    ) -> Option<OutboundSipEffect> {
-        let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
-        let d = leg.dialogs.confirmed()?;
-        if is_media(leg) {
-            let relayed = Relayed { headers: without_reason(&relayed.headers), ..relayed };
-            return self.bye_on_dialog(relay::CallMarks::of(call), leg, d, None, relayed, hops);
-        }
-        self.bye_on_dialog(relay::CallMarks::of(call), leg, d, reason, relayed, hops)
-    }
-
-    fn bye_to_leg_a(
-        &self,
-        call: &Call,
-        reason: Option<&str>,
-        relayed: Relayed,
-        hops: Option<u32>,
-    ) -> Option<OutboundSipEffect> {
-        let d = call.a_leg.dialogs.confirmed()?;
-        self.bye_on_dialog(relay::CallMarks::of(call), &call.a_leg, d, reason, relayed, hops)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn bye_on_dialog(
-        &self,
-        marks: relay::CallMarks,
-        leg: &Leg,
-        d: &Dialog,
-        reason: Option<&str>,
-        relayed: Relayed,
-        hops: Option<u32>,
-    ) -> Option<OutboundSipEffect> {
-        let leg_id = leg.leg_id.as_str();
-        let dialog = relay::to_gen_dialog(leg, d);
-        let branch = self.id_gen.new_branch();
-        let mut extra_headers: Vec<SipHeader> = reason
-            .map(|r| {
-                vec![SipHeader { name: "Reason".to_string().into(), value: r.to_string().into() }]
-            })
-            .unwrap_or_default();
-        // The firing rule's own statement is the more specific one and stands;
-        // every other name the releasing peer sent rides beside it, EVERY line
-        // of it: a set-like header the peer split over several lines (`Allow`,
-        // RFC 3261 §7.3.1) is one set, and keeping only its first line would
-        // relay a one-token set the peer never stated.
-        let stated = extra_headers.clone();
-        for header in relayed.headers {
-            let name = HeaderName::from(header.name.as_str());
-            if !stated.iter().any(|h| name.matches(&h.name)) {
-                extra_headers.push(header);
-            }
-        }
-        // Per-dialog CSeq (§12.2.1.1): `generate_in_dialog_request` defaults to
-        // this dialog's `our_cseq + 1`, the next sequence number within THIS
-        // dialog (a forked sibling's CSeq is irrelevant — distinct dialog).
-        let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, marks, leg_id, branch)),
-            extra_headers,
-            body: relayed.body,
-            content_type: relayed.content_type,
-            max_forwards: hops,
-            ..Default::default()
-        };
-        let res = generators::generate_in_dialog_request(InDialogMethod::Bye, &dialog, &opts);
-        let dest = relay::target_dest(&dialog.remote_target);
-        let (req, dest) =
-            relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, res.request, dest);
-        Some(OutboundSipEffect {
-            body: OutboundBody::Request(req),
-            mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
-            destination: dest,
-            label: format!("BYE → {leg_id}"),
-            leg_id: Some(leg_id.to_string()),
-            provenance: Provenance::Authored,
-        })
-    }
-
     /// Answers every relayed non-INVITE request still pending toward `leg_id`
     /// where that leg goes `Terminated`: its target's answer relays no further,
     /// and RFC 3261 §8.2.6 owes the originator a final. A PRACK draws 200 — it
@@ -545,11 +434,11 @@ fn own_release_reason<'a>(ctx: &RuleContext<'a>) -> Option<&'a str> {
 
 /// A media leg is the dialling service's resource, not a party a release
 /// cause informs: no `Reason` reaches it, relayed or the stack's own.
-fn is_media(leg: &call::Leg) -> bool {
+pub(super) fn is_media(leg: &call::Leg) -> bool {
     call::helpers::leg_kind(leg) == LegKind::Media
 }
 
-fn without_reason(headers: &[SipHeader]) -> Vec<SipHeader> {
+pub(super) fn without_reason(headers: &[SipHeader]) -> Vec<SipHeader> {
     headers.iter().filter(|h| !HeaderName::Reason.matches(&h.name)).cloned().collect()
 }
 
@@ -565,9 +454,9 @@ fn deactivate_service_machines(call: &mut Call) {
 /// What a minted teardown request carries of the peer's: its end-to-end
 /// headers and, on a BYE minted from the peer's BYE, its body.
 pub(super) struct Relayed {
-    headers: Vec<SipHeader>,
-    body: Vec<u8>,
-    content_type: Option<MediaType>,
+    pub(super) headers: Vec<SipHeader>,
+    pub(super) body: Vec<u8>,
+    pub(super) content_type: Option<MediaType>,
 }
 
 impl Relayed {
@@ -577,8 +466,23 @@ impl Relayed {
     }
 
     /// Headers alone, no body.
-    fn headers(headers: Vec<SipHeader>) -> Self {
+    pub(super) fn headers(headers: Vec<SipHeader>) -> Self {
         Self { headers, body: Vec::new(), content_type: None }
+    }
+
+    /// The BYE carrying these and `reason`, `hops`, held as what it says.
+    pub(super) fn held_bye(self, reason: Option<&str>, hops: Option<u32>) -> HeldRequest {
+        HeldRequest::Bye {
+            reason: reason.map(str::to_string),
+            headers: self
+                .headers
+                .iter()
+                .map(|h| (h.name.to_string(), h.value.to_string()))
+                .collect(),
+            body: self.body,
+            content_type: self.content_type.map(|t| t.to_string()),
+            max_forwards: hops,
+        }
     }
 }
 

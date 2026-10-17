@@ -178,7 +178,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                     c_leg_id: None,
                     refer_cseq: Some(req.cseq().seq()),
                     started_at_ms: ctx.now_ms,
-                    last_c_leg_notified_status: None,
+                    last_c_leg_provisional_status: None,
                     c_initial_sdp: None,
                     subscription_terminated: false,
                 };

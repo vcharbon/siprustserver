@@ -208,10 +208,6 @@ async fn refer_allow_full_c_reliable_provisional_is_acknowledged_by_the_stack() 
     charlie_uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
     charlie.receive("PRACK").await.respond(200, "OK").await;
 
-    let mut n183 = bob.receive("NOTIFY").await;
-    assert_notify(&n183, "active", "SIP/2.0 183");
-    n183.respond(200, "OK").await;
-
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     charlie.receive("ACK").await;
 

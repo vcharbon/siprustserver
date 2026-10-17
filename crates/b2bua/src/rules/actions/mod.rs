@@ -13,6 +13,8 @@
 //! - `create_leg` — the new leg's INVITE, opening the attempt it dials
 //! - `originate` — requests the B2BUA sends itself (re-INVITE,
 //!   NOTIFY, in-dialog probes)
+//! - `own_notify` — this stack's requests held behind its own unanswered
+//!   NOTIFY on a dialog
 //! - `prack` — the PRACKs this stack owes responders, settled in one step
 //! - `provisional_arrival` — the engine's record of a reliable provisional
 //!   as it arrives, before the rules
@@ -21,12 +23,14 @@
 //! - `ladder` — the dialog-level retransmission ladders the framework owns
 //!   (ADR-0032 X4): arm / repeat / discharge, keyed by obligation
 //! - `retire` — leaving a scope: its ladders end and its timers are disarmed
-//! - `teardown` — termination policy + BYE/CANCEL builders
+//! - `teardown` — termination policy + the CANCEL builder
+//! - `bye` — the BYE this stack sends on a confirmed dialog
 //! - `reinvite_cancel` — the transaction-scoped CANCEL of a relayed re-INVITE
 //! - `select` — shared leg/dialog selection views
 //! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
 
 mod ack_leg;
+mod bye;
 mod confirm;
 mod create_leg;
 mod dialog_end;
@@ -35,6 +39,7 @@ mod dispatch;
 mod ladder;
 mod lost_round;
 mod originate;
+mod own_notify;
 mod prack;
 mod provisional_arrival;
 mod reinvite_cancel;
@@ -57,6 +62,7 @@ use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 
 use b2bua_sdk::model::{RuleAction, RuleContext};
 
+pub(crate) use own_notify::holds_requests;
 pub use prack::{Owed, Settle};
 pub(crate) use provisional_arrival::invite_open;
 

@@ -109,7 +109,6 @@ async fn a_release_cancels_a_leg_still_ringing_on_an_answered_call() {
     s.bob.receive("NOTIFY").await.respond(200, "OK").await;
     let mut at_charlie = charlie.receive("INVITE").await;
     at_charlie.respond(180, "Ringing").await;
-    s.bob.receive("NOTIFY").await.respond(200, "OK").await;
 
     let mark = s.h.wire_entries().len();
     assert_eq!(s.b2bua.release_all(), ReleasedAll { released: 1, aborted: 0 });

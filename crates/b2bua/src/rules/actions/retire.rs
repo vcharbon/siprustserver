@@ -42,13 +42,15 @@ impl ActionExecutor<'_> {
 }
 
 /// Whether a timer outlives the start of the call's termination: the
-/// teardown's own safety net, the limiter refresh of a call that holds its
+/// teardown's own safety net, the wait of a BYE held behind this stack's own
+/// NOTIFY, the limiter refresh of a call that holds its
 /// admission until it ends, and the deadline of an answer the call awaits off
 /// its turn (ADR-0039), whose answer still settles what the request holds.
 fn outlives_termination(timer_type: &TimerType) -> bool {
     matches!(
         timer_type,
         TimerType::TerminatingTimeout
+            | TimerType::NotifyAnswerCap
             | TimerType::LimiterRefresh
             | TimerType::ServiceHttpAnswer { .. }
             | TimerType::ServiceAdmitAnswer { .. }

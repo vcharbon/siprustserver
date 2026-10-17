@@ -1,6 +1,5 @@
-//! CRinging phase: the transfer target C is being dialed — progress NOTIFYs
-//! toward the referrer, C's initial answer (→ c-realign), and the failure /
-//! no-answer terminals.
+//! CRinging phase: the transfer target C is being dialed — C's provisionals,
+//! its initial answer (→ c-realign), and the failure / no-answer terminals.
 
 use b2bua_sdk::provisional::absorbed_provisional_actions;
 use b2bua_sdk::sm_rule;
@@ -9,26 +8,25 @@ use sip_message::Method;
 
 use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::refer_transfer::notify::{
-    notify, SUB_STATE_ACTIVE_60, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
+    notify, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
 use crate::rules::refer_transfer::ok;
 use crate::rules::{relay, Terminal};
 use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use call::TimerKey;
 
-/// transfer-c-1xx-to-notify — C 1xx → NOTIFY active (deduped). The referrer's
-/// peer is answered, so C's provisional is shown to no one: C keeps what it is
-/// owed (`Early`, a PRACK on a reliable one, the CDR event) and the referrer
-/// hears of the progress.
-pub(super) fn c_1xx_to_notify() -> RuleDefinition {
+/// transfer-c-1xx-absorb — C 1xx. The referrer's peer is answered, so C's
+/// provisional is shown to no one: C keeps what it is owed (`Early`, a PRACK
+/// on a reliable one, the CDR event, accounted once per distinct status). The
+/// referrer hears of no progress: its subscription carries the immediate
+/// NOTIFY and the final one alone (RFC 3515 §3.10).
+pub(super) fn c_1xx_absorb() -> RuleDefinition {
     sm_rule! {
-        id: "transfer-c-1xx-to-notify",
+        id: "transfer-c-1xx-absorb",
         machine: TRANSFER_MACHINE,
         active: [ Phase::CRinging ],
         transitions: [],
-        effects: [
-            Effect::Originate { method: Method::Notify, label: "NOTIFY active (C progress) → referrer" },
-        ],
+        effects: [],
         matcher: Match::response()
             .method("INVITE")
             .status_class(1)
@@ -37,18 +35,15 @@ pub(super) fn c_1xx_to_notify() -> RuleDefinition {
                 state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
             }),
         handle: |ctx| {
-            let st = state(ctx)?.clone();
+            let st = state(ctx)?;
             let resp = ctx.response()?;
             let mut actions = absorbed_provisional_actions(ctx);
-            // Dedupe identical repeats against the *last* status only: the
-            // repeat draws no NOTIFY and is accounted no second time.
-            if st.last_c_leg_notified_status == Some(resp.status()) {
+            if st.last_c_leg_provisional_status == Some(resp.status()) {
                 actions.retain(|a| !matches!(a, RuleAction::AddCdrEvent { .. }));
                 return ok(actions);
             }
             let mut new_state = st.clone();
-            new_state.last_c_leg_notified_status = Some(resp.status());
-            actions.extend(notify(&st, SUB_STATE_ACTIVE_60, resp.status(), resp.reason()));
+            new_state.last_c_leg_provisional_status = Some(resp.status());
             actions.push(RuleAction::SetTransfer { state: Some(new_state) });
             ok(actions)
         },

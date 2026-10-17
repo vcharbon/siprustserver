@@ -39,7 +39,7 @@ define_service! {
         authorizing::http_reject(),
         authorizing::http_allow(),
         authorizing::http_timeout(),
-        c_ringing::c_1xx_to_notify(),
+        c_ringing::c_1xx_absorb(),
         c_ringing::c_200_initial(),
         c_ringing::c_fail_initial(),
         c_ringing::c_no_answer(),

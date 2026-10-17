@@ -4,7 +4,7 @@
 //! relaying an *inbound* request is [`super::relay_request`]'s.
 
 use call::helpers::bump_our_cseq;
-use call::Call;
+use call::{Call, DialogId, HeldRequest};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{Event, HeaderValue, SubscriptionState};
 use sip_message::{Method, SipStr};
@@ -36,17 +36,46 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
         body: &[u8],
     ) {
-        let idx = match leg_index(call, leg_id) {
-            Some(i) => i,
-            None => return,
+        let Some(id) = leg_index(call, leg_id)
+            .and_then(|i| call::helpers::carrying_dialog(leg_at(call, i)))
+            .map(|d| d.id())
+        else {
+            return;
         };
-        let dialog = match call::helpers::carrying_dialog(leg_at(call, idx)) {
-            Some(d) => d.clone(),
-            None => return,
+        if self.held_behind_notify(call, leg_id, &id) {
+            let notify = HeldRequest::Notify {
+                event: event.to_string(),
+                subscription_state: subscription_state.to_string(),
+                content_type: content_type.map(str::to_string),
+                body: body.to_vec(),
+            };
+            self.hold(call, fx, leg_id, &id, notify);
+            return;
+        }
+        self.notify_now(call, fx, leg_id, &id, event, subscription_state, content_type, body);
+    }
+
+    /// Compose and send the NOTIFY on `leg_id`'s dialog `id`, the dialog's next
+    /// CSeq: what this stack asks for there next waits for its final.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn notify_now(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        id: &DialogId,
+        event: &str,
+        subscription_state: &str,
+        content_type: Option<&str>,
+        body: &[u8],
+    ) {
+        let Some(idx) = leg_index(call, leg_id) else { return };
+        let Some(dialog) = leg_at(call, idx).dialogs.by_tags(&id.our_tag, &id.peer_tag).cloned()
+        else {
+            return;
         };
-        let t_id = dialog.id();
         let outbound_cseq = dialog.our_cseq + 1;
-        *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
+        *call = bump_our_cseq(call.clone(), leg_id, id, 1);
 
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
@@ -86,6 +115,7 @@ impl ActionExecutor<'_> {
             leg_id: Some(leg_id.to_string()),
             provenance: Provenance::Authored,
         });
+        self.notify_left(call, leg_id, id, outbound_cseq);
     }
 
     /// Originate a re-INVITE on `leg_id` carrying `body` as the new offer, typed

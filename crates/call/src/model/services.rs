@@ -48,9 +48,8 @@ pub struct TransferState {
     pub refer_cseq: Option<u32>,
     /// Wall-clock ms when the REFER was received.
     pub started_at_ms: i64,
-    /// Last 1xx status forwarded on the subscription as a NOTIFY sipfrag — used
-    /// by `transfer-c-1xx-to-notify` to dedupe repeats.
-    pub last_c_leg_notified_status: Option<u16>,
+    /// Last 1xx status C sent: a repeat of it is accounted no second time.
+    pub last_c_leg_provisional_status: Option<u16>,
     /// C-leg's initial 200-OK answer SDP, carried across `c-realigning` so the
     /// a-realign re-INVITE can offer it back to A.
     #[serde(with = "serde_bytes")]

@@ -191,9 +191,6 @@ async fn refer_gating_a_reinvite_c_ringing() {
 
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(180, "Ringing").await;
-    let mut n180 = bob.receive("NOTIFY").await;
-    assert_notify(&n180, "active", "SIP/2.0 180");
-    n180.respond(200, "OK").await;
 
     // A re-INVITEs mid c-ringing — must still relay transparently to B.
     let mut a_reinvite =
@@ -409,9 +406,6 @@ async fn refer_gating_a_info_c_ringing() {
 
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(180, "Ringing").await;
-    let mut n180 = bob.receive("NOTIFY").await;
-    assert_notify(&n180, "active", "SIP/2.0 180");
-    n180.respond(200, "OK").await;
 
     // A INFO during c-ringing → relays to B.
     let mut a_info = alice_dialog
@@ -548,9 +542,6 @@ async fn refer_gating_second_refer_c_ringing() {
 
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(180, "Ringing").await;
-    let mut n180 = bob.receive("NOTIFY").await;
-    assert_notify(&n180, "active", "SIP/2.0 180");
-    n180.respond(200, "OK").await;
 
     // Second REFER while c-ringing → 491 (transfer-reject-second-refer).
     let mut second_refer = bob_dialog

@@ -94,15 +94,7 @@ pub(super) async fn process(
         else {
             return;
         };
-        crate::rules::invariants::enforce(
-            &ctx.obligations,
-            &before,
-            crate::rules::invariants::finalize(res),
-            now_ms,
-            crate::rules::invariants::UnansweredCaller::Answer(
-                &ctx.config.minted_final_advertisement,
-            ),
-        )
+        enforced(ctx, &before, res, now_ms)
     } else {
         if of_another_incarnation(ctx, &event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
@@ -201,15 +193,7 @@ pub(super) async fn process(
         if fired(&event, &TimerType::LimiterRefresh) {
             let before = call.clone();
             let res = crate::limiter::call::on_refresh_due(&ctx.limiter, call, &call_ref, now_ms);
-            crate::rules::invariants::enforce(
-                &ctx.obligations,
-                &before,
-                crate::rules::invariants::finalize(res),
-                now_ms,
-                crate::rules::invariants::UnansweredCaller::Answer(
-                    &ctx.config.minted_final_advertisement,
-                ),
-            )
+            enforced(ctx, &before, res, now_ms)
         } else {
             // A relay no node can finish is gone before the rules read the
             // call, so its request is relayed afresh.
@@ -432,7 +416,7 @@ pub(super) fn rule_chain_turn(
     // call around message 200, BYEing a healthy dialog mid-call.
     let bumped = if fired(event, &TimerType::Keepalive) {
         0
-    } else if fired(event, &TimerType::Rung) {
+    } else if fired(event, &TimerType::Rung) || fired(event, &TimerType::NotifyAnswerCap) {
         call.message_count.unwrap_or(0)
     } else {
         call.message_count.unwrap_or(0) + 1
@@ -472,15 +456,15 @@ pub(super) fn rule_chain_turn(
         exec.repeat(&mut call, &mut ladder_fx, obligation);
         ladder_fx.quiet = Some(QuietTurn::OwnRung);
         let repeated = HandlerResult { call, effects: ladder_fx };
-        return crate::rules::invariants::enforce(
-            &ctx.obligations,
-            &before,
-            crate::rules::invariants::finalize(repeated),
-            now_ms,
-            crate::rules::invariants::UnansweredCaller::Answer(
-                &ctx.config.minted_final_advertisement,
-            ),
-        );
+        return enforced(ctx, &before, repeated, now_ms);
+    }
+    // The end of the wait behind this stack's own NOTIFY is the framework's:
+    // the requests held there leave, and no rule sees the fire.
+    if fired(event, &TimerType::NotifyAnswerCap) {
+        let before = call.clone();
+        exec.release_at_cap(&mut call, &mut ladder_fx);
+        let released = HandlerResult { call, effects: ladder_fx };
+        return enforced(ctx, &before, released, now_ms);
     }
     let start = TurnStart::of(&call);
     // A reliable provisional is the engine's before it is any rule's (RFC
@@ -494,6 +478,7 @@ pub(super) fn rule_chain_turn(
         if let SipMessage::Response(resp) = message.as_ref() {
             let leg = res.source_leg_id.as_str();
             super::response_facts::record(&exec, &mut call, &mut ladder_fx, leg, resp, screened);
+            exec.release_answered_notify(&mut call, &mut ladder_fx, leg, resp);
         }
     }
     // The end of a BYE that released a retired dialog, its final or its
@@ -590,15 +575,7 @@ pub(super) fn rule_chain_turn(
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         let before = result.call.clone();
         let settled = exec.settle_give_up(result, obligation, &rule_ctx);
-        result = crate::rules::invariants::enforce(
-            &ctx.obligations,
-            &before,
-            crate::rules::invariants::finalize(settled),
-            now_ms,
-            crate::rules::invariants::UnansweredCaller::Answer(
-                &ctx.config.minted_final_advertisement,
-            ),
-        );
+        result = enforced(ctx, &before, settled, now_ms);
     }
     if cap_exceeded
         && !matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated)
@@ -611,6 +588,18 @@ pub(super) fn rule_chain_turn(
     exec.settle_owed_pracks(&mut result.call, &mut result.effects, Owed::Call, Settle::TurnEnd);
     // The turn's lifecycle closes over what every layer above made of it.
     close_turn(&ctx.rules, &start, result, &exec)
+}
+
+/// `result`, the turn's outcome on `before`, finalized and held to the
+/// invariants the framework enforces.
+fn enforced(ctx: &RouterCtx, before: &Call, result: HandlerResult, now_ms: i64) -> HandlerResult {
+    crate::rules::invariants::enforce(
+        &ctx.obligations,
+        before,
+        crate::rules::invariants::finalize(result),
+        now_ms,
+        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
+    )
 }
 
 /// Whether `event` is a fire of a timer of type `timer_type`.

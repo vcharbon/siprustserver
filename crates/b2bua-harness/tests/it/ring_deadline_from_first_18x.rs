@@ -340,7 +340,6 @@ async fn a_transfer_targets_ring_runs_from_its_own_first_18x() {
     h.advance(SILENCE).await;
     let rang = Instant::now();
     charlie_uas.respond(180, "Ringing").await;
-    bob.receive("NOTIFY").await.respond(200, "OK").await;
 
     let mut cancel = charlie.receive("CANCEL").await;
     assert_eq!(

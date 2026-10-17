@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::emission::RetainedEmission;
 use super::invite_txn::InviteTxnHandle;
 use super::owed_answer::OwedAnswer;
+use super::own_notify::OwnNotify;
 use super::sdp_session::LegSdpSession;
 
 /// Direction of an original relayed request.
@@ -289,6 +290,11 @@ pub struct Dialog {
     /// nothing is owed.
     #[serde(default)]
     pub owed_answer: Option<OwedAnswer>,
+    /// This stack's NOTIFY on the dialog that awaits its final, and its
+    /// requests held behind it; `None` when no NOTIFY of this stack is
+    /// unanswered.
+    #[serde(default)]
+    pub own_notify: Option<OwnNotify>,
 }
 
 impl Dialog {
@@ -320,6 +326,7 @@ impl Dialog {
             emitted_ack: None,
             sdp_session: None,
             owed_answer: None,
+            own_notify: None,
         }
     }
 

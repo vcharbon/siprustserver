@@ -16,7 +16,9 @@ use call::model::*;
 use proptest::prelude::*;
 use sip_retransmit::Class;
 
+mod emission;
 mod provisional;
+use emission::{arb_own_notify, arb_retained_emission, arb_unacked_2xx};
 use provisional::{arb_owed_answer, arb_provisional};
 
 // ── Representative fixture (port of fixture.ts) ─────────────────────────────
@@ -399,6 +401,7 @@ fn arb_timer_type() -> impl Strategy<Value = TimerType> {
         Just(TimerType::ReferSubscriptionExpiry),
         Just(TimerType::ReferReinviteAnswer),
         Just(TimerType::ReferOverallSafety),
+        Just(TimerType::NotifyAnswerCap),
         // Service-owned timer: arbitrary (service_id, key) — both deserialise
         // into owned strings on the replica side (Cow::Owned), so the codec
         // P1 round-trip property covers the HA replication path for it.
@@ -492,7 +495,11 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
         proptest::option::of(arb_unacked_2xx()),
         proptest::option::of(arb_retained_emission()),
         proptest::option::of(any::<i64>()),
-        (proptest::option::of(arb_sdp_session()), proptest::option::of(arb_owed_answer())),
+        (
+            proptest::option::of(arb_sdp_session()),
+            proptest::option::of(arb_owed_answer()),
+            proptest::option::of(arb_own_notify()),
+        ),
         any::<bool>(),
     );
     (sip, ext)
@@ -509,7 +516,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                     answered_2xx,
                     emitted_ack,
                     awaited_ack_cseq,
-                    (sdp_session, owed_answer),
+                    (sdp_session, owed_answer, own_notify),
                     shown,
                 ),
             )| Dialog {
@@ -532,6 +539,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                 emitted_ack,
                 sdp_session,
                 owed_answer,
+                own_notify,
             },
         )
         .boxed()
@@ -565,33 +573,6 @@ fn arb_dialog_state() -> impl Strategy<Value = DialogState> {
         end.prop_map(DialogState::Ended),
         retired.prop_map(DialogState::Retired),
     ]
-}
-
-/// Any retained emission: bytes and destination under either repeat shape,
-/// a paced one standing anywhere on the first rungs of any dialog-level class.
-fn arb_retained_emission() -> impl Strategy<Value = RetainedEmission> {
-    let paced = (
-        arb_bytes(120),
-        "[a-z0-9.]{3,20}",
-        any::<u16>(),
-        prop_oneof![Just(Class::Final2xx), Just(Class::ReliableProvisional)],
-        1u32..6,
-    )
-        .prop_map(|(bytes, host, port, class, rung)| {
-            paced_emission(&bytes, (&host, port), class, rung)
-        });
-    let on_trigger =
-        (arb_bytes(120), "[a-z0-9.]{3,20}", any::<u16>()).prop_map(|(bytes, host, port)| {
-            RetainedEmission::on_trigger(bytes, (host, port), Repeated::request("ACK"))
-        });
-    prop_oneof![paced, on_trigger]
-}
-
-/// A 2xx still awaiting its ACK: the key the ACK carries plus the retained
-/// emission on the §13.3.1.4 ladder.
-fn arb_unacked_2xx() -> impl Strategy<Value = Unacked2xx> {
-    (arb_tag(), any::<i64>(), arb_retained_emission())
-        .prop_map(|(dialog_tag, cseq, emission)| Unacked2xx { dialog_tag, cseq, emission })
 }
 
 /// Boxed: a value tree this size, held by value in every enclosing tuple, is

@@ -1597,21 +1597,21 @@ fn a_repeated_transfer_target_provisional_is_accounted_once() {
         c_leg_id: Some("b-2".into()),
         refer_cseq: Some(2),
         started_at_ms: 0,
-        last_c_leg_notified_status: Some(180),
+        last_c_leg_provisional_status: Some(180),
         c_initial_sdp: None,
         subscription_terminated: false,
     });
     b2bua::rules::refer_transfer::project_cursor(&mut call);
 
     let (id, actions) = handle_from(&call, &b_leg_ringing_event(false), "b-2");
-    assert_eq!(id, "transfer-c-1xx-to-notify");
+    assert_eq!(id, "transfer-c-1xx-absorb");
     let accounted = actions
         .iter()
         .filter(|a| {
             matches!(a, RuleAction::AddCdrEvent { event_type: call::CdrEventType::Provisional, .. })
         })
         .count();
-    assert_eq!(accounted, 0, "a repeat of a notified status is not accounted again: {actions:?}");
+    assert_eq!(accounted, 0, "a repeat of a status is not accounted again: {actions:?}");
     assert!(
         !actions.iter().any(|a| matches!(a, RuleAction::SendNotify { .. })),
         "the repeat draws no NOTIFY: {actions:?}"

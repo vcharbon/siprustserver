@@ -134,11 +134,6 @@ async fn refer_allow_c_realign_happy() {
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(180, "Ringing").await;
 
-    // NOTIFY 180 active.
-    let mut n180 = bob.receive("NOTIFY").await;
-    assert_notify(&n180, "active", "SIP/2.0 180 Ringing");
-    n180.respond(200, "OK").await;
-
     // C answers initial INVITE 200; B2BUA ACKs (it is C's UAC).
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     charlie.receive("ACK").await;

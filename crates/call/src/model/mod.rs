@@ -33,6 +33,8 @@
 //!     and the key that discharges it (ADR-0032)
 //!   - [`provisional`] — one reliable provisional the call received (RFC 3262)
 //!   - [`owed_answer`] — the offer a dialog's responder awaits an answer to
+//!   - [`own_notify`] — this stack's unanswered NOTIFY on a dialog and the
+//!     requests held behind it
 //!   - [`invite_txn`] — in-flight INVITE client-transaction handle
 //!   - [`timer`] — serializable timer intents ([`TimerType`], [`TimerScope`],
 //!     [`TimerKey`], [`TimerEntry`])
@@ -59,6 +61,7 @@ pub mod message_ring;
 pub mod obligation;
 pub mod outbound_invite;
 pub mod owed_answer;
+pub mod own_notify;
 pub mod provisional;
 pub mod record;
 pub mod sdp_session;
@@ -88,6 +91,7 @@ pub use message_ring::{MessageDirection, MessageEntry, MessageRing};
 pub use obligation::{Obligation, ObligationKind};
 pub use outbound_invite::OutboundInvite;
 pub use owed_answer::OwedAnswer;
+pub use own_notify::{HeldRequest, OwnNotify};
 pub use provisional::{
     CSeq, Ceased, Ladder, Provisional, ProvisionalId, RSeq, ResponderAck, Shown,
 };

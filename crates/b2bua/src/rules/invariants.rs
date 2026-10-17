@@ -30,12 +30,16 @@ fn global_call_label(state: CallModelState) -> StateLabel {
     }
 }
 
-/// Promote `terminating → terminated` when all legs are resolved, then project
+/// Promote `terminating → terminated` when all legs are resolved and no
+/// request of this stack waits to leave, then project
 /// the (possibly promoted) `CallModelState` into the `global-call` cursor. This
 /// is the single finalize point, so the global machine is observable uniformly
 /// without touching the authoritative `state` field or the termination logic.
 pub fn finalize(mut result: HandlerResult) -> HandlerResult {
-    if result.call.state == CallModelState::Terminating && is_fully_resolved(&result.call) {
+    if result.call.state == CallModelState::Terminating
+        && is_fully_resolved(&result.call)
+        && !super::actions::holds_requests(&result.call)
+    {
         result.call.state = CallModelState::Terminated;
     }
     result.call.sm_cursors.insert(GLOBAL_CALL_MACHINE, global_call_label(result.call.state));

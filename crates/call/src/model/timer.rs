@@ -63,6 +63,12 @@ pub enum TimerType {
     ReferReinviteAnswer,
     /// Overall REFER safety timer covering the full transfer state machine.
     ReferOverallSafety,
+    /// The earliest end of a wait of this stack's requests held behind its own
+    /// NOTIFY on a dialog ([`crate::OwnNotify::ANSWER_CAP_MS`] after that
+    /// NOTIFY left): they leave though it is unanswered. Call-scoped, armed
+    /// exactly while a request is held; it outlives the start of the
+    /// termination, whose BYE may be the request held.
+    NotifyAnswerCap,
     /// The bound on an established call's reroute: the replacement leg's dial,
     /// the realign and the old leg's release.
     RerouteGuard,
@@ -146,6 +152,7 @@ impl PartialEq for TimerType {
             ReferSubscriptionExpiry => matches!(other, ReferSubscriptionExpiry),
             ReferReinviteAnswer => matches!(other, ReferReinviteAnswer),
             ReferOverallSafety => matches!(other, ReferOverallSafety),
+            NotifyAnswerCap => matches!(other, NotifyAnswerCap),
             RerouteGuard => matches!(other, RerouteGuard),
             ServiceHttpAnswer { correlation_id: a } => {
                 matches!(other, ServiceHttpAnswer { correlation_id: b } if a == b)
@@ -202,6 +209,7 @@ impl std::fmt::Debug for TimerType {
             TimerType::ReferSubscriptionExpiry => f.write_str("ReferSubscriptionExpiry"),
             TimerType::ReferReinviteAnswer => f.write_str("ReferReinviteAnswer"),
             TimerType::ReferOverallSafety => f.write_str("ReferOverallSafety"),
+            TimerType::NotifyAnswerCap => f.write_str("NotifyAnswerCap"),
             TimerType::RerouteGuard => f.write_str("RerouteGuard"),
             TimerType::ServiceHttpAnswer { correlation_id } => {
                 write!(f, "ServiceHttpAnswer:{correlation_id}")
