@@ -361,9 +361,11 @@ made. A run profile joins the two.
    observation view, and counts the payloads its view cannot read
    (`cdr_observations_unread_total`). After the drain the runner exports
    the observations whose `call_id` carries the run id (the Call-ID nonce of
-   §6.4) into `cdrs.jsonl`, once the consumer has consumed every CDR the
-   system under test wrote (the lab's written and consumed counters over the
-   run) and the shipped observations have stopped growing for 10 s, at most
+   §6.4) into `cdrs.jsonl`, once the run's distinct shipped observations
+   cover every CDR the system under test wrote (the lab's written counter over
+   the run; the consumer's own counter loses what it counted after its last
+   scrape when it is killed, its shipped observations stay) and have stopped
+   growing for 10 s, at most
    300 s, long enough for a broker thawing late. The consumer acknowledges a
    CDR only once its observation has landed, so a consumer killed in between
    leaves the CDR to the broker's redelivery. `cdrs-collect.json` keeps

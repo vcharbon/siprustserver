@@ -103,8 +103,8 @@ class SimulatedLab:
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(call.url).query).get("query", [""])[0]
             if query.endswith("count() live"):
                 return HttpResult(200, f'{{"live":"{(self.clock.now_ms() - self.t0) // 1000}"}}\n')
-            for field in ("n", "cdrs"):
-                if query.endswith(f"count() {field}"):
+            for stat, field in (("count()", "n"), ("count_uniq(_msg)", "cdrs")):
+                if query.endswith(f"{stat} {field}"):
                     return HttpResult(200, f'{{"{field}":"0"}}\n')
             return HttpResult(200, "")
         if call.kind == "http" and "/api/v1/query" in call.url:

@@ -285,8 +285,8 @@ def test_a_cut_call_s_cdr_may_not_end_after_the_caller_s_end() -> None:
 ON: Json = {"cdr_join": True, "generator_stall_ms": 3_600_000}
 
 
-def collected(complete: bool, written: float, consumed: float, unread: float = 0) -> Json:
-    return {"complete": complete, "written": written, "consumed": consumed, "unread": unread}
+def collected(complete: bool, written: float, observed: float, unread: float = 0) -> Json:
+    return {"complete": complete, "written": written, "observed": observed, "unread": unread}
 
 
 def test_no_observation_at_all_for_answered_calls_is_a_measurement_failure(tmp_path: Path) -> None:
@@ -303,7 +303,7 @@ def test_cdrs_still_owed_at_the_cut_are_an_incomplete_export_not_impacts(tmp_pat
     d = run_dir(tmp_path, [ANSWERED, second], calls=2, events=[], profile=ON, cdrs=[cdr("a", T0, 100, 30_000)], cdr_collect=collected(False, 2, 1))
     v = compute(d, SCHEMAS)
     assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
-        ("class_failed", "cdr_mismatch: the export was cut with CDRs still owed: 2 written, 1 consumed")
+        ("class_failed", "cdr_mismatch: the export was cut with CDRs still owed: 2 written, 1 observed")
     ]
     assert v["unattributed"] == []
 

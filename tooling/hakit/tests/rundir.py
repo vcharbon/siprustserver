@@ -55,7 +55,7 @@ def run_dir(
     write_jsonl(d / "integrity.jsonl", [dict(i) for i in integrity])
     if cdrs is not None:
         write_jsonl(d / "cdrs.jsonl", cdrs)
-        done: Json = {"complete": True, "written": len(cdrs), "consumed": len(cdrs), "unread": 0}
+        done: Json = {"complete": True, "written": len(cdrs), "observed": len(cdrs), "unread": 0}
         (d / "cdrs-collect.json").write_text(json.dumps(cdr_collect or done))
     if classes is not None:
         (d / "classes").mkdir()

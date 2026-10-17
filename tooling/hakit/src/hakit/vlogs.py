@@ -37,8 +37,8 @@ class VictoriaLogs:
         res = self.executor.http("GET", url, timeout_s=120)
         return res.status, res.body
 
-    def _count(self, selector: str, field: str, start_ms: int, end_ms: int) -> int | None:
-        status, body = self._query(f"{selector} | stats count() {field}", start_ms, end_ms)
+    def _count(self, selector: str, field: str, start_ms: int, end_ms: int, stat: str = "count()") -> int | None:
+        status, body = self._query(f"{selector} | stats {stat} {field}", start_ms, end_ms)
         if status != 200:
             return None
         for line in body.splitlines():
@@ -56,9 +56,10 @@ class VictoriaLogs:
         """The records of a stream so far, read during the load for their freshness."""
         return self._count(_stream_filter(run, stream), "live", start_ms, end_ms)
 
-    def cdr_count(self, start_ms: int, end_ms: int) -> int | None:
-        """The CDR observations shipped in a time range, any run."""
-        return self._count(CDR_FILTER, "cdrs", start_ms, end_ms)
+    def cdr_count(self, run: str, start_ms: int, end_ms: int) -> int | None:
+        """The distinct CDR observations whose Call-ID carries the run id, in a
+        time range: byte-identical lines (a redelivery) count once."""
+        return self._count(f"{CDR_FILTER} {json.dumps(run)}", "cdrs", start_ms, end_ms, stat="count_uniq(_msg)")
 
     def export_cdrs(self, run: str, start_ms: int, end_ms: int) -> tuple[list[Json], list[str]]:
         """The CDR observations whose Call-ID carries the run id, and the lines that
