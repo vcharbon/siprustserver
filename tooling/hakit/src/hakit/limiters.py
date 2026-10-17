@@ -6,10 +6,10 @@ its end, so the calls of a limiter's streams answered and not yet ended are
 the calls it admitted. Per span of `SPAN_S` the median of that count, sampled
 each second, is judged: outside every window's zone it stays within
 [cap - `SLACK`, cap]. A window's zone runs from its opening to its close plus
-the limiter's `repair_s`; inside it the median may exceed the cap up to the
-budget's `limiter.overshoot` (a multiple of the cap, or `offered`: every call
-the streams offer, cps × (ring + hold), as callers failing open admit), and
-may fall under the band when the budget allows `limiter.undershoot`. A median under its bound is
+the limiter's `repair_s`; inside it the median may exceed the cap up to every
+call the streams offer, cps × (ring + hold), when the budget states
+`limiter.overshoot: offered` (callers failing open admit them all), and may
+fall under the band when the budget allows `limiter.undershoot`. A median under its bound is
 `limiter_undershoot` (callers refused calls they are entitled to), over it
 `limiter_overshoot` (more calls than the cap: minor).
 """
@@ -80,11 +80,8 @@ def _allowance(
     for z_from, z_to, budget, ev in zones:
         if z_from < b_s and a_s < z_to:
             lim = jv.obj(budget.raw, "limiter")
-            over = lim.get("overshoot")
-            if over == "offered":
+            if lim.get("overshoot") == "offered":
                 high = max(high, offered)
-            elif isinstance(over, (int, float)):
-                high = max(high, float(over) * cap)
             under = under or jv.boolean(lim, "undershoot")
             event = ev
     return high, under, event

@@ -52,7 +52,6 @@ def window(opened_s: int, closed_s: int, budget: str) -> Window:
 
 
 BUDGETS = {
-    "kill": parse_budget({"schema": "budget.v1", "name": "kill", "description": "", "limiter": {"overshoot": 2}}),
     "fail-open": parse_budget({"schema": "budget.v1", "name": "fail-open", "description": "", "limiter": {"overshoot": "offered"}}),
     "starve": parse_budget({"schema": "budget.v1", "name": "starve", "description": "", "limiter": {"undershoot": True}}),
     "none": parse_budget({"schema": "budget.v1", "name": "none", "description": ""}),
@@ -86,22 +85,17 @@ def test_a_limiter_over_its_cap_outside_every_window_is_a_minor_overshoot() -> N
 
 
 def test_a_window_allows_its_overshoot_until_its_close_plus_the_repair_time() -> None:
-    w = window(600, 660, "kill")
+    w = window(600, 660, "fail-open")
     assert judge(level([(0, LOAD_S, CAP), (600, 660 + REPAIR_S, CAP)]), [w]) == []
     late = judge(level([(0, LOAD_S, CAP), (600, 900, CAP)]), [w])
     assert kinds(late) == [("limiter_overshoot", "minor", None)]
     assert late[0]["from_ms"] == T0 + 690_000
 
 
-def test_a_window_bounds_its_overshoot_by_its_factor() -> None:
-    found = judge(level([(0, LOAD_S, CAP), (600, 690, 3 * CAP)]), [window(600, 660, "kill")])
-    assert kinds(found) == [("limiter_overshoot", "minor", "001-x")]
-
-
 def test_a_window_allows_an_undershoot_only_when_its_budget_says_so() -> None:
     gap = level([(0, 600, CAP), (690, LOAD_S, CAP)])
     assert judge(gap, [window(600, 660, "starve")]) == []
-    assert kinds(judge(gap, [window(600, 660, "kill")])) == [("limiter_undershoot", "major", "001-x")]
+    assert kinds(judge(gap, [window(600, 660, "fail-open")])) == [("limiter_undershoot", "major", "001-x")]
     assert kinds(judge(gap, [window(600, 660, "none")])) == [("limiter_undershoot", "major", "001-x")]
 
 

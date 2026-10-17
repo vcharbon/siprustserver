@@ -303,7 +303,7 @@ def test_cdrs_still_owed_at_the_cut_are_an_incomplete_export_not_impacts(tmp_pat
     d = run_dir(tmp_path, [ANSWERED, second], calls=2, events=[], profile=ON, cdrs=[cdr("a", T0, 100, 30_000)], cdr_collect=collected(False, 2, 1))
     v = compute(d, SCHEMAS)
     assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
-        ("class_failed", "cdr_mismatch: the export was cut with CDRs still owed: 2 written, 1 observed")
+        ("class_failed", "cdr_mismatch: the export was cut with CDRs still owed: 2 written, 1 distinct observed")
     ]
     assert v["unattributed"] == []
 

@@ -5,9 +5,5 @@ description: >-
   dependency hung, slow, refusing or gone (it fails open), the replication
   link cut, one clock shifted, a store stalled, dialogs orphaned by a caller.
   No setup may fail; setups may be slower for about 2 s of offered rate.
-  A limiter callers cannot reach is failed open (ADR-0040 §10): a
-  limited stream may hold every call it offers, never fewer than its band.
 setup_slow:
   max_seconds: 2
-limiter:
-  overshoot: offered

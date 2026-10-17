@@ -41,7 +41,7 @@ def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas
     if not complete:
         counts = [jv.opt_number(collect, k) for k in ("written", "observed")]
         written, observed = ("unread" if v is None else f"{v:g}" for v in counts)
-        found.append(_failed(f"the export was cut with CDRs still owed: {written} written, {observed} observed"))
+        found.append(_failed(f"the export was cut with CDRs still owed: {written} written, {observed} distinct observed"))
     unread = jv.opt_number(collect, "unread") or 0
     if unread:
         found.append(_failed(f"the consumer could not read {unread:g} CDR payloads"))

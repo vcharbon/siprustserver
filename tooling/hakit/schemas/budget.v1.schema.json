@@ -87,11 +87,11 @@
       }
     },
     "limiter": {
-      "description": "What the window allows the profile's limiters (ADR-0049 §3.13), from its opening to its close plus the limiter's `repair_s`, each direction on its own: the median of admitted calls may reach `overshoot` (a multiple of the cap, or `offered`: every call the limiter's streams offer, cps × (ring + hold), as callers failing open admit them; absent, the cap), and may fall under the steady band when `undershoot` is true (absent, never).",
+      "description": "What the window allows the profile's limiters (ADR-0049 §3.13), from its opening to its close plus the limiter's `repair_s`, each direction on its own: the median of admitted calls may reach every call the limiter's streams offer, cps × (ring + hold), with `overshoot: offered` (callers failing open admit them all; absent, the cap), and may fall under the steady band when `undershoot` is true (absent, never).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "overshoot": { "anyOf": [{ "type": "number", "minimum": 1 }, { "const": "offered" }] },
+        "overshoot": { "const": "offered" },
         "undershoot": { "type": "boolean" }
       }
     },
