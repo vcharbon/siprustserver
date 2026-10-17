@@ -62,6 +62,7 @@ def _why(v: Json) -> list[str]:
     if n_dialog:
         out.append(f"- {n_dialog} in-dialog impacts in all")
     out += [f"- unattributed: {_impact(r)[2:]}" for r in jv.objs(v, "unattributed")]
+    out += [f"- {_limiter(r)[2:]}" for r in jv.objs(v, "limiters")]
     return out or ["- every impact within its allowance, measurement intact"]
 
 
@@ -129,9 +130,22 @@ def render(v: Json) -> str:
     ] or ["- none"]
     out += ["", "## Unattributed", ""]
     out += [_impact(r) for r in jv.objs(v, "unattributed")] or ["- none"]
+    out += ["", "## Limiters", ""]
+    out += [_limiter(r) for r in jv.objs(v, "limiters")] or ["- every limiter in its band"]
     out += ["", "## Integrity", ""]
     out += [_integrity(i) for i in jv.objs(v, "integrity")] or ["- none"]
     return "\n".join(out) + "\n"
+
+
+def _limiter(r: Json) -> str:
+    lo, hi = (float(str(b)) for b in jv.lst(r, "bound"))
+    medians = ", ".join(f"{float(str(m)):g}" for m in jv.lst(r, "medians"))
+    where = f"window {r['window']}" if r.get("window") else "outside every window"
+    return (
+        f"- `{r['kind']}` ({r['severity']}) limiter {r['limiter']} ({', '.join(jv.strings(r, 'streams'))}) "
+        f"{_t(jv.number(r, 'from_ms'))} to {_t(jv.number(r, 'to_ms'))}, {where}: minute medians {medians} "
+        f"against [{lo:g}, {hi:g}] — FINDING"
+    )
 
 
 def _integrity(i: Json) -> str:

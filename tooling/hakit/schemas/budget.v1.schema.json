@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "budget.v1.schema.json",
-  "$comment": "minor 5",
+  "$comment": "minor 6",
   "title": "budget.v1",
   "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer (but a consult's contract refusal, below) and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
   "type": "object",
@@ -84,6 +84,15 @@
           "minimum": 0,
           "default": 50
         }
+      }
+    },
+    "limiter": {
+      "description": "What the window allows the profile's limiters (ADR-0049 §3.13), from its opening to its close plus the limiter's `repair_s`, each direction on its own: the median of admitted calls may reach `overshoot` (a multiple of the cap, or `offered`: every call the limiter's streams offer, cps × (ring + hold), as callers failing open admit them; absent, the cap), and may fall under the steady band when `undershoot` is true (absent, never).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "overshoot": { "anyOf": [{ "type": "number", "minimum": 1 }, { "const": "offered" }] },
+        "undershoot": { "type": "boolean" }
       }
     },
     "classes": {

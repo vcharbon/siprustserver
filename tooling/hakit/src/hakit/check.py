@@ -10,6 +10,7 @@ from __future__ import annotations
 from .content import Content
 from .jsonval import as_obj
 from . import loadgen
+from .limiters import limiter_errors
 from .model import Incident
 from .recovery import MIN_SAMPLES
 from .profile import EventSpec, Profile, Stream
@@ -178,6 +179,7 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
         b = entry.get("budget")
         if isinstance(b, str) and b not in content.budgets:
             errs.append(f"{where}: defaults.{name}: budget {b!r} is not on the search path")
+    errs.extend(limiter_errors(where, profile))
     if not errs:
         errs.extend(f"{where}: {e}" for e in overlaps(plan(profile, content.incidents)))
     return errs

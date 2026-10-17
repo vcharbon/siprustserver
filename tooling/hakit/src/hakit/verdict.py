@@ -21,6 +21,7 @@ from .classes import read_counts
 from .jsonl import read_jsonl
 from .classify import SETUP_FAILED, Classified, Impact, SetupLatency, classify
 from .judge import ALL_CALL_IDS, judge
+from .limiters import judge_limiters
 from .jsonval import Json, as_obj
 from .model import Budget, Shape, parse_budget, parse_catalog
 from .profile import Profile, parse_profile
@@ -260,8 +261,10 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
     spoiled = {st: len(ids) for st, ids in stalled.items()}
     found = stress_findings(run_dir, thresholds(profile.preflight), stalls, spoiled, found, run.load_start_ms) + found
 
+    load_end_ms = run.load_start_ms + profile.duration_s * 1000
+    limiters = judge_limiters(profile, [r for r, _ in calls.valid], windows, budgets, run.load_start_ms, load_end_ms)
     windows_out: list[Json] = []
-    findings = len(judged.in_dialog) + len(judged.unattributed)
+    findings = len(judged.in_dialog) + len(judged.unattributed) + len(limiters)
     for w in windows:
         recs, rec_rows = recovered.get(w.event, ([], []))
         rows = judged.per_window.get(w.event, []) + rec_rows
@@ -296,5 +299,6 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         "windows": windows_out,
         "in_dialog": judged.in_dialog,
         "unattributed": judged.unattributed,
+        "limiters": limiters,
         "integrity": found,
     }

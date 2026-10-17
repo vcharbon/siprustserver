@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "profile.v1.schema.json",
-  "$comment": "minor 6",
+  "$comment": "minor 7",
   "title": "profile.v1",
   "description": "A file `profiles/<name>.yaml`: one run. The load streams, the schedule of incident events, the budget of each event's window, and the defaults of an event the schedule did not fire. Impact outside every window is `unattributed`. ADR-0049.",
   "type": "object",
@@ -76,6 +76,21 @@
           "ending": { "enum": ["rejected", "abandoned", "timeout", "failed"] },
           "code": { "type": "integer", "minimum": 300, "maximum": 699 },
           "retry_after": { "type": "boolean" }
+        }
+      }
+    },
+    "limiters": {
+      "description": "Call limiters whose admissions the verdict checks for self-repair from the records (ADR-0049 §3.13): every call of `streams` holds the limiter `id` of cap `cap`, and the streams saturate it; the median of their answered calls per minute stays within [cap - 2, cap] outside every window's zone, which runs to the window's close plus `repair_s`.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "cap", "streams", "repair_s"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "cap": { "type": "integer", "minimum": 1 },
+          "streams": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true },
+          "repair_s": { "type": "number", "minimum": 0 }
         }
       }
     },

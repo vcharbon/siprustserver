@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "verdict.v1.schema.json",
-  "$comment": "minor 2",
+  "$comment": "minor 3",
   "title": "verdict.v1",
   "description": "The `verdict.json` of a run directory: every window with its impact against its budget, the in-dialog impact with the windows it may belong to, the impact outside every window, and the integrity of the measurement. `hakit verdict <run-dir>` recomputes it from the run directory alone. ADR-0049.",
   "type": "object",
@@ -162,6 +162,26 @@
       "description": "Impact outside every window, by class and key. Every entry is a finding.",
       "type": "array",
       "items": { "$ref": "#/$defs/impact" }
+    },
+    "limiters": {
+      "description": "The profile's limiters out of their bound (ADR-0049 §3.13): each entry a run of consecutive minutes whose median of admitted calls left the band, or the window's allowance. Every entry is a finding; an overshoot is minor, an undershoot major.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "severity", "limiter", "streams", "from_ms", "to_ms", "medians", "bound", "window"],
+        "properties": {
+          "kind": { "enum": ["limiter_overshoot", "limiter_undershoot"] },
+          "severity": { "enum": ["major", "minor"] },
+          "limiter": { "type": "string" },
+          "streams": { "type": "array", "items": { "type": "string" } },
+          "from_ms": { "type": "number" },
+          "to_ms": { "type": "number" },
+          "medians": { "type": "array", "items": { "type": "number" } },
+          "bound": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+          "window": { "type": ["string", "null"] }
+        }
+      }
     },
     "integrity": {
       "description": "Why the measurement itself is in doubt.",

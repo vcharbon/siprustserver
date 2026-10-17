@@ -112,6 +112,17 @@ class CdrRequired:
 
 
 @dataclass(frozen=True)
+class LimiterSpec:
+    """A call limiter every call of some streams holds, its cap, and how long
+    after a window's close it must be back in its band (limiters.py)."""
+
+    id: str
+    cap: int
+    streams: list[str]
+    repair_s: float
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     duration_s: float
@@ -129,6 +140,7 @@ class Profile:
     raw: Json = field(compare=False)
     cdr_required: list[CdrRequired] = field(default_factory=lambda: [])
     cdr_in_flight_s: float = 0.0
+    limiters: list[LimiterSpec] = field(default_factory=lambda: [])
 
     def stream(self, name: str) -> Stream | None:
         return next((s for s in self.streams if s.name == name), None)
@@ -206,6 +218,10 @@ def parse_profile(d: Json) -> Profile:
             for m in jv.objs(d, "cdr_required")
         ],
         cdr_in_flight_s=jv.number(d, "cdr_in_flight_s", 0),
+        limiters=[
+            LimiterSpec(jv.string(e, "id"), int(jv.number(e, "cap")), jv.strings(e, "streams"), jv.number(e, "repair_s"))
+            for e in jv.objs(d, "limiters")
+        ],
         capture=_capture(jv.opt_obj(d, "capture")),
         catalogs=jv.strings(d, "catalogs"),
         preflight=Preflight(
