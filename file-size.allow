@@ -118,8 +118,8 @@ crates/sip-pcap/src/flow/tests.rs 1000
 crates/sip-proxy-runner/src/main.rs 721
 crates/sip-proxy/src/observability/metrics.rs 608
 crates/sip-txn/src/layer/client.rs 746
-crates/sip-txn/src/layer/owner.rs 517
+crates/sip-txn/src/layer/owner.rs 514
 crates/sip-txn/src/layer/server.rs 549
-crates/sip-txn/src/metrics.rs 629
+crates/sip-txn/src/metrics.rs 616
 crates/sip-txn/tests/it/bounded_queue.rs 806
-crates/sip-txn/tests/it/fsm.rs 1582
+crates/sip-txn/tests/it/fsm.rs 1415

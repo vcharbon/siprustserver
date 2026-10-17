@@ -119,12 +119,6 @@ pub const UNANSWERED_FORGOTTEN: Family = Family::counter(
     "Non-INVITE server transactions forgotten because the router discarded their request unrun (queue full, call cap, behind a release), so the retransmission is admitted again.",
 );
 
-pub const FORGET_REFUSED: Family = Family::counter(
-    "b2bua_txn_forget_refused_total",
-    Labels::None,
-    "Forget requests the full txn command queue refused; the transaction absorbs its retransmissions until its backstop. Expected 0.",
-);
-
 pub const RELEASED_UNANSWERED_INVITES_ANSWERED: Family = Family::counter(
     "b2bua_txn_released_unanswered_invites_answered_total",
     Labels::None,

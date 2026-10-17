@@ -329,9 +329,6 @@ pub(crate) struct MetricsInner {
     /// request ([`TransactionLayer::forget_unanswered`](crate::TransactionLayer::forget_unanswered)):
     /// one per request copy the consumer discarded before answering it.
     pub unanswered_forgotten: AtomicU64,
-    /// Forget requests a full command queue refused; the transaction they
-    /// named absorbs its retransmissions until its backstop.
-    pub forget_refused: AtomicU64,
     /// Non-INVITE server transactions with no final forgotten at their call's
     /// release ([`TransactionLayer::forget_unanswered_of_call`](crate::TransactionLayer::forget_unanswered_of_call)).
     pub released_unanswered_forgotten: AtomicU64,
@@ -373,7 +370,6 @@ impl MetricsInner {
             fallback_to_tag_used: AtomicU64::new(0),
             parse_errors: AtomicU64::new(0),
             unanswered_forgotten: AtomicU64::new(0),
-            forget_refused: AtomicU64::new(0),
             released_unanswered_forgotten: AtomicU64::new(0),
             released_unanswered_invites_answered: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
@@ -598,11 +594,6 @@ impl TransactionMetrics {
         self.inner.unanswered_forgotten.load(Ordering::Relaxed)
     }
 
-    /// Forget requests the full command queue refused (counter, expected 0).
-    pub fn forget_refused(&self) -> u64 {
-        self.inner.forget_refused.load(Ordering::Relaxed)
-    }
-
     /// Non-INVITE server transactions with no final forgotten at their call's
     /// release (counter).
     pub fn released_unanswered_forgotten(&self) -> u64 {
@@ -613,10 +604,6 @@ impl TransactionMetrics {
     /// call's release, answered there (counter).
     pub fn released_unanswered_invites_answered(&self) -> u64 {
         self.inner.released_unanswered_invites_answered.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn count_forget_refused(&self) {
-        self.inner.forget_refused.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Outbound sends the socket refused, a full send buffer aside (counter).

@@ -1,7 +1,7 @@
 //! Public surface: [`TransactionLayer`] (the clone-cheap handle), its
-//! [`TransactionConfig`], and the [`Command`] funnel to the owner task. Every
-//! method round-trips over an mpsc + oneshot, so all mutations run on the
-//! single writer. The owner itself lives in `layer::owner`.
+//! [`TransactionConfig`], and the [`Command`] and [`Forget`] funnels to the
+//! owner task. Every mutation runs on the single writer: a command round-trips
+//! over an mpsc + oneshot, a forget is one-way. The owner itself lives in `layer::owner`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -152,13 +152,6 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
-    /// Forget the non-INVITE server transaction `key` names if it has sent
-    /// nothing yet (`Trying`) and holds the request's dialog identity; no reply.
-    ForgetUnanswered {
-        key: ServerTxnKey,
-        call_id: String,
-        from_tag: String,
-    },
     /// Forget every non-INVITE server transaction of `call_ref` that has sent
     /// no final; replies with how many.
     ForgetUnansweredOfCall {
@@ -182,11 +175,22 @@ pub(super) enum Command {
     },
 }
 
+/// Forget the non-INVITE server transaction `key` names if it has sent nothing
+/// yet (`Trying`) and holds the request's dialog identity; no reply. It rides
+/// its own unbounded lane, which holds at most one per request the owner handed
+/// up, so a stalled owner lets it grow by nothing it did not already emit.
+pub(super) struct Forget {
+    pub(super) key: ServerTxnKey,
+    pub(super) call_id: String,
+    pub(super) from_tag: String,
+}
+
 /// Handle to the running transaction layer. Clone-cheap; every method funnels
 /// to the single owner task.
 #[derive(Clone)]
 pub struct TransactionLayer {
     cmd_tx: mpsc::Sender<Command>,
+    forget_tx: mpsc::UnboundedSender<Forget>,
     metrics: TransactionMetrics,
     /// Aborts the owner task (and so drops the SIP endpoint it owns). Used to
     /// simulate a hard crash: the owner otherwise lives until every `cmd_tx` clone
@@ -211,6 +215,7 @@ impl TransactionLayer {
     ) -> (Self, mpsc::Receiver<TransactionEvent>) {
         let (events_tx, events_rx) = mpsc::channel::<TransactionEvent>(config.event_capacity());
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(1024);
+        let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
 
         let metrics_inner = Arc::new(MetricsInner::new());
         let metrics = TransactionMetrics::new(metrics_inner.clone(), events_tx.clone());
@@ -218,9 +223,10 @@ impl TransactionLayer {
         let owner = Owner::new(parser, events_tx, metrics_inner, config);
         let owner_pulse = Arc::new(LoopPulse::new());
         let owner_abort =
-            tokio::spawn(run(owner, endpoint, cmd_rx, owner_pulse.clone())).abort_handle();
+            tokio::spawn(run(owner, endpoint, cmd_rx, forget_rx, owner_pulse.clone()))
+                .abort_handle();
 
-        (Self { cmd_tx, metrics, owner_abort, owner_pulse }, events_rx)
+        (Self { cmd_tx, forget_tx, metrics, owner_abort, owner_pulse }, events_rx)
     }
 
     pub fn metrics(&self) -> &TransactionMetrics {
@@ -375,17 +381,16 @@ impl TransactionLayer {
     /// Another request on the same branch — another sent-by or method — is
     /// another transaction and is never forgotten, and the request's `call_id`
     /// and `from_tag` must match the transaction's; a transaction that has
-    /// sent a response is kept. Never waits: a full command queue refuses the
-    /// request and counts it (`forget_refused`).
+    /// sent a response is kept. Never waits and is never refused: the owner
+    /// takes it ahead of its commands.
     pub fn forget_unanswered(&self, key: &ServerTxnKey, call_id: &str, from_tag: &str) {
-        let cmd = Command::ForgetUnanswered {
+        let forget = Forget {
             key: key.clone(),
             call_id: call_id.to_string(),
             from_tag: from_tag.to_string(),
         };
-        if let Err(mpsc::error::TrySendError::Full(_)) = self.cmd_tx.try_send(cmd) {
-            self.metrics.count_forget_refused();
-        }
+        // Closed only once the owner is gone, which forgets nothing anyway.
+        let _ = self.forget_tx.send(forget);
     }
 
     /// The consumer released `call_ref` for good: nothing will answer a request

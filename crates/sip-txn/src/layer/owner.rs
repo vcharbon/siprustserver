@@ -459,9 +459,6 @@ impl Owner {
             }
             Command::RelinquishCall { call_ref, reply } => self.relinquish_call(&call_ref, reply),
             Command::RelinquishServer { key, reply } => self.relinquish_server(&key, reply),
-            Command::ForgetUnanswered { key, call_id, from_tag } => {
-                self.forget_unanswered(&key, &call_id, &from_tag)
-            }
             Command::ForgetUnansweredOfCall { call_ref, reply } => {
                 let _ = reply.send(self.forget_unanswered_of_call(&call_ref));
             }

@@ -138,7 +138,6 @@ b2bua-runner b2bua_txn_event_queue_deferred gauge fixed {}
 b2bua-runner b2bua_txn_deferred_swept_total counter fixed {}
 b2bua-runner b2bua_txn_sweep_reaped_total counter fixed {}
 b2bua-runner b2bua_txn_unanswered_forgotten_total counter fixed {}
-b2bua-runner b2bua_txn_forget_refused_total counter fixed {}
 b2bua-runner b2bua_txn_released_unanswered_invites_answered_total counter fixed {}
 b2bua-runner b2bua_txn_released_unanswered_forgotten_total counter fixed {}
 b2bua-runner b2bua_txn_retransmits_total counter capped:256 {ladder,method|ladder,method,code}

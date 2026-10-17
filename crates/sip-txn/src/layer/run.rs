@@ -1,5 +1,5 @@
-//! The owner task's loop: one `select!` per turn over commands, due timers,
-//! the safety-net sweep and inbound packets, each turn stamped on the
+//! The owner task's loop: one `select!` per turn over forgets, commands, due
+//! timers, the safety-net sweep and inbound packets, each turn stamped on the
 //! owner's [`LoopPulse`] from the instant it takes work until it waits again.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use tokio_util::time::DelayQueue;
 use crate::pulse::LoopPulse;
 use crate::timers::{ms, TXN_SWEEP_INTERVAL};
 
-use super::handle::Command;
+use super::handle::{Command, Forget};
 use super::owner::Owner;
 use super::txn::Timer;
 
@@ -27,6 +27,7 @@ async fn next_expired(q: &mut DelayQueue<Timer>) -> Timer {
 
 /// What one turn of the loop took.
 enum Work {
+    Forget(Forget),
     Command(Command),
     Timer(Timer),
     Sweep,
@@ -38,6 +39,7 @@ pub(super) async fn run(
     mut owner: Owner,
     endpoint: Box<dyn UdpEndpoint>,
     mut cmd_rx: mpsc::Receiver<Command>,
+    mut forget_rx: mpsc::UnboundedReceiver<Forget>,
     pulse: Arc<LoopPulse>,
 ) {
     let endpoint: &dyn UdpEndpoint = endpoint.as_ref();
@@ -60,8 +62,11 @@ pub(super) async fn run(
         // makes progress; the flood source (packets) can only be drained once
         // nothing else is pending. (cmd/timer can't themselves flood without
         // packets — the router only issues commands in response to events.)
+        // A forget goes first: a retransmission read after it was posted then
+        // meets no transaction and is admitted afresh.
         let work = tokio::select! {
             biased;
+            Some(f) = forget_rx.recv() => Work::Forget(f),
             cmd = cmd_rx.recv() => match cmd {
                 Some(c) => Work::Command(c),
                 None => break, // all handles dropped → shut down
@@ -77,6 +82,7 @@ pub(super) async fn run(
         };
         pulse.turning();
         match work {
+            Work::Forget(f) => owner.forget_unanswered(&f.key, &f.call_id, &f.from_tag),
             Work::Command(c) => owner.handle_command(endpoint, c).await,
             Work::Timer(t) => owner.fire_timer(endpoint, t).await,
             Work::Sweep => owner.sweep(),

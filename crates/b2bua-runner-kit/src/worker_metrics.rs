@@ -115,7 +115,6 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::DEFERRED_SWEPT.render_value(&mut s, m.deferred_swept());
     c::SWEEP_REAPED.render_value(&mut s, m.sweep_reaped());
     c::UNANSWERED_FORGOTTEN.render_value(&mut s, m.unanswered_forgotten());
-    c::FORGET_REFUSED.render_value(&mut s, m.forget_refused());
     c::RELEASED_UNANSWERED_INVITES_ANSWERED
         .render_value(&mut s, m.released_unanswered_invites_answered());
     c::RELEASED_UNANSWERED_FORGOTTEN.render_value(&mut s, m.released_unanswered_forgotten());
