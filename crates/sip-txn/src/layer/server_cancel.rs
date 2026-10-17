@@ -77,8 +77,9 @@ impl Owner {
             }
         }
 
-        // No INVITE server txn at all: no 200, no 487, no Cancelled. The TU
-        // decides between the §9.2 481 and a re-offer against a rebuilt INVITE.
+        // No INVITE server txn this CANCEL names: no 200, no 487, no
+        // Cancelled. The TU decides between the §9.2 481 and a re-offer
+        // against a rebuilt INVITE.
         let key = match matched {
             Some(key) => key,
             None => {
