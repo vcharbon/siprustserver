@@ -1,7 +1,7 @@
 //! The worker's probe server, and what it answers from: `/ready` from its
 //! readiness and its loops, `/healthz` from its loops alone, `/metrics` from
 //! every metric source of the worker, the operator routes ([`admin`]) from its
-//! readiness and its live calls.
+//! readiness and its live calls, which it can release.
 
 mod admin;
 
@@ -25,7 +25,8 @@ impl RunnerBase {
     /// composed, the loops' stall gauge, the cordon gauge), then
     /// `extra_metrics` (e.g. allocator stats). `/ready` reads NotReady and
     /// `/healthz` 503 while a worker loop is stalled past `loop_stall`.
-    /// `/admin/cordon` is the operator's cordon. Hold the returned server for
+    /// `/admin/cordon` is the operator's cordon, `/admin/release-all` its
+    /// release of every call. Hold the returned server for
     /// the process lifetime — its accept loop aborts on drop.
     pub async fn spawn_probe_server(
         &self,
@@ -50,7 +51,11 @@ impl RunnerBase {
             ready: ready_fn(move || core_ready.readiness_state(), core.loops().clone(), stall),
             heap,
             vrrp: None,
-            admin: Some(admin::admin_routes(core.readiness(), core.active_calls_probe())),
+            admin: Some(admin::admin_routes(
+                core.readiness(),
+                core.active_calls_probe(),
+                core.release_all_handle(),
+            )),
         };
         let live = live_fn(core.loops().clone(), stall);
         match probe_http::ProbeServer::start_live(self.metrics_sa, routes, live).await {
@@ -58,7 +63,7 @@ impl RunnerBase {
                 tracing::info!(
                     service = %self.name,
                     addr = %server.addr(),
-                    "metrics server listening (/metrics, readiness /ready, liveness /healthz, operator /admin/cordon)"
+                    "metrics server listening (/metrics, readiness /ready, liveness /healthz, operator /admin/cordon /admin/release-all)"
                 );
                 Some(server)
             }

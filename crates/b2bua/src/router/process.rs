@@ -247,9 +247,9 @@ enum Gate {
 /// materialisation, plus the last-touched liveness stamp. A verdict is
 /// check-then-act made safe: it applies only if the call's last-touched stamp
 /// still matches what the sweep observed (stale) or the call is still resident
-/// (fatal-error/discharge). Running before the in-dialog lookup means a late
-/// verdict for a RELEASED call can never resurrect it from the replica store
-/// via on-demand reclaim.
+/// (fatal-error/discharge, an operator's release ADR-0050 §10). Running before
+/// the in-dialog lookup means a late verdict for a RELEASED call can never
+/// resurrect it from the replica store via on-demand reclaim.
 async fn reaper_verdict_gate(
     ctx: &Arc<RouterCtx>,
     event: &CallEvent,
@@ -257,7 +257,7 @@ async fn reaper_verdict_gate(
     now_ms: i64,
 ) -> Gate {
     if let CallEvent::InternalEvent { topic, outcome, payload, .. } = event {
-        if topic == crate::reaper::REAPER_TOPIC {
+        if topic == crate::reaper::REAPER_TOPIC || topic == crate::release_all::TOPIC {
             let watermark = payload.get("watermark").and_then(|v| v.as_i64());
             let current = ctx.state.last_touched(call_ref);
             if !crate::reaper::verdict_confirmed(outcome, watermark, current) {

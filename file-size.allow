@@ -11,7 +11,7 @@ ext .rs
 # No generated or fixture .rs file is tracked; one would go here as
 # `exclude <path glob>`.
 
-crates/b2bua-harness/src/lib.rs 1067
+crates/b2bua-harness/src/lib.rs 1062
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
 crates/b2bua-harness/tests/it/message_ring.rs 955

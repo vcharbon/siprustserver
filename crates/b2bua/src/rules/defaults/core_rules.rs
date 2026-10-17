@@ -238,7 +238,7 @@ fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHa
 /// Force every still-unresolved leg terminal, record `reason` on the CDR and
 /// command termination with `cause` (kept only where the call names no cause
 /// yet: the first termination names who ended the call).
-fn force_terminal(
+pub(crate) fn force_terminal(
     ctx: &RuleContext,
     reason: &'static str,
     cause: TerminationCause,

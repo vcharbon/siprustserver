@@ -85,6 +85,10 @@ impl<'a> RuleCall<'a> {
     pub fn b_legs(&self) -> &'a [Leg] {
         &self.0.b_legs
     }
+    /// Whether the caller's INVITE took a 2xx.
+    pub fn caller_answered(&self) -> bool {
+        call::helpers::caller_answered(self.0)
+    }
     /// The id the next leg this stack dials takes — the one a `CreateLeg`
     /// ([`crate::model::RuleAction::CreateLeg`]) emitted now mints.
     pub fn next_b_leg_id(&self) -> String {

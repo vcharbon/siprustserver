@@ -12,7 +12,6 @@ use sip_net::UdpEndpoint;
 use sip_txn::{DeferredBound, IdGen, TransactionConfig, TransactionLayer};
 
 use crate::admission::Refusals;
-
 use crate::capacity::{CapacityGate, Occupancy};
 use crate::cdr::CdrWriter;
 use crate::config::B2buaConfig;
@@ -34,6 +33,7 @@ mod drain_tests;
 #[cfg(test)]
 mod loops_tests;
 mod readiness;
+mod release_all;
 #[cfg(test)]
 mod unwired_tests;
 

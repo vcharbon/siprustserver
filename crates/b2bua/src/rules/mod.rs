@@ -3,7 +3,8 @@
 //! ([`actions`]), framework invariants, and the rule families: the CORE
 //! lifecycle set ([`defaults`]), the 18x-policy services ([`relay_first_18x`],
 //! [`promote_pem`]), REFER transfer ([`refer_transfer`]), release/reroute
-//! ([`release_reroute`]), and the round a record lost ([`lost_round`]).
+//! ([`release_reroute`]), the round a record lost ([`lost_round`]), and an
+//! operator's release ([`operator_release`]).
 
 pub mod actions;
 pub mod capabilities;
@@ -15,6 +16,7 @@ pub mod invariants;
 pub mod lifecycle_delivery;
 pub mod lost_round;
 pub mod model_invariants;
+pub mod operator_release;
 mod pending_refusal;
 pub mod promote_pem;
 pub mod refer_transfer;

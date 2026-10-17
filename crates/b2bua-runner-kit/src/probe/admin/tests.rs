@@ -1,8 +1,11 @@
-//! The cordon routes over a real probe server: their status codes, their
-//! idempotence, the state report, and the states no cordon applies to.
+//! The operator routes over a real probe server: the cordon's status codes,
+//! its idempotence, the state report and the states no cordon applies to;
+//! the release-all's counts.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use b2bua::release_all::ReleasedAll;
 use b2bua::repl::ReadinessSource;
 use probe_http::{ProbeRoutes, ProbeServer, ProbeState};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,12 +27,21 @@ fn body(resp: &str) -> &str {
 }
 
 async fn server(readiness: &Readiness, calls: usize) -> ProbeServer {
+    let release_all: ReleaseAllFn = Arc::new(ReleasedAll::default);
+    server_releasing(readiness, calls, release_all).await
+}
+
+async fn server_releasing(
+    readiness: &Readiness,
+    calls: usize,
+    release_all: ReleaseAllFn,
+) -> ProbeServer {
     let routes = ProbeRoutes {
         metrics: Arc::new(String::new),
         ready: Arc::new(|| ProbeState::Ready),
         heap: None,
         vrrp: None,
-        admin: Some(admin_routes(readiness.clone(), Arc::new(move || calls))),
+        admin: Some(admin_routes(readiness.clone(), Arc::new(move || calls), release_all)),
     };
     ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap()
 }
@@ -116,4 +128,27 @@ async fn a_cordon_is_refused_409_on_a_not_ready_and_on_a_draining_node() {
     let report: serde_json::Value =
         serde_json::from_str(body(&request(s.addr(), "GET", "/admin/cordon").await)).unwrap();
     assert_eq!(report, serde_json::json!({"state": "draining", "cordoned": true, "calls": 0}));
+}
+
+/// `POST /admin/release-all` runs the release once per request and answers
+/// what it reached; another method runs nothing.
+#[tokio::test]
+async fn release_all_answers_its_counts_and_runs_once_per_post() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = runs.clone();
+    let release_all: ReleaseAllFn = Arc::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        ReleasedAll { released: 2, aborted: 1 }
+    });
+    let s = server_releasing(&Readiness::always_ready(), 3, release_all).await;
+    let post = request(s.addr(), "POST", "/admin/release-all").await;
+    assert!(post.starts_with("HTTP/1.1 200 OK") && post.contains("application/json"), "{post}");
+    let reached: serde_json::Value = serde_json::from_str(body(&post)).unwrap();
+    assert_eq!(reached, serde_json::json!({"released": 2, "aborted": 1}));
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    let get = request(s.addr(), "GET", "/admin/release-all").await;
+    assert!(get.starts_with("HTTP/1.1 405 Method Not Allowed"), "{get}");
+    assert!(get.contains("Allow: POST\r\n"), "{get}");
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "a GET releases nothing");
 }

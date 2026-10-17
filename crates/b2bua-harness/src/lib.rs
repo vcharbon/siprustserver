@@ -29,6 +29,7 @@ use sip_txn::IdGen;
 pub mod failure_view;
 pub mod limiter;
 pub mod model_gate;
+mod operator;
 mod proxy_core;
 mod scene;
 pub mod terminated;
@@ -914,12 +915,6 @@ impl B2buaSut {
     /// leaves the worker's release queue.
     pub fn is_reaped(&self) -> bool {
         self.calls_reaped() && self.limiter_releases_waiting() == 0
-    }
-
-    /// The SUT's readiness handle: its OPTIONS self-health and the state
-    /// `/ready` reads.
-    pub fn readiness(&self) -> b2bua::repl::Readiness {
-        self._core.readiness()
     }
 
     /// Every call created has been removed and no admitted new call is left

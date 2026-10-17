@@ -78,6 +78,7 @@ pub fn default_rules_with(options: &ComposeOptions) -> Vec<RuleDefinition> {
     rules.extend(crate::rules::release_reroute::release_reroute_rules());
     rules.extend(crate::rules::lost_round::lost_round_rules());
     rules.extend(core_rules());
+    rules.extend(crate::rules::operator_release::operator_release_rules());
     rules.extend(crate::rules::relay_first_18x::relay_first_18x_rules());
     rules.extend(crate::rules::promote_pem::promote_pem_rules());
     if options.core_refer_transfer {

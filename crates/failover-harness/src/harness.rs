@@ -41,7 +41,6 @@ use b2bua::store::{CallStore, PartitionRole, PutOpts};
 use b2bua::{B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
 use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
-
 use ha_harness::{Marker, ReplReport};
 use observe::NodeScope;
 use repl_net::transport::{
@@ -60,6 +59,7 @@ use crate::views::{Belief, Incarnation, ViewLedger};
 mod acceptance;
 mod membership;
 mod proxy_sut;
+mod release_all;
 mod repl_faults;
 mod repl_wiring;
 pub use proxy_sut::ProxySut;

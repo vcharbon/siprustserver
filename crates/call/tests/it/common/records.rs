@@ -152,6 +152,7 @@ fn arb_termination_cause() -> impl Strategy<Value = TerminationCause> {
         Just(TerminationCause::Admission),
         Just(TerminationCause::MessageCap),
         Just(TerminationCause::Supervisor),
+        Just(TerminationCause::OperatorRelease),
     ]
 }
 

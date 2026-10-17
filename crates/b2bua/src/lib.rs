@@ -49,6 +49,7 @@ pub mod obligations;
 pub mod overload;
 pub mod peer_failures;
 pub mod reaper;
+pub mod release_all;
 pub mod repl;
 pub(crate) mod ring_deadline;
 pub mod router;
