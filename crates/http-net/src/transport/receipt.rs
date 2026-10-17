@@ -3,8 +3,8 @@
 //!
 //! The real transport stamps it when the request head has been read and before
 //! the body is, so a service measuring its own time from it counts the body's
-//! transfer and its own queueing; the simulated fabric receives nothing off a
-//! wire, so there it is unset.
+//! transfer and its own queueing. The simulated fabric states no receipt of its
+//! own: a service it runs inline sees its caller's scope.
 
 use std::future::Future;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

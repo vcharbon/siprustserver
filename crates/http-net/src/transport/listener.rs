@@ -22,10 +22,10 @@ pub(crate) fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     socket.listen(BACKLOG)
 }
 
-/// How long to wait before the next accept after `error`: nothing when it was
-/// one connection's own failure, [`ACCEPT_BACKOFF`] when the process or the
-/// kernel is out of a resource (descriptors, buffers, memory), which an
-/// immediate retry cannot have freed.
+/// How long to wait before the next accept after `error`: nothing after
+/// `ConnectionAborted`, `ConnectionReset` or `Interrupted`, one connection's
+/// own failure; [`ACCEPT_BACKOFF`] after every other error, descriptor, buffer
+/// and memory exhaustion among them.
 pub(crate) fn accept_backoff(error: &io::Error) -> Option<Duration> {
     match error.kind() {
         ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::Interrupted => None,

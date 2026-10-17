@@ -13,13 +13,14 @@ use async_trait::async_trait;
 
 use super::codec::{HttpContinuationCodec, IdentityCodec};
 use super::error::HttpScriptError;
+use super::findings::Findings;
 use super::matcher;
 use super::open::{self, Candidate, Pick};
 use super::program::{HttpBindings, HttpReply, HttpScript, HttpScriptStep, HttpState};
 use super::template::{self, Captures};
 use super::token::{self, HttpContinuation, TokenAt};
 use super::validate;
-use super::verdict::{HttpFinding, HttpFindingKind, HttpScriptHandle, HttpVerdict};
+use super::verdict::{HttpFinding, HttpFindingKind, HttpScriptHandle};
 use crate::{HttpAnswer, HttpRequest, HttpResponse, HttpService};
 
 /// How many near-miss opens an unmatched opening request's diagnostic lists.
@@ -29,25 +30,25 @@ const NEAR_MISSES_SHOWN: usize = 3;
 pub(super) struct Shared {
     nonce: u64,
     codec: Arc<dyn HttpContinuationCodec>,
-    state: Mutex<State>,
+    pub(super) state: Mutex<State>,
 }
 
 #[derive(Default)]
-struct State {
+pub(super) struct State {
     /// Indexed by instance id.
-    instances: Vec<Instance>,
-    findings: Vec<HttpFinding>,
+    pub(super) instances: Vec<Instance>,
+    pub(super) findings: Findings,
 }
 
-struct Instance {
-    script: Arc<HttpScript>,
+pub(super) struct Instance {
+    pub(super) script: Arc<HttpScript>,
     bindings: Arc<HttpBindings>,
     fragments: Vec<super::open::Fragment>,
-    opened: bool,
-    progress: Progress,
+    pub(super) opened: bool,
+    pub(super) progress: Progress,
 }
 
-enum Progress {
+pub(super) enum Progress {
     /// The highest position a served step pointed past, of `len` steps.
     Reified { reached: usize, len: usize },
     /// Whether the code step returned no next state.
@@ -55,14 +56,14 @@ enum Progress {
 }
 
 impl Progress {
-    fn complete(&self) -> bool {
+    pub(super) fn complete(&self) -> bool {
         match self {
             Self::Reified { reached, len } => reached >= len,
             Self::Code { done } => *done,
         }
     }
 
-    fn describe(&self, opened: bool) -> String {
+    pub(super) fn describe(&self, opened: bool) -> String {
         match (opened, self) {
             (false, _) => "never opened".to_string(),
             (true, Self::Reified { reached, len }) => {
@@ -73,43 +74,11 @@ impl Progress {
     }
 }
 
-impl Shared {
-    pub(super) fn verdict(&self, instance: u64) -> HttpVerdict {
-        let state = self.state.lock().unwrap();
-        let Some(inst) = usize::try_from(instance).ok().and_then(|i| state.instances.get(i)) else {
-            return HttpVerdict { instance, opened: false, complete: false, findings: Vec::new() };
-        };
-        let mut findings: Vec<HttpFinding> =
-            state.findings.iter().filter(|f| f.instances.contains(&instance)).cloned().collect();
-        let complete = inst.progress.complete();
-        if !complete {
-            findings.push(unserved(instance, inst));
-        }
-        HttpVerdict { instance, opened: inst.opened, complete, findings }
-    }
-}
-
-fn unserved(instance: u64, inst: &Instance) -> HttpFinding {
-    HttpFinding {
-        kind: HttpFindingKind::Unserved,
-        instances: vec![instance],
-        method: String::new(),
-        path: String::new(),
-        body: String::new(),
-        detail: format!(
-            "{} {}: {}",
-            inst.script.open.method,
-            inst.script.open.path,
-            inst.progress.describe(inst.opened)
-        ),
-    }
-}
-
 /// An [`HttpService`] serving the scripts added to it. Clones share the
-/// scripts, their progress and the findings.
+/// scripts, their progress and the findings (read in `findings`).
 #[derive(Clone)]
 pub struct ScriptedHttpService {
-    shared: Arc<Shared>,
+    pub(super) shared: Arc<Shared>,
 }
 
 impl Default for ScriptedHttpService {
@@ -167,19 +136,6 @@ impl ScriptedHttpService {
             instance,
             attributable: checked.attributable,
         })
-    }
-
-    /// Every finding so far, plus one [`HttpFindingKind::Unserved`] per
-    /// instance not complete: read at run end, the service-level verdict.
-    pub fn findings(&self) -> Vec<HttpFinding> {
-        let state = self.shared.state.lock().unwrap();
-        let mut findings = state.findings.clone();
-        for (i, inst) in state.instances.iter().enumerate() {
-            if !inst.progress.complete() {
-                findings.push(unserved(i as u64, inst));
-            }
-        }
-        findings
     }
 
     /// Decide the reply to `req`: a step to serve, or a finding.
@@ -395,7 +351,7 @@ impl ScriptedHttpService {
     /// Record `finding` and build the `500` that answers it.
     fn record(&self, finding: HttpFinding) -> HttpResponse {
         let body = format!("{:?}: {}\n", finding.kind, finding.detail);
-        self.shared.state.lock().unwrap().findings.push(finding);
+        self.shared.state.lock().unwrap().findings.record(finding);
         HttpResponse::status(500)
             .with_body(body.into_bytes())
             .header("content-type", "text/plain; charset=utf-8")

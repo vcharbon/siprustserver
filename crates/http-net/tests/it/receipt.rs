@@ -1,6 +1,6 @@
 //! The receipt stamp a served request carries: the real server stamps it when
 //! the request head arrives, before the body is read, and the simulated fabric
-//! states none.
+//! states none of its own.
 
 #![cfg(feature = "real")]
 
@@ -44,7 +44,7 @@ async fn the_receipt_is_stamped_before_the_body_arrives() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let body_sent = Instant::now();
     stream.write_all(b"ping").await.unwrap();
     let mut answer = Vec::new();
@@ -65,9 +65,10 @@ async fn the_receipt_is_stamped_before_the_body_arrives() {
     assert!(receipt.unix_us() > 0);
 }
 
-/// The simulated fabric moves no bytes, so it states no receipt.
+/// The simulated fabric states no receipt of its own: a caller outside any
+/// receipt scope reaches a service that reads none.
 #[tokio::test(start_paused = true)]
-async fn the_simulated_fabric_states_no_receipt() {
+async fn the_simulated_fabric_states_no_receipt_of_its_own() {
     let stamps = Arc::new(Stamps::default());
     let net = SimulatedHttpNetwork::new();
     let addr = "10.0.0.1:8080".parse().unwrap();

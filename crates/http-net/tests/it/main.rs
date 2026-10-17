@@ -14,5 +14,6 @@ mod receipt;
 mod recording;
 mod scripted;
 mod scripted_codec;
+mod scripted_findings;
 mod scripted_real;
 mod simulated;

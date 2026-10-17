@@ -20,6 +20,7 @@
 
 mod codec;
 mod error;
+mod findings;
 mod matcher;
 mod open;
 mod program;
