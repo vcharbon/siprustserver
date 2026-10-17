@@ -8,6 +8,7 @@ use b2bua::loops::WorkerLoops;
 use b2bua::metrics::{catalogue, B2buaMetrics, UdpTransportMetrics};
 use b2bua::new_calls::NewCallCounts;
 use b2bua::overload::OverloadSignal;
+use b2bua::repl::Readiness;
 use metric_catalogue::Catalogue;
 
 /// The metric sources of one worker. Clone-cheap: every field shares its
@@ -29,6 +30,8 @@ pub struct WorkerMetrics {
     pub loops: WorkerLoops,
     /// How long one turn may run before its loop reads stalled.
     pub loop_stall: Duration,
+    /// The worker's readiness: its operator cordon.
+    pub readiness: Readiness,
 }
 
 /// The b2bua worker's `/metrics` catalogue: every family of
@@ -43,6 +46,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
         catalogue::OVERLOAD,
         catalogue::CAPACITY,
         catalogue::LOOPS,
+        catalogue::READINESS,
         catalogue::NEW_CALL_OUTCOMES,
         observe::counters::FAMILIES,
         http_net::failures::FAMILIES,
@@ -67,8 +71,8 @@ impl WorkerMetrics {
 
     /// The worker's families as Prometheus text: core registry, txn
     /// backpressure, UDP transport, overload signal, capacity gate, the loops'
-    /// stall gauge, then every new call's admission outcome, every rung
-    /// composed.
+    /// stall gauge, the cordon gauge, then every new call's admission outcome,
+    /// every rung composed.
     pub fn prometheus_text(&self) -> String {
         let mut text = self.core.prometheus_text();
         text.push_str(&txn_metrics_text(&self.txn));
@@ -76,6 +80,8 @@ impl WorkerMetrics {
         text.push_str(&self.overload.prometheus_text());
         text.push_str(&self.capacity.prometheus_text());
         text.push_str(&self.loops.prometheus_text(self.loop_stall));
+        catalogue::worker::CORDONED
+            .render_value(&mut text, u64::from(self.readiness.is_cordoned()));
         text.push_str(
             &NewCallCounts::read(self.core.new_calls(), &self.txn, Some(self.udp.brake()))
                 .prometheus_text(),
@@ -169,6 +175,7 @@ mod tests {
             capacity: CapacityGate::new(Arc::new(probe)),
             loops: WorkerLoops::new((pulse(), parked()), (pulse(), parked())),
             loop_stall: Duration::from_secs(5),
+            readiness: Readiness::always_ready(),
         }
     }
 
@@ -222,6 +229,22 @@ mod tests {
     /// The deferred-backlog and lifetime series of the transaction layer are
     /// on the first scrape, at 0, so a dashboard or probe reads a value from
     /// startup.
+    /// `b2bua_cordoned` reads the operator's cordon at each scrape.
+    #[tokio::test]
+    async fn the_cordon_gauge_follows_the_cordon() {
+        let txn = txn_layer().await;
+        let w = worker(&txn);
+        let gauge = |w: &WorkerMetrics| {
+            let text = w.prometheus_text();
+            text.lines().find(|l| l.starts_with("b2bua_cordoned ")).map(str::to_owned)
+        };
+        assert_eq!(gauge(&w).as_deref(), Some("b2bua_cordoned 0"));
+        w.readiness.cordon().unwrap();
+        assert_eq!(gauge(&w).as_deref(), Some("b2bua_cordoned 1"));
+        w.readiness.uncordon().unwrap();
+        assert_eq!(gauge(&w).as_deref(), Some("b2bua_cordoned 0"));
+    }
+
     #[tokio::test]
     async fn the_txn_deferred_backlog_series_are_published_at_zero_from_startup() {
         let txn = txn_layer().await;

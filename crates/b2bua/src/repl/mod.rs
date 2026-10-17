@@ -38,7 +38,9 @@ pub use changelog::{
 pub use departed::{departed_probe, DepartedProbe};
 pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
 pub use puller::{Puller, PullerConfig, PullerStatus};
-pub use readiness::{OptionsReport, Readiness, ReadinessSource, ReadinessState, Refusal};
+pub use readiness::{
+    CordonRefused, OptionsReport, Readiness, ReadinessSource, ReadinessState, Refusal,
+};
 pub use replication::{flush_replicated, replication_target, ReplicationPlan};
 pub use router_sink::RouterSink;
 pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};

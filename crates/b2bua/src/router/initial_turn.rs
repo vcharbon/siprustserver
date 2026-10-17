@@ -13,6 +13,7 @@ use crate::admission::{class_of, Class};
 use crate::effects::{HandlerEffects, HandlerResult};
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
 use crate::new_calls::Refusal;
+use crate::repl::ReadinessState;
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::ActionExecutor;
 use crate::store::StoreFaultPoint;
@@ -157,6 +158,10 @@ pub(super) async fn initial_invite_turn(
             now_ms,
             TerminationCause::Admission,
         )
+    } else if ctx.readiness.state() == ReadinessState::Cordoned {
+        // A cordoned node refuses every new call before its decision, the
+        // call's record written (ADR-0050 §9).
+        refused_unavailable(ctx, call.clone(), now_ms)
     } else {
         // `req.image()` is the datagram this INVITE arrived as — the only place
         // it exists (the call carries a header snapshot, not bytes), and what a
@@ -219,16 +224,20 @@ pub(super) async fn initial_invite_turn(
     Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &exec)))
 }
 
-/// The call refused 503 with no Retry-After, as for an unavailable decision
-/// (ADR-0022 X3), from the pre-handler call ([`discarded_turn`]), so the
-/// termination releases what the route admitted.
+/// [`refused_unavailable`] from the pre-handler call ([`discarded_turn`]), so
+/// the termination releases what the route admitted.
 fn refused_after_leaving_the_slice(
     ctx: &RouterCtx,
     pre: &Call,
     handled: HandlerResult,
     now_ms: i64,
 ) -> HandlerResult {
-    let call = discarded_turn(pre, handled);
+    refused_unavailable(ctx, discarded_turn(pre, handled), now_ms)
+}
+
+/// `call` refused 503 with no Retry-After, as for an unavailable decision
+/// (ADR-0022 X3): the record of a call no decision reached.
+fn refused_unavailable(ctx: &RouterCtx, call: Call, now_ms: i64) -> HandlerResult {
     let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     crate::initial_invite::reject_call(
         call,

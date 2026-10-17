@@ -93,7 +93,7 @@ pub(crate) struct Cluster {
 }
 
 impl Cluster {
-    fn node(&self, ordinal: &str) -> &ReplicatedB2buaSut {
+    pub(crate) fn node(&self, ordinal: &str) -> &ReplicatedB2buaSut {
         if ordinal == "b1" {
             &self.b1
         } else {
@@ -140,7 +140,7 @@ pub(crate) async fn bring_up(fh: &mut FailoverHarness) -> Cluster {
 
 /// An answered call through the proxy: the caller's and the callee's dialog,
 /// and the cookie's `(w_pri, w_bak)`.
-async fn answered(
+pub(crate) async fn answered(
     fh: &FailoverHarness,
     alice: &Agent,
     bob: &Agent,
@@ -159,7 +159,11 @@ async fn answered(
 }
 
 /// The replicated call ref of the call `primary` serves, read on `backup`.
-async fn call_ref_of(fh: &FailoverHarness, backup: &ReplicatedB2buaSut, primary: &str) -> String {
+pub(crate) async fn call_ref_of(
+    fh: &FailoverHarness,
+    backup: &ReplicatedB2buaSut,
+    primary: &str,
+) -> String {
     for _ in 0..20 {
         if let Some(call_ref) = backup.scan_one_backed_up(primary).await {
             return call_ref;
@@ -170,21 +174,21 @@ async fn call_ref_of(fh: &FailoverHarness, backup: &ReplicatedB2buaSut, primary:
 }
 
 /// The caller hangs up through the proxy; the callee answers the BYE.
-async fn caller_hangs_up(dialog: &mut Dialog, bob: &Agent) {
+pub(crate) async fn caller_hangs_up(dialog: &mut Dialog, bob: &Agent) {
     let mut bye = dialog.bye().await;
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect(200).await;
 }
 
 /// The callee hangs up through the proxy; the caller answers the BYE.
-async fn callee_hangs_up(bob_dialog: &mut Dialog, alice: &Agent) {
+pub(crate) async fn callee_hangs_up(bob_dialog: &mut Dialog, alice: &Agent) {
     let mut bye = bob_dialog.bye().await;
     alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect(200).await;
 }
 
 /// Pump until both nodes hold nothing for any call.
-async fn drain(fh: &FailoverHarness, c: &Cluster) {
+pub(crate) async fn drain(fh: &FailoverHarness, c: &Cluster) {
     let drained = fh.settle_terminal(async || c.b1.memory_clean() && c.b2.memory_clean()).await;
     assert!(drained, "the cluster drains every call");
 }

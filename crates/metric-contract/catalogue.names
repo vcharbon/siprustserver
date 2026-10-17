@@ -156,6 +156,7 @@ b2bua-runner b2bua_capacity_rss_bytes gauge fixed {}
 b2bua-runner b2bua_capacity_ceiling gauge fixed {bound,class|bound,class}
 b2bua-runner b2bua_repl_backup_shed_total counter fixed {bound}
 b2bua-runner b2bua_loop_stalled gauge fixed {loop}
+b2bua-runner b2bua_cordoned gauge fixed {}
 b2bua-runner b2bua_new_calls_total counter fixed {outcome,class|outcome,class|outcome,reason,class|outcome,reason,class}
 b2bua-runner b2bua_new_call_refused_copies_total counter fixed {}
 b2bua-runner log_lines_dropped_total counter fixed {}

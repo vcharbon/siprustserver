@@ -119,7 +119,7 @@ pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> 
 /// Every reply mints a local To-tag (RFC 3261 §8.2.6.2) and states the
 /// process's boot generation (`X-Incarnation`), so a proxy tells a restart
 /// at the same address from the process it last read:
-///   - serving dialogs (Ready, Draining) → `200 OK` with the capabilities
+///   - serving dialogs (Ready, Cordoned, Draining) → `200 OK` with the capabilities
 ///     (§11.2), `X-Overload: v=1; elu=…; gc=…; adm=…` and `X-Readiness:
 ///     new=accept`, or `new=refuse; cause=…` while it refuses new calls;
 ///   - NotReady → `503` and nothing more: it serves nothing yet.

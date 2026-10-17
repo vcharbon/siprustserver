@@ -203,6 +203,24 @@ async fn a_withdrawal_drains_and_exits_zero() {
     assert_eq!(w.core.metrics().drain_exits("quiescent"), 1, "the drain ran");
 }
 
+/// SIGTERM drains a cordoned worker as a ready one: the drain runs, its exit
+/// is counted, the process exits zero.
+#[tokio::test(start_paused = true)]
+async fn sigterm_drains_a_cordoned_worker_and_exits_zero() {
+    let w = worker().await;
+    w.core.readiness().cordon().expect("a ready worker takes a cordon");
+    assert_eq!(w.core.readiness_state(), b2bua::repl::ReadinessState::Cordoned);
+    let code = tokio::time::timeout(
+        Duration::from_secs(10),
+        serve_until_stop(&w.core, "test", BOUNDS, pending(), ready(())),
+    )
+    .await
+    .expect("SIGTERM stops the worker");
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(w.core.metrics().drain_exits("quiescent"), 1, "the drain ran");
+    assert_eq!(w.core.readiness_state(), b2bua::repl::ReadinessState::Draining);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_loop_task_that_ends_flushes_the_releases_and_exits_non_zero() {
     let w = worker().await;

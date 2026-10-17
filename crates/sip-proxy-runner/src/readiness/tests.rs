@@ -43,6 +43,7 @@ async fn server_over(
         ready: p.ready,
         heap: None,
         vrrp: Some(p.vrrp),
+        admin: None,
     };
     ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, p.live).await.unwrap()
 }

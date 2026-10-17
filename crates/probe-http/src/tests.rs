@@ -4,7 +4,13 @@ use super::*;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 fn routes(body: &'static str, ready: ReadyFn) -> ProbeRoutes {
-    ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, heap: None, vrrp: None }
+    ProbeRoutes {
+        metrics: Arc::new(move || body.to_string()),
+        ready,
+        heap: None,
+        vrrp: None,
+        admin: None,
+    }
 }
 fn always(state: ProbeState) -> ReadyFn {
     Arc::new(move || state)
@@ -121,6 +127,7 @@ async fn vrrp_is_liveness_and_its_own_condition() {
     let (live_reads, holds_reads) = (live.clone(), holds.clone());
     let routes = ProbeRoutes {
         vrrp: Some(Arc::new(move || holds_reads.load(Ordering::SeqCst) == 1)),
+        admin: None,
         ..routes("", always(ProbeState::NotReady))
     };
     let server = ProbeServer::start_live(
@@ -146,6 +153,45 @@ async fn vrrp_is_404_on_a_server_given_none() {
             .await
             .unwrap();
     assert!(get(server.addr(), "/vrrp").await.contains("404 Not Found"));
+}
+
+async fn request(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    s.write_all(format!("{method} {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.unwrap();
+    let mut resp = Vec::new();
+    s.read_to_end(&mut resp).await.unwrap();
+    String::from_utf8_lossy(&resp).into_owned()
+}
+
+/// The operator routes receive the method and the path, query included, and
+/// their replies are framed: a body with its length, a `204` with neither.
+#[tokio::test]
+async fn admin_routes_receive_the_method_and_path_and_their_replies_are_framed() {
+    let mut r = routes("", always(ProbeState::Ready));
+    r.admin = Some(Arc::new(|method: &str, path: &str| match (method, path) {
+        ("POST", "/admin/x") => Some(AdminReply::no_content()),
+        ("GET", "/admin/x?y=1") => Some(AdminReply::json(200, r#"{"y":1}"#.into())),
+        _ => None,
+    }));
+    let server = ProbeServer::start("127.0.0.1:0".parse().unwrap(), r).await.unwrap();
+    let post = request(server.addr(), "POST", "/admin/x").await;
+    assert_eq!(post, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+    let get = request(server.addr(), "GET", "/admin/x?y=1").await;
+    assert_eq!(
+        get,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\
+         Connection: close\r\n\r\n{\"y\":1}"
+    );
+    assert!(request(server.addr(), "DELETE", "/admin/x").await.contains("404 Not Found"));
+}
+
+#[tokio::test]
+async fn admin_paths_are_404_on_a_server_given_none() {
+    let server =
+        ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes("", always(ProbeState::Ready)))
+            .await
+            .unwrap();
+    assert!(request(server.addr(), "POST", "/admin/cordon").await.contains("404 Not Found"));
 }
 
 #[tokio::test]

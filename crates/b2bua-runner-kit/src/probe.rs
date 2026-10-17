@@ -1,6 +1,9 @@
 //! The worker's probe server, and what it answers from: `/ready` from its
 //! readiness and its loops, `/healthz` from its loops alone, `/metrics` from
-//! every metric source of the worker.
+//! every metric source of the worker, the operator routes ([`admin`]) from its
+//! readiness and its live calls.
+
+mod admin;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,10 +22,11 @@ impl RunnerBase {
     /// `/metrics` body concatenates the worker's metric sources per scrape
     /// (core registry + txn backpressure + UDP transport + overload signal +
     /// capacity gate + every new call's admission outcome, every rung
-    /// composed, the loops' stall gauge), then `extra_metrics` (e.g. allocator
-    /// stats). `/ready` reads NotReady and `/healthz` 503 while a worker loop is
-    /// stalled past `loop_stall`. Hold the returned server for the process
-    /// lifetime — its accept loop aborts on drop.
+    /// composed, the loops' stall gauge, the cordon gauge), then
+    /// `extra_metrics` (e.g. allocator stats). `/ready` reads NotReady and
+    /// `/healthz` 503 while a worker loop is stalled past `loop_stall`.
+    /// `/admin/cordon` is the operator's cordon. Hold the returned server for
+    /// the process lifetime — its accept loop aborts on drop.
     pub async fn spawn_probe_server(
         &self,
         core: &Arc<B2buaCore>,
@@ -39,12 +43,14 @@ impl RunnerBase {
             capacity: core.capacity().clone(),
             loops: core.loops().clone(),
             loop_stall: stall,
+            readiness: core.readiness(),
         };
         let routes = probe_http::ProbeRoutes {
             metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
             ready: ready_fn(move || core_ready.readiness_state(), core.loops().clone(), stall),
             heap,
             vrrp: None,
+            admin: Some(admin::admin_routes(core.readiness(), core.active_calls_probe())),
         };
         let live = live_fn(core.loops().clone(), stall);
         match probe_http::ProbeServer::start_live(self.metrics_sa, routes, live).await {
@@ -52,7 +58,7 @@ impl RunnerBase {
                 tracing::info!(
                     service = %self.name,
                     addr = %server.addr(),
-                    "metrics server listening (/metrics, readiness /ready, liveness /healthz)"
+                    "metrics server listening (/metrics, readiness /ready, liveness /healthz, operator /admin/cordon)"
                 );
                 Some(server)
             }
@@ -70,7 +76,8 @@ impl RunnerBase {
 }
 
 /// `/ready`: Draining whatever the loops do; NotReady while a loop is stalled
-/// past `stall`; otherwise the readiness itself.
+/// past `stall`; otherwise the readiness itself, a cordoned node reading
+/// Ready (it serves its dialogs and stays published).
 pub(crate) fn ready_fn(
     readiness: impl Fn() -> ReadinessState + Send + Sync + 'static,
     loops: WorkerLoops,
@@ -79,7 +86,7 @@ pub(crate) fn ready_fn(
     Arc::new(move || match readiness() {
         ReadinessState::Draining => ProbeState::Draining,
         _ if !loops.stalled(stall).is_empty() => ProbeState::NotReady,
-        ReadinessState::Ready => ProbeState::Ready,
+        ReadinessState::Ready | ReadinessState::Cordoned => ProbeState::Ready,
         ReadinessState::NotReady => ProbeState::NotReady,
     })
 }
@@ -127,6 +134,7 @@ mod tests {
             ready: ready.clone(),
             heap: None,
             vrrp: None,
+            admin: None,
         };
         let server =
             ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, live).await.unwrap();
@@ -148,5 +156,18 @@ mod tests {
         *state.lock().unwrap() = ReadinessState::Ready;
         assert!(get(server.addr(), "/ready").await.contains("200 OK"));
         assert!(get(server.addr(), "/healthz").await.contains("200 OK"));
+    }
+
+    /// A cordoned worker reads Ready: it serves its dialogs and stays
+    /// published.
+    #[tokio::test]
+    async fn a_cordoned_worker_reads_ready() {
+        let parked = || tokio::spawn(std::future::pending::<()>()).abort_handle();
+        let loops = WorkerLoops::new(
+            (Arc::new(LoopPulse::new()), parked()),
+            (Arc::new(LoopPulse::new()), parked()),
+        );
+        let ready = ready_fn(|| ReadinessState::Cordoned, loops, STALL);
+        assert_eq!(ready(), ProbeState::Ready);
     }
 }

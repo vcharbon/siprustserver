@@ -17,6 +17,9 @@
 //! - `GET /vrrp` — the check of a node that holds a virtual address: `200 ok`
 //!   while `/healthz` passes and the injected [`ProbeRoutes::vrrp`] holds,
 //!   `503 stalled` / `503 not-ready` otherwise; `404` for a server given none.
+//! - any method on `/admin/…` — the runner's operator routes
+//!   ([`ProbeRoutes::admin`]); `404` for a server given none. They sit on the
+//!   observability port only, never on a SIP face.
 //! - `GET /debug/flamegraph[?seconds=N]` — on-demand pprof CPU flamegraph SVG
 //!   (internal debug route, NOT the SIP datapath; blocks for the sample window
 //!   on a blocking thread).
@@ -47,6 +50,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+
+mod admin;
+
+pub use admin::{AdminFn, AdminReply};
 
 /// The readiness a runner reports for `GET /readyz` (and the `/ready` alias).
 /// Three-valued so the HTTP probe can distinguish a node still coming up from
@@ -92,6 +99,8 @@ pub struct ProbeRoutes {
     pub heap: Option<HeapDumpFn>,
     /// What `GET /vrrp` asks on top of liveness; `None` ⇒ the route is `404`.
     pub vrrp: Option<LiveFn>,
+    /// The operator routes under `/admin/`; `None` ⇒ every one is `404`.
+    pub admin: Option<AdminFn>,
 }
 
 /// A connection that sends nothing for this long is cut and its fd reclaimed.
@@ -221,7 +230,17 @@ async fn handle_conn(
         Err(_elapsed) => return Ok(()), // silent client — drop
     };
     let req = String::from_utf8_lossy(&buf[..n]);
-    let path = req.split_whitespace().nth(1).unwrap_or("/");
+    let mut request_line = req.split_whitespace();
+    let method = request_line.next().unwrap_or("GET");
+    let path = request_line.next().unwrap_or("/");
+
+    if path.starts_with(admin::PREFIX) {
+        let reply = routes.admin.as_ref().and_then(|admin| admin(method, path));
+        let reply = reply.unwrap_or_else(|| AdminReply::json(404, String::new()));
+        stream.write_all(reply.render().as_bytes()).await?;
+        stream.flush().await?;
+        return Ok(());
+    }
 
     // On-demand CPU flamegraph (pprof SIGPROF sampling -> inferno SVG). Internal
     // debug route on the observability port — NOT the SIP datapath. Blocks for

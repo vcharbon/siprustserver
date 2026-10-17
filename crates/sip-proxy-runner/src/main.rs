@@ -631,14 +631,14 @@ async fn main() {
             )
         }),
         ready: proxy_probes.ready,
-        // No heap profiling on the proxy (not the leak target; profiling build
-        // feature off here). /debug/heap → 503.
+        // No heap profiling (not the leak target): /debug/heap → 503. No
+        // operator route: /admin/… → 404.
         heap: None,
         vrrp: Some(proxy_probes.vrrp),
+        admin: None,
     };
-    // The listener was bound FIRST (metrics-first bind order above); this only
-    // starts the accept loop. A failure here is fatal — a proxy without its
-    // health endpoint gets liveness-killed 30 s later with a lying /readyz.
+    // The listener was bound first (above); this starts the accept loop. A failure
+    // is fatal: a proxy with no health endpoint is liveness-killed 30 s later.
     let _metrics_server =
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
             .unwrap_or_else(|e| {

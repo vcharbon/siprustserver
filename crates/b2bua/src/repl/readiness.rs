@@ -6,6 +6,7 @@
 //! - [`ReadinessState::NotReady`] → `503`: serves nothing yet.
 //! - [`ReadinessState::Ready`] → `200`, `new=accept`, or `new=refuse;
 //!   cause=backend` while a gating backend's breaker is open.
+//! - [`ReadinessState::Cordoned`] → `200`, `new=refuse; cause=cordoned`.
 //! - [`ReadinessState::Draining`] → `200`, `new=refuse; cause=draining`.
 //!
 //! ## Gating
@@ -28,6 +29,13 @@
 //! open, [`Readiness::options_report`] reports a `Ready` node refusing new
 //! calls, and accepting again once all are closed; never latched (ADR-0043).
 //! [`Readiness::state`], which `/ready` reads, ignores the gate.
+//!
+//! ## Cordon (operator, ADR-0050 §9)
+//! An operator cordons a `Ready` node and uncordons it: `Ready ⇄ Cordoned`,
+//! with no timer. A cordoned node refuses every new call and serves every
+//! dialog; `/ready` reads it as `Ready`. A cordon is refused while the node is
+//! NotReady or Draining; SIGTERM or withdrawal drains a cordoned node as a
+//! `Ready` one.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -37,15 +45,30 @@ use tokio::sync::watch;
 use super::backend_gate::BackendGate;
 use super::ReplicationSupervisor;
 
-/// The three readiness states the OPTIONS responder self-reports.
+/// The readiness states the OPTIONS responder self-reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadinessState {
     /// Not yet re-hydrated / caught up — proxy must not route new calls here.
     NotReady,
     /// Re-hydrated + caught up (latched once reached).
     Ready,
+    /// Ready, and cordoned by an operator: refuses new calls, serves every
+    /// dialog; reversible.
+    Cordoned,
     /// Shutting down (SIGTERM) — terminal; proxy drains traffic away.
     Draining,
+}
+
+impl ReadinessState {
+    /// The state's name as an operator route reports it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            ReadinessState::NotReady => "not-ready",
+            ReadinessState::Ready => "ready",
+            ReadinessState::Cordoned => "cordoned",
+            ReadinessState::Draining => "draining",
+        }
+    }
 }
 
 /// Why a node that serves dialogs refuses new calls: the `cause` of its
@@ -54,6 +77,8 @@ pub enum ReadinessState {
 pub enum Refusal {
     /// A gating backend's breaker is open.
     Backend,
+    /// An operator cordoned the node.
+    Cordoned,
     /// The node is draining (SIGTERM or withdrawal).
     Draining,
 }
@@ -63,7 +88,29 @@ impl Refusal {
     pub const fn cause(self) -> &'static str {
         match self {
             Refusal::Backend => "backend",
+            Refusal::Cordoned => "cordoned",
             Refusal::Draining => "draining",
+        }
+    }
+}
+
+/// Why a cordon request was refused: the node is in a state no operator
+/// cordon applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CordonRefused {
+    /// Not yet bootstrapped: it takes no call to refuse.
+    NotReady,
+    /// Draining: terminal, it never accepts new calls again.
+    Draining,
+}
+
+impl CordonRefused {
+    /// The state the request was refused in, as [`ReadinessState::label`]
+    /// names it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            CordonRefused::NotReady => ReadinessState::NotReady.label(),
+            CordonRefused::Draining => ReadinessState::Draining.label(),
         }
     }
 }
@@ -141,10 +188,14 @@ struct ReadinessInner {
     draining: AtomicBool,
     /// Sticky readiness — once the gate opens it stays open (X6 anti-flap).
     ready_latched: AtomicBool,
-    /// Whether the "still NotReady, and why" line has been emitted. The state
-    /// machine is monotone (NotReady → Ready → Draining), so each transition —
-    /// including the boot state — is lined exactly once (ADR-0026): `state` is
-    /// read once per OPTIONS probe and must never be a per-probe line.
+    /// The operator's cordon: set only over a latched `Ready`, so a set flag
+    /// reads `Cordoned` until it is cleared or the node drains.
+    cordoned: AtomicBool,
+    /// Whether the "still NotReady, and why" line has been emitted. The
+    /// latched states are monotone (NotReady → Ready → Draining), so each
+    /// transition — including the boot state — is lined exactly once
+    /// (ADR-0026): `state` is read once per OPTIONS probe and must never be a
+    /// per-probe line. A cordon change is lined by the operator call making it.
     not_ready_logged: AtomicBool,
     /// The backends whose open breaker gates the OPTIONS self-health.
     backends: BackendGate,
@@ -172,6 +223,7 @@ impl Readiness {
                 source,
                 draining: AtomicBool::new(false),
                 ready_latched: AtomicBool::new(false),
+                cordoned: AtomicBool::new(false),
                 not_ready_logged: AtomicBool::new(false),
                 backends: BackendGate::default(),
                 node: observe::NodeScope::current(),
@@ -209,12 +261,7 @@ impl Readiness {
 
     fn latch_draining(&self, reason: &'static str) {
         if !self.inner.draining.swap(true, Ordering::SeqCst) {
-            tracing::info!(
-                node = %self.inner.node,
-                state = "Draining",
-                reason,
-                "readiness transition"
-            );
+            self.line_transition("Draining", reason);
         }
     }
 
@@ -237,12 +284,51 @@ impl Readiness {
         self.inner.backends.add(breaker);
     }
 
+    /// Cordon the node: `Ready → Cordoned`; idempotent on a cordoned node.
+    /// Refused while NotReady or Draining.
+    pub fn cordon(&self) -> Result<(), CordonRefused> {
+        match self.state() {
+            ReadinessState::NotReady => Err(CordonRefused::NotReady),
+            ReadinessState::Draining => Err(CordonRefused::Draining),
+            ReadinessState::Ready | ReadinessState::Cordoned => {
+                if !self.inner.cordoned.swap(true, Ordering::SeqCst) {
+                    self.line_transition("Cordoned", "operator cordon");
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Lift the cordon: `Cordoned → Ready`; idempotent on a node no cordon
+    /// holds. Refused while Draining.
+    pub fn uncordon(&self) -> Result<(), CordonRefused> {
+        if self.state() == ReadinessState::Draining {
+            return Err(CordonRefused::Draining);
+        }
+        if self.inner.cordoned.swap(false, Ordering::SeqCst) {
+            self.line_transition("Ready", "operator uncordon");
+        }
+        Ok(())
+    }
+
+    /// Whether an operator cordon is set, read apart from the state: a node
+    /// that drains keeps the cordon it was given.
+    pub fn is_cordoned(&self) -> bool {
+        self.inner.cordoned.load(Ordering::SeqCst)
+    }
+
+    fn line_transition(&self, state: &'static str, reason: &'static str) {
+        tracing::info!(node = %self.inner.node, state, reason, "readiness transition");
+    }
+
     /// What the OPTIONS answer reports, from [`state`](Self::state) and the
-    /// backend gate: the one place the two axes are derived.
+    /// backend gate: the one place the two axes are derived. A cordoned node
+    /// names the cordon as its cause whatever the backend gate reads.
     pub fn options_report(&self) -> OptionsReport {
         match self.state() {
             ReadinessState::NotReady => OptionsReport::NotReady,
             ReadinessState::Draining => OptionsReport::Serving(Some(Refusal::Draining)),
+            ReadinessState::Cordoned => OptionsReport::Serving(Some(Refusal::Cordoned)),
             ReadinessState::Ready if self.inner.backends.any_open() => {
                 OptionsReport::Serving(Some(Refusal::Backend))
             }
@@ -250,16 +336,20 @@ impl Readiness {
         }
     }
 
-    /// The current readiness state (Draining wins; else latched/gated Ready;
-    /// else NotReady). Latches `Ready` the first time the gates are all true —
-    /// and only over a SETTLED membership view, so the informer's empty boot
-    /// snapshot never vacuously latches a node before its bound (ADR-0045).
+    /// The current readiness state (Draining wins; else latched/gated Ready,
+    /// Cordoned while an operator cordon holds; else NotReady). Latches
+    /// `Ready` the first time the gates are all true — and only over a SETTLED
+    /// membership view, so the informer's empty boot snapshot never vacuously
+    /// latches a node before its bound (ADR-0045).
     pub fn state(&self) -> ReadinessState {
         if self.inner.draining.load(Ordering::SeqCst) {
             return ReadinessState::Draining;
         }
         if self.inner.ready_latched.load(Ordering::SeqCst) {
-            return ReadinessState::Ready;
+            return match self.inner.cordoned.load(Ordering::SeqCst) {
+                true => ReadinessState::Cordoned,
+                false => ReadinessState::Ready,
+            };
         }
         let settled = self.inner.source.membership_settled();
         let bootstrapped = self.inner.source.all_bootstrapped();
@@ -292,169 +382,4 @@ impl Readiness {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicBool;
-
-    /// A flip-able source for truth-table + transition tests.
-    struct FlagSource {
-        bootstrapped: AtomicBool,
-        current: AtomicBool,
-    }
-    impl FlagSource {
-        fn new(b: bool, c: bool) -> Arc<Self> {
-            Arc::new(Self { bootstrapped: AtomicBool::new(b), current: AtomicBool::new(c) })
-        }
-        fn set(&self, b: bool, c: bool) {
-            self.bootstrapped.store(b, Ordering::SeqCst);
-            self.current.store(c, Ordering::SeqCst);
-        }
-    }
-    impl ReadinessSource for FlagSource {
-        fn all_bootstrapped(&self) -> bool {
-            self.bootstrapped.load(Ordering::SeqCst)
-        }
-        fn all_current(&self) -> bool {
-            self.current.load(Ordering::SeqCst)
-        }
-    }
-
-    #[test]
-    fn truth_table_before_latch() {
-        // (bootstrapped, current) → state, with a fresh (un-latched) Readiness.
-        for (b, c, want) in [
-            (false, false, ReadinessState::NotReady),
-            (true, false, ReadinessState::NotReady),
-            (false, true, ReadinessState::NotReady),
-            (true, true, ReadinessState::Ready),
-        ] {
-            let r = Readiness::new(FlagSource::new(b, c));
-            assert_eq!(r.state(), want, "({b},{c})");
-        }
-    }
-
-    /// A source whose gates are vacuously true over an UNSYNCED membership view
-    /// (the informer's empty boot snapshot) must NOT latch Ready: peers — and
-    /// the calls to reclaim from them — are not visible yet.
-    struct UnsyncedSource {
-        synced: AtomicBool,
-    }
-    impl ReadinessSource for UnsyncedSource {
-        fn all_bootstrapped(&self) -> bool {
-            true // vacuous .all() over the empty peer set
-        }
-        fn all_current(&self) -> bool {
-            true // vacuous
-        }
-        fn membership_settled(&self) -> bool {
-            self.synced.load(Ordering::SeqCst)
-        }
-    }
-
-    #[test]
-    fn vacuous_gates_cannot_latch_before_membership_syncs() {
-        let src = Arc::new(UnsyncedSource { synced: AtomicBool::new(false) });
-        let r = Readiness::new(src.clone());
-        assert_eq!(
-            r.state(),
-            ReadinessState::NotReady,
-            "empty-but-unsynced membership must not vacuously latch Ready"
-        );
-        // The informer's initial LIST completes; an (actually) empty cluster —
-        // or one whose gates are genuinely satisfied — may now latch.
-        src.synced.store(true, Ordering::SeqCst);
-        assert_eq!(r.state(), ReadinessState::Ready);
-    }
-
-    #[test]
-    fn ready_latches_against_blip() {
-        let src = FlagSource::new(true, true);
-        let r = Readiness::new(src.clone());
-        assert_eq!(r.state(), ReadinessState::Ready);
-        // A transient peer blip drops current — readiness must NOT revert.
-        src.set(true, false);
-        assert_eq!(r.state(), ReadinessState::Ready);
-        src.set(false, false);
-        assert_eq!(r.state(), ReadinessState::Ready);
-    }
-
-    #[test]
-    fn draining_wins_over_latched_ready() {
-        let r = Readiness::new(FlagSource::new(true, true));
-        assert_eq!(r.state(), ReadinessState::Ready);
-        r.set_draining();
-        assert_eq!(r.state(), ReadinessState::Draining);
-    }
-
-    #[test]
-    fn draining_wins_over_not_ready_and_is_terminal() {
-        let src = FlagSource::new(false, false);
-        let r = Readiness::new(src.clone());
-        assert_eq!(r.state(), ReadinessState::NotReady);
-        r.set_draining();
-        assert_eq!(r.state(), ReadinessState::Draining);
-        // Even if the gate opens afterwards, Draining is terminal.
-        src.set(true, true);
-        assert_eq!(r.state(), ReadinessState::Draining);
-    }
-
-    #[test]
-    fn always_ready_is_ready() {
-        let r = Readiness::always_ready();
-        assert_eq!(r.state(), ReadinessState::Ready);
-        r.set_draining();
-        assert_eq!(r.state(), ReadinessState::Draining);
-    }
-
-    /// A gating backend's open breaker refuses new calls without a latch,
-    /// the node still serving; `state` (the `/ready` surface) never follows it.
-    #[test]
-    fn an_open_backend_breaker_refuses_new_calls_only_and_never_latches() {
-        let r = Readiness::always_ready();
-        let (breaker, open) = watch::channel(false);
-        r.gate_options_on(open);
-        assert_eq!(r.options_report(), OptionsReport::Serving(None));
-        breaker.send_replace(true);
-        assert_eq!(
-            r.options_report(),
-            OptionsReport::Serving(Some(Refusal::Backend)),
-            "open: serving, refusing new calls"
-        );
-        assert_eq!(r.state(), ReadinessState::Ready, "/ready unchanged");
-        breaker.send_replace(false);
-        assert_eq!(r.options_report(), OptionsReport::Serving(None), "closed: back, no latch");
-        breaker.send_replace(true);
-        r.set_draining();
-        assert_eq!(
-            r.options_report(),
-            OptionsReport::Serving(Some(Refusal::Draining)),
-            "draining wins"
-        );
-    }
-
-    /// Before the node is ready, the gate changes nothing.
-    #[test]
-    fn a_not_ready_node_stays_not_ready_whatever_the_gate() {
-        let r = Readiness::new(FlagSource::new(false, false));
-        let (breaker, open) = watch::channel(false);
-        r.gate_options_on(open);
-        assert_eq!(r.options_report(), OptionsReport::NotReady);
-        breaker.send_replace(true);
-        assert_eq!(r.options_report(), OptionsReport::NotReady);
-    }
-
-    /// Each state's report: NotReady serves nothing, Ready accepts, Draining
-    /// serves and refuses.
-    #[test]
-    fn each_state_reports_its_two_axes() {
-        let src = FlagSource::new(false, false);
-        let r = Readiness::new(src.clone());
-        assert_eq!(r.options_report(), OptionsReport::NotReady);
-        src.set(true, true);
-        assert_eq!(r.options_report(), OptionsReport::Serving(None));
-        r.set_draining();
-        assert_eq!(r.options_report(), OptionsReport::Serving(Some(Refusal::Draining)));
-        assert_eq!(Refusal::Backend.cause(), "backend");
-        assert_eq!(Refusal::Draining.cause(), "draining");
-    }
-}
+mod tests;

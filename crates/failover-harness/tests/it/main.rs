@@ -19,6 +19,7 @@ mod backup_capacity;
 mod call_terminate_on_backup;
 mod cancel_and_retransmission_follow_a_live_hop;
 mod consult_answer_deadline;
+mod cordoned_worker;
 mod crossed_reinvite_round;
 mod deferred_end_of_a_departed_primary;
 mod departure_support;

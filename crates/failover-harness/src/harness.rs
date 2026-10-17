@@ -57,7 +57,7 @@ use topology::{Peer, SimulatedMembership};
 use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
 use crate::views::{Belief, Incarnation, ViewLedger};
 
-mod backend_gate;
+mod acceptance;
 mod membership;
 mod proxy_sut;
 mod repl_faults;

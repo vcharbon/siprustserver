@@ -18,14 +18,15 @@ impl B2buaCore {
     /// on a desired-but-not-yet-current peer and unpublish the node, and a
     /// simultaneously-restarted cluster would oscillate published↔unpublished.
     /// The latch makes Ready sticky on both probe surfaces; `Draining` reports
-    /// not-ready (the probe's job during drain is to unpublish).
+    /// not-ready (the probe's job during drain is to unpublish). A `Cordoned`
+    /// node is ready: it stays published and serves its dialogs.
     pub fn is_ready(&self) -> bool {
-        self.readiness.state() == ReadinessState::Ready
+        matches!(self.readiness.state(), ReadinessState::Ready | ReadinessState::Cordoned)
     }
 
-    /// The full 3-valued readiness state (`NotReady`/`Ready`/`Draining`). The
-    /// runner maps it onto the HTTP probe's `ProbeState` so `/ready` can report
-    /// `draining` distinctly from `not-ready`.
+    /// The full readiness state. The runner maps it onto the HTTP probe's
+    /// `ProbeState` so `/ready` can report `draining` distinctly from
+    /// `not-ready`, and `Cordoned` as ready.
     pub fn readiness_state(&self) -> ReadinessState {
         self.readiness.state()
     }

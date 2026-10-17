@@ -624,8 +624,11 @@ every state but NotReady) and **accepting new calls** (`X-Readiness: new=accept`
 `new=refuse; cause=backend|cordoned|draining`). NotReady answers OPTIONS `503`; in k8s
 the `/ready` HTTP probe reports NotReady / Ready / Draining and ignores acceptance. A
 **backend gate** open on a `Ready` node reports `cause=backend`. **Cordoned** = set and
-cleared by an operator (`/admin/cordon`): refuses new calls, serves every dialog, no
-timer. **Ready** = every **Reclaim** stream to a
+cleared by an operator (`/admin/cordon`, gauge `b2bua_cordoned`): refuses every new
+INVITE with a bare `503` before any decision, its record that of a call no decision
+reached; serves every dialog; no timer; `/ready` reads it Ready. A cordon is refused
+(`409`) while NotReady or Draining; SIGTERM drains a cordoned node as a Ready one.
+**Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
 `Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,

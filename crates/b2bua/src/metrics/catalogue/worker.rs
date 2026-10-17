@@ -344,6 +344,12 @@ pub const WITHDRAWN_RUNNING: Family = Family::gauge(
     "1 while this worker has observed its own endpoint withdrawn from routing and still runs (ADR-0031 D6)",
 );
 
+pub const CORDONED: Family = Family::gauge(
+    "b2bua_cordoned",
+    Labels::None,
+    "1 while an operator cordon is set on this worker (POST /admin/cordon, lifted by DELETE): it refuses new calls with its own 503 and serves every dialog; a worker that drains keeps the cordon it was given (ADR-0050 §9)",
+);
+
 /// One of the worker's two loops, as [`crate::loops::LOOP_NAMES`] names them.
 pub const LOOP: Dim = Dim::new("loop", &crate::loops::LOOP_NAMES);
 
