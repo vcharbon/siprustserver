@@ -18,6 +18,6 @@ impl B2buaCore {
     /// worker's node.
     pub fn release_all_handle(&self) -> ReleaseAllFn {
         let (ctx, node) = (self.ctx.clone(), self.node.clone());
-        Arc::new(move || node.enter(|| release_all(&ctx.state, &ctx.reentry_tx)))
+        Arc::new(move || node.enter(|| release_all(&ctx)))
     }
 }

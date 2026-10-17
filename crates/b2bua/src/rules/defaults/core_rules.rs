@@ -95,7 +95,7 @@ pub(crate) fn unacked_2xx_give_up_actions(
 /// re-INVITE. Absent: a delayed-offer 2xx (only the silent peer's own ACK
 /// supplies its answer) and the a-leg's initial round, where this stack sent
 /// no INVITE and owes no ACK.
-fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
+pub(crate) fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
     std::iter::once(call.a_leg())
         .chain(call.b_legs().iter())
         .filter(|leg| crate::rules::relay::bare_ack_owed(leg))
@@ -238,7 +238,7 @@ fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHa
 /// Force every still-unresolved leg terminal, record `reason` on the CDR and
 /// command termination with `cause` (kept only where the call names no cause
 /// yet: the first termination names who ended the call).
-pub(crate) fn force_terminal(
+fn force_terminal(
     ctx: &RuleContext,
     reason: &'static str,
     cause: TerminationCause,

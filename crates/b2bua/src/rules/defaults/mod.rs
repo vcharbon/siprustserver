@@ -18,7 +18,7 @@ mod core_rules;
 mod route_fold;
 
 pub use compose::{default_rules, default_rules_with, ComposeOptions};
-pub(crate) use core_rules::{force_terminal, unacked_2xx_give_up_actions};
+pub(crate) use core_rules::{still_owed_bare_ack, unacked_2xx_give_up_actions};
 pub(crate) use route_fold::{
     fold_lands_on_going_away_call, parse_header_updates, parse_label, parse_route_fold,
     parse_service_ext, route_fold_parity_actions,

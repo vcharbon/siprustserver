@@ -56,6 +56,7 @@ mod reinvite_server_side_at_the_takeover;
 mod reject_final_loss_via_lb;
 mod relay_the_primary_never_read;
 mod release_all;
+mod release_all_takeover;
 mod released_copy;
 mod reoffer_on_the_backup;
 mod retained_2xx_folded_into_the_record;

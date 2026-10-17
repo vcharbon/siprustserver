@@ -1,6 +1,8 @@
 //! Listings of the resident calls, read under one brief lock of the call map
-//! without cloning a call: their `callRef`s, and the replication topologies
-//! they name.
+//! without cloning a call: their `callRef`s, the active ones with their
+//! answer, and the replication topologies they name.
+
+use call::CallModelState;
 
 use super::CallState;
 
@@ -10,6 +12,21 @@ impl CallState {
     /// spans (ADR-0026) — and tests read it as ground truth.
     pub fn live_call_refs(&self) -> Vec<String> {
         self.inner.lock().unwrap().calls.keys().cloned().collect()
+    }
+
+    /// Every resident call still `Active`, as `(callRef, incarnation,
+    /// answered)`: whether its caller's INVITE took a 2xx.
+    pub fn active_call_answers(&self) -> Vec<(String, String, bool)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .calls
+            .iter()
+            .filter(|(_, call)| call.state == CallModelState::Active)
+            .map(|(call_ref, call)| {
+                let answered = call::helpers::caller_answered(call);
+                (call_ref.clone(), call.incarnation().to_string(), answered)
+            })
+            .collect()
     }
 
     /// The distinct `(primary, backup)` ordinal pairs the resident calls'

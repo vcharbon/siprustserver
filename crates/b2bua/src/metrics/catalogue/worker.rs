@@ -350,6 +350,16 @@ pub const CORDONED: Family = Family::gauge(
     "1 while an operator cordon is set on this worker (POST /admin/cordon, lifted by DELETE): it refuses new calls with its own 503 and serves every dialog; a worker that drains keeps the cordon it was given (ADR-0050 §9)",
 );
 
+/// What an operator's release-all did to a call, indexed like
+/// [`crate::metrics::OPERATOR_RELEASE_KINDS`].
+pub const RELEASE_KIND: Dim = Dim::new("kind", &crate::metrics::OPERATOR_RELEASE_KINDS);
+
+pub const OPERATOR_RELEASED: Family = Family::counter(
+    "b2bua_operator_released_total",
+    Labels::Product(&[RELEASE_KIND]),
+    "calls an operator's release-all reached (POST /admin/release-all, ADR-0050 §10), counted as requested: released = answered, ended with no BYE; aborted = in setup, 503 to the caller and CANCEL to a ringing callee",
+);
+
 /// One of the worker's two loops, as [`crate::loops::LOOP_NAMES`] names them.
 pub const LOOP: Dim = Dim::new("loop", &crate::loops::LOOP_NAMES);
 

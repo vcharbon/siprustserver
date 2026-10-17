@@ -14,37 +14,17 @@ use catalogue::worker::DRAIN_BUCKETS;
 
 pub mod catalogue;
 mod limiter;
+mod operator;
 mod removal_class;
+mod retransmit_row;
 
 pub use limiter::{
     AdmitSite, LimiterCounters, LimiterFailure, LimiterOp, LimiterTask, RefreshDiscard,
     RefreshGiveUp, ReleaseGiveUp,
 };
+pub use operator::OPERATOR_RELEASE_KINDS;
 pub use removal_class::RemovalClass;
-
-/// A `b2bua_retransmits_total` row: method uppercased, the code's digits for
-/// a response.
-struct RetransmitRow {
-    ladder: String,
-    method: String,
-    code: Option<String>,
-}
-
-impl RetransmitRow {
-    fn as_refs(&self) -> Vec<&str> {
-        let mut row = vec![self.ladder.as_str(), self.method.as_str()];
-        row.extend(self.code.as_deref());
-        row
-    }
-}
-
-fn retransmit_row(ladder: &str, method: &str, code: Option<u16>) -> RetransmitRow {
-    RetransmitRow {
-        ladder: ladder.to_owned(),
-        method: method.to_ascii_uppercase(),
-        code: code.map(|c| c.to_string()),
-    }
-}
+use retransmit_row::retransmit_row;
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -63,6 +43,8 @@ struct Inner {
     drain_seconds_buckets: [AtomicU64; DRAIN_BUCKETS.len()],
     drain_seconds_sum_ms: AtomicU64,
     drain_seconds_count: AtomicU64,
+    // What every operator release-all reached, by kind (ADR-0050 §10).
+    operator_releases: operator::OperatorReleases,
     // The worker's view of its call limiter (ADR-0040).
     limiter: LimiterCounters,
     past_bound_depth: AtomicU64,
@@ -800,6 +782,7 @@ impl B2buaMetrics {
             sum: i.drain_seconds_sum_ms.load(Ordering::Relaxed) as f64 / 1_000.0,
             count: i.drain_seconds_count.load(Ordering::Relaxed),
         });
+        operator::render(self, &mut s);
         self.inner.limiter.render(&mut s);
         catalogue::worker::CALL_REMOVALS_BY_CLASS.render(&mut s, |series| {
             self.removals_of_total(

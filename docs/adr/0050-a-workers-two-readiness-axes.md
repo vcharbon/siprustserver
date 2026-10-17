@@ -146,7 +146,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
       signalling: each established call's record is closed (answered, ended
       now, cause `operator_release`), its admission holds freed and its replica
       deleted on the backup, and its dialogs dropped; no BYE is sent and no
-      backend is consulted. A later in-dialog request for it is answered
+      backend is consulted. A 2xx still owed its ACK is ACKed, and a leg
+      still ringing (a transfer target) is CANCELled, as in setup. A later in-dialog request for it is answered
       `481`. A call still in setup is aborted as usual: `503` to the caller,
       CANCEL to the callee. Only an explicit call releases; neither a cordon
       nor a SIGTERM does.

@@ -61,6 +61,7 @@ b2bua-runner b2bua_repl_noops_sent_total counter semi_open {flow,peer}
 b2bua-runner b2bua_repl_forward_flush_refused_total counter fixed {op}
 b2bua-runner b2bua_drain_exits_total counter fixed {reason}
 b2bua-runner b2bua_drain_seconds histogram fixed {}
+b2bua-runner b2bua_operator_released_total counter fixed {kind}
 b2bua-runner b2bua_limiter_requests_total counter fixed {op}
 b2bua-runner b2bua_limiter_failures_total counter fixed {op,cause|op,cause|op,cause|op,cause}
 b2bua-runner b2bua_limiter_admit_released_total counter fixed {site}

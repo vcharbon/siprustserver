@@ -153,6 +153,7 @@ const WORKER_REST: &[Family] = &[
     worker::REPL_FORWARD_FLUSH_REFUSED,
     worker::DRAIN_EXITS,
     worker::DRAIN_SECONDS,
+    worker::OPERATOR_RELEASED,
     limiter::REQUESTS,
     limiter::FAILURES,
     limiter::ADMIT_RELEASED,

@@ -79,7 +79,7 @@ fn ha_harness(name: &str) -> FailoverHarness {
 /// instant on: while one leg has two potential owners, both can mint the same
 /// `local_cseq + 1`; the accepted outcome is one call dropping cleanly, which
 /// each case asserts through its limiter-drain checks.
-fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
+pub(crate) fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     fh.accept_rfc_deviations_from_now(
         RULE_CSEQ_IN_DIALOG_ORDER,
         "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
@@ -93,16 +93,16 @@ fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
 
 /// The shared limiter on its own simulated HTTP fabric (it survives crashes),
 /// with one witness hold per id in [`IDS`].
-struct LimiterRig {
+pub(crate) struct LimiterRig {
     http: SimulatedHttpNetwork,
-    store: Arc<CallStore>,
+    pub(crate) store: Arc<CallStore>,
     _server: Box<dyn HttpServerHandle>,
 }
 
 impl LimiterRig {
     /// The rig under a lease outliving the replica TTL: the release a cell
     /// names is what frees the call.
-    async fn serve() -> Self {
+    pub(crate) async fn serve() -> Self {
         Self::serve_with(LEASE_OUTLIVING_THE_REPLICA_TTL).await
     }
 
@@ -125,13 +125,13 @@ impl LimiterRig {
 
     /// The call's holds on every id of [`IDS`]: the store's count less the
     /// witness. Negative = a release matched no hold of the call.
-    fn holds(&self) -> [i64; 3] {
+    pub(crate) fn holds(&self) -> [i64; 3] {
         IDS.map(|id| self.store.held(id) - 1)
     }
 
     /// Release the witnesses, so the universal post-conditions read the store
     /// empty.
-    fn release_witnesses(&self) {
+    pub(crate) fn release_witnesses(&self) {
         for id in IDS {
             self.store.release(&[format!("witness-{id}")]);
         }
@@ -177,7 +177,7 @@ fn limiters(ids: &[&str]) -> Vec<LimiterEntry> {
 
 /// Two replicating workers behind the proxy, both on `decision` and the
 /// shared limiter, both ready.
-async fn spawn_workers(
+pub(crate) async fn spawn_workers(
     fh: &mut FailoverHarness,
     rig: &LimiterRig,
     decision: Arc<dyn CallDecisionEngine>,
@@ -365,7 +365,7 @@ async fn a_late_landed_initial_admit_is_released_by_the_takeover_s_lossy_cleanup
 }
 
 /// The route toward bob holding `ids`.
-fn limited_decision(ids: &'static [&'static str]) -> Arc<dyn CallDecisionEngine> {
+pub(crate) fn limited_decision(ids: &'static [&'static str]) -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |_| {

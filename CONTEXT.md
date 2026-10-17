@@ -629,9 +629,10 @@ INVITE with a bare `503` before any decision, its record that of a call no decis
 reached; serves every dialog; no timer; `/ready` reads it Ready. A cordon is refused
 (`409`) while NotReady or Draining; SIGTERM drains a cordoned node as a Ready one.
 **Release-all** = an operator's `POST /admin/release-all`, never implied by a cordon
-or a SIGTERM: every answered call ends with nothing sent (its record closed under
-`operator_release`, its holds released, its replica deleted, a later request drawing
-`481`); a call in setup is aborted (`503` to the caller, CANCEL to the callee).
+or a SIGTERM: every answered call ends with no BYE (an owed ACK is sent, a still-ringing
+leg CANCELled; its record closed under `operator_release`, its holds released, its
+replica deleted, a later request drawing `481`); a call in setup is aborted (`503` to
+the caller, CANCEL to the callee). Counted on `b2bua_operator_released_total{kind}`.
 **Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
