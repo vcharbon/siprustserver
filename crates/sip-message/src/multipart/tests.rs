@@ -432,12 +432,11 @@ fn every_entity_header_value_is_located_in_the_body() {
 }
 
 #[test]
-fn a_boundary_longer_than_seventy_characters_frames_no_part() {
+fn a_boundary_of_any_length_frames_its_parts() {
     let framed = |boundary: &str| {
         format!("--{boundary}\r\nContent-Type: text/plain\r\n\r\nhi\r\n--{boundary}--\r\n")
     };
-    let longest = "b".repeat(70);
-    assert_eq!(decompose(framed(&longest).as_bytes(), &longest).len(), 1);
-    let over = "b".repeat(71);
-    assert!(decompose(framed(&over).as_bytes(), &over).is_empty());
+    for boundary in ["b".repeat(70), "b".repeat(2000)] {
+        assert_eq!(decompose(framed(&boundary).as_bytes(), &boundary).len(), 1);
+    }
 }

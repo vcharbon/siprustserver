@@ -102,6 +102,9 @@ mod tests {
 
     #[test]
     fn a_line_keyed_by_a_multibyte_character_is_skipped() {
-        assert_eq!(text_fields("v=0\r\n\u{fffd}=x\r\ns=-\r\n".as_bytes()).len(), 1);
+        assert_eq!(
+            text_fields("v=0\r\n\u{fffd}=x\r\ns=-\r\n".as_bytes()),
+            [TextField { key: 's', value: "-".to_string() }]
+        );
     }
 }

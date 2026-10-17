@@ -87,6 +87,7 @@ thiserror = "2"
 # case — the overwhelming majority on the wire — stays inline, so a parsed
 # name-addr allocates nothing for its parameters.
 smallvec = "1"
+memchr = "2"
 proptest = "1"
 criterion = "0.5"
 # Network layer onward: all async I/O + logic-path time goes through tokio

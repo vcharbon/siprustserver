@@ -45,6 +45,12 @@ fn a_bare_lf_fold_reads_as_one_space() {
 }
 
 #[test]
+fn whitespace_past_the_folds_first_is_kept() {
+    let msg = CustomParser::new().parse(&invite_with_subject("first\r\n   second")).expect("parse");
+    assert_eq!(subject(&msg), vec!["first   second"]);
+}
+
+#[test]
 fn trailing_empty_continuation_lines_trim_away() {
     let msg = CustomParser::new().parse(&invite_with_subject("only\r\n \r\n\t")).expect("parse");
     assert_eq!(subject(&msg), vec!["only"]);

@@ -4143,6 +4143,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "criterion",
+ "memchr",
  "proptest",
  "rvoip-sip-core",
  "schemars",

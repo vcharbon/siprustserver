@@ -300,9 +300,6 @@ pub fn is_entity_header(name: &str) -> bool {
         || (bytes.len() > CONTENT.len() && bytes[..CONTENT.len()].eq_ignore_ascii_case(CONTENT))
 }
 
-/// The longest boundary RFC 2046 §5.1.1 allows.
-const MAX_BOUNDARY_LEN: usize = 70;
-
 /// A boundary no payload contains, derived from the parts so the same parts
 /// always frame the same way. RFC 2046 §5.1.1's `bchars` set is respected: the
 /// derivation emits hex digits and `-` only.
@@ -322,7 +319,7 @@ fn derive_boundary(parts: &[MultipartPart]) -> String {
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|window| window == needle)
+    memchr::memmem::find(haystack, needle).is_some()
 }
 
 /// One part LOCATED in a framed body: its entity headers read, its content
@@ -352,13 +349,8 @@ pub struct LocatedPart {
 
 /// Locate each MIME part of `body` framed under `boundary` (RFC 2046 §5.1):
 /// split on `--boundary`, drop the preamble and the closing delimiter, then
-/// read each block's entity headers and the offsets of its content. A boundary
-/// outside RFC 2046 §5.1.1's 1 to 70 characters frames no part, which keeps the
-/// delimiter search linear in the body.
+/// read each block's entity headers and the offsets of its content.
 pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
-    if boundary.is_empty() || boundary.len() > MAX_BOUNDARY_LEN {
-        return Vec::new();
-    }
     let delim = format!("--{boundary}");
     let mut out = Vec::new();
     for (start, block) in segments(body, delim.as_bytes()).into_iter().skip(1) {
@@ -450,10 +442,10 @@ fn segments<'a>(hay: &'a [u8], sep: &[u8]) -> Vec<(usize, &'a [u8])> {
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
+    if needle.is_empty() {
         return None;
     }
-    hay.windows(needle.len()).position(|w| w == needle)
+    memchr::memmem::find(hay, needle)
 }
 
 mod entity;

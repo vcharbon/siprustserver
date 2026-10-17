@@ -21,6 +21,8 @@ use crate::sdp_doc::{
 
 mod formats;
 
+use std::collections::HashMap;
+
 use formats::{is_dynamic, FormatTable};
 
 /// Whose order of preference picks the one format an answered stream keeps.
@@ -349,14 +351,26 @@ fn sdes_answer(
         FormatPreference::Offerer => offered_keys.iter().map(|(_, s, _)| s).collect(),
         FormatPreference::Answerer => own_keys.iter().map(|(_, s, _)| s).collect(),
     };
+    let offered_by_suite = first_by_suite(&offered_keys);
+    let own_by_suite = first_by_suite(&own_keys);
     ranked.into_iter().filter(|s| required.is_none_or(|r| s.eq_ignore_ascii_case(r))).find_map(
         |suite| {
-            let (tag, suite, _) =
-                offered_keys.iter().find(|(_, s, _)| s.eq_ignore_ascii_case(suite))?;
-            let (_, _, rest) = own_keys.iter().find(|(_, s, _)| s.eq_ignore_ascii_case(suite))?;
+            let folded = suite.to_ascii_lowercase();
+            let (tag, suite, _) = offered_by_suite.get(&folded)?;
+            let (_, _, rest) = own_by_suite.get(&folded)?;
             Some(Some(format!("a=crypto:{tag} {suite} {rest}")))
         },
     )
+}
+
+/// The first key of each crypto suite in `keys`, by its lower-cased name
+/// (suite names compare case-insensitively).
+fn first_by_suite(keys: &[(String, String, String)]) -> HashMap<String, &(String, String, String)> {
+    let mut first = HashMap::new();
+    for key in keys {
+        first.entry(key.1.to_ascii_lowercase()).or_insert(key);
+    }
+    first
 }
 
 /// Whether `media` (under the `session` lines of its description) sets up a
@@ -419,7 +433,8 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
         ),
         eol,
     );
-    let offered_maps = extract_rtpmaps(answer.stream);
+    let offered_maps: HashMap<String, String> =
+        extract_rtpmaps(answer.stream).into_iter().collect();
     let offered_mid = answer.stream.attributes.iter().find_map(|a| a.strip_prefix("mid:"));
     let (mut dir_written, mut crypto_written, mut mid_written) = (false, false, false);
     let mut mapped: Vec<&str> = Vec::new();
@@ -440,8 +455,8 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
             if name == "rtpmap:" {
                 mapped.push(&kept.offered);
             }
-            let tail = match offered_maps.iter().find(|(pt, _)| *pt == kept.offered) {
-                Some((_, enc)) if name == "rtpmap:" => enc.as_str(),
+            let tail = match offered_maps.get(&kept.offered) {
+                Some(enc) if name == "rtpmap:" => enc.as_str(),
                 _ => tail,
             };
             push_line(out, format!("a={name}{} {tail}", kept.offered).trim_end(), eol);
@@ -477,7 +492,7 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
         if mapped.contains(&kept.offered.as_str()) {
             continue;
         }
-        if let Some((_, enc)) = offered_maps.iter().find(|(pt, _)| *pt == kept.offered) {
+        if let Some(enc) = offered_maps.get(&kept.offered) {
             push_line(out, &format!("a=rtpmap:{} {enc}", kept.offered), eol);
         }
     }
