@@ -189,17 +189,23 @@ pub fn build_ingress_brake_hook(
                 }
                 PreIngressAction::Accept
             }
-            Verdict::Refuse(_) => match memo.refuse(&req) {
-                Memo::Held => PreIngressAction::Accept,
-                Memo::Refused { first } => {
-                    if first {
-                        counters.record_refused(class);
-                    } else {
-                        counters.record_copy();
+            // The reply is built before the refusal is remembered: a reply
+            // that cannot be built leaves no memo entry the transaction
+            // layer would rebuild that same answer from.
+            Verdict::Refuse(_) => {
+                let reply = reply(&memo, &req);
+                match memo.refuse(&req) {
+                    Memo::Held => PreIngressAction::Accept,
+                    Memo::Refused { first } => {
+                        if first {
+                            counters.record_refused(class);
+                        } else {
+                            counters.record_copy();
+                        }
+                        reply
                     }
-                    reply(&memo, &req)
                 }
-            },
+            }
         }
     })
 }
