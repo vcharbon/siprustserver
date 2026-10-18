@@ -93,7 +93,7 @@ thiserror = "2"
 smallvec = "1"
 memchr = "2"
 proptest = "1"
-criterion = "0.5"
+criterion = "0.8.2"
 # Network layer onward: all async I/O + logic-path time goes through tokio
 # (see docs/MIGRATION_STRATEGY.md, Effect→Rust construct map).
 tokio = { version = "1", features = ["full"] }

@@ -23,8 +23,10 @@
 #[path = "../tests/perf/mod.rs"]
 mod perf;
 
+use std::hint::black_box;
+
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use sip_message::generators::{
     generate_in_dialog_request, generate_out_of_dialog_request, generate_response, InDialogMethod,
     OutOfDialogMethod,
