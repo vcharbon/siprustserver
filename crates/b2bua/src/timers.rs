@@ -140,12 +140,14 @@ impl TimerService {
     /// Each `TimerEntry.fire_at` is an **absolute wall deadline** (epoch ms),
     /// minted from `now_ms()` on whichever node first scheduled it (and replicated
     /// as part of the `Call`). The driver rebuilds a local monotonic timer as
-    /// `(fire_at - now_ms()).max(0)`:
+    /// `fire_at - now_ms()`, at least zero and at most `MAX_TIMER_DELAY`:
     ///
     /// - **Past-due** (`fire_at <= now_ms()`) → zero delay → fires on the next
     ///   driver tick, then routes through the rules exactly like any timer fire
     ///   (keepalive re-arms its next interval; a duration/no-answer cap reaps the
     ///   call). Nothing is dropped or recomputed.
+    /// - **Beyond the ceiling** → armed at the ceiling, the longest delay the
+    ///   queue holds.
     /// - Re-arm is idempotent: any later rule-emitted `ScheduleTimer` for the same
     ///   `(call_ref, key)` supersedes the restored entry via the driver's epoch
     ///   bump. A restored entry keeps its key and generation, so a fire of an
@@ -235,8 +237,6 @@ async fn driver(
                     // regardless of the clock anchor. Across a failover `restore`,
                     // `fire_at` came from the *dead* node's clock, so the result
                     // depends on cross-node wall-clock agreement (see `restore`).
-                    // Past-due (`fire_at <= now`) clamps to 0 → fires next tick.
-                    let delay = (entry.fire_at - clock.now_ms()).max(0) as u64;
                     let key = queue.insert(
                         Fired {
                             key: entry.key,
@@ -245,7 +245,7 @@ async fn driver(
                             call_ref,
                             incarnation,
                         },
-                        Duration::from_millis(delay),
+                        arm_delay(entry.fire_at, clock.now_ms()),
                     );
                     active.insert(akey, (epoch, key));
                 }
@@ -320,6 +320,18 @@ async fn driver(
         // state change.
         metrics.set_timer_gauges(queue.len() as u64, active.len() as u64);
     }
+}
+
+/// The longest delay the driver arms, below the ceiling past which
+/// `DelayQueue::insert` panics (its wheel holds 2^36 ms, about 2.2 years). A
+/// deadline further out — a replicated `fire_at` no rule mints — arms here.
+const MAX_TIMER_DELAY: Duration = Duration::from_secs(365 * 24 * 3600);
+
+/// The delay from `now_ms` to the absolute deadline `fire_at`: zero when past
+/// due, at most [`MAX_TIMER_DELAY`].
+fn arm_delay(fire_at: i64, now_ms: i64) -> Duration {
+    let ms = u64::try_from(fire_at.saturating_sub(now_ms)).unwrap_or(0);
+    Duration::from_millis(ms).min(MAX_TIMER_DELAY)
 }
 
 /// Await the next expired timer. Only polled while the queue is non-empty (an

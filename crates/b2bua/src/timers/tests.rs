@@ -337,3 +337,56 @@ async fn cancel_is_scoped_to_its_call() {
     tokio::task::yield_now().await;
     assert!(fire_rx.try_recv().is_err(), "call A's keepalive stays cancelled");
 }
+
+/// A restored deadline past what the queue's wheel holds — a replicated
+/// `fire_at` far in the future — arms at the driver's ceiling, and the driver
+/// keeps serving: a timer armed after it fires on time, and the far one fires
+/// at the ceiling.
+#[tokio::test(start_paused = true)]
+async fn a_restored_deadline_past_the_wheel_arms_at_the_ceiling() {
+    let clock = Clock::test_at(0);
+    let (timers, mut fire_rx) = TimerService::spawn(clock);
+    let far = TimerEntry {
+        key: TimerKey::call(TimerType::GlobalDuration),
+        generation: 1,
+        fire_at: i64::MAX,
+    };
+    timers.restore(vec![far], "far".into(), "far#k").await;
+    timers
+        .schedule(
+            TimerEntry { key: TimerKey::call(TimerType::Keepalive), generation: 1, fire_at: 1_000 },
+            "near".into(),
+            None,
+        )
+        .await;
+
+    tokio::time::advance(Duration::from_millis(1_000)).await;
+    match fire_rx.recv().await {
+        Some(CallEvent::Timer { call_ref, .. }) => assert_eq!(call_ref, "near"),
+        other => panic!("the driver keeps serving past the far deadline, got {other:?}"),
+    }
+    tokio::time::advance(MAX_TIMER_DELAY - Duration::from_millis(1_000)).await;
+    match fire_rx.recv().await {
+        Some(CallEvent::Timer { call_ref, .. }) => assert_eq!(call_ref, "far"),
+        other => panic!("the far deadline fires at the ceiling, got {other:?}"),
+    }
+}
+
+/// A restored deadline before any clock reading the subtraction can hold
+/// fires as past due on the next tick.
+#[tokio::test(start_paused = true)]
+async fn a_restored_deadline_before_the_epoch_fires_as_past_due() {
+    let clock = Clock::test_at(1_000);
+    let (timers, mut fire_rx) = TimerService::spawn(clock);
+    let past = TimerEntry {
+        key: TimerKey::call(TimerType::GlobalDuration),
+        generation: 1,
+        fire_at: i64::MIN,
+    };
+    timers.restore(vec![past], "past".into(), "past#k").await;
+    tokio::time::advance(Duration::from_millis(1)).await;
+    match fire_rx.recv().await {
+        Some(CallEvent::Timer { call_ref, .. }) => assert_eq!(call_ref, "past"),
+        other => panic!("the past-due deadline fires, got {other:?}"),
+    }
+}
