@@ -73,29 +73,34 @@ pub fn response_request(xml: &str) -> Option<&str> {
 /// element name where it states none, or removed where `id` is `None`. A body
 /// holding no response comes back unchanged.
 pub fn with_response_id(xml: &str, id: Option<&str>) -> String {
-    let Some(response) = response_element(xml) else { return xml.to_string() };
+    response_id_set(xml, id).unwrap_or_else(|| xml.to_string())
+}
+
+/// [`with_response_id`], `None` where the body comes back unchanged.
+fn response_id_set(xml: &str, id: Option<&str>) -> Option<String> {
+    let response = response_element(xml)?;
     let stated = attribute(xml, &response, "id");
     let mut out = String::with_capacity(xml.len() + id.map_or(0, |v| v.len() + 6));
     match (stated, id) {
-        (None, None) => return xml.to_string(),
+        (None, None) => return None,
         (None, Some(value)) => {
             let quote = quote_for(value, '"');
-            out.push_str(&xml[..response.name_end]);
+            out.push_str(xml.get(..response.name_end)?);
             out.push_str(&format!(" id={quote}{value}{quote}"));
-            out.push_str(&xml[response.name_end..]);
+            out.push_str(xml.get(response.name_end..)?);
         }
         (Some(attr), Some(value)) => {
             let quote = quote_for(value, attr.quote);
-            out.push_str(&xml[..attr.value_start - 1]);
+            out.push_str(xml.get(..attr.value_start.checked_sub(1)?)?);
             out.push_str(&format!("{quote}{value}{quote}"));
-            out.push_str(&xml[attr.value_end + 1..]);
+            out.push_str(xml.get(attr.value_end + 1..)?);
         }
         (Some(attr), None) => {
-            out.push_str(&xml[..attr.start]);
-            out.push_str(&xml[attr.value_end + 1..]);
+            out.push_str(xml.get(..attr.start)?);
+            out.push_str(xml.get(attr.value_end + 1..)?);
         }
     }
-    out
+    Some(out)
 }
 
 /// The quote a value rides in: `preferred`, unless the value holds it.
@@ -152,24 +157,25 @@ impl<'a> Iterator for Tags<'a> {
     fn next(&mut self) -> Option<Tag<'a>> {
         let xml = self.xml;
         loop {
-            let open = self.at + xml[self.at..].find('<')?;
-            let rest = &xml[open..];
+            let open = self.at + xml.get(self.at..)?.find('<')?;
+            let rest = xml.get(open..)?;
             let skip = [("<?", "?>"), ("<!--", "-->"), ("<![CDATA[", "]]>"), ("<!", ">")]
                 .into_iter()
-                .find(|(lead, _)| rest.starts_with(lead));
-            if let Some((lead, end)) = skip {
-                self.at = open + lead.len() + rest[lead.len()..].find(end)? + end.len();
+                .find_map(|(lead, end)| Some((lead, end, rest.strip_prefix(lead)?)));
+            if let Some((lead, end, inner)) = skip {
+                self.at = open + lead.len() + inner.find(end)? + end.len();
                 continue;
             }
             let close = rest.starts_with("</");
             let name_start = open + if close { 2 } else { 1 };
             let name_end = name_start
-                + xml[name_start..]
+                + xml
+                    .get(name_start..)?
                     .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')?;
             // A `>` inside a quoted attribute value does not end the tag.
             let mut quote = None;
             let mut gt = None;
-            for (offset, c) in xml[name_end..].char_indices() {
+            for (offset, c) in xml.get(name_end..)?.char_indices() {
                 match (quote, c) {
                     (Some(q), c) if c == q => quote = None,
                     (Some(_), _) => {}
@@ -182,12 +188,12 @@ impl<'a> Iterator for Tags<'a> {
                 }
             }
             let gt = gt?;
-            let empty = !close && xml[..gt].ends_with('/');
+            let empty = !close && xml.get(..gt)?.ends_with('/');
             self.at = gt + 1;
             return Some(Tag {
-                name: &xml[name_start..name_end],
+                name: xml.get(name_start..name_end)?,
                 name_end,
-                attrs_end: if empty { gt - 1 } else { gt },
+                attrs_end: if empty { gt.checked_sub(1)? } else { gt },
                 close,
                 empty,
             });
@@ -210,30 +216,32 @@ struct Attribute<'a> {
 /// The attribute `name` of `tag`, where it states one in well-formed shape.
 fn attribute<'a>(xml: &'a str, tag: &Tag<'_>, name: &str) -> Option<Attribute<'a>> {
     let end = tag.attrs_end;
+    let within = |from: usize| xml.get(from..end);
+    let lead_ws = |from: usize| within(from).map(|s| s.len() - s.trim_start().len());
     let mut at = tag.name_end;
     loop {
         let start = at;
-        at += xml[at..end].len() - xml[at..end].trim_start().len();
+        at += lead_ws(at)?;
         if at >= end {
             return None;
         }
-        let name_end = at + xml[at..end].find(|c: char| c.is_ascii_whitespace() || c == '=')?;
-        let attr_name = &xml[at..name_end];
+        let name_end = at + within(at)?.find(|c: char| c.is_ascii_whitespace() || c == '=')?;
+        let attr_name = xml.get(at..name_end)?;
         at = name_end;
-        at += xml[at..end].len() - xml[at..end].trim_start().len();
-        if !xml[at..end].starts_with('=') {
+        at += lead_ws(at)?;
+        if !within(at)?.starts_with('=') {
             return None;
         }
         at += 1;
-        at += xml[at..end].len() - xml[at..end].trim_start().len();
-        let quote = xml[at..end].chars().next().filter(|c| *c == '"' || *c == '\'')?;
+        at += lead_ws(at)?;
+        let quote = within(at)?.chars().next().filter(|c| *c == '"' || *c == '\'')?;
         let value_start = at + 1;
-        let value_end = value_start + xml[value_start..end].find(quote)?;
+        let value_end = value_start + within(value_start)?.find(quote)?;
         at = value_end + 1;
         if attr_name == name {
             return Some(Attribute {
                 start,
-                value: &xml[value_start..value_end],
+                value: xml.get(value_start..value_end)?,
                 value_start,
                 value_end,
                 quote,

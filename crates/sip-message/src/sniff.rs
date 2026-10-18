@@ -8,8 +8,10 @@
 //! Strict, allocation-free pre-parse *classifiers* (overload brake, dispatcher fast-path) live
 //! in [`crate::preparse`] and its sibling modules.
 
+mod via_hops;
 mod via_stamp;
 use std::borrow::Cow;
+pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
 pub use via_stamp::relay_stamp_spans;
 
 use crate::parser::custom::scanner::is_token_char;
@@ -76,10 +78,23 @@ pub fn from_tag(raw: &[u8]) -> String {
 /// The `tag` parameter of one From or To value, or the empty string.
 fn tag_of(value: &str) -> String {
     let lower = value.to_ascii_lowercase();
-    let Some(pos) = lower.find("tag=") else { return String::new() };
-    let rest = &value[pos + "tag=".len()..];
-    let end = rest.find([';', ',', ' ', '\t', '>']).unwrap_or(rest.len());
-    rest[..end].trim().to_string()
+    // An ASCII fold keeps every byte offset, so `lower`'s offset is `value`'s.
+    let Some(rest) = lower.find("tag=").and_then(|pos| value.get(pos + "tag=".len()..)) else {
+        return String::new();
+    };
+    up_to_delimiter(rest, &[';', ',', ' ', '\t', '>']).trim().to_string()
+}
+
+/// `text` up to the first of `delims`, or all of it.
+fn up_to_delimiter<'a>(text: &'a str, delims: &[char]) -> &'a str {
+    text.split(delims).next().unwrap_or(text)
+}
+
+/// One header line split at its first colon into name and value; `None` for a
+/// line holding no colon.
+fn field(line: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut halves = line.splitn(2, |&b| b == b':');
+    Some((halves.next()?, halves.next()?))
 }
 
 /// Whether `raw` is a SIP response (status line) vs a request.
@@ -168,8 +183,9 @@ fn cseq_line(raw: &[u8]) -> Option<String> {
     let s = as_str(raw);
     for line in s.lines() {
         let l = line.trim();
-        if l.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("cseq:")) {
-            return Some(l[5..].trim().to_string());
+        let value = l.get(..5).filter(|p| p.eq_ignore_ascii_case("cseq:")).and_then(|_| l.get(5..));
+        if let Some(value) = value {
+            return Some(value.trim().to_string());
         }
     }
     None
@@ -231,9 +247,8 @@ pub fn is_sheddable_new_invite(raw: &[u8]) -> bool {
         if line.is_empty() {
             break; // end of headers
         }
-        let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
-        let name = line[..colon].trim_ascii();
-        let value = &line[colon + 1..];
+        let Some((name, value)) = field(line) else { continue };
+        let name = name.trim_ascii();
         if name.eq_ignore_ascii_case(b"to") || name.eq_ignore_ascii_case(b"t") {
             if contains_ignore_ascii_case(value, b"tag=") {
                 return false; // in-dialog
@@ -284,11 +299,11 @@ pub fn trace_sample_rate(raw: &[u8]) -> TraceSample {
         if line.is_empty() {
             break; // end of headers
         }
-        let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
-        if !line[..colon].trim_ascii().eq_ignore_ascii_case(TRACE_SAMPLE_HEADER.as_bytes()) {
+        let Some((name, value)) = field(line) else { continue };
+        if !name.trim_ascii().eq_ignore_ascii_case(TRACE_SAMPLE_HEADER.as_bytes()) {
             continue;
         }
-        let value = line[colon + 1..].trim_ascii();
+        let value = value.trim_ascii();
         if value.len() > TRACE_SAMPLE_VALUE_CAP {
             return TraceSample::Malformed;
         }
@@ -313,10 +328,8 @@ pub fn via_branch(raw: &[u8]) -> Option<String> {
         let Some((h, v)) = line.split_once(':') else { continue };
         let h = h.trim();
         if h.eq_ignore_ascii_case("via") || h.eq_ignore_ascii_case("v") {
-            let pos = v.find("branch=")?;
-            let rest = &v[pos + "branch=".len()..];
-            let end = rest.find([';', ',', ' ', '\t']).unwrap_or(rest.len());
-            let b = rest[..end].trim();
+            let rest = v.get(v.find("branch=")? + "branch=".len()..)?;
+            let b = up_to_delimiter(rest, &[';', ',', ' ', '\t']).trim();
             return (!b.is_empty()).then(|| b.to_string());
         }
     }
@@ -332,10 +345,11 @@ pub fn via_branches(raw: &[u8]) -> Vec<String> {
         .iter()
         .flat_map(|row| row.split(',').map(str::to_string).collect::<Vec<_>>())
         .map(|via| {
-            let Some(pos) = via.find("branch=") else { return String::new() };
-            let rest = &via[pos + "branch=".len()..];
-            let end = rest.find([';', ' ', '\t']).unwrap_or(rest.len());
-            rest[..end].trim().to_string()
+            let Some(rest) = via.find("branch=").and_then(|pos| via.get(pos + "branch=".len()..))
+            else {
+                return String::new();
+            };
+            up_to_delimiter(rest, &[';', ' ', '\t']).trim().to_string()
         })
         .collect()
 }
@@ -373,9 +387,9 @@ pub fn line_at(raw: &[u8], offset: usize) -> Option<String> {
     if offset >= raw.len() {
         return None;
     }
-    let start = raw[..offset].iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
-    let end = raw[offset..].iter().position(|&b| b == b'\n').map_or(raw.len(), |p| offset + p);
-    Some(as_str(&raw[start..end]).trim_end_matches('\r').to_string())
+    let start = raw.get(..offset)?.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+    let end = raw.get(offset..)?.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| offset + p);
+    Some(as_str(raw.get(start..end)?).trim_end_matches('\r').to_string())
 }
 
 /// The body length a message declares in `Content-Length` (compact `l`), or
@@ -419,7 +433,7 @@ pub fn content_type_is(raw: &[u8], media_type: &str) -> bool {
 /// NOT applied: this returns what the datagram carried, and a consumer that
 /// needs the declared length reads [`content_length`].
 pub fn body(raw: &[u8]) -> Option<&[u8]> {
-    head_end(raw).map(|end| &raw[end..])
+    head_end(raw).and_then(|end| raw.get(end..))
 }
 
 /// The offset just past the empty line that ends the header block (RFC 3261
@@ -427,20 +441,21 @@ pub fn body(raw: &[u8]) -> Option<&[u8]> {
 /// (§25.1); a bare CR or LF is accepted as the parser accepts it, so the
 /// parser and this reader end the head at the same byte.
 pub fn head_end(raw: &[u8]) -> Option<usize> {
+    let at = |i: usize| raw.get(i).copied();
     let mut i = 0;
     loop {
         if i >= raw.len() {
             return None;
         }
         let line_start = i;
-        while i < raw.len() && raw[i] != b'\r' && raw[i] != b'\n' {
+        while at(i).is_some_and(|b| b != b'\r' && b != b'\n') {
             i += 1;
         }
         let empty = i == line_start;
-        if i < raw.len() && raw[i] == b'\r' {
+        if at(i) == Some(b'\r') {
             i += 1;
         }
-        if i < raw.len() && raw[i] == b'\n' {
+        if at(i) == Some(b'\n') {
             i += 1;
         }
         if empty {
@@ -578,10 +593,10 @@ pub fn route_rows(raw: &[u8], name: &str) -> Vec<RouteRow> {
     use crate::header::{HeaderValue, RouteEntry};
     let mut out = Vec::new();
     let mut pos = 0;
-    while pos < raw.len() {
-        let line_end = raw[pos..].iter().position(|&b| b == b'\n').map_or(raw.len(), |p| pos + p);
+    while let Some(rest) = raw.get(pos..).filter(|rest| !rest.is_empty()) {
+        let line_end = rest.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| pos + p);
         let next = (line_end + 1).min(raw.len());
-        let line = as_str(&raw[pos..line_end]);
+        let Some(line) = raw.get(pos..line_end).map(as_str) else { break };
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
             break; // end of headers
@@ -607,80 +622,6 @@ pub fn request_uri_facts(raw: &[u8]) -> Option<UriFacts> {
     let text = request_uri(raw)?;
     let uri = crate::header::Uri::parse(&crate::sip_str::SipStr::owned(&text)).ok()?;
     Some(UriFacts::of(&uri))
-}
-
-/// What the TOP-most Via says about `rport` (RFC 3581): the four states a
-/// server's echo can be in, kept apart because the obligation differs — a bare
-/// request asks, and a response owes the observed port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViaRport {
-    /// No `rport` parameter at all.
-    Absent,
-    /// `;rport` bare — the sender asking to be told its source port.
-    Requested,
-    /// `;rport=<port>` — the port the next hop observed.
-    Observed(u16),
-    /// `rport` is there carrying a value no reader accepts.
-    Unreadable,
-}
-
-/// The `rport` parameter of the TOP-most Via (RFC 3581 §4). Only the first Via
-/// matters: it is the hop whose response routing `rport` fixes.
-pub fn via_rport(raw: &[u8]) -> ViaRport {
-    use crate::header::{HeaderValue, ParamValue, Rport, Via};
-    for line in as_str(raw).lines() {
-        if line.is_empty() {
-            break; // end of headers
-        }
-        let Some((h, v)) = line.split_once(':') else { continue };
-        let h = h.trim();
-        if !(h.eq_ignore_ascii_case("via") || h.eq_ignore_ascii_case("v")) {
-            continue;
-        }
-        let Ok(vias) = Via::parse_line(&crate::sip_str::SipStr::owned(v.trim())) else {
-            return ViaRport::Unreadable;
-        };
-        let Some(top) = vias.first() else { return ViaRport::Unreadable };
-        return match (top.param("rport"), top.rport()) {
-            (None, _) => ViaRport::Absent,
-            (Some(ParamValue::Flag), _) => ViaRport::Requested,
-            (Some(_), Some(Rport::Observed(port))) => ViaRport::Observed(port),
-            (Some(_), _) => ViaRport::Unreadable,
-        };
-    }
-    ViaRport::Absent
-}
-
-/// The originating hop of a request, read off its BOTTOM-most Via: every
-/// proxy pushes its own Via above the ones it received (RFC 3261 §16.6 step 8),
-/// so the bottom one is the originator's as it sent the request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OriginVia {
-    /// The bottom Via's sent-by: the originator's, as it sent the request.
-    pub sent_by: crate::header::SentBy,
-    /// The bottom Via's `branch`, or `None` where it carries none.
-    pub branch: Option<String>,
-    /// How many Via values the request carried: one per hop it crossed.
-    pub depth: usize,
-}
-
-/// The bottom-most Via of `raw` as an [`OriginVia`], or `None` where the
-/// message carries no Via or one of its Via rows does not parse.
-pub fn bottom_via(raw: &[u8]) -> Option<OriginVia> {
-    use crate::header::{HeaderValue, SentBy, Via};
-    let mut depth = 0;
-    let mut bottom = None;
-    for row in header_rows_compact(raw, "via") {
-        let vias = Via::parse_line(&crate::sip_str::SipStr::owned(&row)).ok()?;
-        depth += vias.len();
-        bottom = vias.last().cloned().or(bottom);
-    }
-    let bottom = bottom?;
-    Some(OriginVia {
-        sent_by: SentBy::of(&bottom),
-        branch: bottom.branch().map(str::to_string),
-        depth,
-    })
 }
 
 #[cfg(test)]

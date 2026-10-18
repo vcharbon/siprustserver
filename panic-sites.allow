@@ -150,16 +150,10 @@ crates/sip-message/src/generators/in_dialog.rs 3
 crates/sip-message/src/generators/out_of_dialog.rs 5
 crates/sip-message/src/generators/response.rs 1
 crates/sip-message/src/generators/session_timer.rs 1
-crates/sip-message/src/mscml.rs 25
-crates/sip-message/src/multipart.rs 12
-crates/sip-message/src/multipart/entity.rs 6
 crates/sip-message/src/param_codec.rs 4
-crates/sip-message/src/payload.rs 1
 crates/sip-message/src/remote_target.rs 10
 crates/sip-message/src/serializer.rs 9
 crates/sip-message/src/site.rs 3
-crates/sip-message/src/sniff.rs 21
-crates/sip-message/src/sniff/via_stamp.rs 5
 crates/sip-message/src/template.rs 2
 crates/sip-message/src/types.rs 3
 crates/sip-net/src/fragmentation.rs 2

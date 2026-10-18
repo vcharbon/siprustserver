@@ -269,10 +269,12 @@ pub fn entity_parts(
     if let Some(boundary) = boundary {
         return decompose(body, &boundary)
             .into_iter()
-            .map(|part| MultipartPart {
-                payload: body[part.offset..part.offset + part.len].to_vec(),
-                content_type: part.content_type,
-                headers: part.entity_headers,
+            .filter_map(|part| {
+                Some(MultipartPart {
+                    payload: body.get(part.offset..part.offset + part.len)?.to_vec(),
+                    content_type: part.content_type,
+                    headers: part.entity_headers,
+                })
             })
             .collect();
     }
@@ -297,7 +299,8 @@ pub fn is_entity_header(name: &str) -> bool {
     const CONTENT: &[u8] = b"content-";
     let bytes = name.trim().as_bytes();
     name.trim().eq_ignore_ascii_case("MIME-Version")
-        || (bytes.len() > CONTENT.len() && bytes[..CONTENT.len()].eq_ignore_ascii_case(CONTENT))
+        || (bytes.len() > CONTENT.len()
+            && bytes.get(..CONTENT.len()).is_some_and(|head| head.eq_ignore_ascii_case(CONTENT)))
 }
 
 /// A boundary no payload contains, derived from the parts so the same parts
@@ -366,10 +369,9 @@ pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
         } else {
             0
         };
-        let block = &block[lead..];
-        if block.is_empty() {
+        let Some(block) = block.get(lead..).filter(|b| !b.is_empty()) else {
             continue;
-        }
+        };
         let (head_len, gap) = match find(block, b"\r\n\r\n") {
             Some(i) => (i, 4),
             None => match find(block, b"\n\n") {
@@ -377,7 +379,10 @@ pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
                 None => (0, 0),
             },
         };
-        let content = &block[head_len + gap..];
+        let (Some(head), Some(content)) = (block.get(..head_len), block.get(head_len + gap..))
+        else {
+            continue;
+        };
         // Exactly the ONE trailing CRLF that separates the content from the
         // next delimiter — never greedily, so a binary part ending in 0x0a
         // survives byte-exact.
@@ -389,12 +394,12 @@ pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
             0
         };
         out.push(LocatedPart {
-            content_type: part_header(&block[..head_len], "content-type")
+            content_type: part_header(head, "content-type")
                 .unwrap_or_else(|| "text/plain".to_string()),
-            content_id: part_header(&block[..head_len], "content-id"),
-            headers: part_headers_beyond(&block[..head_len], &["content-type", "content-id"]),
-            entity_headers: part_headers_beyond(&block[..head_len], &["content-type"]),
-            entity_spans: part_header_spans(&block[..head_len], start + lead),
+            content_id: part_header(head, "content-id"),
+            headers: part_headers_beyond(head, &["content-type", "content-id"]),
+            entity_headers: part_headers_beyond(head, &["content-type"]),
+            entity_spans: part_header_spans(head, start + lead),
             offset: start + lead + head_len + gap,
             len: content.len() - trailing,
         });
@@ -433,11 +438,15 @@ pub fn sdp_range(content_type: &MediaType, body: &[u8]) -> Option<std::ops::Rang
 fn segments<'a>(hay: &'a [u8], sep: &[u8]) -> Vec<(usize, &'a [u8])> {
     let mut out = Vec::new();
     let mut at = 0;
-    while let Some(rel) = find(&hay[at..], sep) {
-        out.push((at, &hay[at..at + rel]));
+    let mut rest = hay;
+    while let Some((rel, before, after)) =
+        find(rest, sep).and_then(|rel| Some((rel, rest.get(..rel)?, rest.get(rel + sep.len()..)?)))
+    {
+        out.push((at, before));
         at += rel + sep.len();
+        rest = after;
     }
-    out.push((at, &hay[at..]));
+    out.push((at, rest));
     out
 }
 

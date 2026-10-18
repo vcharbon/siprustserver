@@ -13,19 +13,21 @@ use std::ops::Range;
 pub fn relay_stamp_spans(raw: &[u8]) -> Vec<Range<usize>> {
     let mut entry = 0usize;
     let mut pos = 0;
-    while pos < raw.len() {
-        let line_end = raw[pos..].iter().position(|&b| b == b'\n').map_or(raw.len(), |p| pos + p);
-        let line = &raw[pos..line_end];
+    while let Some(rest) = raw.get(pos..).filter(|rest| !rest.is_empty()) {
+        let line_end = rest.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| pos + p);
+        let Some(line) = raw.get(pos..line_end) else { break };
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line.is_empty() {
             return Vec::new(); // end of headers
         }
-        if let Some(colon) = line.iter().position(|&b| b == b':') {
-            let name = String::from_utf8_lossy(&line[..colon]);
+        let mut halves = line.splitn(2, |&b| b == b':');
+        if let (Some(name), Some(value)) = (halves.next(), halves.next()) {
+            let colon = name.len();
+            let name = String::from_utf8_lossy(name);
             let name = name.trim();
             if name.eq_ignore_ascii_case("via") || name.eq_ignore_ascii_case("v") {
                 let mut start = colon + 1;
-                for part in line[colon + 1..].split(|&b| b == b',') {
+                for part in value.split(|&b| b == b',') {
                     if entry == 1 {
                         let at = pos + start;
                         let mut spans: Vec<Range<usize>> = [b";received=".as_slice(), b";rport="]
@@ -52,7 +54,8 @@ fn param_span(via: &[u8], key: &[u8]) -> Option<Range<usize>> {
     let lower: Vec<u8> = via.iter().map(u8::to_ascii_lowercase).collect();
     let start = lower.windows(key.len()).position(|w| w == key)?;
     let value = start + key.len();
-    let end = via[value..]
+    let end = via
+        .get(value..)?
         .iter()
         .position(|&b| matches!(b, b';' | b',' | b' ' | b'\t'))
         .map_or(via.len(), |p| value + p);

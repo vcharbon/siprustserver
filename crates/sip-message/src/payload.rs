@@ -43,7 +43,7 @@ impl Payload {
         }
         if let Some(body) = crate::sniff::body(raw) {
             let head_len = raw.len() - body.len();
-            if let Ok(head) = std::str::from_utf8(&raw[..head_len]) {
+            if let Some(Ok(head)) = raw.get(..head_len).map(std::str::from_utf8) {
                 return Payload::HeadBody { head: head.to_string(), body_b64: base64(body) };
             }
         }
