@@ -50,7 +50,9 @@ impl<'a> FormatTable<'a> {
                 };
                 table.payload.insert(format, named);
             }
-            let named = &table.payload[format];
+            let Some(named) = table.payload.get(format) else {
+                continue;
+            };
             table.first.entry(named.clone()).or_insert(i);
             if is_dynamic(format) {
                 table.first_dynamic.entry(named.clone()).or_insert(i);
@@ -76,7 +78,7 @@ impl<'a> FormatTable<'a> {
             let same = self.first_static.get(format).copied();
             dynamic.into_iter().chain(same).min()
         };
-        at.map(|i| self.media.formats[i].clone())
+        at.and_then(|i| self.media.formats.get(i)).cloned()
     }
 }
 

@@ -104,28 +104,38 @@ pub struct SdpOrigin {
 /// first byte that is not one. `None` where no digit follows the sign.
 fn leading_int(s: &str) -> Option<i64> {
     let s = s.trim_start();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut neg = false;
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        neg = bytes[i] == b'-';
-        i += 1;
-    }
-    let start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == start {
+    let (neg, unsigned) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let digits = unsigned.get(..unsigned.bytes().take_while(u8::is_ascii_digit).count())?;
+    if digits.is_empty() {
         return None;
     }
-    let n: i64 = s[start..i].parse().ok()?;
+    let n: i64 = digits.parse().ok()?;
     Some(if neg { -n } else { n })
 }
 
 /// Case-insensitive prefix strip; `prefix` is lowercase ASCII.
 fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     let head = value.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix).then(|| &value[prefix.len()..])
+    if head.eq_ignore_ascii_case(prefix) {
+        value.get(prefix.len()..)
+    } else {
+        None
+    }
+}
+
+/// A description line split into its type letter and its value: `None` where
+/// the line is not `<letter>=<value>`.
+fn typed_line(line: &str) -> Option<(u8, &str)> {
+    let mut chars = line.char_indices();
+    let (_, key) = chars.next()?;
+    let (eq, '=') = chars.next()? else {
+        return None;
+    };
+    let key = u8::try_from(key).ok().filter(u8::is_ascii)?;
+    Some((key, line.get(eq + 1..)?))
 }
 
 /// A media block under construction, finalised into [`MediaLine`].
@@ -193,12 +203,9 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
     let mut media: Vec<MutableMedia> = Vec::new();
 
     for line in lines {
-        let bytes = line.as_bytes();
-        if bytes.len() < 2 || bytes[1] != b'=' {
+        let Some((key, value)) = typed_line(line) else {
             continue;
-        }
-        let key = bytes[0];
-        let value = &line[2..];
+        };
 
         if key == b'm' {
             media.push(new_media(value));
@@ -256,12 +263,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
 /// The tokens after `<type> <port> <transport>` on an `m=` line's value — the
 /// format / payload-type list. Empty where the line carries none.
 pub fn extract_format_list(m_line: &str) -> Vec<String> {
-    let tokens: Vec<&str> = m_line.split_whitespace().collect();
-    if tokens.len() > 3 {
-        tokens[3..].iter().map(|t| t.to_string()).collect()
-    } else {
-        Vec::new()
-    }
+    m_line.split_whitespace().skip(3).map(str::to_string).collect()
 }
 
 /// The block's direction attribute; absence is [`SdpDirection::SendRecv`]
@@ -290,13 +292,8 @@ pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
     let mut seen: HashSet<&str> = HashSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "rtpmap:") else { continue };
-        let tail = tail.trim();
-        let Some(sp) = tail.find(' ') else { continue };
-        if sp == 0 {
-            continue;
-        }
-        let pt = tail[..sp].trim();
-        let enc = tail[sp + 1..].trim();
+        let Some((pt, enc)) = tail.trim().split_once(' ') else { continue };
+        let (pt, enc) = (pt.trim(), enc.trim());
         if pt.is_empty() || enc.is_empty() {
             continue;
         }
@@ -373,13 +370,14 @@ pub fn parse_origin(body: &[u8]) -> Option<SdpOrigin> {
         return None;
     }
     let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
-    let o_idx = lines.iter().position(|l| l.starts_with("o="))?;
-    let o_line = lines[o_idx];
-    let parts: Vec<&str> = o_line[2..].split_whitespace().collect();
-    if parts.len() < 6 {
+    let (o_idx, o_line, o_value) =
+        lines.iter().enumerate().find_map(|(i, l)| Some((i, *l, l.strip_prefix("o=")?)))?;
+    let parts: Vec<&str> = o_value.split_whitespace().collect();
+    let [username, session_id, version, nettype, addrtype, unicast_address, ..] = parts.as_slice()
+    else {
         return None;
-    }
-    let session_version = parts[2].parse::<u64>().ok()?;
+    };
+    let session_version = version.parse::<u64>().ok()?;
     let others = lines
         .iter()
         .enumerate()
@@ -388,17 +386,18 @@ pub fn parse_origin(body: &[u8]) -> Option<SdpOrigin> {
         .collect::<Vec<_>>()
         .join("\n");
     Some(SdpOrigin {
-        username: parts[0].to_string(),
-        session_id: parts[1].to_string(),
+        username: username.to_string(),
+        session_id: session_id.to_string(),
         session_version,
-        nettype: parts[3].to_string(),
-        addrtype: parts[4].to_string(),
-        unicast_address: parts[5].to_string(),
+        nettype: nettype.to_string(),
+        addrtype: addrtype.to_string(),
+        unicast_address: unicast_address.to_string(),
         raw_origin_line: o_line.to_string(),
         body_excluding_origin: others,
     })
 }
 
+#[deny(clippy::arithmetic_side_effects)]
 impl SdpOrigin {
     /// The five-field identity `o=` states about the SESSION — everything but
     /// the version, which is the revision counter (RFC 4566 §5.2). Two
@@ -411,9 +410,10 @@ impl SdpOrigin {
             && self.unicast_address == other.unicast_address
     }
 
-    /// The `o=` line's value — everything after `o=`.
+    /// The `o=` line's value — everything after `o=`; the whole line where it
+    /// does not open with `o=`.
     pub fn value(&self) -> &str {
-        &self.raw_origin_line[2..]
+        self.raw_origin_line.strip_prefix("o=").unwrap_or(&self.raw_origin_line)
     }
 
     /// The `o=` line a re-offer of THIS session states (RFC 3264 §8): the five
@@ -447,7 +447,9 @@ pub(crate) struct Section<'a> {
 }
 
 impl<'a> Sections<'a> {
-    pub(crate) fn of(text: &'a str) -> Self {
+    /// `text` cut at its `m=` lines; `None` only where a cut would split a
+    /// character, which a cut at a line start never does.
+    pub(crate) fn of(text: &'a str) -> Option<Self> {
         let mut starts: Vec<usize> = Vec::new();
         let mut offset = 0usize;
         for line in text.split_inclusive('\n') {
@@ -457,14 +459,13 @@ impl<'a> Sections<'a> {
             offset += line.len();
         }
         let session_end = starts.first().copied().unwrap_or(text.len());
+        let ends = starts.iter().skip(1).copied().chain(std::iter::once(text.len()));
         let media = starts
             .iter()
-            .enumerate()
-            .map(|(k, &at)| Section {
-                text: &text[at..starts.get(k + 1).copied().unwrap_or(text.len())],
-            })
-            .collect();
-        Self { session: &text[..session_end], media }
+            .zip(ends)
+            .map(|(&at, end)| Some(Section { text: text.get(at..end)? }))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { session: text.get(..session_end)?, media })
     }
 }
 

@@ -166,13 +166,6 @@ crates/sip-message/src/multipart/entity.rs 6
 crates/sip-message/src/param_codec.rs 4
 crates/sip-message/src/payload.rs 1
 crates/sip-message/src/remote_target.rs 10
-crates/sip-message/src/sdp.rs 29
-crates/sip-message/src/sdp_answer.rs 4
-crates/sip-message/src/sdp_answer/formats.rs 2
-crates/sip-message/src/sdp_doc.rs 23
-crates/sip-message/src/sdp_form.rs 4
-crates/sip-message/src/sdp_session.rs 8
-crates/sip-message/src/sdp_text.rs 1
 crates/sip-message/src/serializer.rs 9
 crates/sip-message/src/site.rs 3
 crates/sip-message/src/sniff.rs 21

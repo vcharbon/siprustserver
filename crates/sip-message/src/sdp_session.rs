@@ -32,7 +32,7 @@ impl StatedSession {
     pub fn of(sdp: &[u8]) -> Option<Self> {
         let origin = parse_origin(sdp)?;
         let text = String::from_utf8_lossy(sdp);
-        let media = Sections::of(&text).media.iter().map(|s| s.value().to_string()).collect();
+        let media = Sections::of(&text)?.media.iter().map(|s| s.value().to_string()).collect();
         Some(Self { origin: origin.value().to_string(), media })
     }
 }
@@ -80,7 +80,7 @@ pub fn restate_session_again(sdp: &[u8], stated: &StatedSession) -> Option<Resta
 fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Option<Restated> {
     let current = parse_origin(sdp)?;
     let text = String::from_utf8_lossy(sdp);
-    let authored = Sections::of(&text);
+    let authored = Sections::of(&text)?;
     let described = parse_sdp_body(sdp).map(|d| d.media).unwrap_or_default();
     let stated_media: Vec<MediaLine> = stated.media.iter().map(|m| media_line(m)).collect();
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
@@ -100,13 +100,14 @@ fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Opt
     }
     let mut slots: Vec<Option<u32>> = vec![None; stated_media.len()];
     for (j, stream) in described.iter().enumerate() {
+        let j = u32::try_from(j).ok()?;
         let kind = stream.r#type.as_str();
         let slot = first_free(live.get_mut(kind), &slots)
             .or_else(|| first_free(of_kind.get_mut(kind), &slots))
             .or_else(|| first_free(Some(&mut stated_rejected), &slots));
-        match slot {
-            Some(i) => slots[i] = Some(j as u32),
-            None => slots.push(Some(j as u32)),
+        match slot.and_then(|i| slots.get_mut(i)) {
+            Some(free) => *free = Some(j),
+            None => slots.push(Some(j)),
         }
     }
 
@@ -117,26 +118,40 @@ fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Opt
         session_c.is_none().then(|| described.iter().find_map(|m| m.c_line.clone())).flatten();
     for (i, slot) in slots.iter().enumerate() {
         match slot {
-            Some(j) => out.push_str(&with_line_end(authored.media[*j as usize].text, eol)),
+            Some(j) => {
+                let section = authored.media.get(usize::try_from(*j).ok()?)?;
+                out.push_str(&with_line_end(section.text, eol));
+            }
             None => {
-                out.push_str(&format!("m={}{eol}", rejected(&stated_media[i])));
+                out.push_str(&format!("m={}{eol}", rejected(stated_media.get(i)?)));
                 if let Some(c) = &stub_c {
                     out.push_str(&format!("c={c}{eol}"));
                 }
             }
         }
     }
+    let mut out = out.into_bytes();
     if !text.ends_with('\n') && slots.last().is_some_and(Option::is_some) {
-        out.truncate(out.len() - eol.len());
+        drop_line_end(&mut out);
     }
-    Some(Restated { sdp: out.into_bytes(), slots })
+    Some(Restated { sdp: out, slots })
+}
+
+/// `out` without the line ending it closes with, for a description that ends
+/// as the one it restates did: without one.
+fn drop_line_end(out: &mut Vec<u8>) {
+    if out.ends_with(b"\r\n") {
+        out.truncate(out.len().saturating_sub(2));
+    } else if out.ends_with(b"\n") {
+        out.truncate(out.len().saturating_sub(1));
+    }
 }
 
 /// The first slot of `queue` still free, the taken ones ahead of it dropped.
 fn first_free(queue: Option<&mut VecDeque<usize>>, slots: &[Option<u32>]) -> Option<usize> {
     let queue = queue?;
     while let Some(&i) = queue.front() {
-        if slots[i].is_none() {
+        if slots.get(i) == Some(&None) {
             return Some(i);
         }
         queue.pop_front();
@@ -152,7 +167,7 @@ fn first_free(queue: Option<&mut VecDeque<usize>>, slots: &[Option<u32>]) -> Opt
 /// or past the last slot) follows in order as a stream the far party adds.
 pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
     let text = String::from_utf8_lossy(sdp);
-    let described = Sections::of(&text);
+    let described = Sections::of(&text)?;
     let ports: Vec<Option<i64>> =
         parse_sdp_body(sdp).map(|d| d.media.iter().map(|m| m.port).collect()).unwrap_or_default();
     let mut ordered: Vec<(u32, &Section<'_>)> = Vec::new();
@@ -176,10 +191,11 @@ pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
     for s in &kept {
         out.push_str(&with_line_end(s.text, eol));
     }
+    let mut out = out.into_bytes();
     if !text.ends_with('\n') {
-        out.truncate(out.len().saturating_sub(eol.len()));
+        drop_line_end(&mut out);
     }
-    Some(out.into_bytes())
+    Some(out)
 }
 
 /// `sdp` as the first description of a session this stack opens at `stamp`:

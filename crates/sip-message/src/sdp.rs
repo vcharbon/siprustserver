@@ -23,22 +23,22 @@ pub(crate) fn split_lines(text: &str) -> Vec<&str> {
 /// at the first non-digit; `None` when no digits are present (the NaN case).
 fn parse_int_js(s: &str) -> Option<i64> {
     let s = s.trim_start();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut neg = false;
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        neg = bytes[i] == b'-';
-        i += 1;
-    }
-    let start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == start {
+    let (neg, unsigned) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let digits = unsigned.get(..unsigned.bytes().take_while(u8::is_ascii_digit).count())?;
+    if digits.is_empty() {
         return None;
     }
-    let n: i64 = s[start..i].parse().ok()?;
+    let n: i64 = digits.parse().ok()?;
     Some(if neg { -n } else { n })
+}
+
+/// The first line of `lines` that starts with `prefix`, and its value after
+/// the prefix.
+fn line_with<'a>(lines: &[&'a str], prefix: &str) -> Option<(&'a str, &'a str)> {
+    lines.iter().find_map(|l| l.strip_prefix(prefix).map(|value| (*l, value)))
 }
 
 /// Split a value on runs of ASCII whitespace, dropping empties — the port of
@@ -85,14 +85,18 @@ pub fn validate_sdp_body(body: &[u8]) -> Result<(), SdpValidationError> {
     }
 
     // v=0 — RFC 4566 §5.1 fixes the version.
-    let v_line = lines.iter().find(|l| l.starts_with("v=")).unwrap();
-    if *v_line != "v=0" {
+    let Some((v_line, _)) = line_with(&lines, "v=") else {
+        return Err(SdpValidationError::new("missing v= line"));
+    };
+    if v_line != "v=0" {
         return Err(SdpValidationError::new(format!("non-zero protocol-version: \"{v_line}\"")));
     }
 
     // o= must have exactly six SP-tokens.
-    let o_line = lines.iter().find(|l| l.starts_with("o=")).unwrap();
-    let o_fields = ws_tokens(&o_line[2..]);
+    let Some((o_line, o_value)) = line_with(&lines, "o=") else {
+        return Err(SdpValidationError::new("missing o= line"));
+    };
+    let o_fields = ws_tokens(o_value);
     if o_fields.len() != 6 {
         return Err(SdpValidationError::new(format!(
             "o= line has {} tokens (want 6): \"{o_line}\"",
@@ -102,10 +106,10 @@ pub fn validate_sdp_body(body: &[u8]) -> Result<(), SdpValidationError> {
 
     // Every m= line has ≥ 4 tokens (<media> <port> <proto> <fmt>+).
     for line in &lines {
-        if !line.starts_with("m=") {
+        let Some(m_value) = line.strip_prefix("m=") else {
             continue;
-        }
-        let tokens = ws_tokens(&line[2..]);
+        };
+        let tokens = ws_tokens(m_value);
         if tokens.len() < 4 {
             return Err(SdpValidationError::new(format!(
                 "m= line has {} tokens (want ≥ 4): \"{line}\"",
@@ -142,19 +146,19 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
 
     // Exactly one session description (one `v=` line), and it must be `v=0`.
     let v_lines: Vec<&&str> = lines.iter().filter(|l| l.starts_with("v=")).collect();
-    if v_lines.is_empty() {
-        return Err(SdpValidationError::new("missing v= line"));
-    }
-    if v_lines.len() > 1 {
+    let v_line = match v_lines.as_slice() {
+        [] => return Err(SdpValidationError::new("missing v= line")),
+        [one] => **one,
+        many => {
+            return Err(SdpValidationError::new(format!(
+                "{} session descriptions (v= lines) — exactly one required",
+                many.len()
+            )))
+        }
+    };
+    if v_line != "v=0" {
         return Err(SdpValidationError::new(format!(
-            "{} session descriptions (v= lines) — exactly one required",
-            v_lines.len()
-        )));
-    }
-    if *v_lines[0] != "v=0" {
-        return Err(SdpValidationError::new(format!(
-            "unexpected v= value '{}' (expected v=0)",
-            v_lines[0]
+            "unexpected v= value '{v_line}' (expected v=0)"
         )));
     }
 
@@ -162,9 +166,14 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
 
     // o= sess-id / sess-version bounds. The six-token o= line is there:
     // `validate_sdp_body` has just confirmed it.
-    let o_line = lines.iter().find(|l| l.starts_with("o=")).unwrap();
-    let o_tokens = ws_tokens(&o_line[2..]);
-    let fields = [("sess-id", o_tokens[1]), ("sess-version", o_tokens[2])];
+    let Some((_, o_value)) = line_with(&lines, "o=") else {
+        return Err(SdpValidationError::new("missing o= line"));
+    };
+    let o_tokens = ws_tokens(o_value);
+    let [_, sess_id, sess_version, ..] = o_tokens.as_slice() else {
+        return Err(SdpValidationError::new("o= line has fewer than 3 tokens"));
+    };
+    let fields = [("sess-id", *sess_id), ("sess-version", *sess_version)];
     for (label, token) in fields {
         if token.is_empty() || !token.bytes().all(|b| b.is_ascii_digit()) {
             return Err(SdpValidationError::new(format!(
@@ -189,12 +198,11 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
                 return Err(missing_c(&current_media_name));
             }
             let m_tokens = ws_tokens(m_val);
-            if m_tokens.len() < 3 {
+            let [media_name, port_tok, _, ..] = m_tokens.as_slice() else {
                 return Err(SdpValidationError::new(format!(
                     "m= line '{line}' has fewer than 3 tokens (expected: media port proto fmt...)"
                 )));
-            }
-            let port_tok = m_tokens[1];
+            };
             if port_tok.is_empty() || !port_tok.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(SdpValidationError::new(format!(
                     "m= line port '{port_tok}' is not a non-negative integer"
@@ -202,7 +210,7 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
             }
             in_media = true;
             current_media_has_c = false;
-            current_media_name = m_tokens[0].to_string();
+            current_media_name = media_name.to_string();
             continue;
         }
         if line.starts_with("c=") {
@@ -235,12 +243,15 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
 /// trailing `/ttl` or `/count` on the address still names it.
 pub fn c_line_is_unspecified(c_value: &str) -> bool {
     let toks = ws_tokens(c_value);
-    if toks.len() < 3 || !toks[0].eq_ignore_ascii_case("IN") {
+    let [nettype, addrtype, address, ..] = toks.as_slice() else {
+        return false;
+    };
+    if !nettype.eq_ignore_ascii_case("IN") {
         return false;
     }
-    let addr = toks[2].split('/').next().unwrap_or_default();
-    (toks[1].eq_ignore_ascii_case("IP4") && addr == "0.0.0.0")
-        || (toks[1].eq_ignore_ascii_case("IP6") && ip6_is_unspecified(addr))
+    let addr = address.split('/').next().unwrap_or_default();
+    (addrtype.eq_ignore_ascii_case("IP4") && addr == "0.0.0.0")
+        || (addrtype.eq_ignore_ascii_case("IP6") && ip6_is_unspecified(addr))
 }
 
 /// True iff `addr` spells the IPv6 unspecified address. RFC 4291 §2.2 compresses
@@ -282,21 +293,21 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
     let mut payload_types: Vec<i64> = Vec::new();
 
     for (i, line) in lines.iter().enumerate() {
-        if !line.starts_with("m=") {
+        let Some(m_value) = line.strip_prefix("m=") else {
+            continue;
+        };
+        let parts = ws_tokens(m_value);
+        let [kind, _, _, formats @ ..] = parts.as_slice() else {
+            continue;
+        };
+        if *kind != "audio" || formats.is_empty() {
             continue;
         }
-        let parts = ws_tokens(&line[2..]);
-        if parts.len() < 4 {
-            continue;
-        }
-        if parts[0] != "audio" {
-            continue;
-        }
-        let pts: Vec<i64> = parts[3..].iter().filter_map(|f| parse_int_js(f)).collect();
+        let pts: Vec<i64> = formats.iter().filter_map(|f| parse_int_js(f)).collect();
         if pts.is_empty() {
             continue;
         }
-        media = parts[0].to_string();
+        media = kind.to_string();
         payload_types = pts;
         m_line_idx = Some(i);
         break;
@@ -310,7 +321,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
     let mut ptime: Option<String> = None;
     let mut maxptime: Option<String> = None;
 
-    for line in &lines[start + 1..] {
+    for line in lines.iter().skip(start + 1) {
         if line.starts_with("m=") {
             break;
         }
@@ -318,18 +329,16 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("a=rtpmap:") {
-            let rest = rest.trim();
-            if let Some(space) = rest.find(' ') {
-                if let Some(pt) = parse_int_js(&rest[..space]) {
+            if let Some((pt, _)) = rest.trim().split_once(' ') {
+                if let Some(pt) = parse_int_js(pt) {
                     if allowed.contains(&pt) {
                         rtpmaps.push((*line).to_string());
                     }
                 }
             }
         } else if let Some(rest) = line.strip_prefix("a=fmtp:") {
-            let rest = rest.trim();
-            if let Some(space) = rest.find(' ') {
-                if let Some(pt) = parse_int_js(&rest[..space]) {
+            if let Some((pt, _)) = rest.trim().split_once(' ') {
+                if let Some(pt) = parse_int_js(pt) {
                     if allowed.contains(&pt) {
                         fmtp.push((*line).to_string());
                     }
@@ -449,7 +458,9 @@ pub fn rewrite_connection_and_ports(
 /// media kind, the port-pair count, the transport, the whole format list —
 /// rides byte-for-byte.
 fn rewrite_media_line(line: &str, port_of: &mut impl FnMut(u16) -> Option<u16>) -> String {
-    let Some((kind, tail)) = line["m=".len()..].split_once(' ') else { return line.to_string() };
+    let Some((kind, tail)) = line.strip_prefix("m=").and_then(|value| value.split_once(' ')) else {
+        return line.to_string();
+    };
     let (port_field, rest) = match tail.split_once(' ') {
         Some((port, rest)) => (port, Some(rest)),
         None => (tail, None),

@@ -104,8 +104,8 @@ pub fn answer_from_own_agreeing(
     let own_doc = parse_sdp_body(own)?;
     let offer_text = String::from_utf8_lossy(offer);
     let own_text = String::from_utf8_lossy(own);
-    let offered = Sections::of(&offer_text);
-    let owned = Sections::of(&own_text);
+    let offered = Sections::of(&offer_text)?;
+    let owned = Sections::of(&own_text)?;
     if bundles(offered.session) || bundles(owned.session) {
         return None;
     }
@@ -127,7 +127,7 @@ pub fn answer_from_own_agreeing(
         .then(|| own_doc.media.iter().find_map(|m| m.c_line.clone()))
         .flatten();
     for (i, stream) in offer_doc.media.iter().enumerate() {
-        let offered_value = offered.media[i].value();
+        let offered_value = offered.media.get(i)?.value();
         // A rejected m-line keeps the offer's `mid` (RFC 5888 §9.2).
         let mid = stream.attributes.iter().find_map(|a| a.strip_prefix("mid:"));
         let reject = |out: &mut String, m_value: String| {
@@ -153,7 +153,7 @@ pub fn answer_from_own_agreeing(
             continue;
         };
         if mine.port == Some(0) {
-            reject(&mut out, owned.media[i].value().to_string());
+            reject(&mut out, owned.media.get(i)?.value().to_string());
             continue;
         }
         let answerable = mine.transport == stream.transport
@@ -173,7 +173,7 @@ pub fn answer_from_own_agreeing(
             media_direction(stream).or(offer_session_dir).unwrap_or(SdpDirection::SendRecv);
         let dir = answer_direction(own_dir, offered_dir);
         let answer = Answered { stream, own: mine, kept: &kept, crypto, dir, inherited };
-        answered_section(&mut out, owned.media[i].text, &answer, eol);
+        answered_section(&mut out, owned.media.get(i)?.text, &answer, eol);
     }
     Some(out.into_bytes())
 }
@@ -252,7 +252,7 @@ pub fn answer_direction(own: SdpDirection, offered: SdpDirection) -> SdpDirectio
 pub fn reject_offer(offer: &[u8], options: &BuildHeldSdpOptions) -> Option<Vec<u8>> {
     let doc = parse_sdp_body(offer)?;
     let text = String::from_utf8_lossy(offer);
-    let sections = Sections::of(&text);
+    let sections = Sections::of(&text)?;
     let address = sdp_origin_address(&options.local_ip);
     let addrtype = if address.contains(':') { "IP6" } else { "IP4" };
     let sess = sdp_session_id(options.now_ms);
@@ -441,10 +441,9 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
     for line in section {
         let attr = line.strip_prefix("a=");
         let bound = attr.and_then(|a| {
-            let name = PER_FORMAT.iter().find(|p| a.starts_with(**p))?;
-            let rest = &a[name.len()..];
+            let (name, rest) = PER_FORMAT.iter().find_map(|p| Some((*p, a.strip_prefix(*p)?)))?;
             let (format, tail) = rest.split_once(' ').unwrap_or((rest, ""));
-            Some((*name, format, tail))
+            Some((name, format, tail))
         });
         if let Some((name, format, tail)) = bound {
             if format == "*" {

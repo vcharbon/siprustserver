@@ -22,7 +22,7 @@ pub fn text_fields(body: &[u8]) -> Vec<TextField> {
     for line in text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)) {
         let mut chars = line.chars();
         let (Some(key), Some('=')) = (chars.next(), chars.next()) else { continue };
-        let value = &line[key.len_utf8() + 1..];
+        let Some(value) = line.get(key.len_utf8() + 1..) else { continue };
         let value = match key {
             'o' => value.split(' ').next().unwrap_or_default(),
             's' | 'i' | 'u' | 'e' | 'p' => value,

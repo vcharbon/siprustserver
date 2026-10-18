@@ -28,7 +28,7 @@ pub fn canonical_form(sdp: &[u8]) -> Option<Vec<u8>> {
     if !text.starts_with("v=") {
         return None;
     }
-    let sections = Sections::of(text);
+    let sections = Sections::of(text)?;
     if sections.media.is_empty() {
         return None;
     }
@@ -63,27 +63,31 @@ fn media_in_form<'a>(section: &'a str, session_direction: &'a str) -> Vec<&'a st
     let mut out = vec![m];
     out.extend(others);
     // Each format's `rtpmap` then `fmtp` attributes, in wire order, read in one pass.
-    let mut bound: HashMap<&str, [Vec<usize>; 2]> = HashMap::new();
+    let mut bound: HashMap<&str, (Vec<usize>, Vec<usize>)> = HashMap::new();
     for (i, attribute) in attributes.iter().enumerate() {
-        for (k, prefix) in ["a=rtpmap:", "a=fmtp:"].into_iter().enumerate() {
-            if let Some(format) = format_of(attribute, prefix) {
-                bound.entry(format).or_default()[k].push(i);
-            }
+        if let Some(format) = format_of(attribute, "a=rtpmap:") {
+            bound.entry(format).or_default().0.push(i);
+        }
+        if let Some(format) = format_of(attribute, "a=fmtp:") {
+            bound.entry(format).or_default().1.push(i);
         }
     }
     for format in &formats {
-        for i in bound.remove(format.as_str()).into_iter().flatten().flatten() {
-            taken[i] = true;
-            out.push(attributes[i]);
+        let Some((rtpmaps, fmtps)) = bound.remove(format.as_str()) else { continue };
+        for i in rtpmaps.into_iter().chain(fmtps) {
+            if let (Some(taken), Some(attribute)) = (taken.get_mut(i), attributes.get(i)) {
+                *taken = true;
+                out.push(attribute);
+            }
         }
     }
     let directions: Vec<&str> = attributes.iter().copied().filter(|a| is_direction(a)).collect();
     out.extend(
         attributes
             .iter()
-            .enumerate()
-            .filter(|(i, a)| !taken[*i] && !is_direction(a))
-            .map(|(_, a)| *a),
+            .zip(&taken)
+            .filter(|(a, taken)| !**taken && !is_direction(a))
+            .map(|(a, _)| *a),
     );
     if !directions.is_empty() {
         out.extend(directions);
