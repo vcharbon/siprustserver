@@ -212,7 +212,8 @@ pub(super) fn queued(ctx: &RouterCtx) {
 }
 
 /// Answer the new INVITE `req` from `src`, refused for `refused`, through its
-/// server transaction. The caller counts it.
+/// server transaction. The caller counts it. A request whose lines no
+/// response can echo is left to its transaction's lifetime.
 pub(super) async fn answer(
     txn: &TransactionLayer,
     refusals: &Refusals,
@@ -220,7 +221,9 @@ pub(super) async fn answer(
     src: SocketAddr,
     refused: Refused,
 ) {
-    let _ = txn.send_response(refusals.answer(req, refused), src).await;
+    if let Ok(resp) = refusals.answer(req, refused) {
+        let _ = txn.send_response(resp, src).await;
+    }
 }
 
 #[cfg(test)]

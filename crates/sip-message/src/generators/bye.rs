@@ -3,6 +3,7 @@
 //! it and the 2xx that confirmed it.
 
 use super::emit;
+use super::error::GenerateError;
 use super::in_dialog::{route_for_in_dialog, with_routes};
 use crate::draft::RequestDraft;
 use crate::header::{CSeq, ContentLength, HeaderName, HeaderValue, MaxForwards};
@@ -21,7 +22,7 @@ pub fn generate_bye_for_2xx_from_invite(
     final_response: &SipResponse,
     cseq: u32,
     branch: &str,
-) -> SipRequest {
+) -> Result<SipRequest, GenerateError> {
     let route_set: Vec<String> = final_response
         .record_route_set()
         .map(|set| set.reversed().iter().map(HeaderValue::to_wire).collect())

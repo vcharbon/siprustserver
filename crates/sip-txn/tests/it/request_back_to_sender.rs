@@ -75,7 +75,7 @@ fn responses(events: &[TransactionEvent], status: u16) -> Vec<bool> {
 
 fn answer(req: &SipRequest, status: u16, reason: &str) -> sip_message::SipResponse {
     let opts = GenerateResponseOpts { to_tag: Some(CALLEE_TAG.to_string()), ..Default::default() };
-    generate_response(req, status, reason, &opts)
+    generate_response(req, status, reason, &opts).unwrap()
 }
 
 /// An INVITE sent to this instance's own address reaches the consumer as a
@@ -143,7 +143,8 @@ async fn a_cancel_sent_to_self_matches_the_server_invite() {
     elapse_ms(100).await;
     assert_eq!(requests(&stack.drain_events(), "INVITE").len(), 1);
 
-    let cancel = generate_cancel(&InviteClientTransactionHandle { original_invite: invite }, &[]);
+    let cancel =
+        generate_cancel(&InviteClientTransactionHandle { original_invite: invite }, &[]).unwrap();
     stack.txn.send_request(cancel, addr(B2BUA), TxnKind::NonInvite).await.unwrap();
     elapse_ms(100).await;
     let events = stack.drain_events();

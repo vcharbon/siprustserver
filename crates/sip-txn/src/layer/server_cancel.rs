@@ -66,13 +66,10 @@ impl Owner {
             };
             if let Some(key) = self.cancelled_invite(cancel_via, is_answered_target) {
                 let to_tag = self.uas_to_tag_of(key.id());
-                let cancel_ok = generate_response(
-                    &req,
-                    200,
-                    "OK",
-                    &GenerateResponseOpts { to_tag, ..Default::default() },
-                );
-                self.send_buffer(endpoint, cancel_ok.image(), src).await;
+                let opts = GenerateResponseOpts { to_tag, ..Default::default() };
+                if let Ok(cancel_ok) = generate_response(&req, 200, "OK", &opts) {
+                    self.send_buffer(endpoint, cancel_ok.image(), src).await;
+                }
                 return true;
             }
         }
@@ -113,23 +110,17 @@ impl Owner {
         // 200 OK to the CANCEL itself. This 200 and the 487 below are the
         // layer's own answers: they carry no header the TU states on its
         // messages.
-        let cancel_ok = generate_response(
-            &req,
-            200,
-            "OK",
-            &GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() },
-        );
-        self.send_buffer(endpoint, cancel_ok.image(), src).await;
+        // A request whose lines no response can echo draws none.
+        let opts = GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() };
+        if let Ok(cancel_ok) = generate_response(&req, 200, "OK", &opts) {
+            self.send_buffer(endpoint, cancel_ok.image(), src).await;
+        }
 
         // 487 Request Terminated on the matched INVITE.
         let original = self.server(id).and_then(|t| t.original_request.clone());
-        if let Some(original) = original {
-            let terminated = generate_response(
-                &original,
-                487,
-                "Request Terminated",
-                &GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() },
-            );
+        let terminated =
+            original.and_then(|o| generate_response(&o, 487, "Request Terminated", &opts).ok());
+        if let Some(terminated) = terminated {
             let terminated_buf = terminated.image().clone();
             self.send_buffer(endpoint, &terminated_buf, src).await;
             self.record_uas_tag(id, &terminated);

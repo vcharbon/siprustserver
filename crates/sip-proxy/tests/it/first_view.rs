@@ -213,7 +213,7 @@ fn spawn_responder(ep: Box<dyn UdpEndpoint>, worker: Arc<Responder>) {
                 extra_headers: extra,
                 ..Default::default()
             };
-            let resp = generate_response(&req, 200, "OK", &opts);
+            let resp = generate_response(&req, 200, "OK", &opts).unwrap();
             let _ = ep.send_to(&serialize(&SipMessage::Response(resp)), pkt.src).await;
         }
     });

@@ -97,7 +97,7 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
         while let Some(pkt) = worker.recv().await {
             let Ok(SipMessage::Request(req)) = parser.parse(&pkt.raw) else { continue };
             let opts = GenerateResponseOpts { to_tag: Some("uas".into()), ..Default::default() };
-            let resp = generate_response(&req, 200, "OK", &opts);
+            let resp = generate_response(&req, 200, "OK", &opts).unwrap();
             let _ = worker.send_to(&serialize(&SipMessage::Response(resp)), pkt.src).await;
         }
     });

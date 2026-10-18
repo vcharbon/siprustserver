@@ -87,7 +87,8 @@ impl Agent {
                 self.ack_obligation_claims(&r);
                 continue;
             };
-            let resp = generate_response(&r, status, reason, &GenerateResponseOpts::default());
+            let resp = generate_response(&r, status, reason, &GenerateResponseOpts::default())
+                .expect("a response to the request");
             let dst = top_via_addr(&r).unwrap_or(self.addr);
             let _ = self.try_send(&SipMessage::Response(resp), dst).await;
         }

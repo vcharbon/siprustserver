@@ -52,7 +52,7 @@ fn invite(call_id: &str) -> SipRequest {
         content_type: None,
         extra_headers: vec![],
     };
-    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts).expect("an INVITE")
 }
 
 fn state(clock: Clock) -> CallState {

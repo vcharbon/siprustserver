@@ -42,7 +42,7 @@ impl AckCtx<'_> {
         {
             return Ok(());
         }
-        let ack = generate_ack_for_non_2xx(self.invite, resp, &[]);
+        let ack = generate_ack_for_non_2xx(self.invite, resp, &[]).expect("an ACK of the final");
         self.agent.try_send(&SipMessage::Request(ack), self.wire_dst).await
     }
 }
@@ -65,7 +65,8 @@ pub(super) async fn try_send_cancel(
     let cancel = generate_cancel(
         &InviteClientTransactionHandle { original_invite: original_invite.clone() },
         &stated,
-    );
+    )
+    .expect("a CANCEL of the scenario's INVITE");
     agent.try_send(&SipMessage::Request(cancel), wire_dst).await
 }
 

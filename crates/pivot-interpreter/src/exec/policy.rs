@@ -65,6 +65,17 @@ impl<'a, 'p> Runner<'a, 'p> {
                 ..Default::default()
             },
         );
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                self.instance.fail(Failure::SendFailed {
+                    step: "(background)".into(),
+                    leg: leg.to_string(),
+                    detail: e.to_string(),
+                });
+                return false;
+            }
+        };
         let wire = sip_message::serialize(&SipMessage::Response(response));
         let (dst, note) = match via_target(request) {
             Some(addr) => (addr, "background answer"),

@@ -104,7 +104,7 @@ async fn a_tagless_answer_to_a_cancel_after_the_ack_takes_the_dialogs_tag() {
     stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
     elapse_ms(20).await;
     let cancel = handed_up(&stack.drain_events(), "CANCEL");
-    let answer = generate_response(&cancel, 481, "Gone", &GenerateResponseOpts::default());
+    let answer = generate_response(&cancel, 481, "Gone", &GenerateResponseOpts::default()).unwrap();
     assert!(
         sip_message::generators::response::is_fallback_to_tag(answer.to().tag().unwrap()),
         "the TU minted nothing: {:?}",
@@ -265,7 +265,7 @@ async fn an_in_dialog_answer_echoes_the_requests_tag_untouched() {
     stack.inject(&inbound_request("BYE", bye_branch, call_id, Some("dlg-d"))).await;
     elapse_ms(20).await;
     let bye = handed_up(&stack.drain_events(), "BYE");
-    let answer = generate_response(&bye, 200, "OK", &GenerateResponseOpts::default());
+    let answer = generate_response(&bye, 200, "OK", &GenerateResponseOpts::default()).unwrap();
     let sent = stack.txn.send_response(answer, addr(PEER)).await.unwrap();
     elapse_ms(20).await;
 
@@ -287,7 +287,7 @@ async fn a_fallback_tag_nothing_binds_leaves_and_is_counted() {
     stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
     elapse_ms(20).await;
     let cancel = handed_up(&stack.drain_events(), "CANCEL");
-    let answer = generate_response(&cancel, 481, "Gone", &GenerateResponseOpts::default());
+    let answer = generate_response(&cancel, 481, "Gone", &GenerateResponseOpts::default()).unwrap();
     let fallback = answer.to().tag().unwrap().to_string();
     stack.txn.send_response(answer, addr(PEER)).await.unwrap();
     elapse_ms(20).await;

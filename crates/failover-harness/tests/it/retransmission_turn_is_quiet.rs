@@ -180,7 +180,8 @@ async fn service_peers(alice: &Agent, bob: &Agent, hop: SocketAddr) {
         match msg {
             SipMessage::Response(r) if r.status() == 200 => {}
             SipMessage::Request(req) if req.method() == Method::Options => {
-                let ok = generate_response(&req, 200, "OK", &GenerateResponseOpts::default());
+                let ok = generate_response(&req, 200, "OK", &GenerateResponseOpts::default())
+                    .expect("a 200");
                 alice.try_send_datagram(&serialize(&SipMessage::Response(ok)), hop).await.unwrap();
             }
             SipMessage::Response(r) => panic!("alice read an unexpected {} response", r.status()),

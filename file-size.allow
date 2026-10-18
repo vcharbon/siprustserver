@@ -39,9 +39,9 @@ crates/b2bua/src/repl/supervisor.rs 849
 crates/b2bua/src/repl/tests.rs 827
 crates/b2bua/src/router/callouts.rs 648
 crates/b2bua/src/router/process.rs 617
-crates/b2bua/src/rules/actions/relay_response.rs 593
+crates/b2bua/src/rules/actions/relay_response.rs 563
 crates/b2bua/src/rules/actions/respond.rs 640
-crates/b2bua/src/rules/actions/teardown.rs 598
+crates/b2bua/src/rules/actions/teardown.rs 597
 crates/b2bua/src/rules/defaults/core_rules.rs 1925
 crates/b2bua/src/rules/relay_first_18x.rs 526
 crates/b2bua/src/rules/relay/originate_tests.rs 849
@@ -110,7 +110,7 @@ crates/sip-message/src/parser/custom/extract_fields.rs 642
 crates/sip-message/src/parser/custom/structured_headers.rs 849
 crates/sip-message/src/sdp_answer.rs 534
 crates/sip-message/src/sniff.rs 628
-crates/sip-message/tests/it/generators.rs 1402
+crates/sip-message/tests/it/generators.rs 1401
 crates/sip-net-testkit/src/contracts.rs 870
 crates/sip-pcap/src/bin/sipflow.rs 1059
 crates/sip-pcap/src/flow.rs 820
@@ -118,5 +118,5 @@ crates/sip-pcap/src/flow/tests.rs 1000
 crates/sip-proxy-runner/src/main.rs 506
 crates/sip-proxy/src/observability/metrics.rs 556
 crates/sip-txn/src/layer/client.rs 746
-crates/sip-txn/tests/it/bounded_queue.rs 806
+crates/sip-txn/tests/it/bounded_queue.rs 803
 crates/sip-txn/tests/it/fsm.rs 1415

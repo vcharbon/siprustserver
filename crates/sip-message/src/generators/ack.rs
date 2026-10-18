@@ -4,6 +4,7 @@
 //! INVITE no longer at hand, from the dialog.
 
 use super::emit;
+use super::error::GenerateError;
 use super::in_dialog::{route_for_in_dialog, with_dialog_identity, with_routes};
 use super::spec::{InviteClientTransactionHandle, StackDialog};
 use crate::draft::RequestDraft;
@@ -32,21 +33,21 @@ pub struct GenerateAckFor2xxOpts {
 
 /// Build an ACK for a 2xx response. The CSeq number comes from the INVITE
 /// (RFC 3261 §13.2.2.4), not from `dialog.local_cseq`; the dialog route set
-/// is honoured like any in-dialog request. Panics when neither `invite_txn`
-/// nor `opts.cseq` is provided.
+/// is honoured like any in-dialog request. Neither `invite_txn` nor
+/// `opts.cseq` given is a [`GenerateError::Missing`].
 pub fn generate_ack_for_2xx(
     invite_txn: Option<&InviteClientTransactionHandle>,
     dialog: &StackDialog,
     opts: &GenerateAckFor2xxOpts,
-) -> SipRequest {
+) -> Result<SipRequest, GenerateError> {
     let invite_cseq = opts
         .cseq
         .or_else(|| invite_txn.map(|t| t.original_invite.cseq().seq()))
-        .expect("generate_ack_for_2xx: either invite_txn or opts.cseq must be provided");
+        .ok_or(GenerateError::Missing("the INVITE transaction or a CSeq"))?;
     let remote_target =
         opts.request_uri.clone().unwrap_or_else(|| emit::uri(&dialog.remote_target));
     let (uri, routes) = route_for_in_dialog(remote_target, &dialog.route_set);
-    let hop = opts.via.clone().expect("via required");
+    let hop = opts.via.clone().ok_or(GenerateError::Missing("via"))?;
 
     let draft = RequestDraft::new(Method::Ack, uri).push(hop).push(MaxForwards::DEFAULT);
     let draft = with_dialog_identity(draft, dialog).push(CSeq::new(invite_cseq, Method::Ack));
@@ -68,11 +69,11 @@ pub fn generate_ack_for_non_2xx(
     original_invite: &SipRequest,
     final_response: &SipResponse,
     extra_headers: &[SipHeader],
-) -> SipRequest {
+) -> Result<SipRequest, GenerateError> {
     let via = original_invite
         .raw_text(HeaderName::Via)
         .next()
-        .expect("generate_ack_for_non_2xx: INVITE missing Via");
+        .ok_or(GenerateError::Missing("the INVITE's Via"))?;
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
 
     let mut draft = RequestDraft::new(Method::Ack, original_invite.request_uri().clone())
@@ -98,7 +99,7 @@ pub fn generate_ack_for_non_2xx(
 pub fn generate_ack_for_non_2xx_in_dialog(
     dialog: &StackDialog,
     final_response: &SipResponse,
-) -> SipRequest {
+) -> Result<SipRequest, GenerateError> {
     let (uri, routes) = route_for_in_dialog(emit::uri(&dialog.remote_target), &dialog.route_set);
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
     let draft = RequestDraft::new(Method::Ack, uri)
@@ -127,7 +128,7 @@ pub fn generate_ack_for_2xx_from_invite(
     original_invite: &SipRequest,
     final_response: &SipResponse,
     branch: &str,
-) -> SipRequest {
+) -> Result<SipRequest, GenerateError> {
     let contact = final_response.contacts().as_slice().first().map(|c| c.uri().clone());
     let invite_routes: Vec<String> =
         original_invite.raw_text(HeaderName::Route).map(|r| r.to_string()).collect();

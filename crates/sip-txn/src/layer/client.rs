@@ -593,10 +593,10 @@ impl Owner {
                 } else if kind == TxnKind::Invite && resp.status() >= 300 {
                     // Non-2xx INVITE final: (re-)ACK hop-by-hop (RFC 3261 §17.1.1.2).
                     if let (Some(orig), Some(dest)) = (original_request, destination) {
-                        let ack = generate_ack_for_non_2xx(&orig, &resp, &[]);
-                        // The recipe froze the ACK into its own image, which IS
-                        // its wire form — send that instead of rendering it twice.
-                        self.send_buffer(endpoint, ack.image(), dest).await;
+                        // The ACK's frozen image is its wire form; no ACK echoes a bad final.
+                        if let Ok(ack) = generate_ack_for_non_2xx(&orig, &resp, &[]) {
+                            self.send_buffer(endpoint, ack.image(), dest).await;
+                        }
                     }
                     if state == TxnState::Completed {
                         // A RETRANSMITTED non-2xx final (our first ACK was lost): we

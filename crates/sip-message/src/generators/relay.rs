@@ -482,7 +482,7 @@ pub fn generate_relayed_response(
     status: u16,
     reason: &str,
     opts: &GenerateRelayedResponseOpts,
-) -> SipResponse {
+) -> Result<SipResponse, super::GenerateError> {
     let mut draft = ResponseDraft::new(status, SipStr::owned(reason));
     for entry in opts.vias.iter().chain(&opts.record_routes) {
         draft = draft.push_entry(entry.clone());

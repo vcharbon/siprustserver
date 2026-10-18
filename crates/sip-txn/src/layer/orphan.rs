@@ -20,8 +20,8 @@ impl Owner {
     /// txn in Accepted for Timer M (RFC 6026 §7.2), the ACK retained for the
     /// 2xx's repeats. A 2xx to an initial INVITE created a dialog nothing holds
     /// any more, so the layer ends it ([`Owner::bye_unheld_dialog`]). Without
-    /// the original request there is nothing to build from: the txn is deleted
-    /// instead.
+    /// the original request, or with a 2xx whose lines no ACK can echo, there
+    /// is nothing to build from: the txn is deleted instead.
     pub(super) async fn accept_orphaned_2xx(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -30,7 +30,8 @@ impl Owner {
     ) {
         let built = self.clients.get(branch).and_then(|t| {
             let orig = t.original_request.as_ref()?;
-            let ack = generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch());
+            let ack =
+                generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch()).ok()?;
             Some((ack.image().clone(), t.destination?))
         });
         let Some((ack, dest)) = built else {
@@ -80,9 +81,10 @@ impl Owner {
         let ack = match (&t.retransmit_buf, &t.original_request) {
             (Some(ack), _) if !forked => ack.clone(),
             (_, Some(orig)) if forked => {
-                generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch())
-                    .image()
-                    .clone()
+                match generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch()) {
+                    Ok(ack) => ack.image().clone(),
+                    Err(_) => return,
+                }
             }
             _ => return,
         };
@@ -107,7 +109,8 @@ impl Owner {
         let built = self.clients.get(branch).and_then(|t| {
             let orig = t.original_request.as_ref().filter(|o| o.to().tag().is_none())?;
             let cseq = orig.cseq().seq().max(t.dialog_cseq) + 1;
-            let bye = generate_bye_for_2xx_from_invite(orig, resp, cseq, &self.id_gen.new_branch());
+            let bye = generate_bye_for_2xx_from_invite(orig, resp, cseq, &self.id_gen.new_branch())
+                .ok()?;
             let dest = first_route_address(&bye).or(t.destination)?;
             Some((bye, dest))
         });

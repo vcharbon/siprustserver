@@ -15,7 +15,7 @@ use sip_txn::{
 };
 
 /// A stateless refusal under a request-derived To-tag.
-fn refuse_503(req: &SipRequest) -> SipResponse {
+fn refuse_503(req: &SipRequest) -> Result<SipResponse, sip_message::generators::GenerateError> {
     generate_response(
         req,
         503,
@@ -75,7 +75,7 @@ async fn a_copy_of_an_invite_refused_ahead_draws_that_refusal() {
     elapse_ms(50).await;
     let wire: Vec<Vec<u8>> =
         stack.drain_peer().into_iter().map(|m| serialize(&m)).collect::<Vec<_>>();
-    let expected = serialize(&SipMessage::Response(refusals.answer(&invite())));
+    let expected = serialize(&SipMessage::Response(refusals.answer(&invite()).unwrap()));
     assert_eq!(wire, [expected], "the same 503, and nothing else");
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
     assert_eq!(delivered_invites(&stack.drain_events()), 0);
@@ -107,7 +107,8 @@ async fn an_admitted_invite_is_held_while_its_transaction_lives() {
         486,
         "Busy Here",
         &GenerateResponseOpts { to_tag: Some("uas-busy".into()), ..Default::default() },
-    );
+    )
+    .unwrap();
     stack.txn.send_response(busy, addr(PEER)).await.unwrap();
     elapse_ms(50).await;
     assert_eq!(count_responses(&stack.drain_peer(), 486), 1);

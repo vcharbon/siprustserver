@@ -5,12 +5,9 @@
 //! here — see [`super::relay_request`].
 
 use call::helpers::{PendingHolder, Scope};
-use call::{Call, PendingRequest, RSeq};
-use sip_message::draft::Entry;
-use sip_message::generators::{
-    self, GenerateRelayedResponseOpts, RelayDirection, RelayScope, RelaySituation, SourceBody,
-};
-use sip_message::header::{From, HeaderName, HeaderValue, MediaType, Via};
+use call::{Call, RSeq};
+use sip_message::generators::{self, RelayDirection, RelayScope, RelaySituation, SourceBody};
+use sip_message::header::{From, HeaderName, HeaderValue, MediaType};
 use sip_message::{Method, SipHeader, SipStr};
 
 use crate::effects::{
@@ -23,6 +20,7 @@ use b2bua_sdk::relayed_final::invite_timestamp;
 
 use super::select::resolve_peer;
 use super::show_provisional::shown_tag_of;
+use super::snapshot_answer::{snapshot_response_opts, via_sent_by};
 use super::{ActionExecutor, Owed, Settle};
 
 impl ActionExecutor<'_> {
@@ -235,7 +233,16 @@ impl ActionExecutor<'_> {
                 transparent_headers,
                 contact,
             );
-            let mut relayed = generators::generate_relayed_response(status, &reason, &opts);
+            let Ok(mut relayed) = generators::generate_relayed_response(status, &reason, &opts)
+            else {
+                tracing::warn!(
+                    call_ref = %call.call_ref,
+                    leg_id = %source_leg_id,
+                    status,
+                    "relayed response dropped — the originator's request lines make no response"
+                );
+                return;
+            };
             // §8.1.3.3 / §14.1: the snapshot correlates EVERY response of the
             // transaction back to the originator, so it must outlive a relayed
             // provisional (1xx) — a re-INVITE may send 18x THEN a non-2xx final,
@@ -553,41 +560,4 @@ impl ActionExecutor<'_> {
             self.relay_to(call, fx, ctx, &leg_id, &transform, dialog);
         }
     }
-}
-
-/// The headers a response answering the relayed request `pending` states for
-/// its originator (RFC 3261 §8.2.6.2): Via / From / To / Call-ID / CSeq equal
-/// the originator's own, and the snapshot holds the originator's own bytes
-/// (the `call` crate stores text, ADR-0008) — so each rides as a raw entry and
-/// reaches the wire unaltered.
-pub(super) fn snapshot_response_opts(
-    pending: &PendingRequest,
-    cseq_method: &str,
-    body: Vec<u8>,
-    content_type: Option<MediaType>,
-    transparent_headers: Vec<SipHeader>,
-    contact: Option<sip_message::header::Contact>,
-) -> GenerateRelayedResponseOpts {
-    let echo = |name: HeaderName, text: &str| Entry::raw(name, SipStr::owned(text));
-    GenerateRelayedResponseOpts {
-        vias: pending.source_vias.iter().map(|v| echo(HeaderName::Via, v)).collect(),
-        record_routes: vec![],
-        from: Some(echo(HeaderName::From, &pending.source_from)),
-        to: Some(echo(HeaderName::To, &pending.source_to)),
-        call_id: Some(echo(HeaderName::CallId, &pending.source_call_id)),
-        cseq: Some(echo(HeaderName::CSeq, &format!("{} {}", pending.inbound_cseq, cseq_method))),
-        body,
-        transparent_headers,
-        content_type,
-        contact,
-    }
-}
-
-/// The sent-by a response to this hop is routed to (RFC 3261 §18.2.2). The
-/// snapshot the pending-request correlation holds is text (the `call` crate has
-/// no sip-message dependency), so reading one back is a parse.
-pub(super) fn via_sent_by(via: &str) -> Option<(String, u16)> {
-    let hop = Via::parse(&SipStr::owned(via)).ok()?;
-    let (host, port) = hop.sent_by().pair();
-    Some((host.to_string(), port))
 }

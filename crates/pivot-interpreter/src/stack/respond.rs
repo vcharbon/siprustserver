@@ -96,7 +96,8 @@ impl LegStack {
             extra_headers: extra,
             incoming_source: None,
         };
-        let response = generate_response(&request, status, reason, &opts);
+        let response = generate_response(&request, status, reason, &opts)
+            .map_err(|e| StackError::unbuilt(&self.leg, e))?;
         let mut rseq = None;
         if (101..200).contains(&status) && reliably(&response) {
             rseq = Some(

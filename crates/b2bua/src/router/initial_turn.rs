@@ -59,7 +59,9 @@ pub(super) async fn initial_invite_turn(
     let copy = unborn.is_none();
     if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
         let resp = build_store_fault_500(&ctx.id_gen, req, &ctx.config.minted_final_advertisement);
-        let _ = ctx.txn.send_response(resp, src).await;
+        if let Ok(resp) = resp {
+            let _ = ctx.txn.send_response(resp, src).await;
+        }
         ctx.metrics.bump_store_fault_rejected();
         if copy {
             ctx.metrics.new_calls().refuse_copy();
@@ -82,13 +84,10 @@ pub(super) async fn initial_invite_turn(
     // the admission ladder.
     let resident = ctx.state.peek(call_ref).is_some();
     if copy {
-        let _ = ctx
-            .txn
-            .send_response(
-                build_merged_482(&ctx.id_gen, req, &ctx.config.minted_final_advertisement),
-                src,
-            )
-            .await;
+        let merged = build_merged_482(&ctx.id_gen, req, &ctx.config.minted_final_advertisement);
+        if let Ok(merged) = merged {
+            let _ = ctx.txn.send_response(merged, src).await;
+        }
         ctx.metrics.new_calls().refuse_copy();
         return if resident { Turn::Consumed } else { Turn::Shed };
     }
@@ -97,7 +96,9 @@ pub(super) async fn initial_invite_turn(
     if resident {
         let retry_after = super::owed::OwedAnswer::of(ctx).jittered_retry_after();
         let resp = build_retry_later_500(req, Some(ctx.id_gen.new_tag()), retry_after);
-        let _ = ctx.txn.send_response(resp, src).await;
+        if let Ok(resp) = resp {
+            let _ = ctx.txn.send_response(resp, src).await;
+        }
         ctx.metrics.new_calls().reject(Refusal::IdentityInUse, class);
         // Its mark, unread, is its own: a copy's would be the live call's.
         ctx.state.clear_setup_cancelled(call_ref, cseq);

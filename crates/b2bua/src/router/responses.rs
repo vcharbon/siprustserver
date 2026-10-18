@@ -2,9 +2,12 @@
 //! call-layer-stateless store-fault 500, the 481 and 405 a request naming
 //! no call draws, the 200 and 487 an ending dialog answers, the out-of-order
 //! 500, the retry-later 500 and the merged-request 482. The 503 refusing a new INVITE is the admission
-//! ladder's ([`crate::admission::Refusals`]).
+//! ladder's ([`crate::admission::Refusals`]). A request whose lines no
+//! response can echo draws none: each builder returns why.
 
-use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
+use sip_message::generators::{
+    generate_response, CapabilitySet, GenerateError, GenerateResponseOpts,
+};
 use sip_message::types::SipHeader;
 use sip_message::worker_report::{
     incarnation_value, Readiness as WorkerReadiness, X_INCARNATION, X_READINESS,
@@ -21,7 +24,7 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
 }
 
 /// `200 OK` to `req`, a request in a dialog, under the To-tag it carries.
-pub(super) fn build_200(req: &SipRequest) -> SipResponse {
+pub(super) fn build_200(req: &SipRequest) -> Result<SipResponse, GenerateError> {
     generate_response(req, 200, "OK", &GenerateResponseOpts::default())
 }
 
@@ -30,7 +33,7 @@ pub(super) fn build_200(req: &SipRequest) -> SipResponse {
 pub(super) fn build_200_advertising(
     req: &SipRequest,
     advertisement: &CapabilitySet,
-) -> SipResponse {
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts {
         extra_headers: minted_final_lines(advertisement),
         ..Default::default()
@@ -40,7 +43,7 @@ pub(super) fn build_200_advertising(
 
 /// `487 Request Terminated` to `req`, a request in a dialog this stack is
 /// ending by a BYE or a CANCEL (RFC 3261 §21.4.25).
-pub(super) fn build_487(req: &SipRequest) -> SipResponse {
+pub(super) fn build_487(req: &SipRequest) -> Result<SipResponse, GenerateError> {
     generate_response(req, 487, "Request Terminated", &GenerateResponseOpts::default())
 }
 
@@ -49,14 +52,17 @@ pub(super) fn build_487(req: &SipRequest) -> SipResponse {
 /// transaction here (§9.2). `to_tag` is the tag this node's final to the
 /// INVITE carried, when a call resolves and `req`'s To has none (§9.2: the
 /// CANCEL's response shares that tag); a tagged To is echoed as it came.
-pub(super) fn build_481(req: &SipRequest, to_tag: Option<&str>) -> SipResponse {
+pub(super) fn build_481(
+    req: &SipRequest,
+    to_tag: Option<&str>,
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts { to_tag: to_tag.map(str::to_owned), ..Default::default() };
     generate_response(req, 481, "Call/Transaction Does Not Exist", &opts)
 }
 
 /// `500 Server Internal Error` to `req`, an in-dialog request whose CSeq is
 /// below the last one its dialog took: out of order (RFC 3261 §12.2.2).
-pub(super) fn build_out_of_order_500(req: &SipRequest) -> SipResponse {
+pub(super) fn build_out_of_order_500(req: &SipRequest) -> Result<SipResponse, GenerateError> {
     generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default())
 }
 
@@ -68,7 +74,7 @@ pub(super) fn build_retry_later_500(
     req: &SipRequest,
     to_tag: Option<String>,
     retry_after_sec: u32,
-) -> SipResponse {
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts {
         to_tag,
         extra_headers: vec![hdr(
@@ -88,7 +94,7 @@ pub(super) fn build_merged_482(
     id_gen: &IdGen,
     req: &SipRequest,
     advertisement: &CapabilitySet,
-) -> SipResponse {
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts {
         to_tag: Some(id_gen.new_tag()),
         extra_headers: minted_final_lines(advertisement),
@@ -105,7 +111,11 @@ pub(crate) fn minted_final_lines(advertisement: &CapabilitySet) -> Vec<SipHeader
 /// `405 Method Not Allowed` to `req`, a request of a method the node does not
 /// serve (RFC 3261 §8.2.1), stating `allow` — the node's `Allow` — and under
 /// `to_tag` when `req`'s To has none (§8.2.6.2).
-pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> SipResponse {
+pub(super) fn build_405(
+    req: &SipRequest,
+    to_tag: Option<&str>,
+    allow: &str,
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts {
         to_tag: to_tag.map(str::to_owned),
         extra_headers: vec![hdr("Allow", allow)],
@@ -136,7 +146,7 @@ pub(crate) fn build_options_health_response(
     tagger: &StatelessTagger,
     req: &sip_message::SipRequest,
     capabilities: &CapabilitySet,
-) -> sip_message::SipResponse {
+) -> Result<SipResponse, GenerateError> {
     let incarnation = hdr(X_INCARNATION, incarnation_value(readiness.incarnation()));
     let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) =
         match readiness.options_report() {
@@ -187,7 +197,7 @@ pub(super) fn build_store_fault_500(
     id_gen: &IdGen,
     req: &sip_message::SipRequest,
     advertisement: &CapabilitySet,
-) -> sip_message::SipResponse {
+) -> Result<SipResponse, GenerateError> {
     generate_response(
         req,
         500,
@@ -231,8 +241,8 @@ Content-Length: 0\r\n\r\n";
     fn the_stateless_minted_finals_carry_the_advertisement() {
         let id_gen = IdGen::seeded(1);
         for resp in [
-            build_merged_482(&id_gen, &invite(), &policy()),
-            build_store_fault_500(&id_gen, &invite(), &policy()),
+            build_merged_482(&id_gen, &invite(), &policy()).unwrap(),
+            build_store_fault_500(&id_gen, &invite(), &policy()).unwrap(),
         ] {
             let accept: Vec<&str> = resp.raw(HeaderName::Accept).collect();
             assert_eq!(accept, ["application/sdp"], "{}", resp.status());

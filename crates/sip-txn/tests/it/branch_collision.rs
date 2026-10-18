@@ -66,7 +66,7 @@ fn on_wire(wire: &[SipMessage], status: u16, call_id: &str) -> usize {
 
 async fn answer(stack: &Stack, req: &SipRequest, src: std::net::SocketAddr, status: u16) {
     let opts = GenerateResponseOpts { to_tag: Some(TAG.to_string()), ..Default::default() };
-    let resp = generate_response(req, status, "Answer", &opts);
+    let resp = generate_response(req, status, "Answer", &opts).unwrap();
     stack.txn.send_response(resp, src).await.unwrap();
 }
 

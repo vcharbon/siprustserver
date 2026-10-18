@@ -26,6 +26,7 @@ use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{LegEnd, RuleContext};
 use b2bua_sdk::release_reason::CancelReason;
 
+use super::snapshot_answer::{stack_answer, via_sent_by};
 use super::{ActionExecutor, Owed, Settle};
 
 impl ActionExecutor<'_> {
@@ -317,9 +318,7 @@ impl ActionExecutor<'_> {
                 );
             }
             // §18.2.2: the final goes to the originator's top Via sent-by.
-            let Some(dest) =
-                p.source_vias.first().and_then(|v| super::relay_response::via_sent_by(v))
-            else {
+            let Some(dest) = p.source_vias.first().and_then(|v| via_sent_by(v)) else {
                 tracing::warn!(
                     call_ref = %call.call_ref,
                     leg_id = %leg_id,
@@ -329,23 +328,22 @@ impl ActionExecutor<'_> {
                 continue;
             };
             let method = p.method.to_ascii_uppercase();
-            let opts = super::relay_response::snapshot_response_opts(
-                &p,
-                &method,
-                Vec::new(),
-                None,
-                Vec::new(),
-                None,
-            );
             let (status, reason) = if method == "PRACK" {
                 (200, "OK")
             } else {
                 (481, "Call/Transaction Does Not Exist")
             };
+            let Ok(answer) = stack_answer(&p, &method, status, reason) else {
+                tracing::warn!(
+                    call_ref = %call.call_ref,
+                    leg_id = %leg_id,
+                    method = %p.method,
+                    "pending relay left unanswered — the originator's request lines make no response"
+                );
+                continue;
+            };
             fx.outbound.push(OutboundSipEffect {
-                body: OutboundBody::Response(generators::generate_relayed_response(
-                    status, reason, &opts,
-                )),
+                body: OutboundBody::Response(answer),
                 mode: OutboundTxnMode::ServerResponse,
                 destination: dest,
                 label: format!("{status} {method} → {originator}"),
@@ -404,7 +402,8 @@ impl ActionExecutor<'_> {
         let cancel = generators::generate_cancel(
             &InviteClientTransactionHandle { original_invite: req },
             relayed,
-        );
+        )
+        .ok()?;
         // RFC 3261 §9.1: the CANCEL follows the INVITE's next hop, NOT `leg.source`
         // (the callee's advertised address). When the b-leg egresses through the
         // front proxy (`b2b_outbound_proxy`), the INVITE's wire destination — cached

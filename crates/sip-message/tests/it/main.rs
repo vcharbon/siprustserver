@@ -10,6 +10,7 @@ mod ack_non_2xx_in_dialog;
 mod compliance_matrix;
 mod contact_set;
 mod draft_round_trip;
+mod generated;
 mod generators;
 mod header_cardinality;
 mod header_registry_typing;

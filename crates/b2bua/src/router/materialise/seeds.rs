@@ -173,7 +173,8 @@ fn pending_invite(p: &PendingRequest) -> bool {
 /// destination it was sent to, whether the record holds a provisional for it,
 /// and the CANCEL of it the record says was sent, rebuilt stating
 /// `cancel`'s headers (RFC 3261 §9.1). `None` for a handle whose bytes or
-/// destination do not read — nothing can be rebuilt from it.
+/// destination do not read, or whose CANCEL does not rebuild — nothing can
+/// be rebuilt from it.
 fn client_seed(
     handle: &InviteTxnHandle,
     provisional: bool,
@@ -189,11 +190,10 @@ fn client_seed(
                 value: value.clone().into(),
             })
             .collect();
-        Box::new(generate_cancel(
-            &InviteClientTransactionHandle { original_invite: invite.clone() },
-            &stated,
-        ))
+        generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &stated)
+            .map(Box::new)
     });
+    let cancel = cancel.transpose().ok()?;
     Some(TxnSeed::ClientInvite { invite, dest, provisional, cancel })
 }
 

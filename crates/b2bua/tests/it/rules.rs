@@ -50,7 +50,7 @@ fn invite() -> SipRequest {
         content_type: None,
         extra_headers: vec![],
     };
-    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts).expect("an INVITE")
 }
 
 /// The INVITE re-issued as an in-dialog request of `method`: both dialog tags
@@ -3647,7 +3647,7 @@ mod header_update_removal_withholds_a_relayed_name {
                 SipHeader { name: "P-Kept".into(), value: "rides-on".into() },
             ],
         };
-        generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+        generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts).expect("an INVITE")
     }
 
     /// The b-leg INVITE a `CreateLeg` carrying `header_updates` emits.

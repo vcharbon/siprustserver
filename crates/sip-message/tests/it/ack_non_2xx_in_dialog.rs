@@ -2,10 +2,12 @@
 //! and the response alone (RFC 3261 §17.1.1.3), is the ACK the INVITE itself
 //! would give: same Request-URI, Route set, Via, From, To, Call-ID and CSeq.
 
-use sip_message::generators::{
+use crate::generated::{
     generate_ack_for_non_2xx, generate_ack_for_non_2xx_in_dialog, generate_in_dialog_request,
-    generate_response, GenerateInDialogRequestOpts, GenerateResponseOpts, InDialogMethod,
-    StackDialog,
+    generate_response,
+};
+use sip_message::generators::{
+    GenerateInDialogRequestOpts, GenerateResponseOpts, InDialogMethod, StackDialog,
 };
 use sip_message::header::{self, HeaderName, Uri, Via};
 use sip_message::{SipRequest, SipStr};

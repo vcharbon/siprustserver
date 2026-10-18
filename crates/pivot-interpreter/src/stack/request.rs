@@ -57,7 +57,8 @@ impl LegStack {
             content_type: content_type.as_deref().map(media_type),
             extra_headers: frozen(headers),
         };
-        let request = generate_out_of_dialog_request(verb, &opts);
+        let request = generate_out_of_dialog_request(verb, &opts)
+            .map_err(|e| StackError::unbuilt(&self.leg, e))?;
         if method == Method::Invite {
             self.sent_invites.push(request.clone());
         }
@@ -120,7 +121,8 @@ impl LegStack {
             cseq,
             ..Default::default()
         };
-        let result = generate_in_dialog_request(verb, &dialog, &opts);
+        let result = generate_in_dialog_request(verb, &dialog, &opts)
+            .map_err(|e| StackError::unbuilt(&self.leg, e))?;
         match fork {
             None => self.dialog = result.dialog,
             Some(tag) => {
@@ -222,7 +224,8 @@ impl LegStack {
             cseq,
             ..Default::default()
         };
-        let result = generate_in_dialog_request(InDialogMethod::Prack, &dialog, &opts);
+        let result = generate_in_dialog_request(InDialogMethod::Prack, &dialog, &opts)
+            .map_err(|e| StackError::unbuilt(&self.leg, e))?;
         match fork {
             Some(tag) => {
                 if let Some((_, early)) = self.early.iter_mut().find(|(known, _)| *known == tag) {
@@ -295,13 +298,15 @@ impl LegStack {
                 cseq,
                 ..Default::default()
             };
-            Ok(generate_ack_for_2xx(Some(&txn), &dialog, &opts))
+            generate_ack_for_2xx(Some(&txn), &dialog, &opts)
+                .map_err(|e| StackError::unbuilt(&self.leg, e))
         } else {
             self.acked_invites.insert(invite.cseq().seq());
             if cseq.is_some() {
                 Err(StackError::CseqOverrideOnAbsorbedAck { leg: self.leg.clone() })
             } else {
-                Ok(generate_ack_for_non_2xx(&invite, response, &frozen(headers)))
+                generate_ack_for_non_2xx(&invite, response, &frozen(headers))
+                    .map_err(|e| StackError::unbuilt(&self.leg, e))
             }
         }
     }
@@ -326,7 +331,7 @@ impl LegStack {
             method: "CANCEL".into(),
         })?;
         let txn = InviteClientTransactionHandle { original_invite: invite };
-        Ok(generate_cancel(&txn, &frozen(headers)))
+        generate_cancel(&txn, &frozen(headers)).map_err(|e| StackError::unbuilt(&self.leg, e))
     }
 }
 

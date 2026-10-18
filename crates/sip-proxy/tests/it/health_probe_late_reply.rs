@@ -131,7 +131,7 @@ fn spawn_late_responder(
                     .collect(),
                 ..Default::default()
             };
-            let resp = generate_response(&req, 200, "OK", &opts);
+            let resp = generate_response(&req, 200, "OK", &opts).unwrap();
             let raw = serialize(&SipMessage::Response(resp));
             let ep = ep.clone();
             let src = pkt.src;
@@ -188,7 +188,7 @@ fn spawn_capture_responder(ep: Box<dyn UdpEndpoint>) -> (tokio::task::JoinHandle
                         extra_headers: crate::common::options_capabilities(),
                         ..Default::default()
                     };
-                    let resp = generate_response(&req, 200, "OK", &opts);
+                    let resp = generate_response(&req, 200, "OK", &opts).unwrap();
                     let raw = serialize(&SipMessage::Response(resp));
                     if hold.load(Ordering::SeqCst) {
                         held.push((raw, pkt.src));
@@ -564,12 +564,14 @@ fn synthetic_200(
             max_forwards: Some(70),
             ..Default::default()
         },
-    );
+    )
+    .unwrap();
     let resp = generate_response(
         &fake_options,
         200,
         "OK",
         &GenerateResponseOpts { to_tag: Some("spoof-uas".into()), ..Default::default() },
-    );
+    )
+    .unwrap();
     serialize(&SipMessage::Response(resp))
 }

@@ -88,12 +88,8 @@ impl Owner {
         for (key, req, source) in unanswered {
             let Some(dest) = source.or_else(|| via_response_target(&req)) else { continue };
             let to_tag = self.uas_to_tag_of(key.id());
-            let resp = generate_response(
-                &req,
-                status,
-                reason,
-                &GenerateResponseOpts { to_tag, ..Default::default() },
-            );
+            let opts = GenerateResponseOpts { to_tag, ..Default::default() };
+            let Ok(resp) = generate_response(&req, status, reason, &opts) else { continue };
             self.do_send_response(endpoint, resp, dest).await;
             answered += 1;
         }

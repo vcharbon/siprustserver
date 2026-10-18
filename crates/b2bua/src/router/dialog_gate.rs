@@ -64,7 +64,7 @@ pub(super) async fn admit(
         SipMessage::Response(resp) => return admit_response(call, leg_id, resp),
         SipMessage::Request(req) => req,
     };
-    let (mut answer, in_order) = match request_verdict(call, leg_id, req) {
+    let (answer, in_order) = match request_verdict(call, leg_id, req) {
         Verdict::Pass(resolved) => return Gate::Pass(resolved),
         Verdict::Drop => return Gate::Answered { answer: None, in_order: None },
         Verdict::NoDialog => (build_481(req, None), None),
@@ -76,6 +76,8 @@ pub(super) async fn admit(
         Verdict::Absorbed(resolved) => (build_200(req), Some(resolved)),
         Verdict::Terminated(resolved) => (build_487(req), Some(resolved)),
     };
+    // A request whose lines no response can echo is answered with none.
+    let Ok(mut answer) = answer else { return Gate::Answered { answer: None, in_order } };
     // An in-call answer is a message of the leg it resolved to: it takes the
     // call's stated headers.
     crate::rules::stated_headers::stamp_response(call, leg_id, &mut answer);

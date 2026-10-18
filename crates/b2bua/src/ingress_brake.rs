@@ -210,9 +210,13 @@ pub fn build_ingress_brake_hook(
     })
 }
 
-/// The worker's refusal of `req`, as the datagram the hook sends back.
+/// The worker's refusal of `req`, as the datagram the hook sends back; a
+/// refused INVITE whose lines no response can echo is dropped.
 fn reply(memo: &InviteRefusals, req: &sip_message::SipRequest) -> PreIngressAction {
-    PreIngressAction::Reply(serialize(&SipMessage::Response(memo.answer(req))))
+    match memo.answer(req) {
+        Ok(refusal) => PreIngressAction::Reply(serialize(&SipMessage::Response(refusal))),
+        Err(_) => PreIngressAction::Drop,
+    }
 }
 
 #[cfg(test)]

@@ -103,14 +103,23 @@ impl Held {
                 else {
                     return Reply::NotHeld;
                 };
+                // A final whose lines no ACK can echo is not the held call's.
                 if status >= 300 {
-                    let ack = wire(generate_ack_for_non_2xx(&invite, &resp, &[]));
+                    let Ok(ack) = generate_ack_for_non_2xx(&invite, &resp, &[]) else {
+                        return Reply::NotHeld;
+                    };
+                    let ack = wire(ack);
                     self.state = HeldState::Completed(ack.clone());
                     return Reply::AckNon2xx(ack, dst);
                 }
-                let ack = wire(generate_ack_for_2xx_from_invite(&invite, &resp, &branch()));
                 let bye_cseq = held_cseq + 1;
-                let bye = generate_bye_for_2xx_from_invite(&invite, &resp, bye_cseq, &branch());
+                let (Ok(ack), Ok(bye)) = (
+                    generate_ack_for_2xx_from_invite(&invite, &resp, &branch()),
+                    generate_bye_for_2xx_from_invite(&invite, &resp, bye_cseq, &branch()),
+                ) else {
+                    return Reply::NotHeld;
+                };
+                let ack = wire(ack);
                 self.state = HeldState::Answered { ack: ack.clone(), bye_cseq };
                 Reply::Answered(vec![(ack, dst), (wire(bye), dst)])
             }

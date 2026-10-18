@@ -46,7 +46,8 @@ impl ClientInvite {
             extra_headers: stated_lines(stated),
             ..Default::default()
         };
-        let ack = generate_ack_for_2xx(Some(&handle), &self.dialog, &opts);
+        let ack =
+            generate_ack_for_2xx(Some(&handle), &self.dialog, &opts).expect("an ACK of the 2xx");
         let dst = next_hop(&self.dialog, self.fallback_addr);
         let sent = self.agent.try_send(&SipMessage::Request(ack), dst).await;
         // If this dialog confirmed to a fork that carried its own PRACK sequence,

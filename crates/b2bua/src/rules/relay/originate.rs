@@ -434,7 +434,7 @@ pub fn build_b_leg(
         content_type,
         extra_headers,
     };
-    let invite = generators::generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
+    let invite = generators::generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)?;
     // Behind the front proxy, the b-leg INVITE traverses the proxy: preload a
     // plain loose Route and make the wire destination the proxy (R-URI stays the
     // callee). The proxy classifies the initial INVITE worker-outbound from the

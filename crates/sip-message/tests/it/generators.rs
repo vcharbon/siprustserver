@@ -1,11 +1,10 @@
 //! Unit tests for the generators — correct-by-default message construction.
 //! Port of `tests/sip/generators.test.ts`.
 
+use crate::generated::*;
 use sip_message::draft::Entry;
 use sip_message::generators::{
-    generate_ack_for_2xx, generate_ack_for_non_2xx, generate_cancel, generate_in_dialog_request,
-    generate_out_of_dialog_request, generate_relayed_response, generate_response, relayable,
-    relayable_from, relayable_headers, relayable_request_headers, CapabilitySet,
+    relayable, relayable_from, relayable_headers, relayable_request_headers, CapabilitySet,
     GenerateAckFor2xxOpts, GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts,
     GenerateRelayedResponseOpts, GenerateResponseOpts, IdentityPrivacy, InDialogMethod,
     InviteClientTransactionHandle, MessageClass, OutOfDialogMethod, RelayDirection, RelayPolicy,

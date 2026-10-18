@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use call::helpers::cap_keepalive_fire_at;
 use call::{Call, TimerEntry, TimerType};
-use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::generators::generate_response;
 use sip_message::{Method, SipMessage};
 
 use super::RouterCtx;
@@ -93,9 +93,11 @@ pub(super) async fn refuse_on_store_fault(
     src: SocketAddr,
     resident: Option<&Call>,
 ) {
-    if req.method() != Method::Ack {
-        let mut resp =
-            generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default());
+    // A request whose lines no response can echo draws none.
+    let refusal = (req.method() != Method::Ack)
+        .then(|| generate_response(req, 500, "Server Internal Error", &Default::default()).ok())
+        .flatten();
+    if let Some(mut resp) = refusal {
         if let Some(call) = resident {
             crate::rules::stated_headers::stamp_answer(call, req, &mut resp);
         }

@@ -67,8 +67,10 @@ impl ProxyCore {
         retry_after_sec: u32,
         metric: &str,
     ) -> RouteOutcome {
-        let resp = self.refusals.refuse(req, retry_after_sec, self.now_ms());
-        self.send_own_final(req, src, &resp).await;
+        // A request whose lines no response can echo is refused unanswered.
+        if let Ok(resp) = self.refusals.refuse(req, retry_after_sec, self.now_ms()) {
+            self.send_own_final(req, src, &resp).await;
+        }
         self.metrics.record_reject(metric);
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
@@ -113,8 +115,9 @@ impl ProxyCore {
             extra_headers: extra.to_vec(),
             ..Default::default()
         };
-        let resp = generate_response(req, status, reason, &opts);
-        self.send_own_final(req, src, &resp).await;
+        if let Ok(resp) = generate_response(req, status, reason, &opts) {
+            self.send_own_final(req, src, &resp).await;
+        }
     }
 
     /// Send `resp`, the proxy's own final to `req`, to the source.

@@ -29,6 +29,16 @@ pub enum StackError {
     /// composed by the INVITE client transaction it rides (RFC 3261 §17.1.1.3),
     /// so its number is not the core's to state.
     CseqOverrideOnAbsorbedAck { leg: String },
+    /// The message the recipe built does not freeze (a stated or echoed line
+    /// does not read as its header), or lacks an input it needs.
+    Unbuilt { leg: String, reason: String },
+}
+
+impl StackError {
+    /// The refusal of the recipe that built nothing for `leg`.
+    pub(crate) fn unbuilt(leg: &str, e: sip_message::generators::GenerateError) -> Self {
+        StackError::Unbuilt { leg: leg.to_string(), reason: e.to_string() }
+    }
 }
 
 impl std::fmt::Display for StackError {
@@ -73,6 +83,7 @@ impl std::fmt::Display for StackError {
                 "leg {leg}: the ACK to a non-2xx final is composed by the INVITE client \
                  transaction and its CSeq is not the core's to override"
             ),
+            StackError::Unbuilt { leg, reason } => write!(f, "leg {leg}: {reason}"),
         }
     }
 }

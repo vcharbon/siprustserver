@@ -45,7 +45,7 @@ async fn stack() -> Stack {
 
 async fn inject_answer(stack: &Stack, req: &SipRequest, status: u16, reason: &str) {
     let opts = GenerateResponseOpts { to_tag: Some(CALLEE_TAG.to_string()), ..Default::default() };
-    stack.inject(generate_response(req, status, reason, &opts).image()).await;
+    stack.inject(generate_response(req, status, reason, &opts).unwrap().image()).await;
 }
 
 fn timeouts(events: &[TransactionEvent]) -> Vec<TimeoutKind> {
@@ -80,6 +80,7 @@ fn handed_up_487s(events: &[TransactionEvent]) -> Vec<bool> {
 
 fn cancel_of(invite: &SipRequest) -> SipRequest {
     generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &[])
+        .unwrap()
 }
 
 /// The callee answers 200 to the CANCEL; its 487 and every Timer G copy but

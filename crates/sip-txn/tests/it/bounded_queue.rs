@@ -12,9 +12,9 @@ use crate::common;
 use common::*;
 use std::sync::Arc;
 
-use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::generators::{generate_response, GenerateError, GenerateResponseOpts};
 use sip_message::types::SipHeader;
-use sip_message::{SipMessage, SipRequest};
+use sip_message::{SipMessage, SipRequest, SipResponse};
 use sip_txn::{
     DeferredBound, EventQueueClass, IdGen, InviteClass, InviteRefusals, TransactionConfig,
     TransactionEvent,
@@ -140,7 +140,7 @@ async fn a_non_invite_request_the_full_queue_dropped_is_admitted_on_its_retransm
     assert_eq!(delivered.len(), 1, "the retransmission reaches the consumer");
 
     // The consumer answers; a further copy replays the cached 200 (§17.2.2).
-    let ok = generate_response(&delivered[0], 200, "OK", &GenerateResponseOpts::default());
+    let ok = generate_response(&delivered[0], 200, "OK", &Default::default()).unwrap();
     stack.txn.send_response(ok, addr(PEER)).await.unwrap();
     elapse_ms(100).await;
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the BYE is answered");
@@ -178,7 +178,7 @@ async fn each_dropped_copy_is_counted_and_the_first_copy_with_room_is_admitted()
     assert_eq!(delivered.len(), 1, "the third copy reaches the consumer");
     assert_eq!(stack.txn.metrics().event_queue_drops(EventQueueClass::RequestOther), 2);
 
-    let ok = generate_response(&delivered[0], 200, "OK", &GenerateResponseOpts::default());
+    let ok = generate_response(&delivered[0], 200, "OK", &Default::default()).unwrap();
     stack.txn.send_response(ok, addr(PEER)).await.unwrap();
     elapse_ms(33_000).await;
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1);
@@ -237,12 +237,8 @@ async fn an_invite_the_full_queue_could_not_take_is_deferred_not_dropped() {
     assert_eq!(stack.txn.metrics().event_queue_deferred(), 0);
 
     // The consumer rejects it; the caller's ACK ends the transaction (§17.2.1).
-    let busy = generate_response(
-        &delivered[0],
-        486,
-        "Busy Here",
-        &GenerateResponseOpts { to_tag: Some("uas-tag".into()), ..Default::default() },
-    );
+    let opts = GenerateResponseOpts { to_tag: Some("uas-tag".into()), ..Default::default() };
+    let busy = generate_response(&delivered[0], 486, "Busy Here", &opts).unwrap();
     stack.txn.send_response(busy, addr(PEER)).await.unwrap();
     elapse_ms(50).await;
     assert_eq!(count_responses(&stack.drain_peer(), 486), 1);
@@ -258,7 +254,7 @@ async fn an_invite_the_full_queue_could_not_take_is_deferred_not_dropped() {
 /// A stateless refusal as a consumer phrases one: 503 with a `Retry-After`
 /// and a To-tag derived from the request (RFC 3261 §8.2.7), so every copy of
 /// one INVITE draws the same answer.
-fn refuse_503(req: &SipRequest) -> sip_message::SipResponse {
+fn refuse_503(req: &SipRequest) -> Result<SipResponse, GenerateError> {
     generate_response(
         req,
         503,
@@ -353,7 +349,8 @@ async fn reject_and_settle(stack: &mut Stack, delivered: &[SipRequest]) {
                 to_tag: Some(invite.to().tag().map_or_else(|| format!("uas-{i}"), str::to_string)),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         stack.txn.send_response(busy, addr(PEER)).await.unwrap();
     }
     elapse_ms(50).await;

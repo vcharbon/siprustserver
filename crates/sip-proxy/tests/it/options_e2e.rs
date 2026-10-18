@@ -92,7 +92,7 @@ fn spawn_responder(
                 extra_headers: extra,
                 ..Default::default()
             };
-            let resp = generate_response(&req, status, reason, &opts);
+            let resp = generate_response(&req, status, reason, &opts).unwrap();
             let _ = ep.send_to(&serialize(&SipMessage::Response(resp)), pkt.src).await;
         }
     })
@@ -366,7 +366,7 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
                 extra_headers: crate::common::options_capabilities(),
                 ..Default::default()
             };
-            let resp = generate_response(&req, 200, "OK", &opts);
+            let resp = generate_response(&req, 200, "OK", &opts).unwrap();
             let _ = worker_ep.send_to(&serialize(&SipMessage::Response(resp)), pkt.src).await;
         }
     });

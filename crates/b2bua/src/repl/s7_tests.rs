@@ -30,7 +30,18 @@ use sip_txn::{IdGen, StatelessTagger};
 
 use super::{PeerLink, Readiness, ReadinessSource};
 use crate::overload::OverloadSignal;
-use crate::router::build_options_health_response;
+use crate::router::build_options_health_response as options_response;
+
+/// The responder's answer to `req`, which every probe here draws.
+fn build_options_health_response(
+    r: &Readiness,
+    overload: &OverloadSignal,
+    tagger: &StatelessTagger,
+    req: &SipRequest,
+    capabilities: &CapabilitySet,
+) -> sip_message::SipResponse {
+    options_response(r, overload, tagger, req, capabilities).expect("an OPTIONS answer")
+}
 
 /// A flip-able readiness source (stand-in for the supervisor's two gates).
 struct FlagSource {
@@ -86,7 +97,7 @@ fn options_probe_on(branch: &str) -> SipRequest {
         content_type: None,
         extra_headers: vec![],
     };
-    generate_out_of_dialog_request(OutOfDialogMethod::Options, &opts)
+    generate_out_of_dialog_request(OutOfDialogMethod::Options, &opts).expect("an OPTIONS")
 }
 
 /// The acceptance of new calls a self-report states, if any.

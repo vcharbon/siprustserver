@@ -37,7 +37,8 @@ fn call() -> Call {
             content_type: None,
             extra_headers: vec![],
         },
-    );
+    )
+    .expect("the caller's INVITE");
     let mut call = crate::initial_invite::build_initial_call(
         &invite,
         "10.0.0.1:5060".parse().unwrap(),
@@ -378,16 +379,13 @@ fn in_dialog_message() -> sip_message::SipRequest {
             extra_headers: vec![],
         },
     )
+    .expect("an in-dialog MESSAGE")
 }
 
 fn response(req: &sip_message::SipRequest, status: u16) -> crate::effects::OutboundSipEffect {
+    let resp = generate_response(req, status, "Reason", &GenerateResponseOpts::default());
     crate::effects::OutboundSipEffect {
-        body: crate::effects::OutboundBody::Response(generate_response(
-            req,
-            status,
-            "Reason",
-            &GenerateResponseOpts::default(),
-        )),
+        body: crate::effects::OutboundBody::Response(resp.expect("a response")),
         mode: crate::effects::OutboundTxnMode::ServerResponse,
         destination: ("10.0.0.1".into(), 5060),
         label: "test".into(),

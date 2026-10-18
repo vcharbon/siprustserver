@@ -101,16 +101,16 @@ impl ActionExecutor<'_> {
                 extra_headers,
                 ..Default::default()
             };
-            let resp = generators::generate_response(req, status, reason, &opts);
+            let Ok(resp) = generators::generate_response(req, status, reason, &opts) else {
+                return;
+            };
             // RFC 3261 §18.2.2 — a response goes back to the request's top-Via
             // sent-by.
-            let hop = req.top_via();
-            let (host, port) = hop.sent_by().pair();
-            let dest = (host.to_string(), port);
+            let (host, port) = req.top_via().sent_by().pair();
             fx.outbound.push(OutboundSipEffect {
                 body: OutboundBody::Response(resp),
                 mode: OutboundTxnMode::ServerResponse,
-                destination: dest,
+                destination: (host.to_string(), port),
                 label: format!("{status} (respond)"),
                 leg_id: Some(ctx.source_leg_id.to_string()),
                 provenance: Provenance::Authored,

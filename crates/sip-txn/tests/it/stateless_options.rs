@@ -59,7 +59,8 @@ async fn an_out_of_dialog_options_opens_no_transaction_and_every_copy_is_deliver
             200,
             "OK",
             &GenerateResponseOpts { to_tag: Some("derived".into()), ..Default::default() },
-        );
+        )
+        .unwrap();
         stack.txn.send_response(answer, addr(PEER)).await.unwrap();
         elapse_ms(TRANSIT + 1).await;
         assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "copy {copy} is answered");
@@ -91,7 +92,8 @@ async fn an_in_dialog_options_keeps_its_transaction() {
     assert_eq!(delivered.len(), 1);
     assert_eq!(stack.txn.metrics().active_transactions(), 1, "it opens one");
 
-    let answer = generate_response(&delivered[0], 200, "OK", &GenerateResponseOpts::default());
+    let answer =
+        generate_response(&delivered[0], 200, "OK", &GenerateResponseOpts::default()).unwrap();
     stack.txn.send_response(answer, addr(PEER)).await.unwrap();
     stack.inject(&options).await;
     elapse_ms(2 * TRANSIT + 1).await;

@@ -562,7 +562,7 @@ impl<'a> InDialogRequest<'a> {
                 }
             }
         }
-        let mut res = generate_in_dialog_request(self.method, &view, &opts);
+        let mut res = generate_in_dialog_request(self.method, &view, &opts).expect("built");
         if self.suppress_default_ct {
             res.request = res
                 .request

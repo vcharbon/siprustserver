@@ -13,6 +13,7 @@ use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use sip_message::generators::GenerateError;
 use sip_message::{SipRequest, SipResponse};
 use tokio::time::Instant;
 
@@ -20,8 +21,10 @@ use crate::timers::{ms, TIMER_B};
 
 /// Builds the response that refuses a new INVITE. It answers one request
 /// identically each time: every later copy of that INVITE is sent the same
-/// response again (RFC 3261 §8.2.7).
-pub type NewCallRefusal = Arc<dyn Fn(&SipRequest) -> SipResponse + Send + Sync>;
+/// response again (RFC 3261 §8.2.7). An INVITE whose lines no response can
+/// echo is refused with none.
+pub type NewCallRefusal =
+    Arc<dyn Fn(&SipRequest) -> Result<SipResponse, GenerateError> + Send + Sync>;
 
 /// The most refused identities a memo holds by default; past its capacity the
 /// oldest is forgotten first, and a later copy of that INVITE is judged
@@ -140,7 +143,7 @@ impl InviteRefusals {
     }
 
     /// The response refusing `req`: the same for every copy of it.
-    pub fn answer(&self, req: &SipRequest) -> SipResponse {
+    pub fn answer(&self, req: &SipRequest) -> Result<SipResponse, GenerateError> {
         (self.shared.answer)(req)
     }
 

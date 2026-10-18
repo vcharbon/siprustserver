@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use sip_message::generators::GenerateError;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_txn::{IdGen, ServerTxnKey, TransactionLayer};
 
@@ -91,8 +92,11 @@ impl<'a> OwedAnswer<'a> {
         }
     }
 
-    async fn send(&self, resp: SipResponse, dst: SocketAddr) {
-        let _ = self.txn.send_response(resp, dst).await;
+    /// Send `built`; a request whose lines no response echoes is owed none.
+    async fn send(&self, built: Result<SipResponse, GenerateError>, dst: SocketAddr) {
+        if let Ok(resp) = built {
+            let _ = self.txn.send_response(resp, dst).await;
+        }
     }
 
     /// A Retry-After, in seconds, jittered over the configured base.
@@ -106,7 +110,7 @@ impl<'a> OwedAnswer<'a> {
     }
 
     /// A capped call's refusal of a non-INVITE request.
-    fn capped_refusal(&self, req: &SipRequest) -> SipResponse {
+    fn capped_refusal(&self, req: &SipRequest) -> Result<SipResponse, GenerateError> {
         match req.method() {
             Method::Bye => build_200(req),
             // The layer binds the tag of the INVITE's final, if any.

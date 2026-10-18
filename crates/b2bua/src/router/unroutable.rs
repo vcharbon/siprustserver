@@ -158,21 +158,24 @@ fn wave_label(method: &Method) -> &str {
 ///   `Allow` (§8.2.1, extension methods included, as the stack's
 ///   `unsupported-method-405-allow` rule holds). Methods compare
 ///   case-sensitively (§7.1).
+///
+/// A request whose lines no response can echo draws none, as an ACK.
 pub(super) fn refusal(ctx: &RouterCtx, req: &SipRequest) -> Option<SipResponse> {
     let method = req.method();
     if method == Method::Ack {
         return None;
     }
     if req.to().tag().is_some() || method == Method::Cancel {
-        return Some(build_481(req, None));
+        return build_481(req, None).ok();
     }
     let minted = ctx.id_gen.new_tag();
     let caps = &ctx.config.node_capabilities;
     let allowed = caps.allow().map(|a| a.iter().any(|m| m == method.as_str()));
-    Some(match allowed {
+    match allowed {
         Some(false) => build_405(req, Some(&minted), &caps.allow_text().unwrap_or_default()),
         Some(true) | None => build_481(req, Some(&minted)),
-    })
+    }
+    .ok()
 }
 
 /// A response's status class (`1xx` … `6xx`).

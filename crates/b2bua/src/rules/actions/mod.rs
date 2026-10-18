@@ -49,6 +49,7 @@ mod respond;
 mod retire;
 mod select;
 mod show_provisional;
+mod snapshot_answer;
 mod straggler;
 mod teardown;
 mod unrelayed;

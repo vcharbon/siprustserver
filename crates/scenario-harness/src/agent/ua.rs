@@ -746,7 +746,7 @@ impl Agent {
             extra_headers: vec![SipHeader { name: "Refer-To".into(), value: refer_to.into() }],
             ..Default::default()
         };
-        let res = generate_in_dialog_request(InDialogMethod::Refer, &view, &opts);
+        let res = generate_in_dialog_request(InDialogMethod::Refer, &view, &opts).expect("a REFER");
         let label = request_label(None, &res.request);
         self.send(&SipMessage::Request(res.request), dst).await;
         InDialogTxn::new(
@@ -791,7 +791,7 @@ impl Agent {
                 value: ttl_sec.to_string().into(),
             }],
         };
-        let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts);
+        let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts).unwrap();
         self.send(&SipMessage::Request(req), registrar).await;
         let resp = expect_response(self, 200, None).await;
         // Echo back the Expires the registrar actually granted (RFC 3261 §10.3

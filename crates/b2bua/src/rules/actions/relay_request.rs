@@ -215,7 +215,10 @@ impl ActionExecutor<'_> {
             capabilities: Some(advertised),
             ..Default::default()
         };
-        let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);
+        // A request whose relayed lines no request can carry is not relayed.
+        let Ok(res) = generators::generate_in_dialog_request(method, &gen_dialog, &opts) else {
+            return;
+        };
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,

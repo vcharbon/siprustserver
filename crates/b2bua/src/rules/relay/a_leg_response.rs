@@ -88,7 +88,7 @@ pub fn response_to_a_leg(
         extra_headers,
         incoming_source,
     };
-    let resp = generators::generate_response(a_leg_invite, status, reason, &opts);
+    let resp = generators::generate_response(a_leg_invite, status, reason, &opts).ok()?;
     // Routed by the txn layer to the a-leg server transaction; dest is alice
     // (top Via sent-by of her INVITE, RFC 3261 §18.2.2).
     let hop = a_leg_invite.top_via();

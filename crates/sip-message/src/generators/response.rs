@@ -3,6 +3,7 @@
 //! B2BUA-snapshotted fields lives in [`super::relay`].
 
 use super::emit;
+use super::error::GenerateError;
 use crate::draft::ResponseDraft;
 use crate::header::{self, HeaderName, HeaderValue, MediaType, To, Via};
 use crate::sip_str::SipStr;
@@ -107,7 +108,7 @@ pub fn generate_response(
     status: u16,
     reason: &str,
     opts: &GenerateResponseOpts,
-) -> SipResponse {
+) -> Result<SipResponse, GenerateError> {
     let line = |name: HeaderName| incoming_request.raw_text(name).next().unwrap_or(SipStr::EMPTY);
     let call_id = line(HeaderName::CallId);
 
@@ -181,7 +182,8 @@ Content-Length: 0\r\n\r\n";
     /// RFC 3261 §8.2.1 — a locally minted 405 names the accepted methods.
     #[test]
     fn a_405_carries_the_stack_allow_set() {
-        let resp = generate_response(&notify(), 405, "Method Not Allowed", &Default::default());
+        let resp =
+            generate_response(&notify(), 405, "Method Not Allowed", &Default::default()).unwrap();
         let allow: Vec<_> = resp.raw_text(HeaderName::Allow).collect();
         assert_eq!(allow.len(), 1);
         assert_eq!(allow[0].as_str(), super::super::B2BUA_ALLOW);
@@ -197,7 +199,7 @@ Content-Length: 0\r\n\r\n";
             }],
             ..Default::default()
         };
-        let resp = generate_response(&notify(), 405, "Method Not Allowed", &opts);
+        let resp = generate_response(&notify(), 405, "Method Not Allowed", &opts).unwrap();
         let allow: Vec<_> = resp.raw_text(HeaderName::Allow).collect();
         assert_eq!(allow.len(), 1);
         assert_eq!(allow[0].as_str(), "INVITE, ACK, BYE");
@@ -207,7 +209,7 @@ Content-Length: 0\r\n\r\n";
     /// their own mint points do.
     #[test]
     fn a_200_gains_no_allow_here() {
-        let resp = generate_response(&notify(), 200, "OK", &Default::default());
+        let resp = generate_response(&notify(), 200, "OK", &Default::default()).unwrap();
         assert_eq!(resp.raw_text(HeaderName::Allow).count(), 0);
     }
 }

@@ -78,7 +78,7 @@ pub fn ack_b_leg(
         extra_headers,
         ..Default::default()
     };
-    let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts);
+    let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts).ok()?;
     let dest = target_dest(&dialog.remote_target);
     let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, &gen_dialog.route_set, ack, dest);
     Some((
@@ -115,7 +115,7 @@ pub fn ack_lost_non_2xx(
 ) -> Option<OutboundSipEffect> {
     let dialog = leg.dialogs.established()?;
     let gen_dialog = to_gen_dialog(leg, dialog);
-    let ack = generators::generate_ack_for_non_2xx_in_dialog(&gen_dialog, resp);
+    let ack = generators::generate_ack_for_non_2xx_in_dialog(&gen_dialog, resp).ok()?;
     let dest = target_dest(&dialog.remote_target);
     let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, &gen_dialog.route_set, ack, dest);
     Some(OutboundSipEffect {

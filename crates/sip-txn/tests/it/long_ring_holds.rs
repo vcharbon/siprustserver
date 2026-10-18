@@ -50,6 +50,7 @@ fn answer(req: &SipRequest, status: u16, reason: &str) -> SipResponse {
             ..Default::default()
         },
     )
+    .unwrap()
 }
 
 async fn inject_answer(stack: &Stack, req: &SipRequest, status: u16, reason: &str) {
@@ -226,7 +227,8 @@ async fn an_orphaned_invite_re_acks_every_2xx_repeat_after_a_long_ring() {
     let _ = stack.drain_peer();
 
     let cancel =
-        generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &[]);
+        generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &[])
+            .unwrap();
     stack.txn.send_request(cancel.clone(), addr(PEER), TxnKind::Invite).await.unwrap();
     stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
     inject_answer(&stack, &invite, 200, "OK").await;

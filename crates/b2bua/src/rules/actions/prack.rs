@@ -167,7 +167,12 @@ impl ActionExecutor<'_> {
             body: answer.unwrap_or_default(),
             ..Default::default()
         };
-        let res = generators::generate_in_dialog_request(InDialogMethod::Prack, &gen_dialog, &opts);
+        // A dialog whose state no request can be built from sends none.
+        let Ok(res) =
+            generators::generate_in_dialog_request(InDialogMethod::Prack, &gen_dialog, &opts)
+        else {
+            return;
+        };
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,

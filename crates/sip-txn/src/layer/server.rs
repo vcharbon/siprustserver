@@ -338,19 +338,22 @@ impl Owner {
         // For INVITE, immediately send 100 Trying and move to proceeding.
         if is_invite {
             // The recipe froze the 100 into its own image, which IS its wire
-            // form — send and cache that instead of rendering it twice.
-            let trying_buf =
-                generate_response(&req, 100, "Trying", &GenerateResponseOpts::default())
-                    .image()
-                    .clone();
-            self.send_buffer(endpoint, &trying_buf, src).await;
+            // form — send and cache that instead of rendering it twice. An
+            // INVITE whose lines no response can echo draws no 100.
+            let trying = generate_response(&req, 100, "Trying", &GenerateResponseOpts::default())
+                .map(|trying| trying.image().clone());
+            if let Ok(trying_buf) = &trying {
+                self.send_buffer(endpoint, trying_buf, src).await;
+            }
             if let Some(txn) = self.server_mut(id) {
                 txn.state = TxnState::Proceeding;
                 // Cache the 100 as the latest provisional so a retransmitted INVITE
                 // replays it (RFC 3261 §17.2.1) instead of being absorbed silently —
                 // the auto-100 already silenced the UAC's own retransmission timer.
-                txn.last_response = Some(trying_buf);
-                txn.last_response_status = Some(100);
+                if let Ok(trying_buf) = trying {
+                    txn.last_response = Some(trying_buf);
+                    txn.last_response_status = Some(100);
+                }
             }
         }
 
@@ -408,10 +411,12 @@ impl Owner {
                 self.metrics.retransmits.record_trigger(&method, status);
             }
             None if owes_trying => {
-                let trying_buf =
+                let Ok(trying) =
                     generate_response(req, 100, "Trying", &GenerateResponseOpts::default())
-                        .image()
-                        .clone();
+                else {
+                    return true;
+                };
+                let trying_buf = trying.image().clone();
                 self.send_buffer(endpoint, &trying_buf, src).await;
                 if let Some(txn) = self.server_mut(id) {
                     txn.last_response = Some(trying_buf);

@@ -160,6 +160,17 @@ impl<'a, 'p> Runner<'a, 'p> {
             reason_for(481),
             &sip_message::generators::GenerateResponseOpts::default(),
         );
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                self.instance.fail(Failure::SendFailed {
+                    step: "(foreign dialog)".into(),
+                    leg: leg.to_string(),
+                    detail: e.to_string(),
+                });
+                return false;
+            }
+        };
         let wire = sip_message::serialize(&SipMessage::Response(response));
         let dst = via_target(request).unwrap_or(self.lane.route_target);
         match agent.try_send_datagram(&wire, dst).await {

@@ -479,7 +479,8 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
         481,
         "Call/Transaction Does Not Exist",
         &GenerateResponseOpts::default(),
-    );
+    )
+    .expect("a 481");
     eprintln!(
         "\n──── actual message the UAC receives for its end-of-hold BYE ────\n\
          SIP/2.0 {} {}\n  CSeq: {} {}\n  Call-ID: {}\n\

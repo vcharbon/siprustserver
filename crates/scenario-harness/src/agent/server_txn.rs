@@ -544,7 +544,7 @@ impl<'a> Respond<'a> {
             extra_headers,
             incoming_source: None,
         };
-        let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts);
+        let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts).unwrap();
         if self.suppress_default_ct {
             resp = resp
                 .thaw()

@@ -112,7 +112,7 @@ impl ActionExecutor<'_> {
         // §18.2.2: the final goes to the originator's top Via sent-by; one no
         // reader accepts names no destination (see `relay_response`).
         let Some(dest) =
-            pending.source_vias.first().and_then(|v| super::relay_response::via_sent_by(v))
+            pending.source_vias.first().and_then(|v| super::snapshot_answer::via_sent_by(v))
         else {
             refused("the originator's top Via does not read, so it names no destination");
             return;
@@ -121,20 +121,15 @@ impl ActionExecutor<'_> {
             refused("the pending re-INVITE toward the target cannot be CANCELled");
             return;
         };
-        let opts = super::relay_response::snapshot_response_opts(
-            &pending,
-            "INVITE",
-            Vec::new(),
-            None,
-            Vec::new(),
-            None,
-        );
+        let Ok(reject) = super::snapshot_answer::stack_answer(&pending, "INVITE", status, reason)
+        else {
+            refused("the originator's request lines make no response");
+            return;
+        };
         let originator =
             call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
         fx.outbound.push(OutboundSipEffect {
-            body: OutboundBody::Response(generators::generate_relayed_response(
-                status, reason, &opts,
-            )),
+            body: OutboundBody::Response(reject),
             mode: OutboundTxnMode::ServerResponse,
             destination: dest,
             label: format!("{status} INVITE → {originator}"),
@@ -173,7 +168,8 @@ fn pending_reinvite_cancel(
         return None;
     }
     let cancel =
-        generators::generate_cancel(&InviteClientTransactionHandle { original_invite: req }, &[]);
+        generators::generate_cancel(&InviteClientTransactionHandle { original_invite: req }, &[])
+            .ok()?;
     Some(PendingReinviteCancel {
         t_id,
         effect: OutboundSipEffect {

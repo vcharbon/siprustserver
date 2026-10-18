@@ -46,7 +46,7 @@ fn invite() -> SipRequest {
             line("Allow", "INVITE, ACK, BYE"),
         ],
     };
-    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts).expect("an INVITE")
 }
 
 /// One `create-leg` toward a leg of `kind` on a call under `strategy`.

@@ -51,7 +51,8 @@ fn bridged() -> call::Call {
             content_type: None,
             extra_headers: vec![],
         },
-    );
+    )
+    .expect("the caller's INVITE");
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
     let mut call = build_initial_call(&invite, src, &B2buaConfig::default(), &IdGen::seeded(1), 0);
     let mut a = Dialog::new("b2bua-a", "atag", DialogState::Confirmed, 1);

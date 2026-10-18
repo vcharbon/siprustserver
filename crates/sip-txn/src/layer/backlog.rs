@@ -117,8 +117,10 @@ impl Owner {
                 }
             }
         }
-        let refusal = refusals.answer(req);
-        self.send_buffer(endpoint, refusal.image(), src).await;
+        match refusals.answer(req) {
+            Ok(refusal) => self.send_buffer(endpoint, refusal.image(), src).await,
+            Err(e) => tracing::debug!(error = %e, "no refusal can answer the INVITE"),
+        }
         NewInvite::Refused
     }
 

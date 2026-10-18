@@ -30,6 +30,7 @@
 //!   - [`relay`] — B2BUA relay transparency + rebuilt responses (§16.6)
 
 mod emit;
+mod error;
 
 pub mod ack;
 pub mod bye;
@@ -56,6 +57,7 @@ pub use contact_policy::{
     request_states_contact, response_names_retry_targets, response_states_contact,
     response_states_own_contact, retain_retry_targets_for, retry_targets,
 };
+pub use error::GenerateError;
 pub use in_dialog::{generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogResult};
 pub use methods::{InDialogMethod, OutOfDialogMethod};
 pub use out_of_dialog::{generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts};

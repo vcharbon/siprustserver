@@ -42,6 +42,7 @@ fn a_invite() -> SipRequest {
             extra_headers: vec![],
         },
     )
+    .expect("the caller's INVITE")
 }
 
 /// A b-leg INVITE handle on `branch` with CSeq `cseq`, stamped with this
@@ -76,7 +77,8 @@ fn b_handle(branch: &str, cseq: u32) -> InviteTxnHandle {
             content_type: None,
             extra_headers: vec![],
         },
-    );
+    )
+    .expect("a b-leg INVITE");
     InviteTxnHandle {
         branch: branch.into(),
         cseq: i64::from(cseq),

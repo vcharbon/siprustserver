@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use load_shed::retry_after;
-use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::generators::{generate_response, GenerateError, GenerateResponseOpts};
 use sip_message::header::{HeaderValue, RetryAfter};
 use sip_message::types::SipHeader;
 use sip_message::{Method, SipRequest, SipResponse};
@@ -124,7 +124,12 @@ impl Refusals {
     /// Refuse `req` at `now_ms`, `retry_after_sec` being the refusing stage's
     /// hint: its 503, remembered so every copy within 64·T1 draws the same one.
     /// A CANCEL is answered but not remembered.
-    pub fn refuse(&self, req: &SipRequest, retry_after_sec: u32, now_ms: u64) -> SipResponse {
+    pub fn refuse(
+        &self,
+        req: &SipRequest,
+        retry_after_sec: u32,
+        now_ms: u64,
+    ) -> Result<SipResponse, GenerateError> {
         let (to_tag, roll) = self.tagger.for_request(req);
         let retry_after_sec = retry_after::jittered(retry_after_sec, self.jitter_sec, || roll);
         if req.method() != Method::Cancel {
@@ -141,10 +146,10 @@ impl Refusals {
     }
 
     /// The 503 an earlier copy of `req` drew, when `req` is a copy of a
-    /// request refused within 64·T1 of `now_ms`.
+    /// request refused within 64·T1 of `now_ms` whose lines a response can echo.
     pub fn repeat(&self, req: &SipRequest, now_ms: u64) -> Option<SipResponse> {
         let refused = self.remembered(req, req.method().as_str(), now_ms)?;
-        Some(answer(req, 503, "Service Unavailable", refused.0, Some(refused.1)))
+        answer(req, 503, "Service Unavailable", refused.0, Some(refused.1)).ok()
     }
 
     /// The 200 answering `cancel` when it cancels an INVITE refused within
@@ -152,7 +157,7 @@ impl Refusals {
     /// 200 carries that final's To-tag.
     pub fn cancel(&self, cancel: &SipRequest, now_ms: u64) -> Option<SipResponse> {
         let (to_tag, _) = self.remembered(cancel, Method::Invite.as_str(), now_ms)?;
-        Some(answer(cancel, 200, "OK", to_tag, None))
+        answer(cancel, 200, "OK", to_tag, None).ok()
     }
 
     /// The To-tag and `Retry-After` of the remembered `method` refusal of
@@ -206,7 +211,7 @@ fn answer(
     reason: &str,
     to_tag: String,
     retry_after_sec: Option<u32>,
-) -> SipResponse {
+) -> Result<SipResponse, GenerateError> {
     let extra_headers = retry_after_sec
         .map(|sec| {
             let retry_after = RetryAfter::new(sec.to_string());

@@ -78,7 +78,9 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                     req,
                     &ctx.config.node_capabilities,
                 );
-                let _ = ctx.txn.send_response(resp, *src).await;
+                if let Ok(resp) = resp {
+                    let _ = ctx.txn.send_response(resp, *src).await;
+                }
                 return;
             }
         }

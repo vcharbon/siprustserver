@@ -325,7 +325,9 @@ impl RegisterProxy {
                 incoming_source: Some((src.ip().to_string(), src.port())),
             },
         );
-        self.send_wire(resp.image(), src).await;
+        if let Ok(resp) = resp {
+            self.send_wire(resp.image(), src).await;
+        }
     }
 
     async fn reject(&self, req: &SipRequest, status: u16, reason: &str, src: SocketAddr) {
@@ -342,7 +344,9 @@ impl RegisterProxy {
                 incoming_source: Some((src.ip().to_string(), src.port())),
             },
         );
-        self.send_wire(resp.image(), src).await;
+        if let Ok(resp) = resp {
+            self.send_wire(resp.image(), src).await;
+        }
     }
 
     fn reg_tag(&self) -> String {

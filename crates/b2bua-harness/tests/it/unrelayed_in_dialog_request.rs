@@ -66,7 +66,8 @@ async fn answered_in_dialog(name: &str, method: OutOfDialogMethod) -> SipRespons
             content_type: None,
             extra_headers: vec![line("Event", "dialog"), line("Expires", "600")],
         },
-    );
+    )
+    .expect("a SUBSCRIBE");
     dialog.set_local_cseq(cseq);
     let wire = sip_message::serializer::serialize(&SipMessage::Request(request));
     alice.try_send_datagram(&wire, b2bua.addr).await.expect("the request leaves");

@@ -104,13 +104,15 @@ impl LatePrackBook {
 
 /// The 200 `req` draws when it is a PRACK the book answers, counted as such
 /// (`b2bua_late_prack_answered_total`); `None` for any other request, which
-/// takes the answer of a request naming no call.
+/// takes the answer of a request naming no call, and for a PRACK whose lines
+/// no response can echo.
 pub(super) fn answer(ctx: &RouterCtx, req: &SipRequest) -> Option<SipResponse> {
     if !ctx.late_pracks.answers(req, ctx.clock.now_ms()) {
         return None;
     }
+    let ok = build_200(req).ok()?;
     ctx.metrics.bump_late_prack_answered();
-    Some(build_200(req))
+    Some(ok)
 }
 
 #[cfg(test)]

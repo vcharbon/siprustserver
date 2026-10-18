@@ -251,7 +251,8 @@ impl<'a> Invite<'a> {
             content_type: self.content_type.clone(),
             extra_headers: self.extra_headers.clone(),
         };
-        let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
+        let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+            .expect("the scenario's INVITE");
         if self.suppress_default_ct {
             invite = invite
                 .thaw()

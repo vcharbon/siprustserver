@@ -322,7 +322,9 @@ fn a_copy_refused_by_another_stage_draws_its_refusal() {
     let (hook, counters) = brake_over(refusals.clone());
     let invite = new_invite(7);
     assert!(matches!(refusals.memo().refuse(&parsed(&invite)), Memo::Refused { first: true }));
-    let expected = serialize(&SipMessage::Response(refusals.memo().answer(&parsed(&invite))));
+    let expected = serialize(&SipMessage::Response(
+        refusals.memo().answer(&parsed(&invite)).expect("a refusal"),
+    ));
     assert_eq!(hook(&invite, src(), 0), PreIngressAction::Reply(expected.clone()));
     assert_eq!(hook(&invite, src(), 2), PreIngressAction::Reply(expected));
     assert_eq!(answered(&counters), 2);

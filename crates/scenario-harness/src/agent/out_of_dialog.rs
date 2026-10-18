@@ -174,7 +174,8 @@ impl<'a> OutOfDialogRequest<'a> {
             content_type: self.content_type,
             extra_headers: self.extra_headers,
         };
-        let mut req = generate_out_of_dialog_request(self.method, &opts);
+        let mut req =
+            generate_out_of_dialog_request(self.method, &opts).expect("an out-of-dialog request");
         if self.suppress_default_ct {
             req = req
                 .thaw()
@@ -247,7 +248,8 @@ impl<'a> OutOfDialogRequest<'a> {
         // At most ONE authenticated resend.
         let mut auth_retries_left: u8 = if responder.is_some() { 1 } else { 0 };
         loop {
-            let mut req = generate_out_of_dialog_request(method, &opts);
+            let mut req =
+                generate_out_of_dialog_request(method, &opts).expect("an out-of-dialog request");
             if self.suppress_default_ct {
                 req = req
                     .thaw()

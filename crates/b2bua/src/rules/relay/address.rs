@@ -4,6 +4,7 @@
 //! [`UnreadableAddress`] refusal, never a fabricated target. Dialog-state text
 //! readback does NOT live here — see [`super::dialog`].
 
+use sip_message::generators::GenerateError;
 use sip_message::header::{self, HeaderName, HeaderValue, NameAddr, ParamValue, Uri};
 use sip_message::{SipHeader as MsgHeader, SipStr};
 
@@ -34,6 +35,14 @@ impl std::fmt::Display for UnreadableAddress {
 }
 
 impl std::error::Error for UnreadableAddress {}
+
+/// An originated INVITE the addresses a decision named do not freeze into:
+/// the leg has nothing to dial either.
+impl From<GenerateError> for UnreadableAddress {
+    fn from(e: GenerateError) -> Self {
+        UnreadableAddress { field: "invite", value: String::new(), reason: e.to_string() }
+    }
+}
 
 impl UnreadableAddress {
     /// The full detail, value included — for a local log, never for the wire.

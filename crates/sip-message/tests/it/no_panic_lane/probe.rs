@@ -356,12 +356,17 @@ fn request(req: &SipRequest, d: &mut Digest) {
     for (status, reason) in
         [(100, "Trying"), (180, "Ringing"), (200, "OK"), (487, "Request Terminated")]
     {
-        let resp = generate_response(req, status, reason, &opts);
-        d.raw("generated", resp.image());
+        match generate_response(req, status, reason, &opts) {
+            Ok(resp) => d.raw("generated", resp.image()),
+            Err(e) => d.note("generated", &e.to_string()),
+        }
     }
     if *req.method() == Method::Invite {
         let handle = InviteClientTransactionHandle { original_invite: req.clone() };
-        d.raw("cancel", generate_cancel(&handle, &[]).image());
+        match generate_cancel(&handle, &[]) {
+            Ok(cancel) => d.raw("cancel", cancel.image()),
+            Err(e) => d.note("cancel", &e.to_string()),
+        }
     }
 }
 

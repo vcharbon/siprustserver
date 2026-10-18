@@ -229,6 +229,7 @@ Content-Length: 0\r\n\r\n";
             &dialog,
             &opts,
         )
+        .expect("a re-INVITE")
         .request;
         let value = |name: HeaderName| out.raw_text(name).next().map(|v| v.as_str().to_string());
         (value(HeaderName::Allow), value(HeaderName::Supported))

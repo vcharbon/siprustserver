@@ -97,8 +97,12 @@ impl ActionExecutor<'_> {
             ),
             ..Default::default()
         };
-        let res =
-            generators::generate_in_dialog_request(InDialogMethod::Notify, &gen_dialog, &opts);
+        // A dialog whose state no request can be built from sends none.
+        let Ok(res) =
+            generators::generate_in_dialog_request(InDialogMethod::Notify, &gen_dialog, &opts)
+        else {
+            return;
+        };
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,
@@ -204,8 +208,12 @@ impl ActionExecutor<'_> {
             capabilities: Some(capabilities::for_reinvite(call, leg_id, creating.as_ref())),
             ..Default::default()
         };
-        let res =
-            generators::generate_in_dialog_request(InDialogMethod::Invite, &gen_dialog, &opts);
+        // A dialog whose state no request can be built from sends none.
+        let Ok(res) =
+            generators::generate_in_dialog_request(InDialogMethod::Invite, &gen_dialog, &opts)
+        else {
+            return;
+        };
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,
@@ -347,7 +355,10 @@ impl ActionExecutor<'_> {
             extra_headers,
             ..Default::default()
         };
-        let res = generators::generate_in_dialog_request(m, &gen_dialog, &opts);
+        // A dialog whose state no request can be built from sends none.
+        let Ok(res) = generators::generate_in_dialog_request(m, &gen_dialog, &opts) else {
+            return;
+        };
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,

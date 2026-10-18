@@ -335,7 +335,7 @@ impl HealthProbe {
         for w in &snapshot {
             let Some(dst) = w.address.to_socket_addr() else { continue };
             let branch = self.id_gen.new_branch();
-            let req = self.build_options(w, &branch, now);
+            let Some(req) = self.build_options(w, &branch, now) else { continue };
             let handle = self.txn.send_request(req, dst, TxnKind::NonInvite).await?;
             state.pending.insert(
                 handle.branch().to_string(),
@@ -444,7 +444,8 @@ impl HealthProbe {
         }
     }
 
-    fn build_options(&self, w: &WorkerEntry, branch: &str, now_ms: u64) -> SipRequest {
+    /// The OPTIONS probing `w`; `None` where its address does not make one.
+    fn build_options(&self, w: &WorkerEntry, branch: &str, now_ms: u64) -> Option<SipRequest> {
         generate_out_of_dialog_request(
             OutOfDialogMethod::Options,
             &GenerateOutOfDialogRequestOpts {
@@ -481,6 +482,7 @@ impl HealthProbe {
                 ..Default::default()
             },
         )
+        .ok()
     }
 }
 

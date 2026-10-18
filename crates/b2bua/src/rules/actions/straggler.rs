@@ -90,7 +90,7 @@ impl ActionExecutor<'_> {
             body: answer.unwrap_or_default(),
             ..Default::default()
         };
-        let ack = generators::generate_ack_for_2xx(None, &dialog, &opts);
+        let Ok(ack) = generators::generate_ack_for_2xx(None, &dialog, &opts) else { return };
         let dest = relay::target_dest(&dialog.remote_target);
         let (ack, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, ack, dest);
