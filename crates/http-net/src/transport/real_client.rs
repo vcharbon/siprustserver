@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{HttpClient, HttpError, HttpRequest, HttpResponse};
+use super::{HttpClient, HttpError, HttpRequest, HttpResponse, MAX_BODY_BYTES};
+use crate::failures::FailureCause;
 use crate::resolved_target::ResolvedTarget;
 use crate::settings::ClientSettings;
 
@@ -44,7 +45,9 @@ pub(super) fn build(
 }
 
 /// Send `req` to `url` on `client`; a failure is counted under `peer` by its
-/// cause and returned classified.
+/// cause and returned classified. A response body past [`MAX_BODY_BYTES`],
+/// declared or streamed, fails [`FailureCause::BodyTooLarge`] once the cap is
+/// passed, the rest left unread.
 pub(super) async fn send(
     client: &reqwest::Client,
     peer: &str,
@@ -58,21 +61,38 @@ pub(super) async fn send(
         crate::failures::record(peer, cause);
         HttpError::new(peer, cause, e.to_string())
     };
-    let method = reqwest::Method::from_bytes(req.method.as_bytes()).map_err(|e| {
-        HttpError::new(peer, crate::failures::FailureCause::Other, format!("bad method: {e}"))
-    })?;
+    let method = reqwest::Method::from_bytes(req.method.as_bytes())
+        .map_err(|e| HttpError::new(peer, FailureCause::Other, format!("bad method: {e}")))?;
     let mut builder = client.request(method, url);
     for (name, value) in &req.headers {
         builder = builder.header(name.as_str(), value.as_str());
     }
-    let resp = builder.body(req.body).send().await.map_err(failed)?;
+    let too_large = || {
+        crate::failures::record(peer, FailureCause::BodyTooLarge);
+        HttpError::new(
+            peer,
+            FailureCause::BodyTooLarge,
+            format!("response body past {MAX_BODY_BYTES} bytes"),
+        )
+    };
+    let mut resp = builder.body(req.body).send().await.map_err(failed)?;
+    let declared = resp.content_length().map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    if declared.is_some_and(|n| n > MAX_BODY_BYTES) {
+        return Err(too_large());
+    }
     let status = resp.status().as_u16();
     let headers = resp
         .headers()
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    let body = resp.bytes().await.map_err(failed)?.to_vec();
+    let mut body = Vec::with_capacity(declared.unwrap_or(0));
+    while let Some(chunk) = resp.chunk().await.map_err(failed)? {
+        if chunk.len() > MAX_BODY_BYTES - body.len() {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
     Ok(HttpResponse { status, headers, body })
 }
 

@@ -38,6 +38,10 @@ pub enum FailureCause {
     Unreachable,
     /// The name did not resolve.
     Dns,
+    /// The response body passed [`MAX_BODY_BYTES`], declared or streamed.
+    ///
+    /// [`MAX_BODY_BYTES`]: crate::MAX_BODY_BYTES
+    BodyTooLarge,
     /// Anything the chain does not identify.
     Other,
 }
@@ -54,12 +58,13 @@ impl FailureCause {
             FailureCause::Refused => "refused",
             FailureCause::Unreachable => "unreachable",
             FailureCause::Dns => "dns",
+            FailureCause::BodyTooLarge => "body_too_large",
             FailureCause::Other => "other",
         }
     }
 
     /// Every cause, in declaration order.
-    pub const ALL: [FailureCause; 9] = [
+    pub const ALL: [FailureCause; 10] = [
         FailureCause::ConnectTimeout,
         FailureCause::RequestTimeout,
         FailureCause::Tls,
@@ -68,6 +73,7 @@ impl FailureCause {
         FailureCause::Refused,
         FailureCause::Unreachable,
         FailureCause::Dns,
+        FailureCause::BodyTooLarge,
         FailureCause::Other,
     ];
 }
@@ -75,7 +81,7 @@ impl FailureCause {
 impl FailureCause {
     /// Whether a request that failed so may be sent once more: any
     /// connection-level failure or a timeout, never a name that does not
-    /// resolve, a TLS failure or an unidentified one.
+    /// resolve, a TLS failure, an oversized body or an unidentified one.
     pub const fn is_retryable(self) -> bool {
         matches!(
             self,
@@ -95,7 +101,7 @@ impl std::fmt::Display for FailureCause {
     }
 }
 
-const CAUSE_VALUES: [&str; 9] = label_values!(FailureCause::ALL, FailureCause::label);
+const CAUSE_VALUES: [&str; 10] = label_values!(FailureCause::ALL, FailureCause::label);
 
 /// Client HTTP failures by peer and cause; every peer observed gets its own
 /// series, under the cap.
@@ -125,6 +131,7 @@ metric_catalogue::assert_exposition_order!(
     Refused,
     Unreachable,
     Dns,
+    BodyTooLarge,
     Other,
 );
 

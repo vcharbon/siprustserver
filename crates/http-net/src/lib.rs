@@ -69,5 +69,5 @@ pub use transport::{
     to_http_entries, AddressedClient, Behaviour, BindError, CapturedExchange, ExchangeOutcome,
     Fault, HttpAnswer, HttpClient, HttpError, HttpNetworkEvent, HttpOutcome, HttpRequest,
     HttpResponse, HttpServerHandle, HttpService, HttpTransport, Receipt, RecordedHttpEntry,
-    RecordingHttpNetwork, SimulatedHttpNetwork, HTTP_TAG,
+    RecordingHttpNetwork, SimulatedHttpNetwork, HTTP_TAG, MAX_BODY_BYTES,
 };

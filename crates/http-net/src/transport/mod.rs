@@ -34,6 +34,11 @@ use crate::failures::FailureCause;
 use crate::resolved_target::ResolvedTarget;
 use crate::settings::ClientSettings;
 
+/// The largest body the real transport carries either way: a response past
+/// it fails [`FailureCause::BodyTooLarge`], a request past it is answered
+/// `413 Content Too Large` without reaching the service.
+pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
 /// A one-shot HTTP request.
 ///
 /// [`headers`](Self::headers) and query strings (carried inline on

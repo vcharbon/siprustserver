@@ -10,6 +10,8 @@
 //! [`request`](HttpTransport::request); a backend gets a client of its own
 //! ([`HttpTransport::client`], `real_client`).
 //!
+//! A body is carried up to [`MAX_BODY_BYTES`] either way.
+//!
 //! No TLS: this is internal cluster `http://` traffic. The caller owns its
 //! budget; this layer surfaces transport failures as [`HttpError`],
 //! classified as `cause` reads them.
@@ -19,10 +21,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use hyper::body::{Body, Incoming};
+use hyper::header::{HeaderValue, CONNECTION};
 use hyper::service::service_fn;
-use hyper::{Request, Response};
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, JoinSet};
@@ -30,7 +33,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use super::receipt::{self, Receipt};
 use super::{
     listener, peer, BindError, HttpAnswer, HttpClient, HttpError, HttpRequest, HttpResponse,
-    HttpServerHandle, HttpService, HttpTransport,
+    HttpServerHandle, HttpService, HttpTransport, MAX_BODY_BYTES,
 };
 use crate::resolved_target::ResolvedTarget;
 use crate::settings::ClientSettings;
@@ -160,8 +163,15 @@ async fn serve_connection(stream: TcpStream, peer: SocketAddr, service: Arc<dyn 
                 .iter()
                 .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect();
-            let body =
-                req.into_body().collect().await.map(|c| c.to_bytes().to_vec()).unwrap_or_default();
+            let body = req.into_body();
+            if body.size_hint().lower() > MAX_BODY_BYTES as u64 {
+                return Ok(content_too_large());
+            }
+            let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
+                Ok(collected) => collected.to_bytes().to_vec(),
+                Err(e) if e.is::<LengthLimitError>() => return Ok(content_too_large()),
+                Err(e) => return Err(std::io::Error::other(e)),
+            };
             let req = HttpRequest { method, path, headers, body };
             let answer = receipt::scope(received, peer::scope(peer, svc.answer(req)));
             let resp = match answer.await {
@@ -184,4 +194,14 @@ async fn serve_connection(stream: TcpStream, peer: SocketAddr, service: Arc<dyn 
         }
     });
     let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, handler).await;
+}
+
+/// `413 Content Too Large` (RFC 9110 §15.5.14) closing the connection: the
+/// rest of the request body is never read. A declared length past the cap is
+/// answered on the head, before any of the body.
+fn content_too_large() -> Response<Full<Bytes>> {
+    let mut resp = Response::new(Full::new(Bytes::new()));
+    *resp.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+    resp.headers_mut().insert(CONNECTION, HeaderValue::from_static("close"));
+    resp
 }
