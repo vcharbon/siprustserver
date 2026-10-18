@@ -1,0 +1,15 @@
+# cargo-audit's configuration of this workspace (`scripts/audit.py`, `just audit`).
+# Every ignored advisory carries its reason: who links it and why it is acceptable.
+
+[advisories]
+ignore = [
+    # instant (unmaintained): lapin 2 -> async-reactor-trait -> async-io 1 -> fastrand 1,
+    # a dependency for wasm targets only, never compiled here; leaves with lapin 4.
+    "RUSTSEC-2024-0384",
+    # paste (unmaintained): a proc-macro of tikv-jemalloc-ctl 0.7 (jemalloc-stats), run at
+    # build time only, no code of it in a binary.
+    "RUSTSEC-2024-0436",
+    # rustls-pemfile (unmaintained): lapin 2 -> tcp-stream -> rustls-native-certs 0.7 reads
+    # the system root store with it, no PEM from a peer; leaves with lapin 4.
+    "RUSTSEC-2025-0134",
+]
