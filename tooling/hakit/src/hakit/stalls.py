@@ -1,14 +1,15 @@
 """Generator health: the stalls of a paced generator (ADR-0049 §3.12).
 
 Two sources. From the records: a gap between two consecutive call starts of
-one firing of a stream longer than 1/cps + `stall_ms`, at the lowest rate in
-force over the gap, unless the stream held its call limit then (the system
-under test holding calls, not the generator stalling); the stall runs from the
-start that was due to the start that came. The gap between two firings of a
-`start: incident` stream is no stall. From the generator's own watchdog: the interval between
-two statistics rows across which its watchdog counter grew. A measurement the
-generator took across a stall measures the generator: a setup time whose span
-overlaps it, and a setup deadline inside it.
+one firing of a stream, or from a firing's last start to the instant its stop
+began, longer than 1/cps + `stall_ms`, at the lowest rate in force over the
+gap, unless the stream held its call limit then (the system under test holding
+calls, not the generator stalling); the stall runs from the start that was due
+to the start that came, or to the stop. The gap between two firings of a
+`start: incident` stream is no stall. From the generator's own watchdog: the
+interval between two statistics rows across which its watchdog counter grew. A
+measurement the generator took across a stall measures the generator: a setup
+time whose span overlaps it, and a setup deadline inside it.
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ WATCHDOG = "watchdog"
 
 type RateBetween = Callable[[float, float], float]
 type AtLimit = Callable[[float, float], bool]
+# A firing of a `start: incident` stream: the instant it began, and the instant
+# its stop began (None while unknown).
+type Firing = tuple[float, float | None]
 
 
 @dataclass(frozen=True)
@@ -54,24 +58,34 @@ def detect(
     rate_between: RateBetween,
     stall_ms: float,
     at_limit: AtLimit = _never,
-    firings: Sequence[float] = (),
+    firings: Sequence[Firing] = (),
 ) -> list[Stall]:
     """The stalls of one stream from its call starts; `rate_between(a, b)` is the
     lowest offered rate in force over [a, b] (0 while the stream offers nothing),
     `at_limit(a, b)` whether the stream held its call limit over it, `firings`
-    the instants its firings began: a gap across one of them is between firings."""
+    those of a `start: incident` stream: a gap across a firing's start is
+    between firings, and a firing's last start is judged against its stop."""
     out: list[Stall] = []
-    ordered = sorted(starts)
-    for a, b in zip(ordered, ordered[1:]):
-        if any(a < f <= b for f in firings):
-            continue
+
+    def judge(a: float, b: float) -> None:
         rate = rate_between(a, b)
         if rate <= 0:
-            continue
+            return
         due = 1000 / rate
         if b - a > due + stall_ms and not at_limit(a, b):
             out.append(Stall(stream, a + due, b))
-    return out
+
+    ordered = sorted(starts)
+    for a, b in zip(ordered, ordered[1:]):
+        if not any(a < began <= b for began, _ in firings):
+            judge(a, b)
+    for began, stopped in firings:
+        if stopped is None:
+            continue
+        last = max((s for s in ordered if began <= s < stopped), default=None)
+        if last is not None:
+            judge(last, stopped)
+    return sorted(out, key=lambda st: st.at_ms)
 
 
 def watchdog_stalls(stream: str, rows: Sequence[StatRow]) -> list[Stall]:

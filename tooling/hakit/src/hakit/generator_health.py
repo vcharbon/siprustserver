@@ -12,7 +12,7 @@ from . import jsonval as jv
 from .generator_stats import StatRow, read_stat_csv
 from .jsonl import read_jsonl
 from .profile import Profile, Stream
-from .stalls import AtLimit, RateBetween, Stall, detect, watchdog_stalls
+from .stalls import AtLimit, Firing, RateBetween, Stall, detect, watchdog_stalls
 from .windows import build_windows
 
 # A row this close to a gap tells the calls in flight during it (rows are 1 s apart).
@@ -33,16 +33,18 @@ def call_limits(run_dir: Path) -> dict[str, int]:
     return out
 
 
-def firing_starts(run_dir: Path) -> dict[str, list[float]]:
-    """Per `start: incident` stream, the instants its firings began: the `inject`
-    phase of each step whose inject facts name the stream (`events.jsonl`)."""
-    out: dict[str, list[float]] = {}
+def firings(run_dir: Path) -> dict[str, list[Firing]]:
+    """Per `start: incident` stream, its firings (`events.jsonl`): each step whose
+    inject facts name the stream began at its `inject` phase and stopped placing
+    calls at its `heal` phase."""
+    out: dict[str, list[Firing]] = {}
     for w in build_windows(read_jsonl(run_dir / "events.jsonl")):
         for step, by_exe in w.facts.items():
             stream = jv.opt_string(jv.obj(by_exe, "inject"), "stream")
-            at = next((p.at_ms for p in w.phases if p.step == step and p.phase == "inject"), None)
-            if stream is not None and at is not None:
-                out.setdefault(stream, []).append(at)
+            began = next((p.at_ms for p in w.phases if p.step == step and p.phase == "inject"), None)
+            stopped = next((p.at_ms for p in w.phases if p.step == step and p.phase == "heal"), None)
+            if stream is not None and began is not None:
+                out.setdefault(stream, []).append((began, stopped))
     return out
 
 
@@ -67,7 +69,7 @@ def _rate(stream: Stream, load_start_ms: float) -> RateBetween:
 
 def run_stalls(run_dir: Path, starts: Mapping[str, Sequence[float]], profile: Profile, load_start_ms: float) -> list[Stall]:
     limits = call_limits(run_dir)
-    firings = firing_starts(run_dir)
+    fired = firings(run_dir)
     found: list[Stall] = []
     for name, st in sorted(starts.items()):
         s = profile.stream(name)
@@ -75,6 +77,6 @@ def run_stalls(run_dir: Path, starts: Mapping[str, Sequence[float]], profile: Pr
             continue
         rows = read_stat_csv(run_dir / "streams" / name / "stat.csv")
         at_limit = _at_limit(rows, limits.get(name))
-        found += detect(name, st, _rate(s, load_start_ms), profile.generator_stall_ms, at_limit, firings.get(name, []))
+        found += detect(name, st, _rate(s, load_start_ms), profile.generator_stall_ms, at_limit, fired.get(name, []))
         found += watchdog_stalls(name, rows)
     return found

@@ -3,7 +3,7 @@
 Reads every classic pcap file under the run directory's `pcap/` (the window
 copies and the last ring), keeps the packets whose Call-ID header (`Call-ID`
 or its compact `i`) holds the Call-ID asked, byte for byte (RFC 3261 §20.8),
-drops the copies a window and the ring share, and writes them in time order,
+on a line of the UDP or TCP payload (a TCP segment may begin with it), drops the copies a window and the ring share, and writes them in time order,
 one file per link type (the bridge ring and a node's `any` ring differ).
 """
 
@@ -65,6 +65,40 @@ def write(path: Path, linktype: int, packets: list[Packet]) -> None:
     path.write_bytes(bytes(out))
 
 
+# The link header ahead of the network layer, and where its EtherType sits.
+LINKS = {1: (14, 12), 113: (16, 14), 276: (20, 0)}
+VLAN = 0x8100
+IPV4, IPV6 = 0x0800, 0x86DD
+TCP, UDP = 6, 17
+
+
+def payload(linktype: int, data: bytes) -> bytes:
+    """The UDP or TCP payload of a frame; the whole frame when it is no
+    unfragmented IPv4 or IPv6 UDP or TCP packet of a known link type."""
+    if linktype not in LINKS:
+        return data
+    off, at = LINKS[linktype]
+    if len(data) < off:
+        return data
+    ether = int.from_bytes(data[at : at + 2])
+    while linktype == 1 and ether == VLAN and len(data) >= off + 4:
+        ether, off = int.from_bytes(data[off + 2 : off + 4]), off + 4
+    if ether == IPV4 and len(data) >= off + 20:
+        proto, ip_len = data[off + 9], (data[off] & 0x0F) * 4
+        if int.from_bytes(data[off + 6 : off + 8]) & 0x1FFF:
+            return data  # a later fragment carries no transport header
+    elif ether == IPV6 and len(data) >= off + 40:
+        proto, ip_len = data[off + 6], 40
+    else:
+        return data
+    off += ip_len
+    if proto == UDP and len(data) >= off + 8:
+        return data[off + 8 :]
+    if proto == TCP and len(data) >= off + 20:
+        return data[off + (data[off + 12] >> 4) * 4 :]
+    return data
+
+
 def call_id_header(call_id: str) -> re.Pattern[bytes]:
     """A Call-ID header line whose whole value is `call_id`; the header name is case-insensitive."""
     return re.compile(rb"(?m)^(?i:call-id|i)[ \t]*:[ \t]*" + re.escape(call_id.encode()) + rb"[ \t]*\r?$")
@@ -81,7 +115,7 @@ def extract(run_dir: Path, call_id: str, out_dir: Path) -> list[Path]:
             continue
         kept = by_link.setdefault(pf.linktype, {})
         for p in pf.packets:
-            if header.search(p.data):
+            if header.search(payload(pf.linktype, p.data)):
                 kept[(p.ts_ns, p.data)] = p
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = re.sub(r"[^A-Za-z0-9._-]", "_", call_id)

@@ -446,11 +446,13 @@ made. A run profile joins the two.
     candidate of.
 12. **Generator health.** A generator stall is a time the generator did not
     run: it placed no call and read no message. It has two signals. In the
-    records: two consecutive calls of a stream started more than 1/cps +
-    `generator_stall_ms` apart (profile, default 500 ms, SIPp's own watchdog
-    threshold), at the lowest rate in force over the gap; the stall runs from
-    the start that was due (the first start + 1/cps) to the second start. A
-    gap is also what a generator at its call limit shows, the system under
+    records: two consecutive calls of one firing of a stream started more than
+    1/cps + `generator_stall_ms` apart (profile, default 500 ms, SIPp's own
+    watchdog threshold), at the lowest rate in force over the gap; the stall
+    runs from the start that was due (the first start + 1/cps) to the second
+    start. A firing's last start is judged the same way against the instant
+    its stop began (its `heal` phase), and the gap between two firings of a
+    `start: incident` stream is no stall. A gap is also what a generator at its call limit shows, the system under
     test holding calls: the runner sizes SIPp's limit for every call of the
     peak rate at the scenario's worst length, and a gap while the generator's
     statistics show the limit reached is no stall. In the generator's own
@@ -469,7 +471,9 @@ made. A run profile joins the two.
     make one `host_under_stress` finding per stressed span, listed first with
     its instants and its worst io and memory full share and swap-in rate, so
     a host stall is never investigated as a fault of the system under test
-    or of the tooling.
+    or of the tooling. Consecutive stressed spans over the same generator
+    stalls make one finding: the first span's start to the last one's end,
+    the count of spans, and the worst values among them.
 13. **Limiter self-repair.** A coarse check that a call limiter whose
     messages were lost comes back to its cap, not a per-instant count. A
     profile's `limiters` name a limiter every call of some streams holds,

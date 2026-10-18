@@ -3,7 +3,7 @@ measured is an integrity finding, never an impact of the system under test."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from kit import T0, paced, record, timed_out
@@ -219,23 +219,37 @@ def test_the_sipp_call_limit_covers_every_call_at_its_worst() -> None:
     assert stream.max_concurrent() == 50 * 96 + 10
 
 
-def test_the_gap_between_two_firings_of_an_incident_stream_is_no_stall(tmp_path: Path) -> None:
+def burst_stalls(tmp_path: Path, firings: Sequence[tuple[float, float]], recs: list[Json]) -> list[Stall]:
+    """The stalls of a 2 cps `start: incident` stream `burst` fired at each
+    `(inject, heal)` of `firings`, read back from a run directory."""
     from hakit.readers.run_view import read_run
     from hakit.windows import event_line, facts_line, phase_line
 
     burst = {"name": "burst", "driver": "sipp", "shape": "basic", "scenario": "uac-basic-hold.xml", "cps": 2}
     streams = [{**burst, "setup_deadline_s": 32, "start": "incident"}]
     events: list[Json] = []
-    for seq, at in ((1, T0 + 10_000), (2, T0 + 100_000)):
+    for seq, (at, heal) in enumerate(firings, 1):
         ev = f"00{seq}-spike"
         events += [
             event_line(ev, "schedule", ["spike"], "any", 20, 720),
-            phase_line(ev, "spike", "inject", at),
+            phase_line(ev, "spike", "inject", int(at)),
             facts_line(ev, "spike", "inject", {"stream": "burst", "firing": seq}),
-            phase_line(ev, "spike", "recovered", at + 15_000),
+            phase_line(ev, "spike", "heal", int(heal)),
+            phase_line(ev, "spike", "recovered", int(heal) + 100),
         ]
+    d = run_dir(tmp_path, recs, calls=None, events=events, cps=2, profile={"streams": streams})
+    return read_run(d).stalls
+
+
+def test_the_gap_between_two_firings_of_an_incident_stream_is_no_stall(tmp_path: Path) -> None:
     # Each firing starts its calls for 10 s, 80 s apart; the second stalls 2 s.
     second = [r for r in paced("b", T0 + 100_000, T0 + 110_000, 2, stream="burst") if not T0 + 105_000 < jv.number(r, "started_at_ms") < T0 + 107_000]
     recs = paced("a", T0 + 10_000, T0 + 20_000, 2, stream="burst") + second
-    d = run_dir(tmp_path, recs, calls=None, events=events, cps=2, profile={"streams": streams})
-    assert read_run(d).stalls == [Stall("burst", T0 + 105_500, T0 + 107_000)]
+    firings = [(T0 + 10_000, T0 + 20_000), (T0 + 100_000, T0 + 110_000)]
+    assert burst_stalls(tmp_path, firings, recs) == [Stall("burst", T0 + 105_500, T0 + 107_000)]
+
+
+def test_a_firing_that_stops_placing_calls_before_its_heal_stalls_until_the_heal(tmp_path: Path) -> None:
+    recs = paced("a", T0, T0 + 5_000, 2, stream="burst") + paced("b", T0 + 100_000, T0 + 110_000, 2, stream="burst")
+    firings = [(T0, T0 + 60_000), (T0 + 100_000, T0 + 110_000)]
+    assert burst_stalls(tmp_path, firings, recs) == [Stall("burst", T0 + 5_000, T0 + 60_000)]

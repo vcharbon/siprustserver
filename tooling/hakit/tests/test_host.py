@@ -223,3 +223,13 @@ def test_stress_repeated_over_one_stall_is_one_finding_and_one_summary_line(tmp_
     assert h["host"] == {"io_full_pct": 20.0, "memory_full_pct": 0.0, "swapin_pages_s": 900.0}
     assert str(h["detail"]).startswith("host under stress 2 times from +61 s to +67 s, 3.0 s in all (peak io full 20.0 %")
     assert [ln for ln in render(v).splitlines() if ln.startswith("- `host_under_stress`")] == [f"- `host_under_stress`: {h['detail']}"] * 2
+
+
+def test_stress_over_two_different_stalls_is_two_findings(tmp_path: Path) -> None:
+    gaps = ((T0 + 30_000, T0 + 40_000), (T0 + 80_000, T0 + 90_000))
+    recs = [r for r in paced("p", T0, T0 + 120_000, 20) if not any(a < jv.number(r, "started_at_ms") < b for a, b in gaps)]
+    d = run_dir(tmp_path, recs, calls=len(recs), events=[], profile={})
+    write_jsonl(d / HOST_FILE, host_spans([(T0 + 32_000, T0 + 33_000, 400), (T0 + 82_000, T0 + 83_000, 400)]))
+    v = compute(d, SCHEMAS)
+    stressed = [(i["at_ms"], i["until_ms"]) for i in jv.objs(v, "integrity") if i["kind"] == "host_under_stress"]
+    assert stressed == [(T0 + 32_000, T0 + 33_000), (T0 + 82_000, T0 + 83_000)]

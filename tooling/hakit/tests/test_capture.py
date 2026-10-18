@@ -135,6 +135,25 @@ def test_pcap_matches_the_call_id_header_exactly(tmp_path: Path) -> None:
     assert [p.ts_ns for p in read(out).packets] == [1_000, 4_000]
 
 
+def tcp(payload: bytes) -> bytes:
+    """An Ethernet, IPv4 and TCP frame around `payload`; the TCP header's last byte is `x`."""
+    eth = b"\x00" * 12 + b"\x08\x00"
+    ip = bytes([0x45, 0]) + struct.pack(">H", 40 + len(payload)) + b"\x00" * 5 + b"\x06" + b"\x00" * 10
+    return eth + ip + b"\x13\xc4\x13\xc4" + b"\x00" * 8 + b"\x50\x18\x00\x10" + b"\x00\x00\x00x" + payload
+
+
+def test_pcap_reads_the_call_id_header_wherever_a_line_starts(tmp_path: Path) -> None:
+    ring = tmp_path / "pcap" / "ring" / "bridge"
+    ring.mkdir(parents=True)
+    asked = "13-1-r@192.0.2.1"
+    segment = tcp(f"Call-ID: {asked}\r\nCSeq: 2 INVITE\r\n\r\n".encode())  # the rest of a message cut by TCP
+    lower = udp(asked, 3).replace(b"Call-ID:", b"call-id:")
+    other = b"\x00" * 42 + f"INFO sip:x SIP/2.0\r\nCall-ID: 2-1-r@192.0.2.1\r\nX-Call-ID: {asked}\r\n\r\n".encode()
+    write(ring / "sip.pcap0", 1, [Packet(1_000, segment), Packet(2_000, lower), Packet(3_000, other)])
+    (out,) = extract(tmp_path, asked, tmp_path / "calls")
+    assert [p.ts_ns for p in read(out).packets] == [1_000, 2_000]
+
+
 def test_pcap_reads_a_microsecond_tcpdump_file_and_stops_at_a_torn_record(tmp_path: Path) -> None:
     head = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, 1)
     rec = struct.pack("<IIII", 5, 7, 4, 4) + b"abcd"
