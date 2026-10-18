@@ -41,17 +41,19 @@ fn a_restated_description_keeps_its_last_character() {
 /// its value.
 #[test]
 fn an_origin_without_its_prefix_is_its_own_value() {
-    let origin = SdpOrigin {
-        username: "-".into(),
-        session_id: "1".into(),
-        session_version: 1,
-        nettype: "IN".into(),
-        addrtype: "IP4".into(),
-        unicast_address: "192.0.2.1".into(),
-        raw_origin_line: "é".into(),
-        body_excluding_origin: String::new(),
-    };
-    assert_eq!(origin.value(), "é");
+    for line in ["a€", "é"] {
+        let origin = SdpOrigin {
+            username: "-".into(),
+            session_id: "1".into(),
+            session_version: 1,
+            nettype: "IN".into(),
+            addrtype: "IP4".into(),
+            unicast_address: "192.0.2.1".into(),
+            raw_origin_line: line.into(),
+            body_excluding_origin: String::new(),
+        };
+        assert_eq!(origin.value(), line);
+    }
 }
 
 /// A leniently read request whose `To` line no response can echo under a
