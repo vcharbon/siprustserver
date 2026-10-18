@@ -36,4 +36,4 @@ def test_the_runner_reads_the_record_back_from_the_line() -> None:
     record = FIXTURE["record"]
     line, _ = record_ship().to_line(json.dumps(record), "run-1", "main", "basic")
     bad: list[str] = []
-    assert VictoriaLogs._messages(line + "\n", bad) == [record] and bad == []  # pyright: ignore[reportPrivateUsage]
+    assert list(VictoriaLogs._messages(line + "\n", bad)) == [record] and bad == []  # pyright: ignore[reportPrivateUsage]

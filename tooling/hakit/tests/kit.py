@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -99,6 +100,12 @@ def paced(prefix: str, from_ms: float, to_ms: float, cps: float, **kw: object) -
     step = 1000 / cps
     n = int(round((to_ms - from_ms) / step))
     return [record(f"{prefix}{i}", from_ms + i * step, **kw) for i in range(n)]  # pyright: ignore[reportArgumentType]
+
+
+def logsql_holds(url: str, at_ms: float) -> bool:
+    """Whether a VictoriaLogs query's [start, end) range holds an entry stored at `at_ms`."""
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    return int(q["start"][0]) <= at_ms * 1_000_000 < int(q["end"][0])
 
 
 def write_jsonl(p: Path, rows: list[Json]) -> None:

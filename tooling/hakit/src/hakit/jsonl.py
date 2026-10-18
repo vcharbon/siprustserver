@@ -10,10 +10,18 @@ from .jsonval import Json, as_obj
 
 
 def read_jsonl(p: Path) -> list[Json]:
-    """Every object of the file; none when it is absent."""
+    """Every object of the file; none when it is absent. The file is read line by
+    line and every key and string value is one object shared by all the lines
+    that hold it: a long run's records repeat the same names millions of times."""
     if not p.is_file():
         return []
-    return [as_obj(json.loads(line), p.name) for line in p.read_text().splitlines() if line.strip()]
+    memo: dict[str, str] = {}
+
+    def shared(pairs: list[tuple[str, object]]) -> Json:
+        return {memo.setdefault(k, k): memo.setdefault(v, v) if isinstance(v, str) else v for k, v in pairs}
+
+    with p.open() as fh:
+        return [as_obj(json.loads(line, object_pairs_hook=shared), p.name) for line in fh if line.strip()]
 
 
 def write_jsonl(p: Path, items: Iterable[Json]) -> None:

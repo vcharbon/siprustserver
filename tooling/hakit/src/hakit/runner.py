@@ -279,13 +279,13 @@ class Runner:
         integrity.add(streams.remove_all())
         if live.capture is not None:
             live.capture.stop()
-        records, bad = self.vlogs.export(run, started - 3_600_000, self.clock.now_ms() + 3_600_000)
-        write_jsonl(run_dir / "records.jsonl", records)
+        _dump(run_dir / "streams.json", stream_docs)
+        bad: list[str] = []
+        write_jsonl(run_dir / "records.jsonl", self.vlogs.export(run, started - 3_600_000, self.clock.now_ms() + 3_600_000, bad))
         integrity.add({"kind": "generator_failure", "detail": f"unreadable record line: {b}"} for b in bad)
         if profile.cdr_join:
             integrity.add(collect_cdrs(self.vlogs, self.vm, self.lab, self.clock, run, run_dir, started))
         run_counts(self.content.classes, run_dir, self.executor)
-        _dump(run_dir / "streams.json", stream_docs)
         write_jsonl(run_dir / "integrity.jsonl", integrity.items)
         meta = json.loads((run_dir / "run-meta.json").read_text())
         meta["ended_at_ms"] = self.clock.now_ms()

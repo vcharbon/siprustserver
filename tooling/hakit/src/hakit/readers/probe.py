@@ -146,7 +146,8 @@ def probe(run_dir: Path, spec: ProbeSpec, executor: Executor, vm_url: str, vlogs
     load = _load(files, now_ms, state)
     loading = state == "running" and load["phase"] == "loading"
     since_ms = now_ms - int(spec.recent_s * 1000)
-    records, bad = VictoriaLogs(executor, vlogs_url).export(run, since_ms, now_ms)
+    bad: list[str] = []
+    records = list(VictoriaLogs(executor, vlogs_url).export(run, since_ms, now_ms, bad))
     events = event_rows(files.windows, now_ms)
     snap: Json = {
         "run": run,

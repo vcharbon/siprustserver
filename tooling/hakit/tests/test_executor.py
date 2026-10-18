@@ -36,6 +36,27 @@ def test_a_post_is_never_a_form() -> None:
     assert seen["type"] == "application/octet-stream"
 
 
+def test_a_body_cut_mid_chunk_is_a_failed_request() -> None:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"10\r\n0123456789")
+            self.close_connection = True
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.handle_request, daemon=True).start()
+    try:
+        res = RealExecutor().http("GET", f"http://127.0.0.1:{srv.server_port}/select/logsql/query")
+    finally:
+        srv.server_close()
+    assert res.status == 0 and "IncompleteRead" in res.body
+
+
 def test_a_step_overrunning_its_timeout_is_ended_with_its_children() -> None:
     t0 = time.monotonic()
     res = RealExecutor().run(["sh", "-c", "sleep 30 & sleep 30"], timeout_s=0.5)

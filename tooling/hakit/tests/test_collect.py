@@ -9,7 +9,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from kit import T0
+from kit import T0, logsql_holds
 
 from hakit.clock import FakeClock
 from hakit.collect import MAX_WAIT_S, collect_cdrs
@@ -60,9 +60,11 @@ class Chain:
             return vector(8 if self.counter_lost else min(self.observed(), 10))
         if "cdr_observations_unread_total" in q:
             return vector(self.unread)
-        if "stats count_uniq(_msg) cdrs" in q:
+        if "stats count_uniq_hash(_msg) cdrs" in q:
             return HttpResult(200, f'{{"cdrs":"{self.observed() if "run-x" in q else 1000}"}}\n')
         if "/select/logsql/query" in c.url:
+            if not logsql_holds(c.url, T0):
+                return HttpResult(200, "")
             line = {"_msg": json.dumps({"call_id": "1-run-x@h", "end_ms": 1}), "source": "cdr-consumer"}
             return HttpResult(200, json.dumps(line) + "\n")
         return None

@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-from kit import T0, record, timed_out
+from kit import T0, logsql_holds, record, timed_out
 from rundir import kill, run_dir
 
 from hakit import jsonval as jv
@@ -28,7 +28,7 @@ def shipped(records: list[Json]) -> str:
 def lab(records: list[Json], vm: dict[str, float] | None = None, pods: str = '{"items": []}') -> FakeExecutor:
     def rule(c: Call) -> HttpResult | ProcResult | None:
         if c.kind == "http" and "/select/logsql/query" in c.url:
-            return HttpResult(200, shipped(records))
+            return HttpResult(200, shipped([r for r in records if logsql_holds(c.url, jv.number(r, "ended_at_ms"))]))
         if c.kind == "http" and "/api/v1/query" in c.url:
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query)["query"][0]
             hits = [v for k, v in (vm or {}).items() if k in q]

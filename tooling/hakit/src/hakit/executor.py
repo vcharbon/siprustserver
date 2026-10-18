@@ -7,6 +7,7 @@ answers from scripted rules, so a whole profile replays on a fake clock.
 
 from __future__ import annotations
 
+import http.client
 import os
 import shutil
 import signal
@@ -119,7 +120,7 @@ class RealExecutor:
                 return HttpResult(status=resp.status, body=resp.read().decode(errors="replace"))
         except urllib.error.HTTPError as e:
             return HttpResult(status=e.code, body=e.read().decode(errors="replace"))
-        except (urllib.error.URLError, OSError) as e:
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
             return HttpResult(status=0, body=str(e))
 
     def read_text(self, path: Path) -> str | None:

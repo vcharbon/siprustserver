@@ -59,16 +59,19 @@ def collect_cdrs(
     span = int((clock.now_ms() - started_ms) / 1000) + 60
     unread = _read(vm, lab.cdr_unread_query, span)
     consumed = _read(vm, lab.cdr_consumed_query, span)
-    cdrs, bad = vlogs.export_cdrs(run, started_ms - MARGIN_MS, clock.now_ms() + MARGIN_MS)
+    bad: list[str] = []
+    observations = 0
     with (run_dir / "cdrs.jsonl").open("w") as fh:
-        fh.writelines(json.dumps(c) + "\n" for c in cdrs)
+        for c in vlogs.export_cdrs(run, started_ms - MARGIN_MS, clock.now_ms() + MARGIN_MS, bad):
+            fh.write(json.dumps(c) + "\n")
+            observations += 1
     doc: Json = {
         "complete": complete,
         "written": written,
         "observed": last,
         "consumed": consumed,
         "unread": unread,
-        "observations": len(cdrs),
+        "observations": observations,
     }
     (run_dir / "cdrs-collect.json").write_text(json.dumps(doc, indent=2) + "\n")
     found: list[Json] = []
