@@ -35,6 +35,10 @@ pub static TRACE_ADMITTED: AtomicU64 = AtomicU64::new(0);
 /// population, which is what makes the count worth having.
 pub static TRACE_ADOPTION_REFUSED: AtomicU64 = AtomicU64::new(0);
 
+/// Panics at a source location the process panic hook already reported:
+/// counted, not reported again ([`crate::panic_report`]).
+pub static PANICS_REPEATED: AtomicU64 = AtomicU64::new(0);
+
 /// Bump a counter by one.
 pub fn bump(c: &AtomicU64) {
     c.fetch_add(1, Ordering::Relaxed);
@@ -94,6 +98,13 @@ pub const TRACE_ADOPTION_REFUSED_TOTAL: Family = Family::counter(
     "Hydrated traced calls this node opened no root span for because the admission chain refused.",
 );
 
+/// Panics the process panic hook counted instead of reporting.
+pub const PANICS_REPEATED_TOTAL: Family = Family::counter(
+    "panics_repeated_total",
+    Labels::None,
+    "Panics at a source location the process panic hook already reported once: counted, not reported again.",
+);
+
 /// Every family [`prometheus_text`] renders, in exposition order.
 pub const FAMILIES: &[Family] = &[
     LOG_LINES_DROPPED_TOTAL,
@@ -103,6 +114,7 @@ pub const FAMILIES: &[Family] = &[
     TRACE_HEADER_MALFORMED_TOTAL,
     TRACE_ADMITTED_TOTAL,
     TRACE_ADOPTION_REFUSED_TOTAL,
+    PANICS_REPEATED_TOTAL,
 ];
 
 /// Prometheus exposition for every counter above, appended by each runner's
@@ -117,6 +129,7 @@ pub fn prometheus_text() -> String {
         &TRACE_HEADER_MALFORMED,
         &TRACE_ADMITTED,
         &TRACE_ADOPTION_REFUSED,
+        &PANICS_REPEATED,
     ]) {
         family.render_value(&mut s, get(counter));
     }

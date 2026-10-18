@@ -87,12 +87,16 @@ fn lifecycle_only() -> FilterFn<fn(&tracing::Metadata<'_>) -> bool> {
 ///    `otlp::provider_from_env`). A domain crate depending on `observe` for the
 ///    lifecycle helpers therefore never compiles the export tree.
 ///
+/// It also installs the process panic hook ([`crate::panic_report`]), which
+/// reports the first panic at each source location and counts the repeats.
+///
 /// Hold the returned guard until the process exits.
 #[cfg_attr(not(feature = "otlp"), allow(unused_variables))]
 pub fn init_production(service_name: &str) -> ObserveGuard {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return ObserveGuard::inert();
     }
+    crate::panic_report::install();
     let (make_writer, writer_guard) = writer::spawn();
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
