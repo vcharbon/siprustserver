@@ -74,8 +74,9 @@ impl LimiterMetrics {
         add(&self.inner.release_calls, calls as u64);
     }
 
-    /// Render the full Prometheus exposition: the request counters here and
-    /// the store's own counters and gauges, every family of
+    /// Render the full Prometheus exposition: the request counters here, the
+    /// store's own counters and gauges, and the process's observability
+    /// counters (`observe::counters`), every family of
     /// [`crate::catalogue::CATALOGUE`].
     pub fn prometheus_text(&self, stats: StoreStats) -> String {
         use crate::catalogue as c;
@@ -93,6 +94,7 @@ impl LimiterMetrics {
         c::FENCES.render_value(&mut s, stats.fences);
         c::CHANGE_MARKERS.render_value(&mut s, stats.change_markers);
         c::ADMISSION_MAX.render_value(&mut s, stats.admission_max);
+        s.push_str(&observe::counters::prometheus_text());
         s
     }
 }

@@ -320,6 +320,14 @@ call-limiter-runner limiter_holds gauge fixed {}
 call-limiter-runner limiter_fences gauge fixed {}
 call-limiter-runner limiter_change_markers gauge fixed {}
 call-limiter-runner limiter_admission_max gauge fixed {}
+call-limiter-runner log_lines_dropped_total counter fixed {}
+call-limiter-runner trace_dropped_no_exporter_total counter fixed {}
+call-limiter-runner trace_denied_rate_total counter fixed {}
+call-limiter-runner trace_denied_active_cap_total counter fixed {}
+call-limiter-runner trace_header_malformed_total counter fixed {}
+call-limiter-runner trace_admitted_total counter fixed {}
+call-limiter-runner trace_adoption_refused_total counter fixed {}
+call-limiter-runner panics_repeated_total counter fixed {}
 loadgen loadgen_calls_total counter semi_open {stream,shape,class}
 loadgen loadgen_branch_total counter semi_open {stream,shape,branch}
 loadgen loadgen_failed_step_total counter semi_open {stream,shape,step}

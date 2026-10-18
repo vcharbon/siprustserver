@@ -750,6 +750,7 @@ dependencies = [
  "async-trait",
  "http-net",
  "metric-catalogue",
+ "observe",
  "serde",
  "serde_json",
  "sip-clock",

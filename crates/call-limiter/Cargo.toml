@@ -14,6 +14,9 @@ workspace = true
 
 [dependencies]
 metric-catalogue = { path = "../metric-catalogue" }
+# The process counters (`/metrics` appends them) — default features, so no
+# OpenTelemetry tree here.
+observe = { path = "../observe", default-features = false }
 http-net = { path = "../http-net" }
 sip-clock = { path = "../sip-clock" }
 serde = { workspace = true }
