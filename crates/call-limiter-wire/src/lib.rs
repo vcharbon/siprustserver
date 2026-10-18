@@ -17,8 +17,34 @@
 //! so a client that lost an answer learns the truth from the next one. Every
 //! admit, refresh and health answer states the server's lease (`lease_ms`), so
 //! a client bounds what it keeps for the server by the lease the server runs.
+//! A server's lease lies in `1..=`[`MAX_LEASE_SEC`] seconds, [`DEFAULT_LEASE_SEC`]
+//! unless configured otherwise.
+
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 
 use serde::{Deserialize, Serialize};
+
+/// The lease a limiter server runs unless configured otherwise (seconds).
+pub const DEFAULT_LEASE_SEC: i64 = 120;
+
+/// The longest lease a limiter server runs (seconds): one day.
+pub const MAX_LEASE_SEC: i64 = 86_400;
 
 /// One limiter entry to admit: an id and its cap.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

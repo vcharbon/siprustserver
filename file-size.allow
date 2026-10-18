@@ -48,7 +48,7 @@ crates/b2bua/src/rules/relay/originate_tests.rs 849
 crates/b2bua/src/rules/relay/sdp_session_tests.rs 963
 crates/b2bua/src/store/mod.rs 1001
 crates/b2bua/tests/it/rules.rs 5682
-crates/call-limiter/src/store.rs 584
+crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1186
 crates/call/tests/it/common/mod.rs 992

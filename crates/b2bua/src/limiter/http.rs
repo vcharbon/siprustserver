@@ -30,8 +30,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use call_limiter::wire::{
-    self, AdmitAnswer, AdmitEntry, AdmitRequest, AdmitResponse, HealthResponse, HeldSet,
+use call_limiter_wire::{
+    self as wire, AdmitAnswer, AdmitEntry, AdmitRequest, AdmitResponse, HealthResponse, HeldSet,
     RefreshRequest, RefreshResponse, ReleaseRequest,
 };
 use http_net::{

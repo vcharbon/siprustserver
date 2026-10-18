@@ -21,6 +21,7 @@ members = [
     "crates/http-net",
     "crates/http-net-testkit",
     "crates/call-limiter",
+    "crates/call-limiter-wire",
     "crates/seq-report",
     "crates/scenario-harness",
     "crates/media",

@@ -36,10 +36,10 @@ use crate::config::B2buaConfig;
 use crate::metrics::B2buaMetrics;
 
 /// The lease before any limiter answer: the limiter's default.
-const DEFAULT_LEASE: Duration = Duration::from_secs(call_limiter::DEFAULT_LEASE_SEC as u64);
+const DEFAULT_LEASE: Duration = Duration::from_secs(call_limiter_wire::DEFAULT_LEASE_SEC as u64);
 
 /// The longest lease the worker honours: the limiter's own bound.
-const MAX_LEASE: Duration = Duration::from_secs(call_limiter::MAX_LEASE_SEC as u64);
+const MAX_LEASE: Duration = Duration::from_secs(call_limiter_wire::MAX_LEASE_SEC as u64);
 
 /// How many refresh periods fit in the lease at the least.
 const PERIODS_PER_LEASE: u32 = 3;

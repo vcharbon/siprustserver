@@ -48,16 +48,10 @@ use std::sync::Mutex;
 
 use sip_clock::Clock;
 
-use crate::wire::{AdmitEntry, HeldSet};
+use crate::wire::{AdmitEntry, HeldSet, DEFAULT_LEASE_SEC};
 
 mod stats;
 pub use stats::StoreStats;
-
-/// The lease a store runs unless configured otherwise (seconds).
-pub const DEFAULT_LEASE_SEC: i64 = 120;
-
-/// The longest lease a store runs (seconds): one day.
-pub const MAX_LEASE_SEC: i64 = 86_400;
 
 /// The store's lease. The default is the deployed value; every admit and
 /// refresh answer states it, the workers refresh below it by more than one

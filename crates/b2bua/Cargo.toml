@@ -42,9 +42,9 @@ metric-catalogue = { path = "../metric-catalogue" }
 repl-net = { path = "../repl-net" }
 topology = { path = "../topology" }
 # Limiter client: the transport SEAM only (real impl injected by the runner; sim
-# in tests). Wire DTOs come from call-limiter. No `real` feature here.
+# in tests). Wire DTOs come from call-limiter-wire. No `real` feature here.
 http-net = { path = "../http-net" }
-call-limiter = { path = "../call-limiter" }
+call-limiter-wire = { path = "../call-limiter-wire" }
 
 [dev-dependencies]
 # Tests that set an exact call admission state (`CallLimiterState::from_parts`).

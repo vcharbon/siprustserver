@@ -498,6 +498,7 @@ dependencies = [
  "b2bua-sdk",
  "call",
  "call-limiter",
+ "call-limiter-wire",
  "http-net",
  "http-net-testkit",
  "load-shed",
@@ -756,6 +757,7 @@ name = "call-limiter"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "call-limiter-wire",
  "http-net",
  "http-net-testkit",
  "metric-catalogue",
@@ -777,6 +779,13 @@ dependencies = [
  "sip-clock",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "call-limiter-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
