@@ -404,18 +404,6 @@ impl ProxyMetrics {
         self.per_peer.record(peer, scope, kind);
     }
 
-    /// Publish one recv shard's endpoint receive-queue state (gauges) and
-    /// lifetime counters (monotonic, endpoint-owned — stored, not accumulated).
-    /// Single-socket deployments are just `shard = 0`.
-    pub fn set_udp_endpoint_stats(&self, shard: usize, stats: UdpShardStats) {
-        self.udp_shards.lock().unwrap().insert(shard, stats);
-    }
-
-    /// Cross-shard aggregate.
-    fn udp_totals(&self) -> UdpShardStats {
-        self.udp_shards.lock().unwrap().values().copied().sum()
-    }
-
     /// Publish how many recv shards are stalled (the readiness gate's reading).
     pub fn set_recv_shards_stalled(&self, n: u64) {
         self.recv_shards_stalled.store(n, Ordering::Relaxed);

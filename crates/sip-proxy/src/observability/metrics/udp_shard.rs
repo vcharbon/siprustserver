@@ -47,6 +47,24 @@ impl UdpShardStats {
     }
 }
 
+impl super::ProxyMetrics {
+    /// Publish one recv shard's endpoint receive-queue state (gauges) and
+    /// lifetime counters (monotonic, endpoint-owned — stored, not accumulated).
+    /// Single-socket deployments are just `shard = 0`.
+    pub fn set_udp_endpoint_stats(&self, shard: usize, stats: UdpShardStats) {
+        self.udp_shards.lock().unwrap().insert(shard, stats);
+    }
+
+    /// Cross-shard aggregate.
+    pub(super) fn udp_totals(&self) -> UdpShardStats {
+        let mut t = UdpShardStats::default();
+        for v in self.udp_shards.lock().unwrap().values() {
+            t += *v;
+        }
+        t
+    }
+}
+
 impl std::ops::AddAssign for UdpShardStats {
     fn add_assign(&mut self, o: Self) {
         self.queue_depth += o.queue_depth;
@@ -57,14 +75,5 @@ impl std::ops::AddAssign for UdpShardStats {
         self.send_would_block += o.send_would_block;
         self.kernel_rx_dropped += o.kernel_rx_dropped;
         self.pre_ingress_panics += o.pre_ingress_panics;
-    }
-}
-
-impl std::iter::Sum for UdpShardStats {
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::default(), |mut total, shard| {
-            total += shard;
-            total
-        })
     }
 }

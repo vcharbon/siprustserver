@@ -55,7 +55,7 @@ crates/b2bua/src/repl/puller.rs 5
 crates/b2bua/src/repl/readiness.rs 1
 crates/b2bua/src/repl/server.rs 1
 crates/b2bua/src/repl/supervisor.rs 53
-crates/b2bua/src/router/admit.rs 4
+crates/b2bua/src/router/admit.rs 1
 crates/b2bua/src/router/callout_requests.rs 1
 crates/b2bua/src/router/callouts.rs 7
 crates/b2bua/src/router/late_prack.rs 4
@@ -87,7 +87,7 @@ crates/b2bua/src/store/resident.rs 6
 crates/b2bua/src/store/takeover.rs 6
 crates/b2bua/src/store/terminate_writer.rs 1
 crates/b2bua/src/sweep.rs 1
-crates/b2bua/src/timers.rs 5
+crates/b2bua/src/timers.rs 4
 crates/b2bua/src/trace/registry.rs 18
 crates/call-limiter-runner/src/main.rs 5
 crates/call-limiter/src/metrics.rs 4
@@ -204,7 +204,6 @@ crates/sip-message/src/template.rs 2
 crates/sip-message/src/types.rs 3
 crates/sip-net/src/contracts.rs 8
 crates/sip-net/src/fragmentation.rs 2
-crates/sip-net/src/queue.rs 12
 crates/sip-net/src/real.rs 3
 crates/sip-net/src/repeat.rs 2
 crates/sip-net/src/rfc_audit/occasions.rs 3
@@ -213,12 +212,14 @@ crates/sip-net/src/rfc_audit/wire_adapter/dialog.rs 2
 crates/sip-net/src/rfc_audit/wire_adapter/final_response.rs 1
 crates/sip-net/src/simulated.rs 14
 crates/sip-net/src/socket_stats.rs 1
+crates/sip-proxy-runner/src/binds.rs 4
 crates/sip-proxy-runner/src/config.rs 8
 crates/sip-proxy-runner/src/config/preflight.rs 2
 crates/sip-proxy-runner/src/health_sampler.rs 2
 crates/sip-proxy-runner/src/intake_shed.rs 1
-crates/sip-proxy-runner/src/main.rs 12
+crates/sip-proxy-runner/src/main.rs 6
 crates/sip-proxy-runner/src/readiness.rs 1
+crates/sip-proxy-runner/src/signal.rs 1
 crates/sip-proxy/src/branch.rs 1
 crates/sip-proxy/src/cancel_lru.rs 12
 crates/sip-proxy/src/core/mod.rs 2
@@ -231,9 +232,10 @@ crates/sip-proxy/src/core/response.rs 5
 crates/sip-proxy/src/health/probe.rs 6
 crates/sip-proxy/src/load_observer/observer.rs 17
 crates/sip-proxy/src/observability/catalogue.rs 3
-crates/sip-proxy/src/observability/metrics.rs 20
+crates/sip-proxy/src/observability/metrics.rs 16
 crates/sip-proxy/src/observability/metrics/face.rs 3
 crates/sip-proxy/src/observability/metrics/pool.rs 2
+crates/sip-proxy/src/observability/metrics/udp_shard.rs 4
 crates/sip-proxy/src/refusals.rs 3
 crates/sip-proxy/src/registry/projection.rs 1
 crates/sip-proxy/src/registry/simulated.rs 8
@@ -254,7 +256,8 @@ crates/sip-txn/src/layer/refusals.rs 1
 crates/sip-txn/src/layer/run.rs 2
 crates/sip-txn/src/layer/seed.rs 2
 crates/sip-txn/src/layer/server.rs 2
-crates/sip-txn/src/metrics.rs 14
+crates/sip-txn/src/metrics.rs 3
+crates/sip-txn/src/metrics/retransmits.rs 11
 crates/sip-txn/src/pulse.rs 2
 crates/sip-txn/src/rng.rs 6
 crates/topology/src/k8s/watch_health.rs 3

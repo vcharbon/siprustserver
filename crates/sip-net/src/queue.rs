@@ -52,6 +52,7 @@ impl PacketQueue {
     /// The queue state, recovered from a poisoned lock: every critical
     /// section leaves `Inner` whole, and [`close`](Self::close) runs from a
     /// `Drop`, where a panic aborts.
+    #[expect(clippy::disallowed_methods, reason = "the queue's poison-recovering lock helper")]
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }

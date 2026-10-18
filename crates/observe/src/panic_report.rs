@@ -36,6 +36,7 @@ impl PerLocation {
     /// counted.
     pub fn report(&self, location: &Location<'_>, now: Instant) -> bool {
         let key = (location.file().to_owned(), location.line(), location.column());
+        #[expect(clippy::disallowed_methods, reason = "poison recovered on the spot, in a hook")]
         let mut reported = self.reported.lock().unwrap_or_else(PoisonError::into_inner);
         let due = reported
             .get(&key)
