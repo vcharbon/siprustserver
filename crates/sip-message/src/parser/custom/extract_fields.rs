@@ -113,14 +113,15 @@ fn has_unbracketed_ipv6(uri: &str) -> bool {
         Some(i) => i,
         None => return false,
     };
-    let mut i = scheme_colon + 1;
-    if let Some(at) = s[i..].iter().position(|&c| c == b'@') {
-        i += at + 1;
-    }
+    let after_scheme = scheme_colon + 1;
+    let host_start = s
+        .iter()
+        .skip(after_scheme)
+        .position(|&c| c == b'@')
+        .map_or(after_scheme, |at| after_scheme + at + 1);
     let mut depth = 0i32;
     let mut colons = 0i32;
-    while i < s.len() {
-        let c = s[i];
+    for &c in s.iter().skip(host_start) {
         if c == b'[' {
             depth += 1;
         } else if c == b']' && depth > 0 {
@@ -135,7 +136,6 @@ fn has_unbracketed_ipv6(uri: &str) -> bool {
                 break;
             }
         }
-        i += 1;
     }
     false
 }
@@ -143,11 +143,17 @@ fn has_unbracketed_ipv6(uri: &str) -> bool {
 /// Count `;tag=` occurrences outside quoted-strings (RFC 3261 permits one).
 fn count_tag_params(value: &str) -> usize {
     let s = value.as_bytes();
+    let at = |k: usize| s.get(k).copied();
+    let skip_ws = |mut k: usize| {
+        while matches!(at(k), Some(b' ' | b'\t')) {
+            k += 1;
+        }
+        k
+    };
     let mut count = 0usize;
     let mut in_quote = false;
     let mut i = 0usize;
-    while i < s.len() {
-        let c = s[i];
+    while let Some(c) = at(i) {
         if in_quote {
             if c == b'\\' {
                 i += 2;
@@ -168,26 +174,9 @@ fn count_tag_params(value: &str) -> usize {
             i += 1;
             continue;
         }
-        let mut j = i + 1;
-        while j < s.len() && (s[j] == b' ' || s[j] == b'\t') {
-            j += 1;
-        }
-        if j + 3 > s.len() {
-            i += 1;
-            continue;
-        }
-        let t = s[j];
-        let a = s[j + 1];
-        let g = s[j + 2];
-        if (t != b't' && t != b'T') || (a != b'a' && a != b'A') || (g != b'g' && g != b'G') {
-            i += 1;
-            continue;
-        }
-        let mut k = j + 3;
-        while k < s.len() && (s[k] == b' ' || s[k] == b'\t') {
-            k += 1;
-        }
-        if k >= s.len() || s[k] != b'=' {
+        let j = skip_ws(i + 1);
+        let is_tag = s.get(j..j + 3).is_some_and(|name| name.eq_ignore_ascii_case(b"tag"));
+        if !is_tag || at(skip_ws(j + 3)) != Some(b'=') {
             i += 1;
             continue;
         }
@@ -201,14 +190,15 @@ fn count_tag_params(value: &str) -> usize {
 /// separated by `/` with LWS permitted around the `/`. `None` if valid.
 fn check_sent_protocol(via: &str) -> Option<String> {
     let s = via.as_bytes();
+    let at = |i: usize| s.get(i).copied();
     let skip_ws = |mut i: usize| {
-        while i < s.len() && (s[i] == b' ' || s[i] == b'\t') {
+        while matches!(at(i), Some(b' ' | b'\t')) {
             i += 1;
         }
         i
     };
     let read_token_run = |mut i: usize| {
-        while i < s.len() && is_token_char(s[i]) {
+        while at(i).is_some_and(is_token_char) {
             i += 1;
         }
         i
@@ -220,7 +210,7 @@ fn check_sent_protocol(via: &str) -> Option<String> {
         return Some("empty Via protocol-name".to_string());
     }
     i = skip_ws(i);
-    if i >= s.len() || s[i] != b'/' {
+    if at(i) != Some(b'/') {
         return Some("missing `/` after Via protocol-name".to_string());
     }
     i = skip_ws(i + 1);
@@ -230,7 +220,7 @@ fn check_sent_protocol(via: &str) -> Option<String> {
         return Some("empty Via protocol-version".to_string());
     }
     i = skip_ws(i);
-    if i >= s.len() || s[i] != b'/' {
+    if at(i) != Some(b'/') {
         return Some("missing `/` after Via protocol-version".to_string());
     }
     i = skip_ws(i + 1);
@@ -321,22 +311,19 @@ pub fn extract_common_fields(
     let cseq_parsed = parse_cseq(cseq_val);
     if wire {
         let cseq_raw = cseq_val.trim();
-        // First SP/HTAB is ASCII → a valid slice boundary.
-        let space_idx = cseq_raw.bytes().position(|c| c == b' ' || c == b'\t');
-        match space_idx {
+        match cseq_raw.split_once([' ', '\t']) {
             None => {
                 return Err(SipParseError::new(format!(
                     "CSeq missing method token: \"{cseq_val}\""
                 )));
             }
-            Some(idx) => {
-                let cseq_digits = &cseq_raw[..idx];
+            Some((cseq_digits, cseq_method)) => {
                 if strict_non_negative_decimal(cseq_digits, INT_32_MAX).is_none() {
                     return Err(SipParseError::new(format!(
                         "CSeq seq malformed (paranoid digit check): \"{cseq_digits}\""
                     )));
                 }
-                if cseq_raw[idx + 1..].trim().is_empty() {
+                if cseq_method.trim().is_empty() {
                     return Err(SipParseError::new(format!(
                         "CSeq missing method token: \"{cseq_val}\""
                     )));
@@ -413,11 +400,16 @@ pub fn extract_common_fields(
                 )));
             }
         }
+        let port = v
+            .port
+            .map(u16::try_from)
+            .transpose()
+            .map_err(|_| SipParseError::new(format!("Via port out of range: {:?}", v.port)))?;
         vias.push(header::Via::from_parts(
             v.protocol,
             v.version,
             v.transport,
-            HostPort::new(v.host, v.port.map(|p| p as u16)),
+            HostPort::new(v.host, port),
             v.params,
         ));
     }
@@ -431,8 +423,10 @@ pub fn extract_common_fields(
         header::From::new(to_name_addr(from_parsed)),
         header::To::new(to_name_addr(to_parsed)),
         header::CallId::new(call_id),
+        // The lenient read saturates a sequence number past `u32`; the wire
+        // read refused it above.
         header::CSeq::new(
-            cseq_parsed.seq.min(u32::MAX as u64) as u32,
+            u32::try_from(cseq_parsed.seq).unwrap_or(u32::MAX),
             Method::from_wire(&cseq_parsed.method),
         ),
         NonEmpty::from_parts(top, hops.collect()),
@@ -553,9 +547,8 @@ pub fn extract_request_fields(
     if let Some(method) = method {
         if let Some(cseq_val) = idx.cseq.first {
             let trimmed = cseq_val.trim();
-            // First SP/HTAB is ASCII → a valid slice boundary.
-            let cseq_method = match trimmed.bytes().position(|c| c == b' ' || c == b'\t') {
-                Some(idx) => trimmed[idx + 1..].trim(),
+            let cseq_method = match trimmed.split_once([' ', '\t']) {
+                Some((_, method)) => method.trim(),
                 None => "",
             };
             if !cseq_method.is_empty() && !cseq_method.eq_ignore_ascii_case(method) {

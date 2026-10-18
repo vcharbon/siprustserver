@@ -92,9 +92,11 @@ fn parse_refer_to_header(value: Option<&SipStr>) -> Result<Option<ReferTo>, SipP
     // -> char boundary), so the head is a plain borrow.
     let violation = {
         let text = parsed.uri().text();
-        let uri_head = match find_uri_embedded_headers_start(&text) {
-            None => &text[..],
-            Some(q) => &text[..q],
+        let uri_head: &str = match find_uri_embedded_headers_start(&text) {
+            None => &text,
+            Some(q) => text
+                .get(..q)
+                .ok_or_else(|| SipParseError::new(format!("Malformed Refer-To: \"{value}\"")))?,
         };
         validate_strict_sip_uri(uri_head)
             .map(|reason| format!("Strict Refer-To URI: {reason} (\"{uri_head}\")"))
@@ -154,46 +156,47 @@ fn parse_date_value_strict(value: &str) -> Result<(), SipParseError> {
         let s: String = v.iter().collect();
         return Err(SipParseError::new(format!("Malformed Date: too short \"{s}\"")));
     }
-    let dow: String = v[0..3].iter().collect();
+    let at = |i: usize| v.get(i).copied();
+    let digit = |i: usize| at(i).is_some_and(|c| c.is_ascii_digit());
+    let text = |from: usize, to: usize| -> String { v.iter().take(to).skip(from).collect() };
+    let dow = text(0, 3);
     if !DOW.contains(&dow.as_str()) {
         return Err(SipParseError::new(format!("Malformed Date: bad day-of-week \"{dow}\"")));
     }
-    if v[3] != ',' || v[4] != ' ' {
+    if at(3) != Some(',') || at(4) != Some(' ') {
         return bad("missing \", \" after day-of-week");
     }
-    if !v[5].is_ascii_digit() || !v[6].is_ascii_digit() || v[7] != ' ' {
+    if !digit(5) || !digit(6) || at(7) != Some(' ') {
         return bad("bad day-of-month");
     }
-    let day: u32 = v[5..7].iter().collect::<String>().parse().unwrap_or(0);
-    let mon: String = v[8..11].iter().collect();
+    let day: u32 = text(5, 7).parse().unwrap_or(0);
+    let mon = text(8, 11);
     let mon_ok = MON.contains(&mon.as_str());
-    if !mon_ok || v[11] != ' ' {
+    if !mon_ok || at(11) != Some(' ') {
         return Err(SipParseError::new(format!("Malformed Date: bad month \"{mon}\"")));
     }
-    for &c in &v[12..16] {
-        if !c.is_ascii_digit() {
-            return bad("bad year");
-        }
+    if !(12..16).all(digit) {
+        return bad("bad year");
     }
-    if v[16] != ' ' {
+    if at(16) != Some(' ') {
         return bad("missing SP before time");
     }
-    if !v[17].is_ascii_digit()
-        || !v[18].is_ascii_digit()
-        || v[19] != ':'
-        || !v[20].is_ascii_digit()
-        || !v[21].is_ascii_digit()
-        || v[22] != ':'
-        || !v[23].is_ascii_digit()
-        || !v[24].is_ascii_digit()
-        || v[25] != ' '
+    if !digit(17)
+        || !digit(18)
+        || at(19) != Some(':')
+        || !digit(20)
+        || !digit(21)
+        || at(22) != Some(':')
+        || !digit(23)
+        || !digit(24)
+        || at(25) != Some(' ')
     {
         return bad("bad HH:MM:SS");
     }
-    let hh: u32 = v[17..19].iter().collect::<String>().parse().unwrap_or(99);
-    let mm: u32 = v[20..22].iter().collect::<String>().parse().unwrap_or(99);
-    let ss: u32 = v[23..25].iter().collect::<String>().parse().unwrap_or(99);
-    let tz: String = v[26..].iter().collect();
+    let hh: u32 = text(17, 19).parse().unwrap_or(99);
+    let mm: u32 = text(20, 22).parse().unwrap_or(99);
+    let ss: u32 = text(23, 25).parse().unwrap_or(99);
+    let tz: String = v.iter().skip(26).collect();
     if tz != "GMT" {
         return Err(SipParseError::new(format!("Malformed Date: expected \"GMT\", got \"{tz}\"")));
     }
@@ -234,12 +237,13 @@ fn is_valid_unquoted_display_name(s: &str) -> bool {
 }
 
 fn index_of(s: &[char], needle: char, from: usize) -> Option<usize> {
-    (from..s.len()).find(|&j| s[j] == needle)
+    let at = s.get(from..)?.iter().position(|&c| c == needle)?;
+    from.checked_add(at)
 }
 
 /// Validate the `<...>` envelope at `lt` (must be `<`): no LWS inside, must close.
 fn validate_angle_section(s: &[char], lt: usize, header_name: &str) -> Result<(), SipParseError> {
-    if s[lt] != '<' {
+    if s.get(lt) != Some(&'<') {
         return Err(SipParseError::new(format!("Strict {header_name}: expected \"<\"")));
     }
     let gt = match index_of(s, '>', lt + 1) {
@@ -248,14 +252,12 @@ fn validate_angle_section(s: &[char], lt: usize, header_name: &str) -> Result<()
             return Err(SipParseError::new(format!("Strict {header_name}: unterminated \"<...>\"")))
         }
     };
-    let first = s[lt + 1];
-    if first == ' ' || first == '\t' {
+    if matches!(s.get(lt + 1), Some(' ' | '\t')) {
         return Err(SipParseError::new(format!(
             "Strict {header_name}: LWS inside \"<...>\" addr-spec"
         )));
     }
-    let last = s[gt - 1];
-    if last == ' ' || last == '\t' {
+    if matches!(gt.checked_sub(1).and_then(|k| s.get(k)), Some(' ' | '\t')) {
         return Err(SipParseError::new(format!(
             "Strict {header_name}: LWS inside \"<...>\" addr-spec"
         )));
@@ -269,18 +271,18 @@ fn validate_angle_section(s: &[char], lt: usize, header_name: &str) -> Result<()
 fn validate_name_addr_strict(value: &str, header_name: &str) -> Result<(), SipParseError> {
     let s: Vec<char> = value.chars().collect();
     let len = s.len();
+    let at = |k: usize| s.get(k).copied();
     let mut i = 0;
-    while i < len && (s[i] == ' ' || s[i] == '\t') {
+    while matches!(at(i), Some(' ' | '\t')) {
         i += 1;
     }
 
     // Quoted display name: tolerate trailing bytes before `<` (wsinv), but the
     // `<...>` section (if present) must still be LWS-free.
-    if i < len && s[i] == '"' {
+    if at(i) == Some('"') {
         i += 1;
         let mut closed = false;
-        while i < len {
-            let c = s[i];
+        while let Some(c) = at(i) {
             if c == '\\' && i + 1 < len {
                 i += 2;
                 continue;
@@ -305,7 +307,7 @@ fn validate_name_addr_strict(value: &str, header_name: &str) -> Result<(), SipPa
 
     // Unquoted display name before `<`.
     if let Some(lt) = index_of(&s, '<', i) {
-        let dn: String = s[i..lt].iter().collect::<String>().trim_end().to_string();
+        let dn: String = s.iter().take(lt).skip(i).collect::<String>().trim_end().to_string();
         if !is_valid_unquoted_display_name(&dn) {
             return Err(SipParseError::new(format!(
                 "Strict {header_name}: non-token char in unquoted display name \"{dn}\""
@@ -316,17 +318,16 @@ fn validate_name_addr_strict(value: &str, header_name: &str) -> Result<(), SipPa
 
     // Bare addr-spec. `?` in the URI head requires name-addr form (3.1.2.13).
     let semi_or_end = index_of(&s, ';', i).unwrap_or(len);
-    for k in i..semi_or_end {
-        if s[k] == '?' {
-            return Err(SipParseError::new(format!(
-                "Strict {header_name}: bare addr-spec with embedded \"?headers\"; name-addr \"<sip:...>\" form required"
-            )));
-        }
+    let head = || s.iter().take(semi_or_end).skip(i);
+    if head().any(|&c| c == '?') {
+        return Err(SipParseError::new(format!(
+            "Strict {header_name}: bare addr-spec with embedded \"?headers\"; name-addr \"<sip:...>\" form required"
+        )));
     }
     // An addr-spec MUST contain a scheme colon.
-    let has_colon = (i..semi_or_end).any(|k| s[k] == ':');
+    let has_colon = head().any(|&c| c == ':');
     if !has_colon {
-        let trimmed: String = s[i..].iter().collect::<String>().trim().to_string();
+        let trimmed: String = s.iter().skip(i).collect::<String>().trim().to_string();
         if !trimmed.is_empty() {
             return Err(SipParseError::new(format!(
                 "Strict {header_name}: addr-spec required, got \"{trimmed}\""

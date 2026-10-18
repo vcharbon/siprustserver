@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::header::{ParamValue, Params};
+use crate::header::{ItemSeparator, ParamValue, Params};
 use crate::sip_str::SipStr;
 
 // ---------------------------------------------------------------------------
@@ -69,21 +69,20 @@ pub struct ParsedUri {
 
 /// The `sep`-separated entries of one header value, trimmed and borrowed. A
 /// separator inside a quoted-string or `<...>` is data. An empty value yields
-/// nothing; an empty entry between two separators is yielded. `sep` must be
-/// ASCII — the byte scan below relies on it.
-pub fn top_level_entries(value: &str, sep: u8) -> TopLevelEntries<'_> {
-    TopLevelEntries { value, sep, pos: 0, emitted: 0, done: false }
+/// nothing; an empty entry between two separators is yielded.
+pub fn top_level_entries(value: &str, sep: ItemSeparator) -> TopLevelEntries<'_> {
+    TopLevelEntries { value, sep: sep.byte(), pos: 0, emitted: 0, done: false }
 }
 
 /// The comma-separated entries of one header value — the SIP §7.3.1 default.
 pub fn top_level_comma_entries(value: &str) -> TopLevelEntries<'_> {
-    top_level_entries(value, b',')
+    top_level_entries(value, ItemSeparator::Comma)
 }
 
 /// The `;`-separated entries of one header value — the layout RFC 3323 §4.2
 /// gives the priv-value list.
 pub fn top_level_semicolon_entries(value: &str) -> TopLevelEntries<'_> {
-    top_level_entries(value, b';')
+    top_level_entries(value, ItemSeparator::Semicolon)
 }
 
 pub struct TopLevelEntries<'a> {
@@ -99,9 +98,9 @@ impl<'a> Iterator for TopLevelEntries<'a> {
 
     // Byte-scan rather than collecting a `Vec<char>` (4x the bytes, and the
     // single hottest parse frame under load). Every structural delimiter here
-    // (`" \ < >` and the separator) is ASCII, so a UTF-8 lead/continuation byte
-    // can never alias one, and each split index lands on the separator — always
-    // a char boundary — so slicing by byte index is panic-free. Entries are trimmed *borrowed*
+    // (`" \ < >` and the [`ItemSeparator`]) is ASCII, so a UTF-8
+    // lead/continuation byte can never alias one, and each split index lands on
+    // the separator — always a char boundary. Entries are trimmed *borrowed*
     // subslices; a caller that stores one calls `.to_string()` at the point of
     // ownership. Scanning resumes with depth 0 and no open quote because a
     // separator is only recognised in exactly that state.
@@ -114,8 +113,7 @@ impl<'a> Iterator for TopLevelEntries<'a> {
         let mut depth: i32 = 0;
         let mut in_quote = false;
         let mut i = start;
-        while i < bytes.len() {
-            let c = bytes[i];
+        while let Some(&c) = bytes.get(i) {
             if in_quote {
                 if c == b'\\' && i + 1 < bytes.len() {
                     i += 2;
@@ -134,14 +132,14 @@ impl<'a> Iterator for TopLevelEntries<'a> {
                 c if c == self.sep && depth == 0 => {
                     self.pos = i + 1;
                     self.emitted += 1;
-                    return Some(self.value[start..i].trim());
+                    return Some(self.value.get(start..i)?.trim());
                 }
                 _ => {}
             }
             i += 1;
         }
         self.done = true;
-        let tail = self.value[start..].trim();
+        let tail = self.value.get(start..)?.trim();
         // A lone empty value has no entries; a trailing empty entry after a
         // separator is one.
         if tail.is_empty() && self.emitted == 0 {
@@ -170,12 +168,12 @@ pub fn parse_name_addr(value: &SipStr) -> ParsedNameAddr {
     let mut display_name: Option<SipStr> = None;
     let uri: SipStr;
 
-    if i < len && s[i] == b'"' {
+    if byte_at(s, i) == Some(b'"') {
         // Quoted display name.
         let (text, end) = read_quoted_string(value, i);
         display_name = Some(text);
         i = skip_ws(s, end);
-        if i < len && s[i] == b'<' {
+        if byte_at(s, i) == Some(b'<') {
             match index_of(s, b'>', i + 1) {
                 None => {
                     let uri = slice_trimmed(value, i + 1, len);
@@ -277,9 +275,7 @@ pub fn parse_cseq(value: &SipStr) -> ParsedCSeq {
     let s = value.as_bytes();
     let mut i = skip_ws(s, 0);
     let num_start = i;
-    while i < s.len() && s[i].is_ascii_digit() {
-        i += 1;
-    }
+    i = skip_digits(s, i);
     let seq = fold_digits(s, num_start, i);
     i = skip_ws(s, i);
     let method = slice_trimmed(value, i, s.len());
@@ -307,7 +303,6 @@ pub fn find_uri_embedded_headers_start(uri: &str) -> Option<usize> {
 
 pub fn parse_sip_uri_string(uri: &SipStr) -> Option<ParsedUri> {
     let s = uri.as_bytes();
-    let len = s.len();
 
     let colon_idx = index_of(s, b':', 0)?;
     let scheme = slice_lowercased(uri, 0, colon_idx);
@@ -317,7 +312,7 @@ pub fn parse_sip_uri_string(uri: &SipStr) -> Option<ParsedUri> {
     let host_start: usize;
 
     let at_idx = scan_until_one_of(s, i, b"@>");
-    if at_idx < len && s[at_idx] == b'@' {
+    if byte_at(s, at_idx) == Some(b'@') {
         user = Some(slice(uri, i, at_idx));
         host_start = at_idx + 1;
     } else {
@@ -329,12 +324,12 @@ pub fn parse_sip_uri_string(uri: &SipStr) -> Option<ParsedUri> {
     i = host_end;
 
     let mut params: BTreeMap<SipStr, SipStr> = BTreeMap::new();
-    while i < len && s[i] == b';' {
+    while byte_at(s, i) == Some(b';') {
         i += 1;
         let name_end = scan_until_one_of(s, i, b"=;>? \t");
         let pname = slice_lowercased(uri, i, name_end);
         i = name_end;
-        if i < len && s[i] == b'=' {
+        if byte_at(s, i) == Some(b'=') {
             i += 1;
             let val_end = scan_until_one_of(s, i, b";>? \t");
             params.insert(pname, slice(uri, i, val_end));
@@ -357,9 +352,24 @@ pub fn parse_sip_uri_string(uri: &SipStr) -> Option<ParsedUri> {
 // (the callers propagate `end + 1` positions on missing delimiters, as the TS
 // did) — hence the clamping in `subslice`.
 
-/// Borrowed `s[a..b]` with both byte indices clamped to `s.len()`.
+/// Borrowed `s[a..b]` with both byte indices clamped to `s.len()`; empty when
+/// the clamped range is not one of `s` (`a` past `b`, or inside a character),
+/// as it is when both indices run past the end.
 fn subslice(s: &str, a: usize, b: usize) -> &str {
-    &s[a.min(s.len())..b.min(s.len())]
+    s.get(a.min(s.len())..b.min(s.len())).unwrap_or("")
+}
+
+/// The byte at `i`, `None` past the end.
+fn byte_at(s: &[u8], i: usize) -> Option<u8> {
+    s.get(i).copied()
+}
+
+/// The index of the first non-digit byte at or after `i`.
+fn skip_digits(s: &[u8], mut i: usize) -> usize {
+    while byte_at(s, i).is_some_and(|b| b.is_ascii_digit()) {
+        i += 1;
+    }
+    i
 }
 
 /// `base[a..b]` as a span of `base`, clamped like [`subslice`] — the single
@@ -400,11 +410,11 @@ fn span_of(base: &SipStr, sub: &str) -> SipStr {
 }
 
 fn index_of(s: &[u8], needle: u8, from: usize) -> Option<usize> {
-    s[from.min(s.len())..].iter().position(|&b| b == needle).map(|p| from + p)
+    s.get(from..)?.iter().position(|&b| b == needle).map(|p| from + p)
 }
 
 fn skip_ws(s: &[u8], mut i: usize) -> usize {
-    while i < s.len() && (s[i] == b' ' || s[i] == b'\t') {
+    while matches!(byte_at(s, i), Some(b' ' | b'\t')) {
         i += 1;
     }
     i
@@ -420,13 +430,13 @@ fn read_quoted_string(base: &SipStr, mut i: usize) -> (SipStr, usize) {
     i += 1; // skip opening "
     let mut result: Option<String> = None;
     let mut run_start = i;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'\\' && i + 1 < bytes.len() {
+    while let Some(c) = byte_at(bytes, i) {
+        // The escaped char may be multi-byte — copy it whole.
+        let escaped =
+            if c == b'\\' { s.get(i + 1..).and_then(|rest| rest.chars().next()) } else { None };
+        if let Some(esc) = escaped {
             let out = result.get_or_insert_with(String::new);
-            out.push_str(&s[run_start..i]);
-            // The escaped char may be multi-byte — copy it whole.
-            let esc = s[i + 1..].chars().next().unwrap();
+            out.push_str(subslice(s, run_start, i));
             out.push(esc);
             i += 1 + esc.len_utf8();
             run_start = i;
@@ -451,45 +461,39 @@ fn finish_quoted(
 ) -> SipStr {
     match rebuilt {
         Some(mut out) => {
-            out.push_str(&s[run_start..end]);
+            out.push_str(subslice(s, run_start, end));
             SipStr::owned(&out)
         }
-        None => span_of(base, &s[run_start..end]),
+        None => span_of(base, subslice(s, run_start, end)),
     }
 }
 
 /// Scan forward until one of the (ASCII) delimiter bytes; returns its index
-/// (or end).
-fn scan_until_one_of(s: &[u8], mut i: usize, delims: &[u8]) -> usize {
-    while i < s.len() {
-        if delims.contains(&s[i]) {
-            return i;
-        }
-        i += 1;
+/// (or end, or `i` when it is past the end).
+fn scan_until_one_of(s: &[u8], i: usize, delims: &[u8]) -> usize {
+    scan_until(s, i, |c| delims.contains(&c))
+}
+
+/// The index of the first byte at or after `i` that `stop` holds for, the end
+/// when none does, `i` itself when it is past the end.
+fn scan_until(s: &[u8], i: usize, stop: impl Fn(u8) -> bool) -> usize {
+    match s.get(i..) {
+        Some(rest) => rest.iter().position(|&c| stop(c)).map_or(s.len(), |p| i + p),
+        None => i,
     }
-    i
 }
 
 /// Scan until whitespace, `;`, or `,`.
-fn scan_until_ws_or_semi(s: &[u8], mut i: usize) -> usize {
-    while i < s.len() {
-        let c = s[i];
-        if c == b' ' || c == b'\t' || c == b';' || c == b',' {
-            return i;
-        }
-        i += 1;
-    }
-    i
+fn scan_until_ws_or_semi(s: &[u8], i: usize) -> usize {
+    scan_until(s, i, |c| matches!(c, b' ' | b'\t' | b';' | b','))
 }
 
 fn fold_digits(s: &[u8], from: usize, to: usize) -> u64 {
-    let mut n: u64 = 0;
-    for &c in &s[from..to] {
-        if c.is_ascii_digit() {
-            n = n.saturating_mul(10).saturating_add((c - b'0') as u64);
-        }
-    }
-    n
+    s.iter()
+        .take(to)
+        .skip(from)
+        .filter_map(|&c| char::from(c).to_digit(10))
+        .fold(0u64, |n, d| n.saturating_mul(10).saturating_add(u64::from(d)))
 }
 
 /// Parse host[:port] from byte `i`. Host can be IPv4, bracketed IPv6, or
@@ -500,19 +504,17 @@ fn parse_host_port(base: &SipStr, i: usize) -> (SipStr, Option<u64>, usize) {
     let len = bytes.len();
 
     // IPv6: [address]
-    if i < len && bytes[i] == b'[' {
+    if byte_at(bytes, i) == Some(b'[') {
         match index_of(bytes, b']', i + 1) {
             None => return (slice(base, i + 1, len), None, len),
             Some(close) => {
                 let host = slice(base, i + 1, close);
                 let mut j = close + 1;
                 let mut port: Option<u64> = None;
-                if j < len && bytes[j] == b':' {
+                if byte_at(bytes, j) == Some(b':') {
                     j += 1;
                     let port_start = j;
-                    while j < len && bytes[j].is_ascii_digit() {
-                        j += 1;
-                    }
+                    j = skip_digits(bytes, j);
                     // TS does not guard the IPv6 branch — empty digits yield NaN
                     // (an invalid port). We mirror with fold_digits → 0, which
                     // `is_valid_port` likewise rejects.
@@ -529,12 +531,10 @@ fn parse_host_port(base: &SipStr, i: usize) -> (SipStr, Option<u64>, usize) {
 
     let mut j = host_end;
     let mut port: Option<u64> = None;
-    if j < len && bytes[j] == b':' {
+    if byte_at(bytes, j) == Some(b':') {
         j += 1;
         let port_start = j;
-        while j < len && bytes[j].is_ascii_digit() {
-            j += 1;
-        }
+        j = skip_digits(bytes, j);
         if j > port_start {
             port = Some(fold_digits(bytes, port_start, j));
         }
@@ -557,10 +557,10 @@ fn collect_params_from(base: &SipStr, mut i: usize, params: &mut Params) {
     let len = bytes.len();
     while i < len {
         i = skip_ws(bytes, i);
-        if i >= len {
+        let Some(c) = byte_at(bytes, i) else {
             break;
-        }
-        if bytes[i] != b';' {
+        };
+        if c != b';' {
             // Skip unexpected bytes (commas for multi-value headers, etc.).
             i += 1;
             continue;
@@ -574,7 +574,6 @@ fn collect_params_from(base: &SipStr, mut i: usize, params: &mut Params) {
 fn read_one_param(base: &SipStr, mut i: usize, params: &mut Params) -> usize {
     let s = base.as_str();
     let bytes = s.as_bytes();
-    let len = bytes.len();
 
     let name_end = scan_until_one_of(bytes, i, b"=; \t,>");
     let pname = slice(base, i, name_end);
@@ -582,10 +581,10 @@ fn read_one_param(base: &SipStr, mut i: usize, params: &mut Params) -> usize {
 
     // RFC 3261 EQUAL permits surrounding LWS: `SWS "=" SWS`.
     i = skip_ws(bytes, i);
-    if i < len && bytes[i] == b'=' {
+    if byte_at(bytes, i) == Some(b'=') {
         i += 1;
         i = skip_ws(bytes, i);
-        if i < len && bytes[i] == b'"' {
+        if byte_at(bytes, i) == Some(b'"') {
             let (text, end) = read_quoted_string(base, i);
             params.push(pname, ParamValue::Quoted(text));
             i = end;
@@ -636,7 +635,7 @@ pub fn validate_strict_host(host: &str) -> Option<String> {
             if label.len() > 3 {
                 return Some(format!("IPv4 octet \"{label}\" exceeds 1*3DIGIT"));
             }
-            let n: u64 = label.bytes().fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
+            let n: u64 = fold_digits(label.as_bytes(), 0, label.len());
             if n > 255 {
                 return Some(format!("IPv4 octet {n} out of range"));
             }
@@ -653,10 +652,7 @@ pub fn validate_strict_host(host: &str) -> Option<String> {
             }
             return Some("empty host label".to_string());
         }
-        let c0 = label.as_bytes()[0];
-        let is_alpha = c0.is_ascii_alphabetic();
-        let is_num = c0.is_ascii_digit();
-        if !is_alpha && !is_num {
+        if !label.bytes().next().is_some_and(|c0| c0.is_ascii_alphanumeric()) {
             return Some(format!("host label \"{label}\" must start with alphanum"));
         }
     }
@@ -687,8 +683,7 @@ pub fn validate_strict_sip_uri(uri: &str) -> Option<String> {
     }
     // Locate scheme colon.
     let mut i = 0usize;
-    while i < s.len() {
-        let c = s[i];
+    while let Some(c) = byte_at(s, i) {
         if c == b':' {
             break;
         }
@@ -710,7 +705,7 @@ pub fn validate_strict_sip_uri(uri: &str) -> Option<String> {
     }
     // Scheme bytes are validated ASCII above, so the case-fold compare is
     // exactly `to_lowercase()` — without minting a String per call.
-    let scheme = &uri[..i];
+    let scheme = subslice(uri, 0, i);
     i += 1; // past ':'
 
     if !scheme.eq_ignore_ascii_case("sip") && !scheme.eq_ignore_ascii_case("sips") {
@@ -720,8 +715,7 @@ pub fn validate_strict_sip_uri(uri: &str) -> Option<String> {
     // Locate the `@` terminating userinfo, if any.
     let mut at_idx: Option<usize> = None;
     let mut second_at = false;
-    for j in i..s.len() {
-        let c = s[j];
+    for (j, &c) in s.iter().enumerate().skip(i) {
         if c == b'@' {
             if at_idx.is_none() {
                 at_idx = Some(j);
@@ -747,10 +741,9 @@ pub fn validate_strict_sip_uri(uri: &str) -> Option<String> {
         None => i,
     };
 
-    if host_start >= s.len() {
+    let Some(first_host_byte) = byte_at(s, host_start) else {
         return Some("empty hostport".to_string());
-    }
-    let first_host_byte = s[host_start];
+    };
     if first_host_byte == b':' {
         return Some("hostport starts with `:`".to_string());
     }
@@ -759,35 +752,20 @@ pub fn validate_strict_sip_uri(uri: &str) -> Option<String> {
     }
 
     // End of hostport: first `;`, `?`, or `>`.
-    let mut host_end = s.len();
-    for j in host_start..s.len() {
-        let c = s[j];
-        if c == b';' || c == b'?' || c == b'>' {
-            host_end = j;
-            break;
-        }
-    }
+    let host_end = scan_until(s, host_start, |c| matches!(c, b';' | b'?' | b'>'));
+    let hostport = || s.iter().enumerate().take(host_end).skip(host_start);
 
-    if s[host_start] == b'[' {
+    if first_host_byte == b'[' {
         // IPv6 reference: must close with `]`.
-        let mut closed = false;
-        let mut k = host_start + 1;
-        while k < host_end {
-            if s[k] == b']' {
-                closed = true;
-                break;
-            }
-            k += 1;
-        }
-        if !closed {
+        let Some(k) = hostport().skip(1).find(|(_, &c)| c == b']').map(|(k, _)| k) else {
             return Some("unclosed IPv6 reference".to_string());
-        }
+        };
         if k == host_start + 1 {
             return Some("empty IPv6 reference".to_string());
         }
         let mut after = k + 1;
         if after < host_end {
-            if s[after] != b':' {
+            if byte_at(s, after) != Some(b':') {
                 return Some("junk after `]` in hostport".to_string());
             }
             after += 1;
@@ -800,8 +778,8 @@ pub fn validate_strict_sip_uri(uri: &str) -> Option<String> {
 
     // Plain host[:port]. Multiple unbracketed `:` = malformed.
     let mut colon_idx: Option<usize> = None;
-    for j in host_start..host_end {
-        if s[j] == b':' {
+    for (j, &c) in hostport() {
+        if c == b':' {
             if colon_idx.is_none() {
                 colon_idx = Some(j);
             } else {
@@ -832,11 +810,11 @@ fn validate_port_digits(s: &[u8], from: usize, to: usize) -> Option<String> {
         return Some("empty port".to_string());
     }
     let mut n: u64 = 0;
-    for &c in &s[from..to] {
-        if !c.is_ascii_digit() {
+    for &c in s.iter().take(to).skip(from) {
+        let Some(d) = char::from(c).to_digit(10) else {
             return Some("non-digit in port".to_string());
-        }
-        n = n * 10 + (c - b'0') as u64;
+        };
+        n = n * 10 + u64::from(d);
         if n > 65535 {
             return Some("port out of range".to_string());
         }
@@ -853,17 +831,17 @@ pub(crate) fn decode_uri_component(s: &str) -> Result<String, ()> {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
+    while let Some(b) = byte_at(bytes, i) {
+        if b == b'%' {
             if i + 2 >= bytes.len() {
                 return Err(());
             }
-            let hi = (bytes[i + 1] as char).to_digit(16).ok_or(())?;
-            let lo = (bytes[i + 2] as char).to_digit(16).ok_or(())?;
-            out.push((hi * 16 + lo) as u8);
+            let hex = |k: usize| byte_at(bytes, k).and_then(|h| char::from(h).to_digit(16));
+            let (hi, lo) = (hex(i + 1).ok_or(())?, hex(i + 2).ok_or(())?);
+            out.push(u8::try_from(hi * 16 + lo).map_err(|_| ())?);
             i += 3;
         } else {
-            out.push(bytes[i]);
+            out.push(b);
             i += 1;
         }
     }

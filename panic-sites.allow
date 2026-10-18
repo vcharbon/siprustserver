@@ -164,15 +164,6 @@ crates/sip-message/src/mscml.rs 25
 crates/sip-message/src/multipart.rs 12
 crates/sip-message/src/multipart/entity.rs 6
 crates/sip-message/src/param_codec.rs 4
-crates/sip-message/src/parser/custom/compact_forms.rs 1
-crates/sip-message/src/parser/custom/extract_fields.rs 21
-crates/sip-message/src/parser/custom/headers.rs 8
-crates/sip-message/src/parser/custom/mod.rs 5
-crates/sip-message/src/parser/custom/optional_headers.rs 38
-crates/sip-message/src/parser/custom/port_garbage.rs 16
-crates/sip-message/src/parser/custom/scanner.rs 30
-crates/sip-message/src/parser/custom/start_line.rs 17
-crates/sip-message/src/parser/custom/structured_headers.rs 46
 crates/sip-message/src/payload.rs 1
 crates/sip-message/src/remote_target.rs 10
 crates/sip-message/src/sdp.rs 29
@@ -183,7 +174,6 @@ crates/sip-message/src/sdp_form.rs 4
 crates/sip-message/src/sdp_session.rs 8
 crates/sip-message/src/sdp_text.rs 1
 crates/sip-message/src/serializer.rs 9
-crates/sip-message/src/sip_str.rs 7
 crates/sip-message/src/site.rs 3
 crates/sip-message/src/sniff.rs 21
 crates/sip-message/src/sniff/via_stamp.rs 5

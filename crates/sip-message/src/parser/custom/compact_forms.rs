@@ -8,7 +8,7 @@ use crate::sip_str::{SharedText, SipStr};
 /// return the wire name unchanged. Neither arm allocates: a canonical name is
 /// a `'static` literal, an unexpanded name stays a span of the image.
 pub fn expand_compact_form(text: &SharedText, name: Span) -> SipStr {
-    match canonical_of(&text.as_str()[name.start..name.end]) {
+    match text.as_str().get(name.clone()).and_then(canonical_of) {
         Some(canonical) => SipStr::from_static(canonical),
         None => text.span(name.start, name.len()),
     }

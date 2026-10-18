@@ -10,6 +10,7 @@
 
 mod access;
 pub mod capture;
+mod checked;
 pub mod draft;
 pub mod error;
 pub mod header;

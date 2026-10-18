@@ -40,25 +40,15 @@ fn numeric_header_rule(name: &HeaderName) -> Option<NumericHeaderRule> {
 /// Strict numeric extraction with optional param tail. The digit prefix is
 /// terminated at the first WSP (CSeq is `1*DIGIT LWS Method`).
 fn extract_strict_numeric_prefix(value: &str, rule: &NumericHeaderRule) -> Option<u64> {
-    let bytes = value.as_bytes();
-    let mut end = bytes.len();
-    if rule.allow_param_tail {
-        if let Some(semi) = value.find(';') {
-            end = semi;
-        }
-    }
-    let mut i = 0;
-    while i < end {
-        let c = bytes[i];
-        if c == 0x20 || c == 0x09 {
-            break;
-        }
-        i += 1;
-    }
-    // `value` is already a valid `&str` and `i` lands on an ASCII WSP byte (or a
-    // char boundary at `end`/len), so the prefix slice is valid — borrow it
-    // rather than re-decoding into a fresh `String`.
-    strict_non_negative_decimal(value[..i].trim(), rule.max)
+    let scoped = match value.split_once(';') {
+        Some((head, _)) if rule.allow_param_tail => head,
+        _ => value,
+    };
+    let digits = match scoped.find([' ', '\t']) {
+        Some(wsp) => scoped.get(..wsp)?,
+        None => scoped,
+    };
+    strict_non_negative_decimal(digits.trim(), rule.max)
 }
 
 pub struct ParsedHeaders {
@@ -88,7 +78,7 @@ pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<Strin
             s.consume_end_of_headers();
             break;
         }
-        if s.pos >= s.buf.len() {
+        if s.at_end() {
             break;
         }
         let raw_name = match read_header_name(&mut s) {
@@ -99,8 +89,10 @@ pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<Strin
             return Vec::new();
         }
         s.skip_lws();
-        let _ = s.read_header_value();
-        names.push(image[raw_name.start..raw_name.end].to_string());
+        let (Ok(_), Some(name)) = (s.read_header_value(), image.get(raw_name)) else {
+            return Vec::new();
+        };
+        names.push(name.to_string());
     }
     names
 }
@@ -125,23 +117,25 @@ pub fn parse_headers(
             s.consume_end_of_headers();
             break;
         }
-        if s.pos >= s.buf.len() {
+        if s.at_end() {
             break;
         }
 
         let raw_name = read_header_name(s)?;
         if raw_name.is_empty() {
-            return Err(SipParseError::new(format!("Empty header name at position {}", s.pos)));
+            return Err(SipParseError::new(format!("Empty header name at position {}", s.pos())));
         }
 
         s.expect(COLON)?;
         s.skip_lws();
 
-        let value = s.read_header_value();
+        let value = s.read_header_value()?;
         let name = expand_compact_form(text, raw_name);
         let trimmed_value = match value {
             HeaderValue::Span(range) => {
-                let t = trim_span(image, range);
+                let t = trim_span(image, range.clone()).ok_or_else(|| {
+                    SipParseError::new(format!("header value {range:?} outside the image"))
+                })?;
                 text.span(t.start, t.len())
             }
             HeaderValue::Unfolded(v) => SipStr::owned(v.trim()),
@@ -229,14 +223,12 @@ fn is_authorization_header(name: &HeaderName) -> bool {
 /// `\<any>` is an escape pair. Operates on bytes (the relevant delimiters are
 /// ASCII, never present in UTF-8 continuation bytes).
 fn has_unbalanced_quotes(value: &str) -> bool {
-    let bytes = value.as_bytes();
+    let mut bytes = value.bytes();
     let mut in_quote = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
+    while let Some(c) = bytes.next() {
         if in_quote {
             if c == 0x5c {
-                i += 2; // escape pair — skip next
+                bytes.next(); // escape pair — skip next
                 continue;
             }
             if c == 0x22 {
@@ -245,7 +237,6 @@ fn has_unbalanced_quotes(value: &str) -> bool {
         } else if c == 0x22 {
             in_quote = true;
         }
-        i += 1;
     }
     in_quote
 }
@@ -255,24 +246,20 @@ fn has_unbalanced_quotes(value: &str) -> bool {
 /// test while catching CVE-2023-27598. Trailing WSP before the colon is
 /// permitted (RFC 4475 §3.1.1.1).
 fn read_header_name(s: &mut Scanner) -> Result<Span, SipParseError> {
-    let start = s.pos;
-    while s.pos < s.buf.len() {
-        let b = s.buf[s.pos];
-        if b == COLON || b == CR || b == LF {
-            break;
-        }
-        if is_wsp(b) {
+    let start = s.pos();
+    while let Some(b) = s.peek() {
+        if b == COLON || b == CR || b == LF || is_wsp(b) {
             break;
         }
         if is_illegal_header_name_byte(b) {
             return Err(SipParseError::new(format!(
                 "Illegal byte 0x{b:x} in header name at position {}",
-                s.pos
+                s.pos()
             )));
         }
-        s.pos += 1;
+        s.advance();
     }
-    let name = start..s.pos;
+    let name = start..s.pos();
     s.skip_wsp();
     Ok(name)
 }
@@ -305,7 +292,10 @@ fn is_valid_digest_credentials(value: &str) -> bool {
             return true; // e.g. "Digestion" — not the Digest scheme
         }
     }
-    let params = value[SCHEME.len()..].trim_start();
+    // The scheme probe read ASCII bytes, so its end is a char boundary.
+    let Some(params) = value.get(SCHEME.len()..).map(str::trim_start) else {
+        return false;
+    };
     if params.is_empty() {
         return false;
     }
@@ -315,11 +305,10 @@ fn is_valid_digest_credentials(value: &str) -> bool {
         if trimmed.is_empty() {
             return false;
         }
-        let eq_idx = match find_unquoted_equals(trimmed) {
-            Some(i) => i,
-            None => return false,
+        let Some(name) = name_before_unquoted_equals(trimmed) else {
+            return false;
         };
-        let name = trimmed[..eq_idx].trim_end();
+        let name = name.trim_end();
         if name.is_empty() {
             return false;
         }
@@ -330,16 +319,14 @@ fn is_valid_digest_credentials(value: &str) -> bool {
     true
 }
 
-/// Byte index of the first `=` outside a quoted-string, or `None`.
-fn find_unquoted_equals(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
+/// The text before the first `=` outside a quoted-string, or `None`.
+fn name_before_unquoted_equals(s: &str) -> Option<&str> {
+    let mut bytes = s.bytes().enumerate();
     let mut in_quote = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
+    while let Some((i, c)) = bytes.next() {
         if in_quote {
             if c == 0x5c {
-                i += 2;
+                bytes.next();
                 continue;
             }
             if c == 0x22 {
@@ -348,9 +335,8 @@ fn find_unquoted_equals(s: &str) -> Option<usize> {
         } else if c == 0x22 {
             in_quote = true;
         } else if c == 0x3d {
-            return Some(i);
+            return s.get(..i);
         }
-        i += 1;
     }
     None
 }

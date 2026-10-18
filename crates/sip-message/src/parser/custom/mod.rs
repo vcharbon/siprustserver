@@ -81,7 +81,7 @@ impl CustomParser {
     /// message passes — the reading a message fragment (RFC 3420) takes.
     pub fn parse_header_fields(&self, raw: &[u8]) -> Result<Vec<SipHeader>, SipParseError> {
         let block = scanner::header_block(raw);
-        let text = decode_image(&raw[..block.end]);
+        let text = decode_image(head(raw, block.end)?);
         let mut s = Scanner::new(text.as_str().as_bytes());
         parse_start_line(&mut s, text.as_str(), &self.limits)?;
         Ok(headers::parse_headers(&mut s, &text, block.lines, &self.limits)?.headers)
@@ -115,7 +115,7 @@ impl SipParser for CustomParser {
         // becomes the text image every span points into.
         let block = scanner::header_block(&raw);
         let body_at = block.end;
-        let text = decode_image(&raw[..body_at]);
+        let text = decode_image(head(&raw, body_at)?);
         let image = text.as_str();
 
         let mut s = Scanner::new(image.as_bytes());
@@ -126,20 +126,23 @@ impl SipParser for CustomParser {
         // The body bound is the declared Content-Length; a datagram that
         // declares none ends with its bytes (RFC 3261 §18.3), a stream that
         // declares none is undelimited and refused (§20.14).
-        let available = raw.len() - body_at;
         let body: Bytes = match parsed.content_length {
             Some(0) => Bytes::new(),
             Some(declared) => {
-                let content_length = declared as usize;
-                if available < content_length {
+                let available = raw.len().saturating_sub(body_at);
+                let bounded = usize::try_from(declared)
+                    .ok()
+                    .and_then(|len| body_at.checked_add(len))
+                    .filter(|&end| end <= raw.len());
+                let Some(end) = bounded else {
                     return Err(SipParseError::new(format!(
-                        "Content-Length {content_length} exceeds remaining bytes {available}"
+                        "Content-Length {declared} exceeds remaining bytes {available}"
                     )));
-                }
-                raw.slice(body_at..body_at + content_length)
+                };
+                body_of(&raw, body_at..end)?
             }
             None => match limits.framing {
-                Framing::Datagram => raw.slice(body_at..),
+                Framing::Datagram => body_of(&raw, body_at..raw.len())?,
                 Framing::Stream => {
                     return Err(SipParseError::new(
                         "Content-Length is mandatory over a stream transport (RFC 3261 §20.14)",
@@ -156,7 +159,7 @@ impl SipParser for CustomParser {
 
         match start {
             StartLine::Request(rl) => {
-                let method = start_line::canonical_method(image, rl.method);
+                let method = start_line::canonical_method(image, rl.method)?;
                 let uri = text.span(rl.uri.start, rl.uri.len());
                 let eager: RequestEager =
                     extract_request_fields(&idx, &uri, limits, Some(&method), mode)?;
@@ -184,6 +187,18 @@ impl SipParser for CustomParser {
             }
         }
     }
+}
+
+/// The body of `raw` at `range`, sharing its bytes.
+fn body_of(raw: &Bytes, range: std::ops::Range<usize>) -> Result<Bytes, SipParseError> {
+    crate::checked::slice(raw, range.clone())
+        .ok_or_else(|| SipParseError::new(format!("body {range:?} past the datagram")))
+}
+
+/// The header block of `raw`, the `end` [`scanner::header_block`] found.
+fn head(raw: &[u8], end: usize) -> Result<&[u8], SipParseError> {
+    raw.get(..end)
+        .ok_or_else(|| SipParseError::new(format!("header block end {end} past the datagram")))
 }
 
 /// The header block as one shared text image. Predominantly-ASCII input takes

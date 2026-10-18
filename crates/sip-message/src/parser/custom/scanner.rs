@@ -1,8 +1,12 @@
 //! Byte-level cursor scanner. Port of `src/sip/parsers/custom/scanner.ts`.
 //! All character classification is direct byte comparison — zero regex.
 //!
-//! The fallible methods (`read_digits`, `expect`, `expect_crlf`) return
-//! `Result<_, SipParseError>`; the rest are infallible.
+//! The cursor never leaves its buffer: every read is checked access and every
+//! move goes through [`Scanner::bump`], which stops at the end, so the offset
+//! arithmetic of the parser lives here and nowhere else (ADR-0051 §2). The
+//! fallible methods (`expect`, `expect_crlf`) return `Result<_, SipParseError>`;
+//! the rest are infallible.
+#![deny(clippy::arithmetic_side_effects)]
 
 use crate::error::SipParseError;
 
@@ -56,6 +60,15 @@ pub(crate) fn decode(bytes: &[u8]) -> String {
 /// these — the parser slices the image by index and never copies a token.
 pub type Span = std::ops::Range<usize>;
 
+/// The text `span` covers in `image`, or the parse error a span outside it (or
+/// splitting a character) is: spans come from a scanner over the same image,
+/// so the error names a scanner defect, never accepted input.
+pub fn span_text<'a>(image: &'a str, span: &Span) -> Result<&'a str, SipParseError> {
+    image
+        .get(span.clone())
+        .ok_or_else(|| SipParseError::new(format!("span {span:?} outside the message image")))
+}
+
 /// Where the header block ends and how many lines it holds.
 pub struct HeaderBlock {
     /// Byte offset just past the blank line, in raw-datagram coordinates.
@@ -73,30 +86,19 @@ pub struct HeaderBlock {
 /// the decode, and the body is a slice of the original packet, not a copy. The
 /// line count rides along so the header list can be sized without a second scan.
 pub fn header_block(raw: &[u8]) -> HeaderBlock {
-    let mut i = 0;
-    let mut lines = 0;
+    let mut s = Scanner::new(raw);
+    let mut lines: usize = 0;
     loop {
-        if i >= raw.len() {
+        if s.at_end() {
             return HeaderBlock { end: raw.len(), lines };
         }
-        let line_start = i;
-        while i < raw.len() && raw[i] != CR && raw[i] != LF {
-            i += 1;
+        let line = s.take_while(|b| b != CR && b != LF);
+        s.skip_if(CR);
+        s.skip_if(LF);
+        if line.is_empty() {
+            return HeaderBlock { end: s.pos(), lines };
         }
-        let empty = i == line_start;
-        if i < raw.len() && raw[i] == CR {
-            i += 1;
-        }
-        if i < raw.len() && raw[i] == LF {
-            i += 1;
-        }
-        if empty {
-            return HeaderBlock { end: i, lines };
-        }
-        if i == line_start {
-            return HeaderBlock { end: raw.len(), lines }; // unterminated final line
-        }
-        lines += 1;
+        lines = lines.saturating_add(1);
     }
 }
 
@@ -109,20 +111,23 @@ pub enum HeaderValue {
 }
 
 /// `range` with leading/trailing whitespace excluded. Trimming a span is index
-/// arithmetic — no copy, unlike trimming an owned value.
-pub fn trim_span(image: &str, range: Span) -> Span {
-    let slice = &image[range.start..range.end];
-    let trimmed = slice.trim();
+/// arithmetic — no copy, unlike trimming an owned value. `None` when `range`
+/// is not a span of `image`.
+pub fn trim_span(image: &str, range: Span) -> Option<Span> {
+    let slice = image.get(range.clone())?;
+    let after_lead = slice.trim_start();
+    let trimmed = after_lead.trim_end();
     if trimmed.is_empty() {
-        return range.start..range.start;
+        return Some(range.start..range.start);
     }
-    let lead = trimmed.as_ptr() as usize - slice.as_ptr() as usize;
-    (range.start + lead)..(range.start + lead + trimmed.len())
+    let start = range.start.checked_add(slice.len().checked_sub(after_lead.len())?)?;
+    Some(start..start.checked_add(trimmed.len())?)
 }
 
+/// A cursor over one buffer. Its position never passes the buffer's end.
 pub struct Scanner<'a> {
-    pub buf: &'a [u8],
-    pub pos: usize,
+    buf: &'a [u8],
+    pos: usize,
 }
 
 impl<'a> Scanner<'a> {
@@ -130,8 +135,19 @@ impl<'a> Scanner<'a> {
         Self { buf, pos: 0 }
     }
 
-    pub fn at(buf: &'a [u8], pos: usize) -> Self {
-        Self { buf, pos }
+    /// The cursor's offset into the buffer.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Whether every byte has been read.
+    pub fn at_end(&self) -> bool {
+        self.pos >= self.buf.len()
+    }
+
+    /// Moves the cursor `n` bytes on, stopping at the end of the buffer.
+    fn bump(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.buf.len());
     }
 
     /// Peek at the current byte without advancing. `None` at end.
@@ -139,77 +155,70 @@ impl<'a> Scanner<'a> {
         self.buf.get(self.pos).copied()
     }
 
+    /// The byte `offset` past the current one, without advancing. `None` past
+    /// the end.
+    pub fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.buf.get(self.pos.checked_add(offset)?).copied()
+    }
+
     /// Read the current byte and advance. `None` at end.
     pub fn advance(&mut self) -> Option<u8> {
-        let b = self.buf.get(self.pos).copied();
+        let b = self.peek();
         if b.is_some() {
-            self.pos += 1;
+            self.bump(1);
         }
         b
     }
 
+    /// Consumes the current byte when it is `byte`; whether it did.
+    pub fn skip_if(&mut self, byte: u8) -> bool {
+        let hit = self.peek() == Some(byte);
+        if hit {
+            self.bump(1);
+        }
+        hit
+    }
+
+    /// Consumes bytes while `keep` holds for them; the span read.
+    pub fn take_while(&mut self, mut keep: impl FnMut(u8) -> bool) -> Span {
+        let start = self.pos;
+        while self.peek().is_some_and(&mut keep) {
+            self.bump(1);
+        }
+        start..self.pos
+    }
+
+    /// Consumes bytes up to `byte`, which is left unread; the span read.
+    pub fn take_until(&mut self, byte: u8) -> Span {
+        self.take_while(|b| b != byte)
+    }
+
     /// Skip over SP and HTAB.
     pub fn skip_wsp(&mut self) {
-        while self.pos < self.buf.len() && is_wsp(self.buf[self.pos]) {
-            self.pos += 1;
-        }
+        self.take_while(is_wsp);
     }
 
     /// Skip LWS: SP/HTAB and header-folding (CRLF followed by SP/HTAB).
     pub fn skip_lws(&mut self) {
-        while self.pos < self.buf.len() {
-            let b = self.buf[self.pos];
-            if is_wsp(b) {
-                self.pos += 1;
-                continue;
+        loop {
+            match self.peek() {
+                Some(b) if is_wsp(b) => self.bump(1),
+                Some(CR) if self.peek_at(1) == Some(LF) && self.peek_at(2).is_some_and(is_wsp) => {
+                    self.bump(3); // CR LF WSP
+                }
+                _ => break,
             }
-            if b == CR
-                && self.pos + 2 < self.buf.len()
-                && self.buf[self.pos + 1] == LF
-                && is_wsp(self.buf[self.pos + 2])
-            {
-                self.pos += 3; // skip CR LF WSP
-                continue;
-            }
-            break;
         }
     }
 
-    /// Read bytes until the given delimiter byte. Does not consume it.
-    pub fn read_until(&mut self, byte: u8) -> Span {
-        let start = self.pos;
-        while self.pos < self.buf.len() && self.buf[self.pos] != byte {
-            self.pos += 1;
+    /// The line ending at the cursor, as its length: CRLF, or a bare LF
+    /// (lenient). `None` elsewhere.
+    fn eol_len(&self) -> Option<usize> {
+        match self.peek()? {
+            CR if self.peek_at(1) == Some(LF) => Some(2),
+            LF => Some(1),
+            _ => None,
         }
-        start..self.pos
-    }
-
-    /// Read an RFC 3261 token (alphanum + special chars).
-    pub fn read_token(&mut self) -> Span {
-        let start = self.pos;
-        while self.pos < self.buf.len() && is_token_char(self.buf[self.pos]) {
-            self.pos += 1;
-        }
-        start..self.pos
-    }
-
-    /// Read 1+ digits as an integer. Errors if no digits found.
-    pub fn read_digits(&mut self) -> Result<u64, SipParseError> {
-        let start = self.pos;
-        let mut n: u64 = 0;
-        while self.pos < self.buf.len() && is_digit(self.buf[self.pos]) {
-            n = n
-                .checked_mul(10)
-                .and_then(|n| n.checked_add((self.buf[self.pos] - b'0') as u64))
-                .ok_or_else(|| {
-                SipParseError::new(format!("Invalid integer at position {start}"))
-            })?;
-            self.pos += 1;
-        }
-        if self.pos == start {
-            return Err(SipParseError::new(format!("Expected digit at position {}", self.pos)));
-        }
-        Ok(n)
     }
 
     /// Read the rest of the line until CRLF, unfolding continuation lines
@@ -217,26 +226,23 @@ impl<'a> Scanner<'a> {
     /// An unfolded line is the only shape that cannot be expressed as a span.
     /// One pass, constant stack: each line is copied once into the unfolded
     /// value, whatever the number of continuation lines.
-    pub fn read_header_value(&mut self) -> HeaderValue {
+    pub fn read_header_value(&mut self) -> Result<HeaderValue, SipParseError> {
         let mut line = self.pos;
         let mut unfolded: Option<String> = None;
-        while self.pos < self.buf.len() {
-            let eol = match self.buf[self.pos] {
-                CR if self.pos + 1 < self.buf.len() && self.buf[self.pos + 1] == LF => 2,
-                LF => 1, // bare LF (lenient)
-                _ => {
-                    self.pos += 1;
-                    continue;
-                }
+        while !self.at_end() {
+            let Some(eol) = self.eol_len() else {
+                self.bump(1);
+                continue;
             };
             let end = self.pos;
-            self.pos += eol;
-            if self.pos >= self.buf.len() || !is_wsp(self.buf[self.pos]) {
+            self.bump(eol);
+            if !self.peek().is_some_and(is_wsp) {
                 return self.finish_value(line..end, unfolded);
             }
-            self.pos += 1; // the fold's WSP: the fold becomes one SP
+            self.bump(1); // the fold's WSP: the fold becomes one SP
+            let text = self.bytes(line..end)?;
             let out = unfolded.get_or_insert_with(String::new);
-            out.push_str(&String::from_utf8_lossy(&self.buf[line..end]));
+            out.push_str(&String::from_utf8_lossy(text));
             out.push(' ');
             line = self.pos;
         }
@@ -244,25 +250,33 @@ impl<'a> Scanner<'a> {
         self.finish_value(line..self.pos, unfolded)
     }
 
+    /// The bytes of a span this scanner read.
+    fn bytes(&self, span: Span) -> Result<&'a [u8], SipParseError> {
+        self.buf
+            .get(span.clone())
+            .ok_or_else(|| SipParseError::new(format!("span {span:?} outside the scanned bytes")))
+    }
+
     /// The value whose last line is `last`: that span itself when nothing was
     /// folded, else the unfolded text it completes.
-    fn finish_value(&self, last: Span, unfolded: Option<String>) -> HeaderValue {
-        match unfolded {
+    fn finish_value(
+        &self,
+        last: Span,
+        unfolded: Option<String>,
+    ) -> Result<HeaderValue, SipParseError> {
+        Ok(match unfolded {
             None => HeaderValue::Span(last),
             Some(mut out) => {
-                out.push_str(&String::from_utf8_lossy(&self.buf[last]));
+                out.push_str(&String::from_utf8_lossy(self.bytes(last)?));
                 HeaderValue::Unfolded(out)
             }
-        }
+        })
     }
 
     /// Expect and consume CRLF (also accepts bare LF). Errors otherwise.
     pub fn expect_crlf(&mut self) -> Result<(), SipParseError> {
-        if self.pos < self.buf.len() && self.buf[self.pos] == CR {
-            self.pos += 1;
-        }
-        if self.pos < self.buf.len() && self.buf[self.pos] == LF {
-            self.pos += 1;
+        self.skip_if(CR);
+        if self.skip_if(LF) {
             return Ok(());
         }
         Err(SipParseError::new(format!("Expected CRLF at position {}", self.pos)))
@@ -270,61 +284,27 @@ impl<'a> Scanner<'a> {
 
     /// Expect and consume a specific byte.
     pub fn expect(&mut self, byte: u8) -> Result<(), SipParseError> {
-        if self.pos >= self.buf.len() || self.buf[self.pos] != byte {
-            let got = self.buf.get(self.pos).copied().map(|b| b as i32).unwrap_or(-1);
-            return Err(SipParseError::new(format!(
-                "Expected byte 0x{byte:x} at position {}, got 0x{:x}",
-                self.pos, got
-            )));
+        if self.skip_if(byte) {
+            return Ok(());
         }
-        self.pos += 1;
-        Ok(())
-    }
-
-    /// At a CRLF (or bare LF) boundary?
-    pub fn at_crlf(&self) -> bool {
-        if self.pos >= self.buf.len() {
-            return false;
-        }
-        if self.buf[self.pos] == LF {
-            return true;
-        }
-        self.buf[self.pos] == CR && self.pos + 1 < self.buf.len() && self.buf[self.pos + 1] == LF
+        let got = self.peek().map_or(-1, i32::from);
+        Err(SipParseError::new(format!(
+            "Expected byte 0x{byte:x} at position {}, got 0x{got:x}",
+            self.pos
+        )))
     }
 
     /// At the blank line marking end of headers? (Each header's trailing CRLF
     /// is already consumed by `read_header_value`, so this is a single CRLF /
     /// bare LF — or EOF.)
     pub fn at_end_of_headers(&self) -> bool {
-        let p = self.pos;
-        let len = self.buf.len();
-        if p >= len {
-            return true; // EOF counts as end of headers
-        }
-        if p + 1 < len && self.buf[p] == CR && self.buf[p + 1] == LF {
-            return true;
-        }
-        self.buf[p] == LF
+        self.at_end() || self.eol_len().is_some()
     }
 
     /// Consume the blank line (single CRLF or bare LF).
     pub fn consume_end_of_headers(&mut self) {
-        if self.pos < self.buf.len() && self.buf[self.pos] == CR {
-            self.pos += 1;
-        }
-        if self.pos < self.buf.len() && self.buf[self.pos] == LF {
-            self.pos += 1;
-        }
-    }
-
-    /// Remaining bytes.
-    pub fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-
-    /// Slice the underlying buffer.
-    pub fn slice(&self, start: usize, end: usize) -> &'a [u8] {
-        &self.buf[start..end]
+        self.skip_if(CR);
+        self.skip_if(LF);
     }
 }
 
@@ -334,16 +314,15 @@ impl<'a> Scanner<'a> {
 /// `0x10`, `Infinity`, `NaN`, empty). Overflow against `max` is detected
 /// mid-loop so adversarially long inputs cannot wrap. `None` on any rejection.
 pub fn strict_non_negative_decimal(s: &str, max: u64) -> Option<u64> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
+    if s.is_empty() {
         return None;
     }
     let mut n: u64 = 0;
-    for &c in bytes {
-        if !(0x30..=0x39).contains(&c) {
+    for c in s.bytes() {
+        if !c.is_ascii_digit() {
             return None;
         }
-        n = n.checked_mul(10)?.checked_add((c - 0x30) as u64)?;
+        n = n.checked_mul(10)?.checked_add(u64::from(char::from(c).to_digit(10)?))?;
         if n > max {
             return None;
         }

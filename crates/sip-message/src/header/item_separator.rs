@@ -40,7 +40,7 @@ impl ItemSeparator {
     /// The items of `value`, trimmed and borrowed. A separator inside a
     /// quoted-string or `<...>` is data, not a separator.
     pub fn split(self, value: &str) -> TopLevelEntries<'_> {
-        top_level_entries(value, self.byte())
+        top_level_entries(value, self)
     }
 }
 
