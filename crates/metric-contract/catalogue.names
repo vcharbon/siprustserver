@@ -149,6 +149,7 @@ b2bua-runner b2bua_udp_queue_max gauge fixed {}
 b2bua-runner b2bua_udp_tail_dropped_total counter fixed {}
 b2bua-runner b2bua_udp_send_would_block_total counter fixed {}
 b2bua-runner b2bua_udp_kernel_rx_dropped_total counter fixed {}
+b2bua-runner b2bua_udp_pre_ingress_panics_total counter fixed {}
 b2bua-runner b2bua_overload_token_bucket_level gauge fixed {}
 b2bua-runner b2bua_overload_cps_gate_enabled gauge fixed {}
 b2bua-runner b2bua_overload_elu_ewma gauge fixed {}
@@ -237,6 +238,7 @@ sip-proxy-runner sip_proxy_udp_tail_dropped_total counter fixed {}
 sip-proxy-runner sip_proxy_intake_shed_total counter fixed {}
 sip-proxy-runner sip_proxy_udp_send_would_block_total counter fixed {}
 sip-proxy-runner sip_proxy_udp_kernel_rx_dropped_total counter fixed {}
+sip-proxy-runner sip_proxy_udp_pre_ingress_panics_total counter fixed {}
 sip-proxy-runner sip_proxy_recv_shards_stalled gauge fixed {}
 sip-proxy-runner sip_proxy_worker_pool_empty gauge fixed {}
 sip-proxy-runner sip_proxy_discovery_no_client gauge fixed {}

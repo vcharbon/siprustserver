@@ -68,7 +68,7 @@ use b2bua::decision::CallDecisionEngine;
 use b2bua::destination_allowlist::{classify_admission, AdmissionVerdict};
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::limiter::CallLimiter;
-use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
+use b2bua::metrics::{B2buaMetrics, LiveGauge, UdpTransportMetrics};
 use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
@@ -587,20 +587,20 @@ impl RunnerEnv {
         log_socket_buffers(name, endpoint.as_ref(), self.udp_rcvbuf, self.udp_sndbuf);
 
         // The `UdpTransport` facade's Prometheus-visible shape: the brake
-        // counters + live queue depth / queue_max / tail-drop / refused sends
-        // proxied off the bound endpoint.
+        // counters + live readings of the bound endpoint.
         let udp_metrics = {
-            let ep_depth = endpoint.clone();
-            let ep_tail = endpoint.clone();
-            let ep_would_block = endpoint.clone();
-            let ep_kernel = endpoint.clone();
+            let live = |read: fn(&dyn UdpEndpoint) -> u64| -> LiveGauge {
+                let endpoint = endpoint.clone();
+                Arc::new(move || read(endpoint.as_ref()))
+            };
             UdpTransportMetrics::new(
                 self.queue_max,
                 brake_counters.clone(),
-                Arc::new(move || ep_depth.queue_depth() as u64),
-                Arc::new(move || ep_tail.counters().tail_dropped),
-                Arc::new(move || ep_would_block.counters().send_would_block),
-                Arc::new(move || ep_kernel.counters().kernel_rx_dropped),
+                live(|ep| ep.queue_depth() as u64),
+                live(|ep| ep.counters().tail_dropped),
+                live(|ep| ep.counters().send_would_block),
+                live(|ep| ep.counters().kernel_rx_dropped),
+                live(|ep| ep.counters().pre_ingress_panics),
             )
         };
         tracing::info!(

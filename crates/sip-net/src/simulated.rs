@@ -190,11 +190,7 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
         };
 
         let depth = queue.depth();
-        let action = match &pre {
-            Some(hook) => hook(&raw, src, depth),
-            None => PreIngressAction::Accept,
-        };
-        match action {
+        match crate::pre_ingress::judge(pre.as_ref(), &raw, src, depth, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }

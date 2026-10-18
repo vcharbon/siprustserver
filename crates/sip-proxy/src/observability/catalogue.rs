@@ -291,6 +291,12 @@ pub const UDP_KERNEL_RX_DROPPED: Family = Family::counter(
     "Inbound datagrams the kernel dropped on the signalling sockets before the proxy read them, mostly on a full receive buffer (SO_RCVBUF, PROXY_UDP_RCVBUF). Summed over recv shards and both faces.",
 );
 
+pub const UDP_PRE_INGRESS_PANICS: Family = Family::counter(
+    "sip_proxy_udp_pre_ingress_panics_total",
+    Labels::None,
+    "Inbound datagrams whose pre-ingress hook (the intake shed) panicked on the receive pump; each was accepted and is a hook defect, expected 0. Summed over recv shards and both faces.",
+);
+
 pub const RECV_SHARDS_STALLED: Family = Family::gauge(
     "sip_proxy_recv_shards_stalled",
     Labels::None,
@@ -449,6 +455,7 @@ pub const PROXY: &[Family] = &[
     INTAKE_SHED,
     UDP_SEND_WOULD_BLOCK,
     UDP_KERNEL_RX_DROPPED,
+    UDP_PRE_INGRESS_PANICS,
     RECV_SHARDS_STALLED,
     WORKER_POOL_EMPTY,
     DISCOVERY_NO_CLIENT,

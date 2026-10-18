@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 
 use crate::fragmentation::pin_fragmentation;
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
+use crate::pre_ingress;
 use crate::queue::PacketQueue;
 use crate::socket_stats::{rx_dropped, socket_buffers};
 use crate::types::{
@@ -158,6 +159,14 @@ async fn recv_loop(
     pre_ingress: Option<PreIngressHook>,
     clock: Clock,
 ) {
+    // However the pump ends — a `recv_from` error, an abort, a panic — the
+    // queue closes, so the endpoint's `recv()` resolves to None and the owner
+    // task can wind down. Without it the layer goes permanently DEAF — sends
+    // still work, nothing is ever received, no panic/metric/readiness change —
+    // because the endpoint is owned by the very owner task blocked on
+    // `recv()`, so its `Drop` (the other `close` site) can never run until
+    // that `recv()` returns.
+    let _closes = queue.close_on_drop();
     let mut buf = vec![0u8; RECV_BUF_LEN];
     // A `recv_from` error is treated as terminal (socket closed) and ends the
     // pump. The source logged and continued on transient errors; for our
@@ -165,11 +174,7 @@ async fn recv_loop(
     while let Ok((n, src)) = socket.recv_from(&mut buf).await {
         let raw = buf[..n].to_vec();
         let depth = queue.depth();
-        let action = match &pre_ingress {
-            Some(hook) => hook(&raw, src, depth),
-            None => PreIngressAction::Accept,
-        };
-        match action {
+        match pre_ingress::judge(pre_ingress.as_ref(), &raw, src, depth, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -193,13 +198,6 @@ async fn recv_loop(
             }
         }
     }
-    // The pump is terminating (recv_from error). CLOSE the queue so the
-    // endpoint's `recv()` resolves to None and the owner task can wind down.
-    // Without this the layer goes permanently DEAF — sends still work, nothing is
-    // ever received, no panic/metric/readiness change — because the endpoint is
-    // owned by the very owner task blocked on `recv()`, so its `Drop` (the only
-    // other `close` site) can never run until that `recv()` returns.
-    queue.close();
 }
 
 /// The one send path of a real socket: one non-blocking `sendto` on the fd,

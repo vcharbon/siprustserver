@@ -16,6 +16,9 @@ pub struct UdpShardStats {
     /// Datagrams the kernel dropped on the shard's sockets before the recv
     /// pump read them (a full `SO_RCVBUF`).
     pub kernel_rx_dropped: u64,
+    /// Datagrams whose pre-ingress hook (the intake shed) panicked: each was
+    /// accepted, each is a hook defect.
+    pub pre_ingress_panics: u64,
 }
 
 impl UdpShardStats {
@@ -39,6 +42,7 @@ impl UdpShardStats {
             intake_shed: c.pre_ingress_dropped,
             send_would_block: c.send_would_block,
             kernel_rx_dropped: c.kernel_rx_dropped,
+            pre_ingress_panics: c.pre_ingress_panics,
         }
     }
 }
@@ -52,5 +56,15 @@ impl std::ops::AddAssign for UdpShardStats {
         self.intake_shed += o.intake_shed;
         self.send_would_block += o.send_would_block;
         self.kernel_rx_dropped += o.kernel_rx_dropped;
+        self.pre_ingress_panics += o.pre_ingress_panics;
+    }
+}
+
+impl std::iter::Sum for UdpShardStats {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |mut total, shard| {
+            total += shard;
+            total
+        })
     }
 }

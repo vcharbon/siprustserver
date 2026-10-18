@@ -93,6 +93,7 @@ async fn setup(
     let ep_tail = b2bua.clone();
     let ep_would_block = b2bua.clone();
     let ep_kernel = b2bua.clone();
+    let ep_hook = b2bua.clone();
     let metrics = UdpTransportMetrics::new(
         QUEUE_MAX,
         brake,
@@ -100,6 +101,7 @@ async fn setup(
         Arc::new(move || ep_tail.counters().tail_dropped),
         Arc::new(move || ep_would_block.counters().send_would_block),
         Arc::new(move || ep_kernel.counters().kernel_rx_dropped),
+        Arc::new(move || ep_hook.counters().pre_ingress_panics),
     );
 
     (net, b2bua, flooder, metrics)

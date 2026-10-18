@@ -55,6 +55,51 @@ async fn pre_ingress_reply_round_trips() {
     assert_eq!(b.counters().enqueued, 0);
 }
 
+/// A pre-ingress hook that panics on one datagram costs the pump nothing:
+/// that datagram is accepted and counted, and the next one is received.
+#[tokio::test]
+async fn a_panicking_pre_ingress_hook_keeps_the_pump_receiving() {
+    let net = RealSignalingNetwork::new();
+    let hook: PreIngressHook = Arc::new(|raw: &[u8], _src, _depth| {
+        if raw == b"PANIC" {
+            panic!("probe: pre-ingress hook panic");
+        }
+        PreIngressAction::Accept
+    });
+    let a = net.bind_udp(loopback(64)).await.unwrap();
+    let b = net.bind_udp(loopback(64).with_pre_ingress(hook)).await.unwrap();
+
+    a.send_to(b"PANIC", b.local_addr()).await.unwrap();
+    a.send_to(b"after the panic", b.local_addr()).await.unwrap();
+
+    let first = timeout(Duration::from_secs(2), b.recv()).await.expect("recv timed out");
+    assert_eq!(first.expect("the pump outlives the hook's panic").raw, b"PANIC");
+    let second = timeout(Duration::from_secs(2), b.recv()).await.expect("recv timed out");
+    assert_eq!(second.expect("the pump keeps receiving").raw, b"after the panic");
+    assert_eq!(b.counters().pre_ingress_panics, 1);
+}
+
+/// A pump that ends abnormally — here a receive tap that panics — closes the
+/// queue on its way out, so the consumer's `recv()` resolves instead of
+/// waiting forever on a pump that is gone.
+#[tokio::test]
+async fn a_pump_that_panics_closes_the_queue() {
+    let net = RealSignalingNetwork::new();
+    let a = net.bind_udp(loopback(64)).await.unwrap();
+    let b = net.bind_udp(loopback(64)).await.unwrap();
+    let tap: sip_net::RecvTap = Arc::new(|_, _| panic!("probe: receive tap panic"));
+    assert!(b.install_recv_tap(tap));
+
+    a.send_to(b"ends the pump", b.local_addr()).await.unwrap();
+
+    let ended = timeout(Duration::from_secs(2), b.recv()).await;
+    assert!(
+        matches!(ended, Ok(None)),
+        "the queue closes when the pump ends: {:?}",
+        ended.map(|p| p.map(|p| p.raw))
+    );
+}
+
 #[tokio::test]
 async fn real_has_no_transit_or_inflight() {
     let net = RealSignalingNetwork::new();

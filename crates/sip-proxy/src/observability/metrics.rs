@@ -413,11 +413,7 @@ impl ProxyMetrics {
 
     /// Cross-shard aggregate.
     fn udp_totals(&self) -> UdpShardStats {
-        let mut t = UdpShardStats::default();
-        for v in self.udp_shards.lock().unwrap().values() {
-            t += *v;
-        }
-        t
+        self.udp_shards.lock().unwrap().values().copied().sum()
     }
 
     /// Publish how many recv shards are stalled (the readiness gate's reading).
@@ -524,6 +520,7 @@ impl ProxyMetrics {
         c::INTAKE_SHED.render_value(&mut s, udp.intake_shed);
         c::UDP_SEND_WOULD_BLOCK.render_value(&mut s, udp.send_would_block);
         c::UDP_KERNEL_RX_DROPPED.render_value(&mut s, udp.kernel_rx_dropped);
+        c::UDP_PRE_INGRESS_PANICS.render_value(&mut s, udp.pre_ingress_panics);
         c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));
         self.pool.render_pool(&mut s);
 

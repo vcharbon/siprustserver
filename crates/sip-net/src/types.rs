@@ -125,6 +125,9 @@ pub struct UdpEndpointCounters {
     pub pre_ingress_replies: u64,
     /// Pre-ingress replies the socket refused to send (see [`SendErrorKind`]).
     pub pre_ingress_reply_failures: u64,
+    /// Datagrams whose pre-ingress hook panicked: each was accepted, and each
+    /// is a hook defect.
+    pub pre_ingress_panics: u64,
     /// Datagrams dropped because the socket could not take them without
     /// suspending the sender ([`SendErrorKind::WouldBlock`]): the send buffer
     /// was full. Non-zero means egress was throttled by the kernel; the

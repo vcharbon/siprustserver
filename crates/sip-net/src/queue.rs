@@ -14,7 +14,7 @@
 //! queue.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use tokio::sync::Notify;
 
@@ -136,10 +136,26 @@ impl PacketQueue {
         self.lock().buf.len()
     }
 
+    /// A guard that closes the queue when dropped: held by a pump, it closes
+    /// the queue on any exit — return, abort or panic — so the consumer's
+    /// `take` never waits on a pump that is gone.
+    pub fn close_on_drop(self: &Arc<Self>) -> CloseOnDrop {
+        CloseOnDrop(self.clone())
+    }
+
     /// Close the queue: no further offers succeed, pending/future `take`s
     /// return `None` once drained.
     pub fn close(&self) {
         self.lock().closed = true;
         self.notify.notify_waiters();
+    }
+}
+
+/// Closes its queue when dropped ([`PacketQueue::close_on_drop`]).
+pub struct CloseOnDrop(Arc<PacketQueue>);
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }

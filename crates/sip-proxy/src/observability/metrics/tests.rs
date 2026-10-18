@@ -46,6 +46,7 @@ fn a_dual_face_shard_sums_both_faces() {
                 pre_ingress_dropped: n,
                 send_would_block: n,
                 kernel_rx_dropped: n,
+                pre_ingress_panics: n,
                 ..UdpEndpointCounters::default()
             },
         )
@@ -59,6 +60,7 @@ fn a_dual_face_shard_sums_both_faces() {
         intake_shed: v,
         send_would_block: v,
         kernel_rx_dropped: v,
+        pre_ingress_panics: v,
     };
     assert_eq!(UdpShardStats::of_faces(&int, Some(&ext)), each(11));
     assert_eq!(UdpShardStats::of_faces(&int, None), UdpShardStats { queue_max: 8, ..each(1) });

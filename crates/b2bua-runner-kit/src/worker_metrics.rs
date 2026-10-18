@@ -163,6 +163,7 @@ mod tests {
             Arc::new(|| 0),
             Arc::new(|| 0),
             Arc::new(|| 0),
+            Arc::new(|| 0),
         );
         let pulse = || Arc::new(sip_txn::LoopPulse::new());
         let parked = || tokio::spawn(std::future::pending::<()>()).abort_handle();

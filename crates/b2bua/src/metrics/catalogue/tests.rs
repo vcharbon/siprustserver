@@ -21,6 +21,7 @@ fn udp_with(brake: IngressBrakeCounters) -> UdpTransportMetrics {
         Arc::new(|| 0),
         Arc::new(|| 0),
         Arc::new(|| 0),
+        Arc::new(|| 0),
     )
 }
 

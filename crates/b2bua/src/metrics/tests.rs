@@ -1,4 +1,5 @@
 use super::*;
+use crate::ingress_brake::IngressBrakeCounters;
 
 #[test]
 fn per_method_request_response_render() {
@@ -220,6 +221,7 @@ fn shape() -> (UdpTransportMetrics, IngressBrakeCounters, Arc<AtomicU64>, Arc<At
         Arc::new(move || t.load(Ordering::Relaxed)),
         Arc::new(|| 0),
         Arc::new(|| 7),
+        Arc::new(|| 3),
     );
     (m, brake, depth, tail)
 }
@@ -265,6 +267,7 @@ fn udp_transport_metrics_render() {
     assert!(txt.contains("b2bua_udp_tail_dropped_total 11"));
     assert!(txt.contains("b2bua_udp_kernel_rx_dropped_total 7"));
     assert!(txt.contains("# TYPE b2bua_udp_kernel_rx_dropped_total counter"));
+    assert!(txt.contains("b2bua_udp_pre_ingress_panics_total 3"));
     // Prometheus TYPE lines: gauges vs counters.
     assert!(txt.contains("# TYPE b2bua_udp_queue_depth gauge"));
     assert!(txt.contains("# TYPE b2bua_udp_queue_max gauge"));

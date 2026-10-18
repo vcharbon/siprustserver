@@ -11,7 +11,7 @@ ext .rs
 # No generated or fixture .rs file is tracked; one would go here as
 # `exclude <path glob>`.
 
-crates/b2bua-harness/src/lib.rs 1062
+crates/b2bua-harness/src/lib.rs 1056
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
 crates/b2bua-harness/tests/it/message_ring.rs 955
@@ -29,7 +29,7 @@ crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
 crates/b2bua/src/limiter/release_queue.rs 513
 crates/b2bua/src/metrics/limiter.rs 551
-crates/b2bua/src/metrics.rs 974
+crates/b2bua/src/metrics.rs 836
 crates/b2bua/src/repl/changelog.rs 620
 crates/b2bua/src/repl/puller.rs 782
 crates/b2bua/src/repl/real_transport_tests.rs 1208
@@ -116,7 +116,7 @@ crates/sip-pcap/src/bin/sipflow.rs 1059
 crates/sip-pcap/src/flow.rs 820
 crates/sip-pcap/src/flow/tests.rs 1000
 crates/sip-proxy-runner/src/main.rs 506
-crates/sip-proxy/src/observability/metrics.rs 571
+crates/sip-proxy/src/observability/metrics.rs 568
 crates/sip-txn/src/layer/client.rs 746
 crates/sip-txn/tests/it/bounded_queue.rs 806
 crates/sip-txn/tests/it/fsm.rs 1415
