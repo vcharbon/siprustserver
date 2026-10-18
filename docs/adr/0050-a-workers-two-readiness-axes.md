@@ -66,6 +66,11 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    ```
 
    `cause` is free text for metrics and logs; the proxy acts on `new` alone.
+
+   The worker holds no transaction for an out-of-dialog OPTIONS: every copy
+   is answered afresh under a To-tag derived from the request (RFC 3261
+   §8.2.7), so a retransmitted probe can draw a newer payload or readiness
+   than the copy before it.
 3. **The proxy's view of a worker** is health `Unknown | Alive | Dead` plus
    acceptance. A `200` makes it `Alive` and sets acceptance from `new` (an
    absent header reads `accept`); a `503` sets acceptance to `refuse` and

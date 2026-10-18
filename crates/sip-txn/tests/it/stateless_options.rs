@@ -67,6 +67,17 @@ async fn an_out_of_dialog_options_opens_no_transaction_and_every_copy_is_deliver
     }
 }
 
+/// Another out-of-dialog request keeps its server transaction: only OPTIONS
+/// is answered statelessly.
+#[tokio::test(start_paused = true)]
+async fn an_out_of_dialog_message_keeps_its_transaction() {
+    let mut stack = stack().await;
+    stack.inject(&inbound_request("MESSAGE", "z9hG4bK-message", "message", None)).await;
+    elapse_ms(TRANSIT + 1).await;
+    assert_eq!(messages(stack.drain_events()).len(), 1);
+    assert_eq!(stack.txn.metrics().active_transactions(), 1, "it opens one");
+}
+
 /// An OPTIONS inside a dialog (To-tag) keeps its server transaction: its
 /// retransmission is absorbed and answered from the cached response.
 #[tokio::test(start_paused = true)]

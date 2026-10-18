@@ -1,5 +1,6 @@
 //! RFC 3261 §17.2 server (UAS) transactions: inbound request admission
-//! (auto-100, cached-response replay for duplicates), ACK absorption and the
+//! (auto-100, cached-response replay for duplicates, an out-of-dialog OPTIONS
+//! passed up with no transaction under `stateless_options`), ACK absorption and the
 //! Timer I Confirmed hold, the RFC 6026 Accepted hold after a 2xx, TU
 //! response sending (Timer H/J/L arming), and Timer G non-2xx final
 //! retransmission. A CANCEL of a server INVITE is `layer::server_cancel`'s;
