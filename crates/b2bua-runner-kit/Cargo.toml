@@ -42,7 +42,7 @@ serde_json = { workspace = true }
 repl-net = { path = "../repl-net" }
 topology = { path = "../topology", features = ["kube"] }
 # The in-cluster client K8sMembership watches through.
-kube = { version = "1", default-features = false, features = ["client", "rustls-tls"] }
+kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls"] }
 # rustls 0.23 has no compile-time default CryptoProvider and kube's `rustls-tls`
 # picks none: `ring` is installed before the kube client's first handshake.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

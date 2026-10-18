@@ -213,13 +213,13 @@ impl Membership for K8sMembership {
 /// (ADR-0031 D1). A Pod listed in two slices (a slice rebalance in flight) is one
 /// peer: the conditions are OR-ed across its copies and the first host seen
 /// wins, so a worker that is ready in either slice is ready — slice order is
-/// arbitrary. Endpoints with no address or no identity are skipped. Pure — the
-/// testable heart of the informer (a synthetic slice in, the expected peers out;
-/// no cluster needed).
+/// arbitrary. A slice with no endpoint list, and endpoints with no address or no
+/// identity, are skipped. Pure — the testable heart of the informer (a synthetic
+/// slice in, the expected peers out; no cluster needed).
 fn peers_from_slices<'a>(slices: impl IntoIterator<Item = &'a EndpointSlice>) -> Vec<Peer> {
     let mut out: Vec<Peer> = Vec::new();
     for slice in slices {
-        for ep in &slice.endpoints {
+        for ep in slice.endpoints.iter().flatten() {
             let ready = ep.conditions.as_ref().and_then(|c| c.ready).unwrap_or(false);
             let terminating = ep.conditions.as_ref().and_then(|c| c.terminating).unwrap_or(false);
             let Some(host) = ep.addresses.first().cloned() else {
@@ -271,7 +271,11 @@ mod tests {
     }
 
     fn slice(endpoints: Vec<Endpoint>) -> EndpointSlice {
-        EndpointSlice { address_type: "IPv4".to_string(), endpoints, ..Default::default() }
+        EndpointSlice {
+            address_type: "IPv4".to_string(),
+            endpoints: Some(endpoints),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -354,5 +358,12 @@ mod tests {
         ep.hostname = Some("b2bua-worker-9".to_string());
         let s = slice(vec![ep]);
         assert_eq!(peers_from_slices([&s]), vec![Peer::new("b2bua-worker-9", "10.0.0.9")]);
+    }
+
+    #[test]
+    fn a_slice_without_an_endpoint_list_adds_no_peer() {
+        let empty = EndpointSlice { address_type: "IPv4".to_string(), ..Default::default() };
+        let s = slice(vec![endpoint("b2bua-worker-0", "10.0.0.1", Some(true))]);
+        assert_eq!(peers_from_slices([&empty, &s]), vec![Peer::new("b2bua-worker-0", "10.0.0.1")]);
     }
 }

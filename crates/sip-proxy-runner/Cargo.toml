@@ -40,7 +40,7 @@ sip-clock = { path = "../sip-clock" }
 # replaces discovery (ADR-0046).
 topology = { path = "../topology", features = ["kube"] }
 # Default in-cluster kube client for K8sMembership.
-kube = { version = "1", default-features = false, features = ["client", "rustls-tls"] }
+kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls"] }
 # rustls 0.23 ships no compile-time default CryptoProvider unless a provider
 # feature is enabled; install one before the first TLS handshake (mirrors the
 # b2bua-runner) or the kube client panics.
