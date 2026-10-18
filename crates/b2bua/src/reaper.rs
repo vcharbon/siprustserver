@@ -44,8 +44,9 @@ pub const REAPER_TOPIC: &str = "reaper";
 /// threshold. Handled by the CORE_LAYER `reaper-stale` rule. Carries the
 /// observed stamp as `payload.watermark` (the X5 confirm input).
 pub const OUTCOME_STALE: &str = "stale";
-/// Strike-1 verdict: a handler body for this call panicked. Handled by the
-/// CORE_LAYER `reaper-fatal-error` rule.
+/// Strike-1 verdict: a handler body for this call panicked or was aborted.
+/// Handled by the CORE_LAYER `reaper-fatal-error` rule, which tears an Active
+/// call down on the wire and forces a terminating one terminal.
 pub const OUTCOME_FATAL: &str = "fatal-error";
 /// Overflow verdict: the call's dispatch overflow reached its ceiling — more
 /// must-run events arrive than the call consumes. Handled by the CORE_LAYER
@@ -140,7 +141,7 @@ impl Reaper {
     /// The dispatcher-facing failure hook (X6): strike 1 → a `fatal-error`
     /// verdict through the normal rules; strike ≥ 2 (the rules path itself
     /// failed) → `discharge`. Aborts count as strikes too — an aborted body
-    /// was hung, so its call needs the same forced resolution — except one the
+    /// was hung, so its call needs the same resolution — except one the
     /// overflow ladder asked for: its call's teardown is already queued, and a
     /// strike would force the legs that teardown is ending on the wire.
     pub fn failure_hook(&self) -> crate::dispatch::FailureHook {

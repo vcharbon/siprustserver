@@ -6,6 +6,8 @@
 //!   priority order, and the compose-time opt-out seam ([`ComposeOptions`]).
 //! - `core_rules` — the CORE_LAYER rules themselves, one exhaustive
 //!   registration list.
+//! - `reaper_verdicts` — the bodies of the rules that handle the call
+//!   reaper's verdicts (ADR-0020).
 //! - `route_fold` — the shared route-shaped-payload parser + parity actions
 //!   both async route folds (`call-failure-result`, `call-release-result`)
 //!   apply identically.
@@ -15,6 +17,7 @@
 
 mod compose;
 mod core_rules;
+mod reaper_verdicts;
 mod route_fold;
 
 pub use compose::{default_rules, default_rules_with, ComposeOptions};
