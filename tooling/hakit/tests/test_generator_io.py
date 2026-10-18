@@ -244,6 +244,22 @@ def test_records_the_twins_buffer_dropped_are_a_record_gap_naming_their_stream(t
     assert str(lost[0]["detail"]).startswith("7 records")
 
 
+def test_a_record_copy_not_complete_by_the_settle_deadline_is_a_record_gap_naming_its_stream(tmp_path: Path) -> None:
+    """A twin that died or a disk that stalls past the run leaves records off the disk, uncounted."""
+
+    def stuck(c: Call) -> str | None:
+        if c.kind == "read" and c.path is not None and c.path.name == "records.copy.json" and "basic" in str(c.path):
+            return '{"complete": false, "lines": 0, "lost": 0}\n'
+        return None
+
+    clock, fake = simulated([stuck], shapes=["basic"])
+    r = Runner(content(tmp_path), SCHEMAS, lab_from_env({"HAKIT_GENERATOR_SCRATCH": SCRATCH}), fake, clock,
+               tmp_path / "results", say=lambda _m: None)
+    verdict = json.loads((r.run("io") / "verdict.json").read_text())
+    stuck_ = [i for i in verdict["integrity"] if "did not complete" in str(i["detail"])]
+    assert [(i["kind"], i["stream"]) for i in stuck_] == [("record_gap", "basic")]
+
+
 def test_a_pod_generators_files_leave_its_process_room_in_its_memory(tmp_path: Path) -> None:
     """A memory-backed emptyDir's pages are charged to the container that writes them."""
     run_dir, _ = run(tmp_path, {"HAKIT_GENERATOR_SCRATCH": SCRATCH})

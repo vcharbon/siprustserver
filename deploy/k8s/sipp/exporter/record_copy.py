@@ -10,10 +10,11 @@ is the buffer, never the run's records. Lines that do not fit the buffer (a
 disk slower than SIPp for longer than the buffer holds) or that fail to write
 are counted lost, never written in part.
 
-The status file (JSON: complete, lines, lost) is rewritten each time `lost`
-grows, and once SIPp closed the FIFO and every line is on disk or lost
-(`complete`). `lines` counts the lines on disk, a last line SIPp did not end
-included.
+The status file (JSON: complete, lines, lost) is rewritten by a third thread
+each time `lost` grows, and once SIPp closed the FIFO and every line is on
+disk or lost (`complete`). `lines` counts the lines on disk, a last line SIPp
+did not end included. A status that never says complete (the twin died, the
+disk stalled past the run) is the runner's to report.
 """
 import collections
 import fcntl
@@ -28,7 +29,8 @@ F_SETPIPE_SZ = getattr(fcntl, "F_SETPIPE_SZ", 1031)
 
 
 class RecordCopy:
-    """feed() and close() are the reader's side, write_all() the writer's."""
+    """feed() and close() are the reader's side, write_all() the writer's,
+    report_all() the status file's."""
 
     def __init__(self, dst, status, buffer_bytes):
         self.dst, self.status, self.cap = dst, status, buffer_bytes
@@ -37,6 +39,8 @@ class RecordCopy:
         self._partial = b""
         # Set while the rest of a line longer than the buffer is dropped.
         self._skipping = False
+        # Set while the record file ends in a line a failed write tore.
+        self._torn = False
         self._closed = False
         self._complete = False
         self._lines = 0
@@ -51,10 +55,6 @@ class RecordCopy:
         with self._cond:
             return self._lost
 
-    def complete(self):
-        with self._cond:
-            return self._complete
-
     def _queue(self, block, lines):
         """Called with the lock held."""
         if self._held + len(block) > self.cap:
@@ -62,7 +62,7 @@ class RecordCopy:
         else:
             self._blocks.append((block, lines))
             self._held += len(block)
-        self._cond.notify()
+        self._cond.notify_all()
 
     def feed(self, chunk):
         """Queue the complete lines of `chunk`; a line without its end waits
@@ -81,7 +81,7 @@ class RecordCopy:
             if len(self._partial) > self.cap:
                 self._partial, self._skipping = b"", True
                 self._lost += 1
-                self._cond.notify()
+                self._cond.notify_all()
 
     def close(self):
         """SIPp closed the FIFO: a last line it did not end is queued as it is."""
@@ -90,54 +90,58 @@ class RecordCopy:
                 self._queue(self._partial, 1)
                 self._partial = b""
             self._closed = True
-            self._cond.notify()
+            self._cond.notify_all()
 
     def write_all(self):
-        """Append the buffer to the record file until the FIFO is closed and the
-        buffer empty, then write the complete status."""
+        """Append the buffer to the record file until the FIFO is closed and
+        the buffer empty, then mark the copy complete."""
         fd = os.open(self.dst, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        reported = 0
         try:
             while True:
                 with self._cond:
-                    while not self._blocks and not self._closed and self._lost == reported:
+                    while not self._blocks and not self._closed:
                         self._cond.wait()
-                    item = self._blocks.popleft() if self._blocks else None
-                    done = item is None and self._closed
-                    lost = self._lost
-                if item is not None:
-                    self._write(fd, *item)
-                if done:
-                    with self._cond:
+                    if not self._blocks:
                         self._complete = True
-                    self._report()
-                    return
-                if lost != reported:
-                    reported = lost
-                    self._report()
+                        self._cond.notify_all()
+                        return
+                    block, lines = self._blocks.popleft()
+                self._write(fd, block, lines)
         finally:
             os.close(fd)
 
     def _write(self, fd, block, lines):
-        view = memoryview(block)
-        try:
-            while view:
-                view = view[os.write(fd, view):]
-            ok = True
-        except OSError:
-            ok = False
+        """Append one block; after a failed write, the lines written whole are
+        on disk, a torn last one too (ended by the next write), the rest lost."""
+        ok = not self._torn or _write_all(fd, b"\n")[1]
+        self._torn = self._torn and not ok
+        n, ok = _write_all(fd, block) if ok else (0, False)
+        whole = lines if ok else block.count(b"\n", 0, n)
+        torn = not ok and n > 0 and block[n - 1:n] != b"\n"
+        self._torn = self._torn or torn
         with self._cond:
             self._held -= len(block)
-            if ok:
-                self._lines += lines
-            else:
-                self._lost += lines
+            self._lines += whole + torn
+            self._lost += lines - whole - torn
+            self._cond.notify_all()
 
-    def _report(self):
+    def report_all(self):
+        """Rewrite the status file each time `lost` grows, and once complete;
+        its own thread, so a writer stuck on the disk never holds the count back."""
+        reported = None
+        while True:
+            with self._cond:
+                while (self._lost, self._complete) == reported:
+                    self._cond.wait()
+                doc = {"complete": self._complete, "lines": self._lines, "lost": self._lost}
+                reported = (self._lost, self._complete)
+            self._report(doc)
+            if doc["complete"]:
+                return
+
+    def _report(self, doc):
         if self.status is None:
             return
-        with self._cond:
-            doc = {"complete": self._complete, "lines": self._lines, "lost": self._lost}
         tmp = self.status + ".tmp"
         try:
             with open(tmp, "w") as fh:
@@ -165,8 +169,20 @@ class RecordCopy:
 
 
 def start(fifo, dst, status, buffer_bytes):
-    """A copier whose reader and writer run on daemon threads."""
+    """A copier whose reader, writer and reporter run on daemon threads."""
     copy = RecordCopy(dst, status, buffer_bytes)
     threading.Thread(target=copy.read_fifo, args=(fifo,), name="record-read", daemon=True).start()
     threading.Thread(target=copy.write_all, name="record-write", daemon=True).start()
+    threading.Thread(target=copy.report_all, name="record-report", daemon=True).start()
     return copy
+
+
+def _write_all(fd, data):
+    """The bytes written before an error, and whether all were."""
+    view, n = memoryview(data), 0
+    try:
+        while n < len(data):
+            n += os.write(fd, view[n:])
+        return n, True
+    except OSError:
+        return n, False

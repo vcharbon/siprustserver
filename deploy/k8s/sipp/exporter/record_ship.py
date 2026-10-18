@@ -8,7 +8,9 @@ stream fields), the record verbatim in `_msg`, and `_time` from its
 `ended_at_ms`. A line that is not a
 JSON object still ships, with `unparsed` set, so a reader sees it and counts
 it. Lines that fail to post stay queued and go out with the next poll; nothing
-is dropped while the process lives.
+is dropped while the process lives. The queue holds at most QUEUE_MAX lines
+(plus one read): while it is full the file is not read, so a VictoriaLogs
+outage holds the shipper's memory and loses nothing.
 
 Counters: records read by ending, records shipped, failed posts, queued lines.
 """
@@ -22,6 +24,7 @@ from datetime import datetime, timezone
 
 CHUNK = 64 * 1024
 BATCH = 1000
+QUEUE_MAX = 20_000
 INSERT = "/insert/jsonline?_stream_fields=run,source,stream&_msg_field=_msg&_time_field=_time"
 
 Counts = collections.namedtuple("Counts", "by_ending shipped failed_posts pending")
@@ -91,7 +94,7 @@ class RecordShipper:
                     self._fh = open(self.path, "rb")
                 except FileNotFoundError:
                     return
-            while True:
+            while len(self._queue) < QUEUE_MAX:
                 chunk = self._fh.read(CHUNK)
                 if not chunk:
                     break

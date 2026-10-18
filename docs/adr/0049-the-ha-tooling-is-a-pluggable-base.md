@@ -712,10 +712,13 @@ made. A run profile joins the two.
    makes in the working directory: the twin reads them out of the pipe into
    its bounded buffer and appends them to `records.jsonl` of the stream
    directory on disk, which it ships from, so a disk stall the buffer
-   absorbs never blocks SIPp. Records that do not fit the buffer are counted
-   in the twin's `records.copy.json`, which also says when every record is
-   on disk; the runner waits for that before it counts the records, and a
-   count of dropped records is a `record_gap` naming the stream. A firing
+   absorbs never blocks SIPp. Its shipper reads that file no further while
+   20 000 lines wait to be posted, so a VictoriaLogs outage bounds its
+   memory and loses nothing. Records that do not fit the buffer or fail to
+   write are counted in the twin's `records.copy.json`, which also says when
+   every record is on disk; the runner waits (bounded) for that before it
+   counts the records, and a count of dropped records, or a copy not
+   complete by then, is a `record_gap` naming the stream. A firing
    whose files stay in the scratch is a `generator_failure`, and `hakit
    cleanup` copies out the scratch of every run whose runner is gone.
 5. **Before the load.** The runner records the host (free memory, swap, disk,

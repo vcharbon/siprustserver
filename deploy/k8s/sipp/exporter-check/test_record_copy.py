@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -41,12 +42,30 @@ class RecordCopyTest(unittest.TestCase):
         copy.feed(PARTIAL)
         copy.close()
         copy.write_all()
+        copy.report_all()
         with open(self.dst, "rb") as fh:
             written = fh.read()
         self.assertEqual(written, b"".join(LINE % i for i in range(10)) + PARTIAL)
         with open(self.status) as fh:
             self.assertEqual(json.load(fh), {"complete": True, "lines": 11, "lost": 90})
         self.assertEqual(copy.held(), 0)
+
+    def test_the_lines_dropped_reach_the_status_while_the_writer_is_stuck(self):
+        copy = record_copy.RecordCopy(self.dst, self.status, buffer_bytes=len(LINE % 0))
+        threading.Thread(target=copy.report_all, daemon=True).start()
+        for i in range(5):  # no writer runs: the first line fills the buffer
+            copy.feed(LINE % i)
+        deadline = time.monotonic() + 5
+        while self.read_status().get("lost") != 4 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.read_status(), {"complete": False, "lines": 0, "lost": 4})
+
+    def read_status(self):
+        try:
+            with open(self.status) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
 
     def test_the_fifo_reaches_the_record_file_and_completes_when_sipp_closes_it(self):
         fifo = os.path.join(self.dir.name, "records.fifo")
@@ -57,13 +76,11 @@ class RecordCopyTest(unittest.TestCase):
                 w.write(LINE % i)
                 w.flush()
         deadline = time.monotonic() + 5
-        while not copy.complete() and time.monotonic() < deadline:
+        while not self.read_status().get("complete") and time.monotonic() < deadline:
             time.sleep(0.01)
-        self.assertTrue(copy.complete())
+        self.assertEqual(self.read_status(), {"complete": True, "lines": 3, "lost": 0})
         with open(self.dst, "rb") as fh:
             self.assertEqual(fh.read(), b"".join(LINE % i for i in range(3)))
-        with open(self.status) as fh:
-            self.assertEqual(json.load(fh), {"complete": True, "lines": 3, "lost": 0})
 
 
 if __name__ == "__main__":

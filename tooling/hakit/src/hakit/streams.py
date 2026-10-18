@@ -59,6 +59,7 @@ class Firing:
     generator_failures: int | None = None
     local: int = 0
     lost: int = 0
+    records_complete: bool = True
     exit_code: int | None = None
     collected: bool = False
 
@@ -210,7 +211,7 @@ class StreamSet:
         while not copy.complete and self.clock.now_ms() < deadline:
             wait(min(deadline, self.clock.now_ms() + POLL_MS))
             copy = f.gen.record_copy()
-        f.lost = copy.lost
+        f.lost, f.records_complete = copy.lost, copy.complete
         f.local = f.gen.local_records()
         name = f.gen.stream.name
         expected = sum(x.local for x in self.firings[name])
@@ -287,6 +288,7 @@ class StreamSet:
                     "exit_code": fs[-1].exit_code if fs else None,
                     "local_records": sum(f.local for f in fs),
                     "lost_records": sum(f.lost for f in fs),
+                    "records_complete": all(f.records_complete for f in fs),
                     "shipped_records": shipped,
                     **({} if failed is None else {"generator_failures": failed}),
                 }

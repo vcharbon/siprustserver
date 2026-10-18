@@ -2,8 +2,9 @@
 
 The records plus the calls not placed plus the calls the generator failed
 equal its offered-call counter; a difference is `record_gap`, and so are the
-records dropped on their way to the disk (`lost_records`). A count of calls
-the generator failed above 0 is `generator_failure`.
+records dropped on their way to the disk (`lost_records`) and a record copy
+that did not complete (`records_complete` false), reconciled stream or not. A
+count of calls the generator failed above 0 is `generator_failure`.
 """
 
 from __future__ import annotations
@@ -33,7 +34,11 @@ def reconcile(
         reconciled = jv.boolean(s, "reconciled", True)
         lost = jv.opt_int(s, "lost_records") or 0
         if lost:
-            found.append(integrity("record_gap", f"{lost} records dropped: the generator's record buffer was full", stream=name))
+            why = "the generator's record buffer was full or a disk write failed"
+            found.append(integrity("record_gap", f"{lost} records dropped on their way to the disk: {why}", stream=name))
+        if not jv.boolean(s, "records_complete", True):
+            why = "its records on disk may be short and their losses uncounted"
+            found.append(integrity("record_gap", f"the generator's record copy did not complete: {why}", stream=name))
         if failed:
             found.append(integrity("generator_failure", f"the generator failed {failed} calls without a record", stream=name))
         if calls is None and reconciled:
