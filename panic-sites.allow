@@ -28,7 +28,6 @@ crates/b2bua/src/capacity/prometheus.rs 2
 crates/b2bua/src/cdr/buffered.rs 1
 crates/b2bua/src/cdr/memory.rs 6
 crates/b2bua/src/decision/mod.rs 1
-crates/b2bua/src/decision/test_adapter.rs 8
 crates/b2bua/src/dispatch/mod.rs 14
 crates/b2bua/src/dispatch/queue.rs 1
 crates/b2bua/src/dispatch/worker.rs 22

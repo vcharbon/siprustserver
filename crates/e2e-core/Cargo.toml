@@ -21,7 +21,7 @@ media = { path = "../media" }
 media-harness = { path = "../media-harness" }
 layer-harness = { path = "../layer-harness" }
 b2bua-harness = { path = "../b2bua-harness" }
-b2bua = { path = "../b2bua" }
+b2bua = { path = "../b2bua", features = ["testkit"] }
 call = { path = "../call" }
 sip-proxy = { path = "../sip-proxy" }
 sip-net = { path = "../sip-net" }

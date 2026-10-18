@@ -48,6 +48,7 @@ kube = { version = "1", default-features = false, features = ["client", "rustls-
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
+b2bua = { path = "../b2bua", features = ["testkit"] }
 sip-message = { path = "../sip-message" }
 sip-net-testkit = { path = "../sip-net-testkit" }
 http-net-testkit = { path = "../http-net-testkit" }

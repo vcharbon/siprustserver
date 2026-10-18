@@ -10,7 +10,7 @@ description = "Test-only harness for multi-node HA failover: composes the proxy 
 workspace = true
 
 [dependencies]
-b2bua = { path = "../b2bua" }
+b2bua = { path = "../b2bua", features = ["testkit"] }
 # The simulated load sampler each worker's overload signal reads.
 load-shed = { path = "../load-shed" }
 # Shared b2bua/proxy spawn primitives live in b2bua-harness; failover-harness reuses them.

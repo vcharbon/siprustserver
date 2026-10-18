@@ -1,6 +1,7 @@
 //! The call-decision adapter seam — port of `CallDecisionEngine`. The B2BUA
 //! core depends only on this trait; the production HTTP adapter and the
-//! deterministic [`ScriptedDecisionEngine`] both implement it. `apply_route` /
+//! deterministic `ScriptedDecisionEngine` (feature `testkit`) both implement
+//! it. `apply_route` /
 //! `handle_initial_invite` (the response→call-state translation) live in
 //! [`apply_route`] / [`crate::initial_invite`].
 
@@ -9,6 +10,7 @@ pub mod apply_route;
 mod limiter_failover;
 mod no_answer;
 mod schemas;
+#[cfg(any(test, feature = "testkit"))]
 pub mod test_adapter;
 
 pub use b2bua_sdk::header_update::{header_lines, payload_lines, HeaderUpdate, SipHeaderUpdates};
@@ -20,6 +22,7 @@ pub use schemas::{
     NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision, RejectDecision,
     RouteDecision, SipDestination,
 };
+#[cfg(any(test, feature = "testkit"))]
 pub use test_adapter::{default_call_refer, ReferOutcome, ReleaseOutcome, ScriptedDecisionEngine};
 
 use async_trait::async_trait;

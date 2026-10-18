@@ -14,7 +14,9 @@ name = "b2bua-runner"
 path = "src/main.rs"
 
 [dependencies]
-b2bua = { path = "../b2bua" }
+# The scripted decision engine every call routes through (no decision backend):
+# this lab worker is no production binary.
+b2bua = { path = "../b2bua", features = ["testkit"] }
 # The shared env -> bind -> deps -> spawn -> drain runner plumbing (this binary
 # is its first consumer; downstream integrator runner binaries are the others).
 b2bua-runner-kit = { path = "../b2bua-runner-kit" }

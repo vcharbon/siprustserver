@@ -12,6 +12,12 @@ tier = "shell"
 [lints]
 workspace = true
 
+[features]
+# Test support: the scripted decision engine (`decision::test_adapter`) the
+# harnesses and the reference runner route with. No production binary turns it
+# on (ADR-0051 §1).
+testkit = []
+
 [dependencies]
 tokio = { workspace = true }
 tokio-util = { workspace = true }

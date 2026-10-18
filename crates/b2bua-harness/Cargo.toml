@@ -10,7 +10,7 @@ description = "Test-only harness: binds a real `b2bua` B2buaCore as a System-Und
 workspace = true
 
 [dependencies]
-b2bua = { path = "../b2bua" }
+b2bua = { path = "../b2bua", features = ["testkit"] }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
