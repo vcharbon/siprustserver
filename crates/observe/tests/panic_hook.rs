@@ -27,8 +27,9 @@ fn panic_here() {
 
 #[test]
 fn the_installed_hook_forwards_a_site_once_per_interval() {
-    std::panic::set_hook(Box::new(|_| {
+    std::panic::set_hook(Box::new(|info| {
         FORWARDED.fetch_add(1, Ordering::SeqCst);
+        eprintln!("{info}");
     }));
     install_with(Duration::from_secs(60), fake_now);
 
