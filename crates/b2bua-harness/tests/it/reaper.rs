@@ -286,6 +286,67 @@ async fn handler_panic_strike1_on_a_reinvite_2xx_acks_its_retransmission() {
     let _ = s.finish().await;
 }
 
+/// Set once the released-call variant's probe has panicked (a flag of its
+/// own, so the two re-INVITE cells never share one).
+static RELEASED_REINVITE_2XX_PANICKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn panic_once_on_reinvite_2xx(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    use std::sync::atomic::Ordering;
+    if ctx.response().is_some_and(|r| r.cseq().seq() > 1)
+        && !RELEASED_REINVITE_2XX_PANICKED.swap(true, Ordering::SeqCst)
+    {
+        panic!("probe: handler panic on a re-INVITE's 2xx");
+    }
+    None
+}
+fn panic_once_on_reinvite_2xx_service() -> ServiceDef {
+    fn rules() -> Vec<RuleDefinition> {
+        vec![RuleDefinition::core(
+            "probe-panic-once-on-reinvite-2xx",
+            SERVICE_LAYER,
+            &[],
+            Match::response().method("INVITE").status_class(2),
+            panic_once_on_reinvite_2xx,
+        )]
+    }
+    ServiceDef { id: "probe-panic-once-reinvite-2xx", init: no_init, rules }
+}
+
+/// As above, with both parties answering their BYE at once, as a UA does:
+/// the call is released before bob's 2xx retransmission (RFC 3261 §13.3.1.4,
+/// at T1) arrives. That 2xx names no call any more and is still ACKed
+/// (§13.2.2.4), so bob's retransmissions stop.
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_2xx_retransmitted_after_the_release_is_still_acked() {
+    let s = B2buaScene::with_b2bua("reaper-panic-strike1-reinvite-2xx-released", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port)
+            .services(vec![panic_once_on_reinvite_2xx_service()])
+    })
+    .await;
+    let mut dialog = s.establish().await;
+
+    let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
+    let mut bob_reinvite = s.bob.receive("INVITE").await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+
+    s.bob.try_receive("BYE").await.expect("strike 1 sends bob a BYE").respond(200, "OK").await;
+    reinvite.try_expect(487).await.expect("alice's re-INVITE is answered 487");
+    s.alice.try_receive("BYE").await.expect("strike 1 sends alice a BYE").respond(200, "OK").await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+
+    s.h.advance(Duration::from_millis(500)).await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+    let ack = s.bob.try_receive("ACK").await.expect("the released call's 2xx is ACKed");
+    assert_eq!(ack.request().cseq().seq(), bob_reinvite.request().cseq().seq());
+    assert_eq!(s.b2bua.metrics().unroutable_2xx_acked_total(), 1);
+
+    let cdrs = s.b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "exactly one CDR despite the panic");
+    assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
+    let _ = s.finish().await;
+}
+
 /// bob's 183 kills its handler while his INVITE rings. Strike 1 tears the
 /// call down on the wire: bob is CANCELled and his INVITE ends 487, alice is
 /// answered 503, and one CDR names the panic.

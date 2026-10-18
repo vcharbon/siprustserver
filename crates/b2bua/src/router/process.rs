@@ -22,6 +22,7 @@ use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::stray_cancel::reject_stray_cancel;
 use super::superseded_relay::drop_superseded_relay;
+use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::answer_deadline::Screened;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
@@ -99,7 +100,7 @@ pub(super) async fn process(
         if of_another_incarnation(ctx, &event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
         }) {
-            maybe_reject_orphan(ctx, &event).await;
+            answer_vanished(ctx, &event).await;
             return;
         }
         if super::store_fault_gate::in_dialog_store_fault_gate(ctx, &event, &call_ref, now_ms).await
@@ -107,7 +108,7 @@ pub(super) async fn process(
             return;
         }
         let Some(call) = resident_or_materialised(ctx, &call_ref).await else {
-            maybe_reject_orphan(ctx, &event).await;
+            answer_vanished(ctx, &event).await;
             // An admit report for a vanished call (a route fold, a service's
             // admit result): no call is left to own the set its admit may
             // have counted.
@@ -130,7 +131,7 @@ pub(super) async fn process(
         res.bind_indexed_leg(&call, &event);
         // A copy this event materialised is checked as a resident one was.
         if of_another_incarnation(ctx, &event, &res, |stamp| call.incarnation() != stamp) {
-            maybe_reject_orphan(ctx, &event).await;
+            answer_vanished(ctx, &event).await;
             return;
         }
         // A timer fire reaches the call only while its ledger holds the fired
@@ -612,21 +613,5 @@ fn fired_obligation<'a>(event: &'a CallEvent, timer_type: &TimerType) -> Option<
     match event {
         CallEvent::Timer { key, .. } if &key.timer_type == timer_type => key.obligation_of(),
         _ => None,
-    }
-}
-
-/// A request for a vanished call draws the 200 of a PRACK its released call
-/// still answers ([`super::late_prack::answer`]), else the answer a request
-/// naming no call is owed ([`super::unroutable::refusal`]); an ACK or a
-/// response draws nothing.
-async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
-    if let CallEvent::Sip { message, src, .. } = event {
-        if let SipMessage::Request(req) = message.as_ref() {
-            let answer = super::late_prack::answer(ctx, req)
-                .or_else(|| super::unroutable::refusal(ctx, req));
-            if let Some(answer) = answer {
-                let _ = ctx.txn.send_response(answer, *src).await;
-            }
-        }
     }
 }

@@ -37,6 +37,7 @@ mod dropped_on_delete;
 mod ingress;
 mod initial_turn;
 mod interpret;
+mod late_2xx;
 pub(crate) mod late_prack;
 mod materialise;
 mod message_cap;

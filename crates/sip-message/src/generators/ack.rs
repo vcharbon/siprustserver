@@ -168,3 +168,31 @@ pub fn generate_ack_for_2xx_from_invite(
 
     emit::request(draft.push(ContentLength::new(0)))
 }
+
+/// Build the ACK for a 2xx to an INVITE from the 2xx alone (RFC 3261
+/// §13.2.2.4), for a UAC that no longer holds the INVITE: Request-URI and
+/// route set from the 2xx's Contact and reversed Record-Route, From, To and
+/// Call-ID echoed, the INVITE's CSeq number, and the 2xx's top Via — the hop
+/// the INVITE left from — on `branch`. `None` when the 2xx names no Contact
+/// to address the ACK to.
+pub fn generate_ack_for_2xx_from_response(
+    final_response: &SipResponse,
+    branch: &str,
+) -> Option<SipRequest> {
+    let target = final_response.contacts().as_slice().first()?.uri().clone();
+    let route_set: Vec<String> = final_response
+        .record_route_set()
+        .map(|set| set.reversed().iter().map(HeaderValue::to_wire).collect())
+        .unwrap_or_default();
+    let (uri, routes) = route_for_in_dialog(target, &route_set);
+    let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
+    let hop = final_response.top_via().clone().with_branch(branch.to_string());
+    let draft = RequestDraft::new(Method::Ack, uri)
+        .push(hop)
+        .push(MaxForwards::DEFAULT)
+        .push_raw(HeaderName::From, echoed(HeaderName::From))
+        .push_raw(HeaderName::To, echoed(HeaderName::To))
+        .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
+        .push(CSeq::new(final_response.cseq().seq(), Method::Ack));
+    Some(emit::request(with_routes(draft, &routes).push(ContentLength::new(0))))
+}
