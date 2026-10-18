@@ -6,9 +6,7 @@
 //!   CANCEL's 481 is stateless, so each repeat of it counts again.
 //! - A PRACK a released call still answers draws 200 instead
 //!   ([`super::late_prack`], `b2bua_late_prack_answered_total`).
-//! - A 2xx to an INVITE a released call took is still ACKed
-//!   ([`super::late_2xx`], `b2bua_unroutable_2xx_acked_total`).
-//! - Any other response, and an ACK, is owed nothing and is dropped
+//! - An ACK or a response is owed nothing and is dropped
 //!   (`b2bua_unroutable_dropped_total{kind}`).
 //! - This node's own event — a client transaction released from its call
 //!   (ADR-0034) reaching Timer B/F — crossed no wire and leaves no peer
@@ -63,7 +61,6 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
                     on_request(ctx, req, *src).await;
                 }
             }
-            SipMessage::Response(resp) if super::late_2xx::ack(ctx, resp, *src).await => {}
             SipMessage::Response(resp) => {
                 let kind = status_class(resp.status());
                 ctx.metrics.record_unroutable_dropped(&kind);
@@ -103,22 +100,16 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
     }
 }
 
-/// The answer an event is owed whose call vanished (released, or of another
-/// incarnation): a request draws the 200 of a PRACK its released call still
-/// answers ([`super::late_prack::answer`]), else [`refusal`]; a 2xx to an
-/// INVITE draws its ACK ([`super::late_2xx`]); an ACK or any other response
-/// draws nothing.
+/// A request for a vanished call draws the 200 of a PRACK its released call
+/// still answers ([`super::late_prack::answer`]), else the answer a request
+/// naming no call is owed ([`refusal`]); an ACK or a response draws nothing.
 pub(super) async fn answer_vanished(ctx: &RouterCtx, event: &CallEvent) {
-    let CallEvent::Sip { message, src, .. } = event else { return };
-    match message.as_ref() {
-        SipMessage::Request(req) => {
+    if let CallEvent::Sip { message, src, .. } = event {
+        if let SipMessage::Request(req) = message.as_ref() {
             let answer = super::late_prack::answer(ctx, req).or_else(|| refusal(ctx, req));
             if let Some(answer) = answer {
                 let _ = ctx.txn.send_response(answer, *src).await;
             }
-        }
-        SipMessage::Response(resp) => {
-            super::late_2xx::ack(ctx, resp, *src).await;
         }
     }
 }

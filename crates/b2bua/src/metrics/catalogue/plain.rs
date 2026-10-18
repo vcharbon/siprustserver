@@ -147,10 +147,6 @@ plain_counters! {
         "b2bua_late_prack_answered_total",
         "PRACKs that reached this node after their call's release and named a reliable provisional it showed, answered 200 (RFC 3262 §3); the caller's PRACK crossing the final",
     ) => late_prack_answered, bump_late_prack_answered, late_prack_answered_total;
-    UNROUTABLE_2XX_ACKED = (
-        "b2bua_unroutable_2xx_acked_total",
-        "2xx responses to an INVITE that reached this node after their call's release (a repeat whose first copy the call took) and were ACKed from the 2xx alone (RFC 3261 §13.2.2.4)",
-    ) => unroutable_2xx_acked, bump_unroutable_2xx_acked, unroutable_2xx_acked_total;
     // An initial INVITE the front proxy placed here as another primary's
     // backup (its cookie names that primary) that is no copy of a replica
     // this node holds: the primary owns its transaction, so it is dropped
