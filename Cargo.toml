@@ -181,10 +181,10 @@ webrtc-util = "0.10"
 # reactor, which an async client would panic on — hence no `rt-tokio` either.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "ansi"] }
-tracing-opentelemetry = { version = "0.33", default-features = false, features = ["tracing-log"] }
-opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "0.34.0", default-features = false, features = ["tracing-log"] }
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 # THE HTTP client of the workspace — one major, linked once. Both consumers ride
 # this pin: `http-net`'s pooled async client (feature `real`) and the OTLP
 # exporter's blocking client above, whose own floor is 0.13. `default-features =
