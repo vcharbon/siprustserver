@@ -27,6 +27,5 @@ mod sdp_answer;
 mod sdp_form;
 mod sdp_offer_answer_grammar;
 mod sdp_utils;
-mod serializer;
 mod sipfrag;
 mod via_sent_by;

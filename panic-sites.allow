@@ -154,7 +154,6 @@ crates/sip-message/src/param_codec.rs 4
 crates/sip-message/src/remote_target.rs 10
 crates/sip-message/src/serializer.rs 9
 crates/sip-message/src/site.rs 3
-crates/sip-message/src/template.rs 2
 crates/sip-message/src/types.rs 3
 crates/sip-net/src/fragmentation.rs 2
 crates/sip-net/src/real.rs 3

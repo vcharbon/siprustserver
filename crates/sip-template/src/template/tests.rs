@@ -1,6 +1,6 @@
 use super::*;
-use crate::parser::custom::CustomParser;
-use crate::parser::SipParser;
+use sip_message::parser::custom::CustomParser;
+use sip_message::parser::SipParser;
 
 fn parse(raw: &[u8]) -> SipMessage {
     CustomParser::new().parse(raw).expect("well-formed")
@@ -175,7 +175,7 @@ fn apply_name_forms_rewrites_only_mapped_headers() {
 
 #[test]
 fn header_identity_is_compact_aware() {
-    use crate::header::HeaderName;
+    use sip_message::header::HeaderName;
     assert!(HeaderName::Supported.matches("Supported"));
     assert!(HeaderName::Supported.matches("k"), "compact Supported");
     assert!(HeaderName::Supported.matches("K"), "compact, case-insensitive");

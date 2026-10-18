@@ -45,12 +45,12 @@ pub use agent::{
     Harness, InDialogRequest, InDialogTxn, Inbound, Invite, OutOfDialogRequest, Party, Proxy,
     Respond, ServerTxn, StepError, WaiverScope,
 };
-// Captured-message replay vocabulary (`sip_message::template` + matching),
-// re-exported so a `send_template`/`expect_template` caller reaches the harness
-// and its templates from one crate.
-pub use sip_message::{
-    Automatic, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic, EmitOpts, HeaderClass, MatchOpts,
-    MessageTemplate, Mismatch, TemplateHeader, TemplateStart,
+// Captured-message replay vocabulary (`sip_template` + matching), re-exported
+// so a `send_template`/`expect_template` caller reaches the harness and its
+// templates from one crate.
+pub use sip_message::{Automatic, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic, HeaderClass};
+pub use sip_template::{
+    EmitOpts, MatchOpts, MessageTemplate, Mismatch, TemplateHeader, TemplateStart,
 };
 // Multi-callee routing: several logical agents on one bound socket, demuxed by
 // the shared R-URI leg-picker (the transfer Bob/Charlie/David fabric).

@@ -3374,6 +3374,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-retransmit",
+ "sip-template",
  "tokio",
 ]
 
@@ -4244,6 +4245,7 @@ dependencies = [
  "sip-message",
  "sip-net",
  "sip-net-testkit",
+ "sip-template",
  "tokio",
  "tracing",
 ]
@@ -4696,6 +4698,13 @@ name = "sip-retransmit"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "sip-template"
+version = "0.1.0"
+dependencies = [
+ "sip-message",
 ]
 
 [[package]]

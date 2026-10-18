@@ -4,7 +4,8 @@
 
 use crate::actor::*;
 use crate::{ANSWER_SDP, OFFER_SDP};
-use sip_message::{MessageTemplate, Method, TemplateHeader};
+use sip_message::Method;
+use sip_template::{MessageTemplate, TemplateHeader};
 /// A captured-INVITE stand-in: frozen extra headers + an SDP offer body.
 pub(super) fn invite_template(extra: &[(&str, &str)]) -> MessageTemplate {
     let mut headers = vec![TemplateHeader::frozen("Content-Type", "application/sdp")];

@@ -136,7 +136,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             .find(|h| sip_message::HeaderName::ContentType.matches(&h.name))
             .filter(|_| !preserved)
             .map(|h| h.value.clone());
-        let headers: Vec<sip_message::TemplateHeader> = rendered
+        let headers: Vec<sip_template::TemplateHeader> = rendered
             .template
             .headers()
             .iter()

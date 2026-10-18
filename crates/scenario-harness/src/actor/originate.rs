@@ -7,7 +7,7 @@
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
-use sip_message::{EmitOpts, MessageTemplate};
+use sip_template::{EmitOpts, MessageTemplate};
 
 use super::answer::discharge_on_teardown;
 use super::ledger::{ObligationKey, ObligationKind};

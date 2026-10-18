@@ -1,4 +1,4 @@
-use sip_message::{EmitOpts, MessageTemplate, TemplateHeader};
+use sip_template::{EmitOpts, MessageTemplate, TemplateHeader};
 use std::time::Duration;
 
 use super::testkit::*;

@@ -55,10 +55,10 @@
 //! frozen headers regardless) — it does NOT yet restore the original interleaving
 //! of frozen and regenerated headers.
 
-pub use crate::header::HeaderClass;
-use crate::header::HeaderName;
-use crate::method::Method;
-use crate::types::{SipHeader, SipMessage};
+pub use sip_message::header::HeaderClass;
+use sip_message::header::HeaderName;
+use sip_message::method::Method;
+use sip_message::types::{SipHeader, SipMessage};
 
 /// One header of a [`MessageTemplate`]: its **canonical** name (compact forms
 /// expanded, casing preserved), its value, how the stack treats it on emission,
@@ -175,7 +175,7 @@ impl MessageTemplate {
     /// [`from_message_with_limits`](Self::from_message_with_limits) with the
     /// original limits to avoid that.
     pub fn from_message(msg: &SipMessage) -> Self {
-        Self::from_message_with_limits(msg, &crate::parser::SipParserLimits::default())
+        Self::from_message_with_limits(msg, &sip_message::parser::SipParserLimits::default())
     }
 
     /// [`from_message`](Self::from_message) scanning the wire name-forms under an
@@ -186,7 +186,7 @@ impl MessageTemplate {
     /// fidelity, never wrong values).
     pub fn from_message_with_limits(
         msg: &SipMessage,
-        limits: &crate::parser::SipParserLimits,
+        limits: &sip_message::parser::SipParserLimits,
     ) -> Self {
         let (start, body, raw) = match msg {
             SipMessage::Request(r) => {
@@ -203,7 +203,7 @@ impl MessageTemplate {
         let wire_names = if raw.is_empty() {
             Vec::new()
         } else {
-            crate::parser::custom::headers::scan_header_name_forms(raw, limits)
+            sip_message::parser::custom::headers::scan_header_name_forms(raw, limits)
         };
         let parsed = msg.headers();
         let aligned = wire_names.len() == parsed.len();
@@ -300,9 +300,9 @@ impl MessageTemplate {
             .iter()
             .filter(|h| {
                 h.class == HeaderClass::Structural
-                    && crate::remote_target::is_remote_target(&h.name)
+                    && sip_message::remote_target::is_remote_target(&h.name)
             })
-            .map(|h| (crate::remote_target::canonical(&h.name), h.value.clone()))
+            .map(|h| (sip_message::remote_target::canonical(&h.name), h.value.clone()))
             .collect()
     }
 
@@ -334,11 +334,11 @@ pub struct EmitOpts {
 /// built from.
 pub fn emitted_wire(msg: &SipMessage, headers: &[SipHeader]) -> Vec<u8> {
     match msg {
-        SipMessage::Request(r) => crate::serializer::render(headers, r.body(), |out| {
-            crate::serializer::write_request_line(out, r)
+        SipMessage::Request(r) => sip_message::serializer::render(headers, r.body(), |out| {
+            sip_message::serializer::write_request_line(out, r)
         }),
-        SipMessage::Response(r) => crate::serializer::render(headers, r.body(), |out| {
-            crate::serializer::write_status_line(out, r)
+        SipMessage::Response(r) => sip_message::serializer::render(headers, r.body(), |out| {
+            sip_message::serializer::write_status_line(out, r)
         }),
     }
 }
@@ -379,10 +379,12 @@ pub fn apply_remote_target_emits(
     }
     let mut out = headers.to_vec();
     for (canon, captured) in emits {
-        if let Some(h) = out.iter_mut().find(|h| crate::remote_target::canonical(&h.name) == *canon)
+        if let Some(h) =
+            out.iter_mut().find(|h| sip_message::remote_target::canonical(&h.name) == *canon)
         {
-            if let Some((host, port)) = crate::remote_target::first_hostport(&h.value) {
-                h.value = crate::remote_target::rewrite_hostport(captured, &host, port).into();
+            if let Some((host, port)) = sip_message::remote_target::first_hostport(&h.value) {
+                h.value =
+                    sip_message::remote_target::rewrite_hostport(captured, &host, port).into();
             }
         }
     }

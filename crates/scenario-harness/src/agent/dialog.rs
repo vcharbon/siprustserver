@@ -11,10 +11,10 @@ use sip_message::generators::{
     generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
 };
 use sip_message::header::{HeaderName, HeaderValue, MediaType, RAck};
-use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, CseqDeviation, CseqPattern,
-    EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse, SipStr,
-};
+use sip_message::{CseqDeviation, SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
+use sip_template::{apply_name_forms, apply_remote_target_emits, emitted_wire};
+
+use crate::{CseqPattern, EmitOpts, MessageTemplate};
 
 use super::addressing::next_hop;
 use super::client_txn::{

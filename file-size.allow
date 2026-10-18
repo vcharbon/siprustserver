@@ -106,10 +106,10 @@ crates/scenario-harness/src/agent/ua.rs 804
 crates/scenario-harness/tests/it/template_emission.rs 1016
 crates/seq-report/src/html.rs 1005
 crates/sip-message/src/generators/relay.rs 504
-crates/sip-message/src/parser/custom/extract_fields.rs 649
-crates/sip-message/src/parser/custom/structured_headers.rs 871
-crates/sip-message/src/sdp_answer.rs 535
-crates/sip-message/src/sniff.rs 687
+crates/sip-message/src/parser/custom/extract_fields.rs 642
+crates/sip-message/src/parser/custom/structured_headers.rs 849
+crates/sip-message/src/sdp_answer.rs 534
+crates/sip-message/src/sniff.rs 628
 crates/sip-message/tests/it/generators.rs 1402
 crates/sip-net-testkit/src/contracts.rs 870
 crates/sip-pcap/src/bin/sipflow.rs 1059

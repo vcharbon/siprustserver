@@ -42,8 +42,6 @@ pub mod serializer;
 pub mod sipfrag;
 pub mod site;
 pub mod sniff;
-pub mod template;
-pub mod template_match;
 pub mod trace_sample;
 pub mod worker_report;
 
@@ -92,11 +90,6 @@ pub use sdp_session::{
 };
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sip_str::{SharedText, SipStr};
-pub use template::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
-    TemplateHeader, TemplateStart,
-};
-pub use template_match::{MatchOpts, Mismatch};
 pub use types::{
     ContactSet, CoreHeaders, InDialogRequest, InviteRequest, MessageCore, NonEmpty, NotInDialog,
     OptionalHeaders, SipHeader, SipMessage, SipRequest, SipResponse, SipResponseTagged,

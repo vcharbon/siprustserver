@@ -8,7 +8,8 @@ use sip_message::generators::{
     OutOfDialogMethod, StackDialog,
 };
 use sip_message::header::{self, NameAddr, Uri};
-use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr, TemplateHeader};
+use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr};
+use sip_template::TemplateHeader;
 
 impl LegStack {
     /// Compose the dialog-opening request of an originating leg. The R-URI,

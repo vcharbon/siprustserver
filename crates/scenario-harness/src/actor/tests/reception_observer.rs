@@ -2,7 +2,8 @@
 //! message of every satisfied reception goal — matcher or not — with the
 //! header list exactly as it arrived, and changes nothing when absent.
 
-use sip_message::{EmitOpts, MessageTemplate, Method, TemplateHeader};
+use sip_message::Method;
+use sip_template::{EmitOpts, MessageTemplate, TemplateHeader};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
-use sip_message::{EmitOpts, MessageTemplate};
+use sip_template::{EmitOpts, MessageTemplate};
 
 pub use super::barrier::Barrier;
 use super::endpoint::ForkWinner;

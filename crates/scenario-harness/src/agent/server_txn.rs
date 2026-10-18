@@ -10,10 +10,10 @@ use sip_message::generators::{
     B2BUA_SUPPORTED,
 };
 use sip_message::header::{self, HeaderName, HeaderValue, MediaType};
-use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MatchOpts,
-    MessageTemplate, Mismatch, SipHeader, SipMessage, SipRequest,
-};
+use sip_message::{SipHeader, SipMessage, SipRequest};
+use sip_template::{apply_name_forms, apply_remote_target_emits, emitted_wire, Mismatch};
+
+use crate::{EmitOpts, MatchOpts, MessageTemplate};
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
 use super::client_txn::request_label;

@@ -17,7 +17,7 @@
 //!     part is host:port ONLY. Per element, the user part is compared byte-wise
 //!     and the URI params and header params are compared SEPARATELY (each
 //!     order-insensitive, modulo [`MatchOpts::ignore_params`]); host:port is
-//!     ignored. This mirrors emission ([`crate::remote_target`]), so a
+//!     ignored. This mirrors emission ([`sip_message::remote_target`]), so a
 //!     param'd/user'd Contact round-trips.
 //!
 //! Header NAME comparison is canonical (a captured compact `k:` matches an
@@ -29,9 +29,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::remote_target::{canonical, is_remote_target, parse_elements, RtElement};
 use crate::template::{HeaderClass, MessageTemplate, TemplateHeader, TemplateStart};
-use crate::types::SipMessage;
+use sip_message::remote_target::{canonical, is_remote_target, parse_elements, RtElement};
+use sip_message::types::SipMessage;
 
 /// Tier-1 headers the live dialog owns — never value-compared.
 const TIER1: &[&str] = &["via", "from", "to", "call-id", "cseq", "max-forwards", "content-length"];

@@ -1,7 +1,7 @@
 use super::*;
-use crate::parser::custom::CustomParser;
-use crate::parser::SipParser;
 use crate::template::{MessageTemplate, TemplateHeader};
+use sip_message::parser::custom::CustomParser;
+use sip_message::parser::SipParser;
 
 fn parse(raw: &[u8]) -> SipMessage {
     CustomParser::new().parse(raw).expect("well-formed")

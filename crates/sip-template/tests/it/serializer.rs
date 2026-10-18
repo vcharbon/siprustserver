@@ -9,7 +9,8 @@
 
 use sip_message::serializer::serialize;
 use sip_message::types::{SipHeader, SipMessage, SipResponse};
-use sip_message::{emitted_wire, CustomParser, SipParser};
+use sip_message::{CustomParser, SipParser};
+use sip_template::emitted_wire;
 
 const SDP_BODY: &[u8] = b"v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n";
 

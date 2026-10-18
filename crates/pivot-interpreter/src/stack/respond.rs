@@ -2,7 +2,8 @@
 
 use super::{creates_dialog, frozen, media_type, reliably, rseq_of, Answer, LegStack, StackError};
 use sip_message::generators::{generate_response, GenerateResponseOpts, StackDialog};
-use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr, TemplateHeader};
+use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr};
+use sip_template::TemplateHeader;
 
 impl LegStack {
     /// Compose a response to the newest received request whose CSeq method is

@@ -19,8 +19,8 @@ use super::react::{cancel_pending_initial, react_in_dialog_request};
 use super::runner::ActorState;
 use super::select::{body_facts, parked_matches, select_parked};
 use super::state::{Observation, ResponseFact, SubflowState};
-use crate::StepError;
-use sip_message::{EmitOpts, MatchOpts, MessageTemplate, SipMessage, SipRequest};
+use crate::{EmitOpts, MatchOpts, MessageTemplate, StepError};
+use sip_message::{SipMessage, SipRequest};
 
 /// Whether the goal arm may fire the NEXT pending goal: a reception (or
 /// binding-consuming) goal additionally requires its consumable — a new

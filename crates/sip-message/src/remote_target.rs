@@ -18,7 +18,7 @@ use crate::parser::custom::structured_headers::{
 use crate::sip_str::SipStr;
 
 /// Canonical, case-folded header name (compact forms expanded).
-pub(crate) fn canonical(name: &str) -> String {
+pub fn canonical(name: &str) -> String {
     expanded_name(name).to_ascii_lowercase()
 }
 
@@ -26,7 +26,7 @@ pub(crate) fn canonical(name: &str) -> String {
 pub(crate) const REMOTE_TARGET: &[&str] = &["contact", "route", "record-route"];
 
 /// Whether `name` (canonical or compact) is a remote-target header.
-pub(crate) fn is_remote_target(name: &str) -> bool {
+pub fn is_remote_target(name: &str) -> bool {
     REMOTE_TARGET.contains(&canonical(name).as_str())
 }
 

@@ -9,9 +9,9 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, StackDialog,
 };
 use sip_message::header::{HeaderName, MediaType};
-use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, DelayedAutomatic, EmitOpts,
-    MessageTemplate, SipHeader, SipMessage,
+use sip_message::{DelayedAutomatic, SipHeader, SipMessage};
+use sip_template::{
+    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
 };
 
 use super::client_invite::ClientInvite;

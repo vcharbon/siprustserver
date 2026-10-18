@@ -20,7 +20,7 @@ pub fn serialize(msg: &SipMessage) -> Vec<u8> {
 /// Render a message whose header block is stated by the caller — the template
 /// lane's emission seam, where the capture's header-name spelling and
 /// remote-target rewrites are applied to the block a generator produced.
-pub(crate) fn render(
+pub fn render(
     headers: &[SipHeader],
     body: &[u8],
     start_line: impl FnOnce(&mut Vec<u8>),
@@ -30,12 +30,14 @@ pub(crate) fn render(
     finish(out, headers, body)
 }
 
-pub(crate) fn write_request_line(out: &mut Vec<u8>, req: &SipRequest) {
+/// The request line of `req`, as the wire writes it.
+pub fn write_request_line(out: &mut Vec<u8>, req: &SipRequest) {
     use std::io::Write;
     let _ = write!(out, "{} {} {}", req.method(), req.request_uri().text(), req.version());
 }
 
-pub(crate) fn write_status_line(out: &mut Vec<u8>, resp: &SipResponse) {
+/// The status line of `resp`, as the wire writes it.
+pub fn write_status_line(out: &mut Vec<u8>, resp: &SipResponse) {
     use std::io::Write;
     let _ = write!(out, "{} {} {}", resp.version(), resp.status(), resp.reason());
 }

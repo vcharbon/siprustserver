@@ -8,9 +8,9 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
 use sip_message::header::{HeaderName, MediaType};
-use sip_message::{
+use sip_message::{SipHeader, SipMessage, SipResponse};
+use sip_template::{
     apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
-    SipHeader, SipMessage, SipResponse,
 };
 
 use super::client_txn::{recv_response_raw, request_label};

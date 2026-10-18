@@ -31,7 +31,8 @@ use std::net::SocketAddr;
 
 use sip_message::generators::StackDialog;
 use sip_message::header::{self, MediaType, Uri, Via};
-use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr, TemplateHeader};
+use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr};
+use sip_template::TemplateHeader;
 
 /// The tier-2 addresses a dialog-opening request carries: the lane composed
 /// them, and the stack regenerates every tier-1 header around them.
