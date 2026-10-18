@@ -8,7 +8,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use repl_net::frame::{Frame, Partition, Watermark};
-use repl_net::transport::{Fault, ReplicationNetwork, SimulatedReplicationNetwork};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::{Fault, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Membership, Peer, SimulatedMembership};
 

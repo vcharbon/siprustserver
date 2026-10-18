@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::frame::{Partition, Watermark};
-use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::testkit::run_paused_within;
 use sip_clock::Clock;
 use tokio::sync::watch;

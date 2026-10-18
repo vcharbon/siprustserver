@@ -1,6 +1,6 @@
 use super::*;
-use repl_net::transport::CapturedFrame;
 use repl_net::{Frame, Watermark};
+use repl_net_testkit::CapturedFrame;
 
 fn addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{port}").parse().unwrap()

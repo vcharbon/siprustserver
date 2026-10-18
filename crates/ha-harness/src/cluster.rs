@@ -18,9 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::repl::PullerConfig;
-use repl_net::transport::{
-    Fault, RecordingReplicationNetwork, ReplicationNetwork, SimulatedReplicationNetwork,
-};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::{Fault, RecordingReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::Peer;
 

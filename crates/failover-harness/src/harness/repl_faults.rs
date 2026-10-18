@@ -4,7 +4,7 @@
 
 use std::net::SocketAddr;
 
-use repl_net::transport::Fault;
+use repl_net_testkit::Fault;
 
 use super::FailoverHarness;
 

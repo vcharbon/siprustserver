@@ -275,7 +275,8 @@ fn options_200_stamps_x_overload_503_does_not() {
 
 use std::net::SocketAddr;
 
-use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 

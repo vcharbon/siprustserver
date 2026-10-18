@@ -21,9 +21,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use repl_net::frame::{Frame, Partition, Watermark};
 use repl_net::transport::{
-    ConnectError, Fault, ListenError, ReplicationConnection, ReplicationListener,
-    ReplicationNetwork, SimulatedReplicationNetwork,
+    ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
 };
+use repl_net_testkit::{Fault, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use tokio::sync::{watch, Notify};
 use tokio::time::Instant;

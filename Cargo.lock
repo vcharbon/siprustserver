@@ -505,6 +505,7 @@ dependencies = [
  "observe",
  "proptest",
  "repl-net",
+ "repl-net-testkit",
  "serde",
  "serde_json",
  "sip-clock",
@@ -586,6 +587,7 @@ dependencies = [
  "observe",
  "probe-http",
  "repl-net",
+ "repl-net-testkit",
  "rustls",
  "serde_json",
  "sip-clock",
@@ -1398,6 +1400,7 @@ dependencies = [
  "load-shed",
  "observe",
  "repl-net",
+ "repl-net-testkit",
  "scenario-harness",
  "seq-report",
  "serde_json",
@@ -1686,6 +1689,7 @@ dependencies = [
  "b2bua",
  "call",
  "repl-net",
+ "repl-net-testkit",
  "seq-report",
  "sip-clock",
  "tokio",
@@ -3536,11 +3540,20 @@ dependencies = [
  "async-trait",
  "proptest",
  "rmp",
- "sip-clock",
  "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "repl-net-testkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "repl-net",
+ "sip-clock",
+ "tokio",
 ]
 
 [[package]]

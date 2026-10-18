@@ -23,7 +23,7 @@ use failover_harness::{
     ReplicatedB2buaSut,
 };
 use repl_net::frame::{Frame, Watermark};
-use repl_net::transport::Direction;
+use repl_net_testkit::Direction;
 use scenario_harness::Agent;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";

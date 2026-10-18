@@ -4,8 +4,8 @@
 //! transport seam that the peer-to-peer replication engine (ADR-0011) speaks
 //! over. The wire layer is the replication analogue of `sip-message`:
 //! pure, synchronous, no transport. The transport seam
-//! ([`ReplicationNetwork`]: sim + real TCP +
-//! recording) is the analogue of `sip-net`'s `SignalingNetwork`, but for a
+//! ([`ReplicationNetwork`] and its real TCP implementation; the simulated
+//! network and the recording decorator live in `repl-net-testkit`) is the analogue of `sip-net`'s `SignalingNetwork`, but for a
 //! reliable, ordered, message-granular framed stream (Decision X2).
 //!
 //! ## What is here
@@ -44,8 +44,6 @@ pub use codec::{decode_frame, encode_frame, ReplCodecError};
 pub use frame::{Frame, Op, Partition, UnknownDiscriminant, Watermark};
 pub use framing::{frame_with_len_prefix, try_read_framed, ReplFramingError, MAX_FRAME_LEN};
 pub use transport::{
-    AcceptError, CapturedFrame, ConnectError, Direction, Fault, ListenError,
-    RealReplicationNetwork, RecordingReplicationNetwork, ReplicationConnection,
-    ReplicationListener, ReplicationNetwork, SendError, SimulatedReplicationNetwork,
-    SocketSettings,
+    AcceptError, ConnectError, ListenError, RealReplicationNetwork, ReplicationConnection,
+    ReplicationListener, ReplicationNetwork, SendError, SocketSettings,
 };

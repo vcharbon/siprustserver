@@ -18,7 +18,7 @@ use std::sync::Arc;
 use call::{
     Call, CallBodyCodec, CallLimiterState, CallModelState, LegState, LimiterEntry, MsgpackCodec,
 };
-use repl_net::transport::SimulatedReplicationNetwork;
+use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};

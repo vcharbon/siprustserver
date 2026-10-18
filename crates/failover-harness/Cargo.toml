@@ -25,6 +25,7 @@ scenario-harness = { path = "../scenario-harness" }
 layer-harness = { path = "../layer-harness" }
 sip-proxy = { path = "../sip-proxy" }
 repl-net = { path = "../repl-net" }
+repl-net-testkit = { path = "../repl-net-testkit" }
 topology = { path = "../topology" }
 ha-harness = { path = "../ha-harness" }
 seq-report = { path = "../seq-report" }

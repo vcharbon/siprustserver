@@ -68,7 +68,7 @@ use failover_harness::{
     RULE_CSEQ_IN_DIALOG_ORDER, RULE_NO_CANCEL_AFTER_FINAL,
 };
 use repl_net::frame::{Frame, Op};
-use repl_net::transport::Direction;
+use repl_net_testkit::Direction;
 use scenario_harness::{Agent, Inbound};
 use sip_message::generators::InDialogMethod;
 use sip_message::SipMessage;

@@ -224,7 +224,7 @@ mod tests {
 
     use sip_clock::testkit::advance_settled;
 
-    use crate::transport::SimulatedReplicationNetwork;
+    use crate::SimulatedReplicationNetwork;
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))

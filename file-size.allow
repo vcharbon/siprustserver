@@ -56,7 +56,7 @@ crates/call/tests/it/model_helpers.rs 937
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1280
-crates/failover-harness/src/harness.rs 2202
+crates/failover-harness/src/harness.rs 2201
 crates/failover-harness/src/runner.rs 636
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 1017
 crates/failover-harness/tests/it/failover.rs 1570
@@ -82,7 +82,7 @@ crates/pivot-schema/src/bundle/verdict.rs 632
 crates/pivot-schema/src/lint/flow_rules.rs 788
 crates/pivot-schema/src/lint/references.rs 505
 crates/pivot-schema/tests/it/lint.rs 2890
-crates/repl-net/src/transport/simulated.rs 987
+crates/repl-net-testkit/src/simulated.rs 987
 crates/rfc-rules/src/rules/ack.rs 713
 crates/rfc-rules/src/rules/cancel.rs 648
 crates/rfc-rules/src/rules/capability.rs 648

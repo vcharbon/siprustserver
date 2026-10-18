@@ -43,9 +43,8 @@ use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
 use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
 use ha_harness::{Marker, ReplReport};
 use observe::NodeScope;
-use repl_net::transport::{
-    RecordingReplicationNetwork, ReplicationNetwork, SimulatedReplicationNetwork,
-};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::{RecordingReplicationNetwork, SimulatedReplicationNetwork};
 use scenario_harness::{Agent, Harness};
 use sip_clock::Clock;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
@@ -992,7 +991,7 @@ impl FailoverHarness {
         // marker appended just before the bootstrap pull it triggers sorts first
         // even though both land on the same paused-clock millisecond.
         let event_seq = harness.recording().recorder().sequencer();
-        let capture_seq: repl_net::transport::CaptureSeq = {
+        let capture_seq: repl_net_testkit::CaptureSeq = {
             let s = event_seq.clone();
             Arc::new(move || s.next())
         };

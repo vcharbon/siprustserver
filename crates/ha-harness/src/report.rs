@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use repl_net::transport::{CapturedFrame, Direction};
 use repl_net::{Frame, Op, Partition};
+use repl_net_testkit::{CapturedFrame, Direction};
 
 /// A non-frame timeline event injected by the harness (crash / reboot /
 /// partition / heal / put / delete), stamped with the recording clock.

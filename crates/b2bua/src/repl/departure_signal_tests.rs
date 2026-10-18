@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use repl_net::transport::SimulatedReplicationNetwork;
+use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use tokio::sync::mpsc;
 use topology::{Membership, Peer, SimulatedMembership};

@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 b2bua = { path = "../b2bua" }
 repl-net = { path = "../repl-net" }
+repl-net-testkit = { path = "../repl-net-testkit" }
 seq-report = { path = "../seq-report" }
 topology = { path = "../topology" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }

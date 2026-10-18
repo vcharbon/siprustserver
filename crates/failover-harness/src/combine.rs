@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 
 use ha_harness::{frame_summary, ReplReport};
 use layer_harness::{NetworkTag, RecordedScenario};
-use repl_net::transport::Direction;
+use repl_net_testkit::{CapturedFrame, Direction};
 use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow, ViewChange};
 use sip_net_testkit::RecordedSipEntry;
 
@@ -264,12 +264,10 @@ pub fn combine_doc(
 /// (e.g. dropped pre-reboot, then re-sent and delivered). We walk `Received` in
 /// time order and claim, for each, the most-recent unconsumed matching `Sent` at
 /// or before it — so a later delivery can never "rescue" an earlier dropped send.
-fn delivered_sent(
-    frames: &[repl_net::transport::CapturedFrame],
-) -> std::collections::HashSet<usize> {
-    let sent: Vec<(usize, &repl_net::transport::CapturedFrame)> =
+fn delivered_sent(frames: &[CapturedFrame]) -> std::collections::HashSet<usize> {
+    let sent: Vec<(usize, &CapturedFrame)> =
         frames.iter().enumerate().filter(|(_, f)| f.dir == Direction::Sent).collect();
-    let mut received: Vec<&repl_net::transport::CapturedFrame> =
+    let mut received: Vec<&CapturedFrame> =
         frames.iter().filter(|f| f.dir == Direction::Received).collect();
     received.sort_by_key(|f| f.at_ms);
 
@@ -305,10 +303,7 @@ fn delivered_sent(
 /// sockets, and a node that crashes + reconnects gets a fresh one; rendering
 /// each `conn` in its own color makes a frame "lost to b2" legible as riding a
 /// DIFFERENT (defunct) socket than the live connection collapsed on that lane.
-fn conn_label(
-    f: &repl_net::transport::CapturedFrame,
-    repl_addr_col: &BTreeMap<SocketAddr, String>,
-) -> String {
+fn conn_label(f: &CapturedFrame, repl_addr_col: &BTreeMap<SocketAddr, String>) -> String {
     // The listen end is in `repl_addr_col`; the other end is the ephemeral one.
     let ephemeral = if repl_addr_col.contains_key(&f.from) { f.to } else { f.from };
     format!(":{}", ephemeral.port())

@@ -139,9 +139,6 @@ crates/probe-http/src/lib.rs 2
 crates/repl-net/src/codec.rs 45
 crates/repl-net/src/framing.rs 7
 crates/repl-net/src/transport/real.rs 1
-crates/repl-net/src/transport/recording.rs 4
-crates/repl-net/src/transport/simulated.rs 69
-crates/repl-net/src/transport/simulated/listener.rs 4
 crates/sip-clock/src/lib.rs 4
 crates/sip-message/src/access.rs 1
 crates/sip-message/src/deviation.rs 4

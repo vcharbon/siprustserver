@@ -19,7 +19,8 @@ use b2bua::repl::{FnPeerResolver, PullerConfig, ReplicatingCallStore, ServeConfi
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaDeps, ReplicationSetup};
 use call::Call;
-use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};

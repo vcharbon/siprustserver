@@ -18,14 +18,9 @@ workspace = true
 # serde-derived enum would not produce clean tag-led arrays.
 rmp = { workspace = true }
 thiserror = { workspace = true }
-# Transport seam: tokio for the sim fabric's spawned-sleep delivery +
-# bounded mpsc channels (sync), the real TCP impl (net, io-util), and the
-# runtime/macros the impls + tests ride. `tokio::time::pause`/`advance` drives
-# sim delivery under the paused-clock tests exactly like sip-net's fabric.
+# Transport seam: the real TCP impl (net, io-util) and the runtime it rides.
 tokio = { workspace = true }
 async-trait = { workspace = true }
-# Recording timestamps come from the injected wall-clock seam.
-sip-clock = { path = "../sip-clock" }
 # TCP keepalive and TCP_USER_TIMEOUT on the real transport's streams.
 socket2 = { workspace = true, features = ["all"] }
 # A socket option the kernel refuses is logged.
@@ -35,7 +30,5 @@ tracing = { workspace = true }
 proptest = { workspace = true }
 # The error-path tests hand-build malformed msgpack arrays directly.
 rmp = { workspace = true }
-# Paused-time test harness (`#[tokio::test(start_paused = true)]` +
-# `advance_in_100ms_chunks`); real-TCP tests use a non-paused runtime.
+# The real-TCP tests run on a non-paused runtime.
 tokio = { workspace = true }
-sip-clock = { path = "../sip-clock", features = ["testkit"] }

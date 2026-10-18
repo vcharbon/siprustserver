@@ -17,6 +17,7 @@ members = [
     "crates/sip-proxy",
     "crates/topology",
     "crates/repl-net",
+    "crates/repl-net-testkit",
     "crates/http-net",
     "crates/http-net-testkit",
     "crates/call-limiter",

@@ -10,24 +10,19 @@
 //! ## The codec plays through every path
 //! `send` always [`encode_frame`](crate::encode_frame)s to bytes and moves the
 //! bytes; `recv` always [`decode_frame`](crate::decode_frame)s back. Even the
-//! in-process [`SimulatedReplicationNetwork`] never passes a `Frame` by
-//! reference — it moves an encoded `Vec<u8>` through its channels — so the wire
-//! codec is exercised in **every** test path (Decision X2), and the recording
-//! layer can decode + display each replication message.
+//! in-process simulated network never passes a `Frame` by reference — it moves
+//! an encoded `Vec<u8>` through its channels — so the wire codec is exercised
+//! in **every** test path (Decision X2), and the recording layer can decode +
+//! display each replication message.
 //!
-//! ## Three impls
-//! - [`SimulatedReplicationNetwork`] — in-process ordered delivery, the
-//!   workhorse for the fake-clock tests (goals 1–2). Mandatory, not a
-//!   convenience: real `TcpStream` readiness does **not** obey
-//!   `tokio::time::pause`, so the paused-clock scenarios *cannot* use real TCP.
-//! - [`RealReplicationNetwork`] — tokio TCP + 4-byte length prefix; goal-3
-//!   only, and its tests run on a **real** (non-paused) runtime.
-//! - [`RecordingReplicationNetwork`] — a decorator that tees every decoded
-//!   frame into a capture sink for the report.
+//! ## The production impl
+//! [`RealReplicationNetwork`] — tokio TCP + 4-byte length prefix; its tests run
+//! on a **real** (non-paused) runtime. The in-process simulated network (the
+//! workhorse of the fake-clock tests: real `TcpStream` readiness does **not**
+//! obey `tokio::time::pause`) and the recording decorator implement the same
+//! seam in `repl-net-testkit`.
 
 mod real;
-mod recording;
-mod simulated;
 mod socket_settings;
 
 use std::net::SocketAddr;
@@ -37,8 +32,6 @@ use async_trait::async_trait;
 use crate::Frame;
 
 pub use real::RealReplicationNetwork;
-pub use recording::{CaptureSeq, CapturedFrame, Direction, RecordingReplicationNetwork};
-pub use simulated::{Fault, NodeReplicationNetwork, SimulatedReplicationNetwork};
 pub use socket_settings::SocketSettings;
 
 /// Failure opening an outbound connection.

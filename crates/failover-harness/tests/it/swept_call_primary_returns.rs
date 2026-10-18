@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use failover_harness::{FailoverHarness, PartitionRole, WorkerHealth};
 use repl_net::frame::{Frame, Partition, Watermark};
-use repl_net::transport::Direction;
+use repl_net_testkit::Direction;
 use scenario_harness::agent::Dialog;
 use sip_message::SipMessage;
 
