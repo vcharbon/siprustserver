@@ -212,6 +212,80 @@ async fn handler_panic_strike1_sends_bye_to_both_legs_of_a_confirmed_call() {
     let _ = s.finish().await;
 }
 
+const REOFFER: &str = "v=0\r\no=alice 101 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=bob 202 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+
+/// Set once the re-INVITE 2xx probe has panicked: the defect it stands for
+/// strikes one turn, not every copy of the 2xx.
+static REINVITE_2XX_PANICKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// SERVICE_LAYER rule that panics on the callee's first 2xx to a re-INVITE
+/// (a CSeq past the initial INVITE's): the panicking turn consumed that 2xx.
+fn panic_on_reinvite_2xx(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    use std::sync::atomic::Ordering;
+    if ctx.response().is_some_and(|r| r.cseq().seq() > 1)
+        && !REINVITE_2XX_PANICKED.swap(true, Ordering::SeqCst)
+    {
+        panic!("probe: handler panic on a re-INVITE's 2xx");
+    }
+    None
+}
+fn panic_on_reinvite_2xx_service() -> ServiceDef {
+    fn rules() -> Vec<RuleDefinition> {
+        vec![RuleDefinition::core(
+            "probe-panic-on-reinvite-2xx",
+            SERVICE_LAYER,
+            &[],
+            Match::response().method("INVITE").status_class(2),
+            panic_on_reinvite_2xx,
+        )]
+    }
+    ServiceDef { id: "probe-panic-reinvite-2xx", init: no_init, rules }
+}
+
+/// bob's 2xx to the re-INVITE alice made kills its handler before it is
+/// relayed, so the call never learns of it. Strike 1 tears the call down on
+/// the wire: the relayed re-INVITE is CANCELled (bob's transaction already
+/// has its final, so no CANCEL leaves), alice's re-INVITE is answered 487,
+/// and both legs are sent a BYE. bob's 2xx retransmission (RFC 3261
+/// §13.3.1.4) meets the CANCELled relay and is ACKed (§13.2.2.4), and one
+/// CDR names the panic.
+#[tokio::test(start_paused = true)]
+async fn handler_panic_strike1_on_a_reinvite_2xx_acks_its_retransmission() {
+    let s = B2buaScene::with_b2bua("reaper-panic-strike1-reinvite-2xx", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port)
+            .services(vec![panic_on_reinvite_2xx_service()])
+    })
+    .await;
+    let mut dialog = s.establish().await;
+
+    let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
+    let mut bob_reinvite = s.bob.receive("INVITE").await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+
+    let mut b_bye = s.bob.try_receive("BYE").await.expect("strike 1 sends bob a BYE");
+    // bob's 2xx retransmission (RFC 3261 §13.3.1.4, at T1).
+    s.h.advance(Duration::from_millis(500)).await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+    let ack = s.bob.try_receive("ACK").await.expect("bob's 2xx is ACKed");
+    assert_eq!(ack.request().cseq().seq(), bob_reinvite.request().cseq().seq());
+    b_bye.respond(200, "OK").await;
+    reinvite.try_expect(487).await.expect("alice's re-INVITE is answered 487");
+    s.alice.try_receive("BYE").await.expect("strike 1 sends alice a BYE").respond(200, "OK").await;
+
+    settle_until(|| s.b2bua.is_reaped()).await;
+    let cdrs = s.b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "exactly one CDR despite the panic");
+    assert!(
+        reason_of(&cdrs[0]).iter().any(|r| r == "handler-panic"),
+        "the CDR names the panic: {:?}",
+        reason_of(&cdrs[0])
+    );
+    assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
+    let _ = s.finish().await;
+}
+
 /// bob's 183 kills its handler while his INVITE rings. Strike 1 tears the
 /// call down on the wire: bob is CANCELled and his INVITE ends 487, alice is
 /// answered 503, and one CDR names the panic.
@@ -316,10 +390,14 @@ async fn wedged_setup_is_aborted_and_reaped() {
 
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "exactly one CDR for the wedged call");
+    // The stale verdicts were queued behind the body, so the first of them
+    // reaps the call before the abort's own strike-1 verdict arrives: that one
+    // finds the call gone.
     let reasons = reason_of(&cdrs[0]);
+    assert!(reasons.iter().any(|r| r == "reaper-stale"), "the stale verdict reaps: {reasons:?}");
     assert!(
-        reasons.iter().any(|r| r == "reaper-stale" || r == "handler-panic"),
-        "the CDR names the forced reap: {reasons:?}"
+        !reasons.iter().any(|r| r == "handler-panic"),
+        "the abort's strike runs after the reap: {reasons:?}"
     );
     // ADR-0022: the reap is not silent toward the caller — the
     // `→ terminated` funnel answers the still-unanswered a-leg INVITE with a
