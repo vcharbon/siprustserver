@@ -71,38 +71,32 @@ pub fn first_hostport(value: &str) -> Option<(String, u16)> {
     let first = split_top_level_commas(value).into_iter().next()?;
     let na = parse_name_addr(&SipStr::owned(first.trim()));
     let u = parse_sip_uri_string(&na.uri)?;
-    Some((u.host.into(), u.port.unwrap_or(5060) as u16))
+    Some((u.host.into(), u16::try_from(u.port.unwrap_or(5060)).ok()?))
 }
 
 /// Replace the host:port span of a single SIP-URI string, preserving scheme,
-/// userinfo, and all URI parameters verbatim.
+/// userinfo, and all URI parameters verbatim; a value with no scheme comes
+/// back as it is.
 fn replace_uri_hostport(uri: &str, host: &str, port: u16) -> String {
-    let scheme_end = match uri.find(':') {
-        Some(i) => i + 1,
-        None => return uri.to_string(),
-    };
-    let rest = &uri[scheme_end..];
+    hostport_replaced(uri, host, port).unwrap_or_else(|| uri.to_string())
+}
+
+fn hostport_replaced(uri: &str, host: &str, port: u16) -> Option<String> {
+    let (head, rest) = uri.split_at_checked(uri.find(':')? + 1)?;
     let params_at = rest.find([';', '?']).unwrap_or(rest.len());
     // Userinfo (before '@', before any parameter).
-    let host_start_rel = match rest[..params_at].find('@') {
-        Some(at) => at + 1,
-        None => 0,
-    };
-    let host_start = scheme_end + host_start_rel;
-    let after_host = &uri[host_start..];
-    let host_end_rel = after_host.find([';', '?']).unwrap_or(after_host.len());
-    let host_end = host_start + host_end_rel;
-    format!("{}{}:{}{}", &uri[..host_start], host, port, &uri[host_end..])
+    let user_len = rest.get(..params_at)?.find('@').map_or(0, |at| at + 1);
+    let (user, after_user) = rest.split_at_checked(user_len)?;
+    let tail = after_user.get(after_user.find([';', '?']).unwrap_or(after_user.len())..)?;
+    Some(format!("{head}{user}{host}:{port}{tail}"))
 }
 
 /// Rewrite the host:port of every element in `value` to `(host, port)`,
 /// preserving display name, user, URI/header params, and their placement.
 fn rewrite_element_hostport(elem: &str, host: &str, port: u16) -> String {
-    if let Some(lt) = elem.find('<') {
-        if let Some(gt_rel) = elem[lt + 1..].find('>') {
-            let gt = lt + 1 + gt_rel;
-            let new_uri = replace_uri_hostport(&elem[lt + 1..gt], host, port);
-            return format!("{}<{}>{}", &elem[..lt], new_uri, &elem[gt + 1..]);
+    if let Some((before, inner)) = elem.split_once('<') {
+        if let Some((uri, after)) = inner.split_once('>') {
+            return format!("{before}<{}>{after}", replace_uri_hostport(uri, host, port));
         }
     }
     replace_uri_hostport(elem, host, port)
@@ -121,6 +115,14 @@ pub fn rewrite_hostport(value: &str, host: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A port past 16 bits names no socket: no host:port, rather than the
+    /// port's low 16 bits.
+    #[test]
+    fn a_port_past_16_bits_reads_as_none() {
+        assert_eq!(first_hostport("<sip:a@192.0.2.1:70000>"), None);
+        assert_eq!(first_hostport("<sip:a@192.0.2.1:5070>"), Some(("192.0.2.1".into(), 5070)));
+    }
 
     #[test]
     fn rewrites_hostport_preserving_user_and_params() {

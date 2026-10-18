@@ -32,7 +32,7 @@ pub(super) fn route_for_in_dialog(remote_target: Uri, route_set: &[String]) -> (
     match RouteEntry::parse(&SipStr::owned(first)) {
         Ok(entry) if !entry.uri().is_loose_route() => {
             let request_uri = entry.uri().clone();
-            let mut routes: Vec<String> = route_set[1..].to_vec();
+            let mut routes: Vec<String> = route_set.iter().skip(1).cloned().collect();
             routes.push(format!("<{}>", remote_target.text()));
             (request_uri, routes)
         }

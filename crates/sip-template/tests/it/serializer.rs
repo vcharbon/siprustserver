@@ -5,7 +5,7 @@
 //! Content-Length and the parser gates the wire form. The header BLOCK can still
 //! be stated by a caller — [`emitted_wire`] is the template lane's seam — so the
 //! net is exercised there, where a wrong length can actually arrive. The
-//! correction is observable in the output bytes (the warning goes to stderr).
+//! correction is observable in the output bytes.
 
 use sip_message::serializer::serialize;
 use sip_message::types::{SipHeader, SipMessage, SipResponse};

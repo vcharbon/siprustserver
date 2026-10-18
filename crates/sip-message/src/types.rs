@@ -275,30 +275,32 @@ pub struct NotInDialog;
 /// A request the router has confirmed in-dialog: both From-tag and To-tag are
 /// present. `from_tag()` / `to_tag()` are infallible `&str`.
 #[derive(Debug, Clone, Copy)]
-pub struct InDialogRequest<'a>(&'a SipRequest);
+pub struct InDialogRequest<'a> {
+    request: &'a SipRequest,
+    from_tag: &'a str,
+    to_tag: &'a str,
+}
 
 impl<'a> InDialogRequest<'a> {
     /// The single validation choke point — the only constructor.
     pub fn new(r: &'a SipRequest) -> Result<Self, NotInDialog> {
-        if r.from().tag().is_some() && r.to().tag().is_some() {
-            Ok(Self(r))
-        } else {
-            Err(NotInDialog)
+        match (r.from().tag(), r.to().tag()) {
+            (Some(from_tag), Some(to_tag)) => Ok(Self { request: r, from_tag, to_tag }),
+            _ => Err(NotInDialog),
         }
     }
-    /// Sound by construction — `new` checked presence.
     pub fn from_tag(&self) -> &str {
-        self.0.from().tag().expect("InDialogRequest invariant: From-tag present")
+        self.from_tag
     }
     pub fn to_tag(&self) -> &str {
-        self.0.to().tag().expect("InDialogRequest invariant: To-tag present")
+        self.to_tag
     }
 }
 
 impl<'a> Deref for InDialogRequest<'a> {
     type Target = SipRequest;
     fn deref(&self) -> &SipRequest {
-        self.0
+        self.request
     }
 }
 
@@ -328,24 +330,24 @@ impl<'a> Deref for InviteRequest<'a> {
 /// A response with a guaranteed To-tag (every non-`100` response). `to_tag()`
 /// is infallible.
 #[derive(Debug, Clone, Copy)]
-pub struct SipResponseTagged<'a>(&'a SipResponse);
+pub struct SipResponseTagged<'a> {
+    response: &'a SipResponse,
+    to_tag: &'a str,
+}
 
 impl<'a> SipResponseTagged<'a> {
     pub fn new(r: &'a SipResponse) -> Result<Self, NotInDialog> {
-        if r.to().tag().is_some() {
-            Ok(Self(r))
-        } else {
-            Err(NotInDialog)
-        }
+        let to_tag = r.to().tag().ok_or(NotInDialog)?;
+        Ok(Self { response: r, to_tag })
     }
     pub fn to_tag(&self) -> &str {
-        self.0.to().tag().expect("SipResponseTagged invariant: To-tag present")
+        self.to_tag
     }
 }
 
 impl<'a> Deref for SipResponseTagged<'a> {
     type Target = SipResponse;
     fn deref(&self) -> &SipResponse {
-        self.0
+        self.response
     }
 }

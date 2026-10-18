@@ -134,7 +134,7 @@ impl<S: StartKind> Draft<S> {
 
     /// Put a typed value on the first line of the whole message.
     pub fn push_front(mut self, value: impl HeaderValue) -> Self {
-        self.entries.insert(0, Entry::typed(value));
+        insert_entry(&mut self.entries, 0, Entry::typed(value));
         self
     }
 
@@ -145,7 +145,7 @@ impl<S: StartKind> Draft<S> {
     pub fn prepend(mut self, value: impl HeaderValue) -> Self {
         let name = value.name();
         let at = self.entries.iter().position(|e| e.is(&name)).unwrap_or(self.entries.len());
-        self.entries.insert(at, Entry::typed(value));
+        insert_entry(&mut self.entries, at, Entry::typed(value));
         self
     }
 
@@ -169,21 +169,12 @@ impl<S: StartKind> Draft<S> {
     /// wire position the header already had.
     pub fn set(mut self, value: impl HeaderValue) -> Self {
         let name = value.name();
-        match self.entries.iter().position(|e| e.is(&name)) {
-            Some(at) => {
-                self.entries[at] = Entry::typed(value);
-                let mut i = at + 1;
-                while i < self.entries.len() {
-                    if self.entries[i].is(&name) {
-                        self.entries.remove(i);
-                    } else {
-                        i += 1;
-                    }
-                }
-                self
-            }
-            None => self.push(value),
-        }
+        let Some(at) = self.entries.iter().position(|e| e.is(&name)) else {
+            return self.push(value);
+        };
+        self.entries.retain(|e| !e.is(&name));
+        insert_entry(&mut self.entries, at, Entry::typed(value));
+        self
     }
 
     pub fn remove(mut self, name: &HeaderName) -> Self {
@@ -213,22 +204,18 @@ impl<S: StartKind> Draft<S> {
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
         let name = H::header_name();
-        let positions: Vec<usize> =
-            self.entries.iter().enumerate().filter(|(_, e)| e.is(&name)).map(|(i, _)| i).collect();
-
         let mut values = Vec::new();
-        for &at in &positions {
-            values.extend(self.entries[at].read::<H>()?);
+        for entry in self.entries.iter().filter(|e| e.is(&name)) {
+            values.extend(entry.read::<H>()?);
         }
 
         let updated = f(HeaderList::new(values)).into_vec();
-        let at = positions.first().copied().unwrap_or(self.entries.len());
-        for &position in positions.iter().rev() {
-            self.entries.remove(position);
-        }
-        let at = at.min(self.entries.len());
+        // The lines above the first one of this header are none of it, so the
+        // first one's position survives taking them all out.
+        let at = self.entries.iter().position(|e| e.is(&name)).unwrap_or(self.entries.len());
+        self.entries.retain(|e| !e.is(&name));
         for (offset, value) in updated.into_iter().enumerate() {
-            self.entries.insert(at + offset, Entry::typed(value));
+            insert_entry(&mut self.entries, at + offset, Entry::typed(value));
         }
         Ok(self)
     }
@@ -264,12 +251,14 @@ impl<S: StartKind> Draft<S> {
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
         let name = H::header_name();
-        let Some(at) = self.entries.iter().position(|e| e.is(&name)) else { return Ok(self) };
-        let values = self.entries[at].read::<H>()?;
+        let Some((at, entry)) = self.entries.iter().enumerate().find(|(_, e)| e.is(&name)) else {
+            return Ok(self);
+        };
+        let values = entry.read::<H>()?;
         let updated = f(HeaderList::new(values)).into_vec();
-        self.entries.remove(at);
+        remove_entry(&mut self.entries, at);
         for (offset, value) in updated.into_iter().enumerate() {
-            self.entries.insert(at + offset, Entry::typed(value));
+            insert_entry(&mut self.entries, at + offset, Entry::typed(value));
         }
         Ok(self)
     }
@@ -310,7 +299,12 @@ impl<S: StartKind> Draft<S> {
         let draft = self.complete()?;
 
         let rendered = render::<S>(&draft.start, &draft.entries, &draft.body);
-        let image = decode(&rendered.bytes[..rendered.body_at]);
+        let outside = || {
+            IncompleteDraft::Unreadable(SipParseError::new(
+                "the render's body offset is past its bytes",
+            ))
+        };
+        let image = decode(rendered.bytes.get(..rendered.body_at).ok_or_else(outside)?);
         let headers: Vec<SipHeader> = rendered
             .headers
             .iter()
@@ -320,7 +314,7 @@ impl<S: StartKind> Draft<S> {
             })
             .collect();
         let raw = Bytes::from(rendered.bytes);
-        let body = raw.slice(rendered.body_at..);
+        let body = crate::checked::slice(&raw, rendered.body_at..raw.len()).ok_or_else(outside)?;
         S::assemble(draft.start, &image, rendered.start, headers, body, raw)
             .map_err(IncompleteDraft::Unreadable)
     }
@@ -349,7 +343,7 @@ impl<S: StartKind> Draft<S> {
     /// This draft with its Content-Length restated, once every header RFC 3261
     /// requires of this direction is present.
     fn complete(self) -> Result<Self, IncompleteDraft> {
-        let draft = self.with_content_length();
+        let draft = self.with_content_length()?;
         let missing: Vec<HeaderName> =
             S::REQUIRED.iter().filter(|name| !draft.has(name)).cloned().collect();
         if missing.is_empty() {
@@ -361,15 +355,34 @@ impl<S: StartKind> Draft<S> {
 
     /// Declare the body length the message actually carries. A bodiless message
     /// gets no Content-Length it did not already have — the serializer's
-    /// long-standing contract.
-    fn with_content_length(self) -> Self {
-        let length = self.body.len() as u32;
-        if length > 0 || self.has(&HeaderName::ContentLength) {
+    /// long-standing contract. A body longer than a `u32` states no length.
+    fn with_content_length(self) -> Result<Self, IncompleteDraft> {
+        let length = u32::try_from(self.body.len()).map_err(|_| {
+            IncompleteDraft::Unreadable(SipParseError::new(
+                "body longer than a Content-Length states",
+            ))
+        })?;
+        Ok(if length > 0 || self.has(&HeaderName::ContentLength) {
             self.set(ContentLength::new(length))
         } else {
             self
-        }
+        })
     }
+}
+
+/// Puts `entry` at `at`, the lines from `at` on moving down one; past the end
+/// it goes last.
+fn insert_entry(entries: &mut Vec<Entry>, at: usize, entry: Entry) {
+    entries.push(entry);
+    if let Some(tail) = entries.get_mut(at..) {
+        tail.rotate_right(1);
+    }
+}
+
+/// Takes out the line at `at`; `None` past the end.
+fn remove_entry(entries: &mut Vec<Entry>, at: usize) -> Option<Entry> {
+    entries.get_mut(at..).filter(|tail| !tail.is_empty())?.rotate_left(1);
+    entries.pop()
 }
 
 /// The rendered header block as one shared text image. Everything written came

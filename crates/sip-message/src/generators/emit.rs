@@ -85,5 +85,6 @@ pub(super) fn framed<S: StartKind>(
             .unwrap_or_else(|| MediaType::new(SipStr::from_static(DEFAULT_CONTENT_TYPE)));
         draft = draft.push(media);
     }
-    draft.push(ContentLength::new(body.len() as u32)).with_body(body)
+    // A body past `u32` is refused at the freeze, which restates the length.
+    draft.push(ContentLength::new(u32::try_from(body.len()).unwrap_or(u32::MAX))).with_body(body)
 }

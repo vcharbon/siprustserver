@@ -14,7 +14,7 @@ use sip_message::header::{HeaderName, HeaderValue, MediaType, RAck};
 use sip_message::{CseqDeviation, SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
 use sip_template::{apply_name_forms, apply_remote_target_emits, emitted_wire};
 
-use crate::{CseqPattern, EmitOpts, MessageTemplate};
+use crate::{shared_cseq_applier, CseqPattern, EmitOpts, MessageTemplate};
 
 use super::addressing::next_hop;
 use super::client_txn::{
@@ -89,7 +89,7 @@ impl Dialog {
     /// by [`assert_deviations_consumed`](Self::assert_deviations_consumed) and a
     /// Drop-time warning.
     pub fn set_cseq_pattern(&mut self, pattern: CseqPattern) {
-        self.cseq_dev = Some(Arc::new(Mutex::new(CseqDeviation::new(pattern))));
+        self.cseq_dev = Some(shared_cseq_applier(pattern));
     }
 
     /// Builder form of [`set_cseq_pattern`](Self::set_cseq_pattern).
@@ -558,7 +558,7 @@ impl<'a> InDialogRequest<'a> {
             if let Some(dev) = &self.cseq_dev {
                 let mut dev = dev.lock().expect("cseq deviation lock");
                 if !dev.is_identity() {
-                    opts.cseq = Some(dev.next_cseq(self.dialog.local_cseq));
+                    opts.cseq = Some(dev.next_cseq(self.dialog.local_cseq).expect("CSeq in range"));
                 }
             }
         }

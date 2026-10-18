@@ -47,7 +47,9 @@ pub mod worker_report;
 
 /// The body and image type the public surface hands out and takes back.
 pub use bytes::Bytes;
-pub use deviation::{Automatic, CseqDeviation, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic};
+pub use deviation::{
+    Automatic, CseqDeviation, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic, DeviationError,
+};
 pub use error::SipParseError;
 /// Header identity and the one ownership table (ADR-0025).
 pub use header::{canonical_header_items, header_forms_equivalent, HeaderClass, HeaderName};

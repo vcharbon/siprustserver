@@ -61,7 +61,7 @@ fn echo_via(draft: ResponseDraft, line: SipStr, source: Option<&(String, u16)>) 
         return draft.push_raw(HeaderName::Via, line);
     };
     let single = Via::parse_line(&line).ok().filter(|hops| hops.len() == 1);
-    match single.map(|mut hops| hops.remove(0)) {
+    match single.and_then(|hops| hops.into_iter().next()) {
         Some(hop) => {
             let stamped = hop.clone().stamped_from(host, *port);
             if stamped == hop {

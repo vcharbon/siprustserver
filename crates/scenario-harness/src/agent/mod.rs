@@ -75,6 +75,7 @@ mod artifact_dump;
 mod call_trace;
 mod client_invite;
 mod client_txn;
+mod cseq_applier;
 mod dialog;
 pub(crate) mod dialog_gate;
 mod failure_dump;
@@ -99,6 +100,7 @@ mod ua;
 pub(crate) mod waiver;
 
 pub use client_invite::{CancelHandle, ClientInvite};
+pub(crate) use cseq_applier::shared_cseq_applier;
 pub use dialog::{ClientReinvite, Dialog, InDialogRequest, InDialogTxn};
 pub use failure_dump::{expect_failure, DumpSection, FailedRun, FailureView};
 pub use harness::Harness;

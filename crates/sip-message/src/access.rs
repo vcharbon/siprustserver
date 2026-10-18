@@ -117,7 +117,7 @@ macro_rules! core_read_surface {
             /// §3.1); `None` where it carries none.
             pub fn sdp(&self) -> Option<&[u8]> {
                 let ct = self.header::<header::MediaType>()?.ok()?;
-                crate::multipart::sdp_range(&ct, self.body()).map(|r| &self.body()[r])
+                crate::multipart::sdp_range(&ct, self.body()).and_then(|r| self.body().get(r))
             }
 
             /// The datagram this message is — received or rendered at freeze.

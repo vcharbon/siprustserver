@@ -19,7 +19,8 @@ pub fn site_at(raw: &[u8], at: usize) -> Site {
     if at >= head_end {
         return Site::Body;
     }
-    let line_start = |end: usize| raw[..end].iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+    let line_start =
+        |end: usize| raw.iter().take(end).rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
     let mut start = line_start(at.min(raw.len()));
     while start > 0 && matches!(raw.get(start), Some(b' ' | b'\t')) {
         start = line_start(start - 1);
@@ -27,8 +28,9 @@ pub fn site_at(raw: &[u8], at: usize) -> Site {
     if start == 0 {
         return Site::StartLine;
     }
-    let line = &raw[start..];
-    let name = &line[..line.iter().position(|&b| b == b':').unwrap_or(0)];
+    // A line with no colon names no header: the empty name.
+    let line = raw.get(start..).unwrap_or_default();
+    let name = line.iter().position(|&b| b == b':').and_then(|c| line.get(..c)).unwrap_or_default();
     Site::Header(String::from_utf8_lossy(name).trim().to_string())
 }
 

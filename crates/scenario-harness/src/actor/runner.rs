@@ -36,7 +36,7 @@ use super::script::{goal_arm_enabled, requeue_parked};
 use super::shared_endpoint::{EndpointHandle, Inbox};
 use super::state::{Observation, ObservedState};
 use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
-use crate::{Agent, ClientInvite, Dialog, ServerTxn, StepError};
+use crate::{shared_cseq_applier, Agent, ClientInvite, Dialog, ServerTxn, StepError};
 
 /// One inbound request parked on a [`Disposition::Scripted`] actor, awaiting
 /// the reception goal that consumes it (or a requeue-on-advance auto-react).
@@ -379,10 +379,7 @@ impl<'c> ActorState<'c> {
             consumed_requests: HashMap::new(),
             reinvite_ack_bodies: HashMap::new(),
             automatics,
-            cseq_dev: spec
-                .cseq
-                .filter(|p| !p.is_identity())
-                .map(|p| Arc::new(Mutex::new(CseqDeviation::new(p)))),
+            cseq_dev: spec.cseq.filter(|p| !p.is_identity()).map(shared_cseq_applier),
             delayed: spec.delayed,
             originated_invites: 0,
             reinvite_ordinals: HashMap::new(),

@@ -27,7 +27,7 @@ pub fn withdraw_session_timer(headers: &mut Vec<SipHeader>) {
         !HeaderName::SessionExpires.matches(&h.name) && !HeaderName::MinSe.matches(&h.name)
     });
     let mut kept = Vec::with_capacity(headers.len());
-    for h in headers.drain(..) {
+    for h in std::mem::take(headers) {
         if !HeaderName::Require.matches(&h.name) {
             kept.push(h);
             continue;

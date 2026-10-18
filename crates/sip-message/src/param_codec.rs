@@ -23,16 +23,17 @@ pub fn encode_param(s: &str) -> String {
 pub fn decode_param(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
+    let hex_at = |k: usize| bytes.get(k).copied().and_then(hex_val);
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+    while let Some(&b) = bytes.get(i) {
+        if b == b'%' {
+            if let (Some(hi), Some(lo)) = (hex_at(i + 1), hex_at(i + 2)) {
                 out.push((hi << 4) | lo);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(b);
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
