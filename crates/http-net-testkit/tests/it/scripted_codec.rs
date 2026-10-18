@@ -7,11 +7,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use http_net::scripted::{
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpTransport};
+use http_net_testkit::scripted::{
     HttpBindings, HttpContinuationCodec, HttpFindingKind, HttpReifiedStep, HttpReply,
     HttpRequestMatch, HttpScript, IdentityCodec, ScriptedHttpService,
 };
-use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net_testkit::SimulatedHttpNetwork;
 
 const PREFIX: &str = "hex:";
 

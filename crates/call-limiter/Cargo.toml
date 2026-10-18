@@ -26,3 +26,5 @@ async-trait = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
+# The server's tests serve it on the simulated HTTP fabric.
+http-net-testkit = { path = "../http-net-testkit" }

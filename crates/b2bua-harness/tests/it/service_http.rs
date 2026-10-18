@@ -27,10 +27,8 @@ use async_trait::async_trait;
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua::AdaptationHttpPort;
 use b2bua_harness::{establish, hangup, settle_until, B2buaSut};
-use http_net::{
-    Behaviour, Fault, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
-    SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport};
+use http_net_testkit::{Behaviour, Fault, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 
 // ── The binary payloads under test. Each contains bytes that are NOT valid

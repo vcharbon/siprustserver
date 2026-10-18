@@ -2,17 +2,15 @@
 //! client, loopback sockets, real clock): the same program served over the
 //! wire, and the faults as a peer on a socket sees them.
 
-#![cfg(feature = "real")]
-
 use std::sync::Arc;
 use std::time::Duration;
 
 use http_net::failures::FailureCause;
-use http_net::scripted::{
+use http_net::{HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork};
+use http_net_testkit::scripted::{
     HttpBindings, HttpFindingKind, HttpReifiedStep, HttpReply, HttpRequestMatch, HttpScript,
     ScriptedHttpService,
 };
-use http_net::{HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 

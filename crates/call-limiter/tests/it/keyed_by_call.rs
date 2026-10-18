@@ -24,7 +24,7 @@ use call_limiter::wire::{
 use call_limiter::{
     AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer, RefreshResult,
 };
-use http_net::{HttpRequest, HttpResponse, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpRequest, HttpResponse, HttpTransport};
 use sip_clock::Clock;
 
 /// A short lease so the paused clock crosses it cheaply.
@@ -641,7 +641,7 @@ fn addr() -> std::net::SocketAddr {
     "10.0.0.1:8080".parse().unwrap()
 }
 
-async fn call(net: &SimulatedHttpNetwork, req: HttpRequest) -> HttpResponse {
+async fn call(net: &http_net_testkit::SimulatedHttpNetwork, req: HttpRequest) -> HttpResponse {
     let h = tokio::spawn({
         let net = net.clone();
         async move { net.request(addr(), req).await }
@@ -656,7 +656,7 @@ async fn a_release_of_an_unknown_key_answers_200_and_creates_nothing() {
     let store = Arc::new(store());
     witnesses(&store, &["x"]);
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    let net = SimulatedHttpNetwork::new();
+    let net = http_net_testkit::SimulatedHttpNetwork::new();
     let _h = net.serve(addr(), server).await.unwrap();
     let body = serde_json::to_vec(&ReleaseRequest { keys: vec!["c1".into()] }).unwrap();
     assert_eq!(call(&net, HttpRequest::post("/v1/release", body)).await.status, 200);
@@ -677,7 +677,7 @@ async fn one_release_request_frees_every_call_it_names() {
     );
     assert_eq!(store.admit("c2", n(), &entries(&[("x", 10)]), false), AdmitResult::Admitted);
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    let net = SimulatedHttpNetwork::new();
+    let net = http_net_testkit::SimulatedHttpNetwork::new();
     let _h = net.serve(addr(), server).await.unwrap();
     let keys = vec!["c1".into(), "unknown".into(), "c2".into()];
     let body = serde_json::to_vec(&ReleaseRequest { keys }).unwrap();
@@ -695,7 +695,7 @@ async fn one_release_request_frees_every_call_it_names() {
 async fn the_wire_carries_the_call_key() {
     let store = Arc::new(store());
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    let net = SimulatedHttpNetwork::new();
+    let net = http_net_testkit::SimulatedHttpNetwork::new();
     let _h = net.serve(addr(), server).await.unwrap();
 
     let admit = |key: &str, entries: Vec<AdmitEntry>, release_on_refusal: bool| {
@@ -776,7 +776,7 @@ async fn the_wire_carries_the_call_key() {
 async fn every_admit_and_refresh_answer_states_the_lease() {
     let store = Arc::new(store());
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    let net = SimulatedHttpNetwork::new();
+    let net = http_net_testkit::SimulatedHttpNetwork::new();
     let _h = net.serve(addr(), server).await.unwrap();
     let lease_ms = LEASE.as_millis() as u64;
 
@@ -825,7 +825,7 @@ async fn one_refresh_request_answers_every_call_it_names_in_order() {
     let store = Arc::new(store());
     let metrics = LimiterMetrics::new();
     let server = Arc::new(LimiterServer::new(store.clone(), metrics.clone()));
-    let net = SimulatedHttpNetwork::new();
+    let net = http_net_testkit::SimulatedHttpNetwork::new();
     let _h = net.serve(addr(), server).await.unwrap();
     assert_eq!(
         store.admit("known", n(), &entries(&[("x", 10), ("y", 10)]), false),

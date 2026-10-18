@@ -36,6 +36,7 @@ seq-report = { path = "../seq-report" }
 # b2bua-harness module.
 call-limiter = { path = "../call-limiter" }
 http-net = { path = "../http-net" }
+http-net-testkit = { path = "../http-net-testkit" }
 tokio = { workspace = true }
 # The node each SUT serves (`NodeScope`); the trace-plane tests also install
 # their own sampling gate and read the captured subscriber buffer (ADR-0026).

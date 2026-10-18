@@ -43,4 +43,5 @@ call = { path = "../call" }
 # server on the simulated HTTP fabric, reached by the system's own client.
 call-limiter = { path = "../call-limiter" }
 http-net = { path = "../http-net" }
+http-net-testkit = { path = "../http-net-testkit" }
 sip-clock = { path = "../sip-clock" }

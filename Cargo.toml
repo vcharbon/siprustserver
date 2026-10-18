@@ -18,6 +18,7 @@ members = [
     "crates/topology",
     "crates/repl-net",
     "crates/http-net",
+    "crates/http-net-testkit",
     "crates/call-limiter",
     "crates/seq-report",
     "crates/scenario-harness",

@@ -34,7 +34,8 @@ use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, DrainBounds, DrainExit,
     FailoverHarness, Partition, ReplicatedB2buaSut, WorkerHealth,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";

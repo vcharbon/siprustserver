@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 
-use http_net::scripted::{
+use http_net::{HttpRequest, HttpResponse, HttpTransport};
+use http_net_testkit::scripted::{
     HttpBindings, HttpFindingKind, HttpReifiedStep, HttpReply, HttpRequestMatch, HttpScript,
     ScriptedHttpService,
 };
-use http_net::{HttpRequest, HttpResponse, HttpTransport, SimulatedHttpNetwork};
+use http_net_testkit::SimulatedHttpNetwork;
 
 /// `POST /start` opens (keyed on the cell) and hands a token; `POST /next`
 /// returns it and completes.

@@ -38,7 +38,7 @@ use failover_harness::{
     assert_call_fully_over, assert_call_lost_no_cdr, cookie_field, FailoverHarness,
     ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL, RULE_CSEQ_IN_DIALOG_ORDER,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 
@@ -87,14 +87,14 @@ pub(crate) fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     );
 }
 
-fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
+fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// The shared limiter on its own simulated HTTP fabric (it survives crashes),
 /// with one witness hold per id in [`IDS`].
 pub(crate) struct LimiterRig {
-    http: SimulatedHttpNetwork,
+    http: http_net_testkit::SimulatedHttpNetwork,
     pub(crate) store: Arc<CallStore>,
     _server: Box<dyn HttpServerHandle>,
 }
@@ -107,7 +107,7 @@ impl LimiterRig {
     }
 
     async fn serve_with(cfg: LimiterConfig) -> Self {
-        let http = SimulatedHttpNetwork::new();
+        let http = http_net_testkit::SimulatedHttpNetwork::new();
         let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
         for id in IDS {
             let witness = store.admit(
@@ -327,10 +327,10 @@ async fn a_late_landed_initial_admit_is_released_by_the_takeover_s_lossy_cleanup
         spawn_workers(&mut fh, &rig, limited_decision(&["x", "y"])).await;
 
     // ── the admit lands at 100 ms, its answer would come back at 200 ms ──
-    rig.http.apply_fault(http_net::Fault::Delay { dst: laddr(), ms: 100 });
+    rig.http.apply_fault(http_net_testkit::Fault::Delay { dst: laddr(), ms: 100 });
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    rig.http.apply_fault(http_net::Fault::Resume { dst: laddr() });
+    rig.http.apply_fault(http_net_testkit::Fault::Resume { dst: laddr() });
     let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
@@ -932,7 +932,7 @@ async fn a_release_queued_on_a_crashed_primary_is_freed_by_the_lease() {
     let call_ref = replicated_call_ref(&fh, backup_sut, &primary_ord).await;
 
     // ── the limiter stalls; the call ends on the primary ─────────────────
-    rig.http.apply_fault(http_net::Fault::Stall { dst: laddr() });
+    rig.http.apply_fault(http_net_testkit::Fault::Stall { dst: laddr() });
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
@@ -945,7 +945,7 @@ async fn a_release_queued_on_a_crashed_primary_is_freed_by_the_lease() {
     // ── the primary crashes with its release queue ───────────────────────
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    rig.http.apply_fault(http_net::Fault::Resume { dst: laddr() });
+    rig.http.apply_fault(http_net_testkit::Fault::Resume { dst: laddr() });
     for _ in 0..LEASE_SEC + 5 {
         fh.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();

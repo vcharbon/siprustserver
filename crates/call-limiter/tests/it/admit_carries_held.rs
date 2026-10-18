@@ -13,7 +13,8 @@ use call_limiter::wire::{AdmitAnswer, AdmitEntry, AdmitRequest, AdmitResponse, H
 use call_limiter::{
     AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer, RefreshResult,
 };
-use http_net::{HttpRequest, HttpResponse, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpRequest, HttpResponse, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use sip_clock::Clock;
 
 fn store() -> CallStore {

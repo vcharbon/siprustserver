@@ -7,12 +7,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use http_net::failures::FailureCause;
-use http_net::scripted::{
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpTransport};
+use http_net_testkit::scripted::{
     HttpBindings, HttpFindingKind, HttpReifiedStep, HttpReply, HttpRequestMatch, HttpScript,
     HttpScriptError, HttpState, HttpUnmatched, ScriptedHttpService,
 };
-use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net_testkit::SimulatedHttpNetwork;
 
 fn dst() -> std::net::SocketAddr {
     "10.0.0.7:8080".parse().unwrap()
@@ -380,7 +380,7 @@ async fn reset_is_a_connection_reset_on_the_simulated_fabric() {
     let err = net.request(dst(), HttpRequest::post("/start", b"{}".to_vec())).await.unwrap_err();
     assert_eq!(
         (err.cause, err.peer),
-        (FailureCause::Eof, dst().to_string()),
+        (http_net::failures::FailureCause::Eof, dst().to_string()),
         "closed without a response"
     );
     assert!(script.verdict().is_green());

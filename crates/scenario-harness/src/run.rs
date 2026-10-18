@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use http_net_testkit::{to_http_entries, HttpNetworkEvent, RecordedHttpEntry, HTTP_TAG};
 use layer_harness::{NetworkTag, RecordedScenario, Recorder, RunContext, Stamped, TransportKind};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -140,11 +141,9 @@ impl RunReport {
     }
 
     /// The HTTP exchanges recorded on the run's recorder (any
-    /// `http_net::RecordingHttpNetwork` built on it), in request order.
-    pub fn http_entries(&self) -> Vec<http_net::RecordedHttpEntry> {
-        http_net::to_http_entries(
-            &self.recorder.for_tag::<http_net::HttpNetworkEvent>(http_net::HTTP_TAG).snapshot(),
-        )
+    /// `http_net_testkit::RecordingHttpNetwork` built on it), in request order.
+    pub fn http_entries(&self) -> Vec<RecordedHttpEntry> {
+        to_http_entries(&self.recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot())
     }
 
     /// The recorder's drained scenario state (lanes + anomalies).

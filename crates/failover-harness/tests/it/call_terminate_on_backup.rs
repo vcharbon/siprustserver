@@ -40,7 +40,7 @@ use failover_harness::{
     assert_call_fully_over, assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
 use scenario_harness::{Agent, Dialog};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
@@ -58,7 +58,7 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
+fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
@@ -125,7 +125,7 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
     let bob = fh.agent("bob", BOB).await;
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();

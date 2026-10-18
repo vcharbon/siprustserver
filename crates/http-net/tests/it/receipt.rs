@@ -8,10 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use http_net::{
-    HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork, Receipt,
-    SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork, Receipt};
+use http_net_testkit::SimulatedHttpNetwork;
 use sip_clock::testkit::advance_settled;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

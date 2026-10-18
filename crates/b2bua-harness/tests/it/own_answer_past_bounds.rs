@@ -20,9 +20,8 @@ use b2bua::decision::{
 use b2bua::AdaptationHttpPort;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::ReleaseEventKind;
-use http_net::{
-    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::callflow::OFFER_SDP;
 use sip_message::generators::InDialogMethod;
 

@@ -31,7 +31,8 @@ use b2bua::limiter::{
     RefreshAnswer, RefreshCall, ReleaseAnswer,
 };
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use sip_clock::Clock;
 
 /// The id of the entry the default limiter adds to every route. Its cap never

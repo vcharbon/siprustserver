@@ -557,7 +557,7 @@ async fn a_stalled_service_admit_counts_as_a_limiter_failure() {
     let limiter = b2bua_harness::WITNESS_LIMITER_ADDR.parse().unwrap();
     let before =
         s.b2bua.metrics().limiter().failures_total(LimiterOp::Admit, LimiterFailure::Timeout);
-    s.rig.http.apply_fault(http_net::Fault::Stall { dst: limiter });
+    s.rig.http.apply_fault(http_net_testkit::Fault::Stall { dst: limiter });
     for _ in 0..40 {
         if !reads("stalled").is_empty() {
             break;
@@ -570,6 +570,6 @@ async fn a_stalled_service_admit_counts_as_a_limiter_failure() {
         before + 1,
         "the client's timeout answered the admit, not the router's cap",
     );
-    s.rig.http.apply_fault(http_net::Fault::Resume { dst: limiter });
+    s.rig.http.apply_fault(http_net_testkit::Fault::Resume { dst: limiter });
     s.end(dialog).await;
 }

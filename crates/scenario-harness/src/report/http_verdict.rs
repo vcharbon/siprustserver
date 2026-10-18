@@ -3,8 +3,8 @@
 
 use std::collections::HashSet;
 
-use http_net::scripted::{HttpFinding, HttpFindingKind};
-use http_net::{HttpOutcome, RecordedHttpEntry};
+use http_net_testkit::scripted::{HttpFinding, HttpFindingKind};
+use http_net_testkit::{HttpOutcome, RecordedHttpEntry};
 use seq_report::Anomaly;
 
 /// The report anomalies of a scripted service's findings: gating unless the

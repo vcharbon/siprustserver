@@ -28,9 +28,9 @@ use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::wire::AdmitEntry;
 use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{
-    BindError, Fault, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
-    HttpTransport, SimulatedHttpNetwork,
+    BindError, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
 };
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use scenario_harness::{Agent, Dialog, Harness};
 use sip_clock::Clock;
 use tokio::time::Instant;

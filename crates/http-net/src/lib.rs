@@ -13,27 +13,16 @@
 //! - a client fires a one-shot [`request`](HttpTransport::request) at that
 //!   address and awaits the [`HttpResponse`].
 //!
-//! ## Three impls (mirror of repl-net)
-//! - [`SimulatedHttpNetwork`] — an in-memory routing table keyed by
-//!   `SocketAddr`. A `request` looks up the bound service, applies the per-`dst`
-//!   [`Fault`] (pause / cutoff / error), waits the transit delay, and invokes
-//!   the **real** handler in-process. Mandatory for the paused-clock tests:
-//!   real sockets do not obey `tokio::time::pause`, so deterministic scenarios
-//!   cannot use real HTTP. This is the workhorse.
-//! - `RealHttpNetwork` — hyper server + a pooled `reqwest` client; **feature
-//!   `real`**. Its tests run on a real
-//!   (non-paused) runtime. The server listens with a 4096 backlog, sets
-//!   `TCP_NODELAY` on every connection, and answers each request with its
-//!   [`Receipt`] in scope: when its head arrived, before the body.
-//! - [`RecordingHttpNetwork`] — a test decorator that records both sides of
-//!   every exchange onto the `layer-harness` `Recorder` ([`HTTP_TAG`]), so HTTP
-//!   joins the run's ladder; [`to_http_entries`] reads the channel back.
+//! ## The production impl
+//! `RealHttpNetwork` — hyper server + a pooled `reqwest` client; **feature
+//! `real`**. Its tests run on a real (non-paused) runtime. The server listens
+//! with a 4096 backlog, sets `TCP_NODELAY` on every connection, and answers
+//! each request with its [`Receipt`] in scope (when its head arrived, before
+//! the body) and the connection's remote address in [`peer`] scope.
 //!
-//! ## Scripted service
-//! [`scripted::ScriptedHttpService`] is an [`HttpService`] for tests: it serves
-//! the exchanges a scenario states as a program and answers anything else
-//! `500`, recorded as a finding. Its faults include closing the connection
-//! without a response, through [`HttpService::answer`] and [`HttpAnswer`].
+//! The simulated fabric (in-memory, per-destination faults, for the
+//! paused-clock tests), the recording decorator and the scripted test service
+//! implement the same seam in `http-net-testkit`.
 //!
 //! ## Failure counters
 //! The real transport classifies every client failure into
@@ -55,7 +44,6 @@ pub mod backend;
 pub mod failures;
 mod resolved_target;
 mod resolver;
-pub mod scripted;
 pub mod settings;
 mod transport;
 
@@ -66,8 +54,6 @@ pub use settings::ClientSettings;
 #[cfg(feature = "real")]
 pub use transport::RealHttpNetwork;
 pub use transport::{
-    to_http_entries, AddressedClient, Behaviour, BindError, CapturedExchange, ExchangeOutcome,
-    Fault, HttpAnswer, HttpClient, HttpError, HttpNetworkEvent, HttpOutcome, HttpRequest,
-    HttpResponse, HttpServerHandle, HttpService, HttpTransport, Receipt, RecordedHttpEntry,
-    RecordingHttpNetwork, SimulatedHttpNetwork, HTTP_TAG, MAX_BODY_BYTES,
+    peer, AddressedClient, BindError, HttpAnswer, HttpClient, HttpError, HttpRequest, HttpResponse,
+    HttpServerHandle, HttpService, HttpTransport, Receipt, MAX_BODY_BYTES,
 };

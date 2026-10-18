@@ -19,10 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use http_net::{
-    HttpRequest, HttpResponse, HttpService, HttpTransport, RecordingHttpNetwork,
-    SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpService, HttpTransport};
+use http_net_testkit::{RecordingHttpNetwork, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;

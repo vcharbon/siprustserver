@@ -2,7 +2,8 @@ use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 
 use crate::limiter::lease::LimiterLease;
 use crate::metrics::B2buaMetrics;
-use http_net::{Fault, MemoryResolver, SimulatedHttpNetwork};
+use http_net::MemoryResolver;
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use sip_clock::Clock;
 
 use super::*;

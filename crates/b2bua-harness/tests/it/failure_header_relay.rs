@@ -17,7 +17,8 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use b2bua_harness::{B2buaScene, B2buaSut, BOB_PORT};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use sip_clock::Clock;
 use sip_message::header::HeaderName;
 

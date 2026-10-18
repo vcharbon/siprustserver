@@ -8,27 +8,21 @@ use async_trait::async_trait;
 mod addressed;
 #[cfg(feature = "real")]
 mod cause;
-mod entries;
 #[cfg(feature = "real")]
 mod listener;
-mod peer;
+pub mod peer;
 #[cfg(feature = "real")]
 mod real;
 #[cfg(feature = "real")]
 mod real_client;
 mod receipt;
-mod recording;
 #[cfg(feature = "real")]
 mod reqwest_resolve;
-mod simulated;
 
 pub use addressed::AddressedClient;
-pub use entries::{to_http_entries, CapturedExchange, ExchangeOutcome, RecordedHttpEntry};
 #[cfg(feature = "real")]
 pub use real::RealHttpNetwork;
 pub use receipt::Receipt;
-pub use recording::{HttpNetworkEvent, HttpOutcome, RecordingHttpNetwork, HTTP_TAG};
-pub use simulated::{Behaviour, Fault, SimulatedHttpNetwork};
 
 use crate::failures::FailureCause;
 use crate::resolved_target::ResolvedTarget;

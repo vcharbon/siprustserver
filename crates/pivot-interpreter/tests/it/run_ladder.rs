@@ -48,7 +48,8 @@ use b2bua::limiter::CallLimiter;
 use b2bua_harness::{B2buaScene, B2buaSut, BOB_PORT};
 use call::model::cdr::CdrEventType;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpTransport, SimulatedHttpNetwork};
+use http_net::HttpTransport;
+use http_net_testkit::SimulatedHttpNetwork;
 use pivot_interpreter::plan::Plan;
 use pivot_interpreter::{
     Booking, ClockMode, CloseOwed, Failure, IdentityBindings, Lane, Outcome, RunConfig, Sut,

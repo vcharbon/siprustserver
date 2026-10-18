@@ -12,9 +12,8 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use call_limiter::wire::AdmitEntry;
 use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{
-    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use sip_clock::Clock;
 
 use crate::settle_until;

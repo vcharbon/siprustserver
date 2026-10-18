@@ -33,7 +33,8 @@ use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use observe::{activation_bucket, CapturedSpan, RateDraw, SampleAdmission};
 use sip_clock::Clock;
 

@@ -28,10 +28,8 @@ use failover_harness::{
     assert_call_fully_over, cookie_field, total_cdrs_for, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
-use http_net::{
-    Fault, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
-    SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport};
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use scenario_harness::Agent;
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;

@@ -39,7 +39,8 @@ use failover_harness::{
     assert_call_fully_over, cookie_field, total_cdrs_for, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::{Agent, Dialog};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;

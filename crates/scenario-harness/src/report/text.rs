@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use http_net::{HttpOutcome, RecordedHttpEntry};
+use http_net_testkit::{HttpOutcome, RecordedHttpEntry};
 use layer_harness::{Lane, NetworkTag, RecordedScenario, TransportKind};
 use seq_report::Anomaly;
 use sip_net_testkit::RecordedSipEntry;

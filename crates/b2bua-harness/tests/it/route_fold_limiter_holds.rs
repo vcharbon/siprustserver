@@ -552,7 +552,8 @@ async fn a_fail_open_fold_on_an_ending_call_is_freed_by_its_release() {
     // ── the caller hangs up; the limiter stalls before the fold's admit ────
     let mut bye = dialog.bye().await;
     let mut bob_bye = bob.receive("BYE").await;
-    rig.http.apply_fault(http_net::Fault::Stall { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
+    rig.http
+        .apply_fault(http_net_testkit::Fault::Stall { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
     for _ in 0..RELEASE_DELAY.as_secs() {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
@@ -561,7 +562,9 @@ async fn a_fail_open_fold_on_an_ending_call_is_freed_by_its_release() {
         media.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the fold dials no replacement leg for a call whose parties hung up",
     );
-    rig.http.apply_fault(http_net::Fault::Resume { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
+    rig.http.apply_fault(http_net_testkit::Fault::Resume {
+        dst: WITNESS_LIMITER_ADDR.parse().unwrap(),
+    });
 
     // ── bob's 200 ends the call: still counted, it releases its set ────────
     bob_bye.respond(200, "OK").await;

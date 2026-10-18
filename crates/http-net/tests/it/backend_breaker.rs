@@ -7,9 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use http_net::backend::metrics;
-use http_net::{
-    AttemptError, Behaviour, BreakerConfig, ClientSettings, HttpRequest, SimulatedHttpNetwork,
-};
+use http_net::{AttemptError, BreakerConfig, ClientSettings, HttpRequest};
+use http_net_testkit::{Behaviour, SimulatedHttpNetwork};
 use sip_clock::testkit::{advance_settled, settle};
 
 use crate::backend::{Rig, ATTEMPT};

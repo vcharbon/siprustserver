@@ -12,10 +12,11 @@ use async_trait::async_trait;
 use http_net::backend::metrics;
 use http_net::failures::FailureCause;
 use http_net::{
-    AttemptError, BackendClient, Behaviour, BindError, BreakerConfig, Budgets, ClientSettings,
-    Fault, HttpClient, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
-    MemoryResolver, ResolvedTarget, SimulatedHttpNetwork,
+    AttemptError, BackendClient, BindError, BreakerConfig, Budgets, ClientSettings, HttpClient,
+    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, MemoryResolver,
+    ResolvedTarget,
 };
+use http_net_testkit::{Behaviour, Fault, SimulatedHttpNetwork};
 use sip_clock::testkit::{advance_settled, settle};
 use tokio::time::Instant;
 

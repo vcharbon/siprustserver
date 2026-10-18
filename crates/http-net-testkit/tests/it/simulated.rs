@@ -9,10 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http_net::failures::FailureCause;
-use http_net::{
-    ExchangeOutcome, Fault, HttpRequest, HttpResponse, HttpService, HttpTransport,
-    RecordingHttpNetwork, SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpService, HttpTransport};
+use http_net_testkit::{ExchangeOutcome, Fault, RecordingHttpNetwork, SimulatedHttpNetwork};
 use layer_harness::{Recorder, TransportKind};
 use sip_clock::testkit::advance_settled;
 use sip_clock::Clock;
@@ -432,7 +430,7 @@ async fn a_request_its_caller_abandons_leaves_the_flight() {
 /// never completes, `Eof` is never served.
 #[tokio::test(start_paused = true)]
 async fn scripted_behaviours_are_taken_one_per_request() {
-    use http_net::Behaviour;
+    use http_net_testkit::Behaviour;
     let net = SimulatedHttpNetwork::new().with_connect_timeout(Duration::from_millis(300));
     let (svc, calls) = echo();
     let dst = addr("10.0.0.1:8080");

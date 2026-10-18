@@ -14,11 +14,12 @@
 
 use std::sync::Arc;
 
-use http_net::scripted::{
+use http_net::{HttpRequest, HttpResponse, HttpTransport};
+use http_net_testkit::scripted::{
     HttpBindings, HttpReifiedStep, HttpReply, HttpRequestMatch, HttpScript, HttpScriptHandle,
     ScriptedHttpService,
 };
-use http_net::{HttpRequest, HttpResponse, HttpTransport, RecordingHttpNetwork};
+use http_net_testkit::RecordingHttpNetwork;
 use layer_harness::{lane_key, NetworkTag};
 use scenario_harness::report::{self, http_verdict::verdict_anomalies};
 use scenario_harness::{Agent, Harness, RunReport};
@@ -86,7 +87,7 @@ async fn the_exchange_sits_between_the_sip_messages_on_the_simulated_fabric() {
     let handle = svc.add(route_script(), bindings()).unwrap();
     let service: std::net::SocketAddr = "10.9.0.1:8080".parse().unwrap();
     let net = RecordingHttpNetwork::new(
-        Arc::new(http_net::SimulatedHttpNetwork::new()),
+        Arc::new(http_net_testkit::SimulatedHttpNetwork::new()),
         &h.recorder(),
         BOB,
     )
@@ -131,7 +132,7 @@ async fn an_unmatched_request_is_a_gating_finding_linked_to_its_row() {
     let handle = svc.add(route_script(), bindings()).unwrap();
     let service: std::net::SocketAddr = "10.9.0.1:8080".parse().unwrap();
     let net = RecordingHttpNetwork::new(
-        Arc::new(http_net::SimulatedHttpNetwork::new()),
+        Arc::new(http_net_testkit::SimulatedHttpNetwork::new()),
         &h.recorder(),
         BOB,
     );
@@ -179,7 +180,7 @@ async fn the_written_artifacts_carry_the_service_view() {
     svc.add(route_script(), bindings()).unwrap();
     let service: std::net::SocketAddr = "10.9.0.1:8080".parse().unwrap();
     let net = RecordingHttpNetwork::new(
-        Arc::new(http_net::SimulatedHttpNetwork::new()),
+        Arc::new(http_net_testkit::SimulatedHttpNetwork::new()),
         &h.recorder(),
         BOB,
     )
@@ -224,7 +225,7 @@ async fn a_service_nobody_called_draws_no_column() {
     let bob = h.agent("bob", BOB).await;
     let service: std::net::SocketAddr = "10.9.0.1:8080".parse().unwrap();
     let net = RecordingHttpNetwork::new(
-        Arc::new(http_net::SimulatedHttpNetwork::new()),
+        Arc::new(http_net_testkit::SimulatedHttpNetwork::new()),
         &h.recorder(),
         BOB,
     )

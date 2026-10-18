@@ -50,6 +50,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 [dev-dependencies]
 sip-message = { path = "../sip-message" }
 sip-net-testkit = { path = "../sip-net-testkit" }
+http-net-testkit = { path = "../http-net-testkit" }
 # The simulated load sampler the /metrics body test builds the overload signal with.
 load-shed = { path = "../load-shed" }
 # The limiter client's boot and re-resolve tests run a real limiter server on

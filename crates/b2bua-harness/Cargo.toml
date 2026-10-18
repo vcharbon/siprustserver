@@ -33,6 +33,7 @@ async-trait = { workspace = true }
 # The SUT's default call limiter (`src/limiter/mod.rs`): a real `CallStore` served
 # by a `LimiterServer` on the simulated HTTP fabric.
 http-net = { path = "../http-net" }
+http-net-testkit = { path = "../http-net-testkit" }
 call-limiter = { path = "../call-limiter" }
 # The node a spawned SUT serves rides its tasks (`observe::spawn_keeping_node`).
 observe = { path = "../observe", default-features = false }

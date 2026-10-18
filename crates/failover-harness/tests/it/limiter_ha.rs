@@ -19,7 +19,7 @@ use failover_harness::{
     assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
     LEASE_OUTLIVING_THE_REPLICA_TTL, RULE_CSEQ_IN_DIALOG_ORDER,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 
@@ -64,7 +64,7 @@ fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     );
 }
 
-fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
+fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
@@ -107,7 +107,7 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     let bob = fh.agent("bob", BOB).await;
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
@@ -225,7 +225,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     let bob = fh.agent("bob", BOB).await;
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
@@ -367,7 +367,7 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
     // A 2-minute lease so the paused clock reaches the leak budget fast.
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(lease_leak_config(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
@@ -539,7 +539,7 @@ async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
     let bob = fh.agent("bob", BOB).await;
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
@@ -787,7 +787,7 @@ async fn rerouted_call_holds_drain_on_the_takeover_node_without_re_releasing_the
     let charlie = fh.agent("charlie", CHARLIE).await;
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     for id in ["x", "y", "z"] {
         let witness = store.admit(

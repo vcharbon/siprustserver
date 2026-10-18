@@ -69,9 +69,9 @@ mod tests {
     use b2bua::metrics::B2buaMetrics;
     use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
     use http_net::{
-        BindError, Fault, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
-        SimulatedHttpNetwork,
+        BindError, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
     };
+    use http_net_testkit::{Fault, SimulatedHttpNetwork};
     use sip_clock::testkit::settle;
     use sip_clock::Clock;
 

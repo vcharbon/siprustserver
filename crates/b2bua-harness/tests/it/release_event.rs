@@ -38,7 +38,8 @@ use b2bua_harness::{settle_until, B2buaSut};
 use crate::common::sdp::apart_from_origin;
 use call::{DecisionKind, ReleaseEventKind};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 

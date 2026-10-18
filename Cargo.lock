@@ -499,6 +499,7 @@ dependencies = [
  "call",
  "call-limiter",
  "http-net",
+ "http-net-testkit",
  "load-shed",
  "metric-catalogue",
  "observe",
@@ -532,6 +533,7 @@ dependencies = [
  "callshapes",
  "futures",
  "http-net",
+ "http-net-testkit",
  "layer-harness",
  "load-shed",
  "media",
@@ -575,6 +577,7 @@ dependencies = [
  "call",
  "call-limiter",
  "http-net",
+ "http-net-testkit",
  "jemalloc-stats",
  "kube",
  "lapin",
@@ -752,6 +755,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "http-net",
+ "http-net-testkit",
  "metric-catalogue",
  "observe",
  "serde",
@@ -1389,6 +1393,7 @@ dependencies = [
  "call-limiter",
  "ha-harness",
  "http-net",
+ "http-net-testkit",
  "layer-harness",
  "load-shed",
  "observe",
@@ -1830,22 +1835,34 @@ name = "http-net"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "bytes",
  "http-body-util",
  "http-net",
+ "http-net-testkit",
  "hyper",
  "hyper-util",
- "layer-harness",
  "metric-catalogue",
  "reqwest",
- "serde",
- "serde_json",
  "sip-clock",
  "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "http-net-testkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "http-net",
+ "layer-harness",
+ "serde",
+ "serde_json",
+ "sip-clock",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -3052,6 +3069,7 @@ dependencies = [
  "call-limiter",
  "futures",
  "http-net",
+ "http-net-testkit",
  "pivot-schema",
  "regex",
  "scenario-harness",
@@ -3850,6 +3868,7 @@ dependencies = [
  "async-trait",
  "futures",
  "http-net",
+ "http-net-testkit",
  "layer-harness",
  "observe",
  "rfc-rules",

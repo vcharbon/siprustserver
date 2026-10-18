@@ -20,7 +20,8 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use b2bua_harness::{establish, hangup, settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{Fault, HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
 

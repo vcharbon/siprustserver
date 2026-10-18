@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http_net::failures::FailureCause;
-use http_net::{
-    to_http_entries, ExchangeOutcome, Fault, HttpAnswer, HttpNetworkEvent, HttpOutcome,
-    HttpRequest, HttpResponse, HttpService, HttpTransport, RecordingHttpNetwork,
+use http_net::{HttpAnswer, HttpRequest, HttpResponse, HttpService, HttpTransport};
+use http_net_testkit::{
+    to_http_entries, ExchangeOutcome, Fault, HttpNetworkEvent, HttpOutcome, RecordingHttpNetwork,
     SimulatedHttpNetwork, HTTP_TAG,
 };
 use layer_harness::{lane_key, NetworkTag, Recorder, TransportKind};

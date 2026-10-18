@@ -24,7 +24,7 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use call::LimiterEntry;
 use call_limiter::{CallStore, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 use sip_message::SipMessage;
@@ -64,7 +64,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
     )
 }
 
-fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
+fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
@@ -106,7 +106,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes),
     // its lease outliving the replica TTL so the sweep proves the reap's release.
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(crate::LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();

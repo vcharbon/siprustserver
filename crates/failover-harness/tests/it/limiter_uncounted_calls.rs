@@ -20,7 +20,8 @@ use failover_harness::{
     assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
     RULE_CSEQ_IN_DIALOG_ORDER,
 };
-use http_net::{Fault, HttpTransport, SimulatedHttpNetwork};
+use http_net::HttpTransport;
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 
