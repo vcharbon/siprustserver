@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "SIP transaction layer (RFC 3261 §17 client/server FSMs + retransmission timers). Shared by proxy and B2BUA; per-call FIFO dispatch is a B2BUA-only concern and lives there."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 

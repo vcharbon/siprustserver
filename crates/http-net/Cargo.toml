@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Reusable unary HTTP transport seam (request/response, no streaming) and the outbound backend client on it (name lookup, in-flight cap, rotation, breaker, retry). A SimulatedHttpNetwork in-memory fabric (per-destination and per-attempt faults reported as reqwest classifies them, transit delay) for paused-clock tests, a RecordingHttpNetwork decorator onto the layer-harness Recorder, and a feature-gated RealHttpNetwork (hyper + reqwest) for production. Bodies are opaque bytes — JSON/serde lives in the consumer."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 

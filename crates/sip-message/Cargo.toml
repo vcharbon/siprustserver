@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Pure SIP message layer (parse / serialize / strict-validate) — Rust port of sipjsserver src/sip message core."
 
+[package.metadata.purity]
+tier = "pure"
+
 [lints]
 workspace = true
 

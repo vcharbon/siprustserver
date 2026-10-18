@@ -28,6 +28,15 @@ fn the_limiter_refresh_and_release_queue_bounds_are_checked() {
     assert!(e.contains("limiter_release_queue_cap=0"), "{e}");
 }
 
+/// A refresh tick past `i64::MAX` ms is past every refresh period, not a
+/// negative one.
+#[test]
+fn a_refresh_tick_beyond_i64_is_refused() {
+    let c = B2buaConfig { limiter_refresh_batch_ms: u64::MAX, ..B2buaConfig::default() };
+    let e = c.validate().expect_err("a tick past i64::MAX ms");
+    assert!(e.contains(&format!("limiter_refresh_batch_ms={}", u64::MAX)), "{e}");
+}
+
 /// New calls hold half the handler permits and stop 5 % below the queue
 /// cap by default; each share is a bounded percentage.
 #[test]

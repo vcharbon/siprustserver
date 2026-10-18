@@ -11,6 +11,24 @@
 //! When idle there is ZERO overhead: the SIGPROF handler exists only while a
 //! [`pprof::ProfilerGuard`] is alive (i.e. only during an active capture).
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 use std::time::Duration;
 
 /// Sample the current process for `seconds` at `freq` Hz and return a flamegraph

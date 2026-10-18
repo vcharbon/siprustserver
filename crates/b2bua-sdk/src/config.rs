@@ -453,6 +453,7 @@ pub struct RetryAfterRange {
 
 impl RetryAfterRange {
     /// The value `roll` (any `u64`) picks, uniform over `[min_sec, max_sec]`.
+    #[expect(clippy::cast_possible_truncation, reason = "the remainder is below span ≤ 2^32")]
     pub fn pick(&self, roll: u64) -> u32 {
         let span = u64::from(self.max_sec.saturating_sub(self.min_sec)) + 1;
         self.min_sec.saturating_add((roll % span) as u32)
@@ -618,8 +619,8 @@ impl B2buaConfig {
             ));
         }
         let refresh_ms = self.limiter_refresh_sec.saturating_mul(1000);
-        if self.limiter_refresh_batch_ms == 0 || self.limiter_refresh_batch_ms as i64 >= refresh_ms
-        {
+        let batch = i64::try_from(self.limiter_refresh_batch_ms);
+        if !batch.is_ok_and(|batch| (1..refresh_ms).contains(&batch)) {
             return Err(format!(
                 "limiter_refresh_batch_ms={} not in 1..{refresh_ms} (limiter_refresh_sec): a \
                  refresh falling due must leave within one refresh period",
@@ -799,13 +800,12 @@ impl B2buaConfig {
     /// is NOT "disabled": a non-positive value falls back to the 32 s Timer B
     /// default rather than arming a degenerate deadline.
     pub fn invite_first_response_timeout_ms(&self) -> u64 {
-        let default = Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC;
         let sec = if self.invite_first_response_timeout_sec > 0 {
             self.invite_first_response_timeout_sec
         } else {
-            default
+            Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC
         };
-        u64::try_from(sec).unwrap_or(default as u64).saturating_mul(1000)
+        sec.unsigned_abs().saturating_mul(1000)
     }
 
     /// The privacy-service role every relay site mints under

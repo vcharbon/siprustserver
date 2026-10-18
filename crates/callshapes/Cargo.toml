@@ -3,6 +3,9 @@ name = "callshapes"
 version = "0.1.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
 scenario-harness = { path = "../scenario-harness" }
 sip-message = { path = "../sip-message" }

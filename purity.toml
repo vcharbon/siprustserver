@@ -1,0 +1,45 @@
+# Tiers of the production closure (scripts/purity.py, `just purity`,
+# ADR-0051 §1). Each crate a production binary links declares
+# `[package.metadata.purity] tier = "pure" | "shell"` in its manifest.
+
+# The production binaries. Each is built by a cargo command of its own; its
+# closure is its `cargo tree -p <binary> -e normal,features`. A binary is
+# never removed while it ships.
+binaries = ["sip-proxy-runner", "call-limiter-runner"]
+
+# Features no production binary may reach: test support, and the schedules
+# no RFC prescribes (ADR-0032 X1). A bare name is that feature of any crate.
+test-features = ["testkit", "test-util", "sip-retransmit/authored", "sip-message/rvoip-oracle"]
+
+# Third-party crates a pure crate may reach through its normal dependencies
+# (proc-macro crates aside): no clock, randomness, filesystem, network,
+# environment, sleep or interior mutability of their own reaches the caller.
+# An entry no pure crate reaches is stale; an entry added is a reviewed change.
+pure-deps = [
+  "base64",
+  "bytes",
+  "dyn-clone",
+  "itoa",
+  "memchr",
+  "num-traits",
+  "ref-cast",
+  "rmp",
+  "rmp-serde",
+  "schemars",
+  "serde",
+  "serde_bytes",
+  "serde_core",
+  "serde_json",
+  "smallvec",
+  "thiserror",
+  "zmij",
+]
+
+# Breaches held until their fix lands. An entry only goes away: one the base
+# does not hold fails, and so does one whose breach no longer holds.
+[known]
+# Test support linked into production through sip-net and http-net.
+untiered = ["layer-harness", "rfc-rules"]
+
+[known.pure-reaches]
+b2bua-sdk = ["sip-txn"]

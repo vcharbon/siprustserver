@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Shared, port-agnostic cluster-membership seam of HA replication. A leaf crate consumed by BOTH the front proxy and the b2bua replication engine: a `Peer` is ordinal+host (no port — membership, not transport), `MembershipState` is the lock-free ArcSwap+broadcast backing, and `Membership` is the read seam. Health is deliberately NOT modelled here — it is a proxy-layer concern layered on top. Preserves ADR-0002 acyclicity: proxy/b2bua → topology, never the reverse."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 

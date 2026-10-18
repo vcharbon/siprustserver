@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Refuses a commit whose STAGED Rust content is not what `cargo fmt` would
-# write, or whose staged .rs files break the file-size budget
-# (scripts/file-size.py). Checks the index blobs, not the worktree, so a
-# formatted worktree cannot vouch for an unformatted stage. Installed by `just
-# hooks`.
+# write, whose staged .rs files break the file-size budget
+# (scripts/file-size.py), or whose staged panic-sites.allow or purity.toml
+# loosens against HEAD (scripts/panic-sites.py, scripts/purity.py). Checks the
+# index blobs, not the worktree, so a formatted worktree cannot vouch for an
+# unformatted stage. Installed by `just hooks`.
 set -euo pipefail
 top="$(git rev-parse --show-toplevel)"
 rc=0
@@ -22,4 +23,6 @@ if [ "${#bad[@]}" -gt 0 ]; then
   rc=1
 fi
 "$top/scripts/file-size.py" -C "$top" --staged || rc=1
+"$top/scripts/panic-sites.py" -C "$top" --staged || rc=1
+"$top/scripts/purity.py" -C "$top" --staged || rc=1
 exit "$rc"

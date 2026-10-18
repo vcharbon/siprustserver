@@ -230,16 +230,24 @@ debug = false
 # `[lints] workspace = true`, turning a stray `unsafe` block into a hard compile
 # error rather than a silent perf shortcut nobody reviewed. `forbid` (stronger
 # than `deny`) cannot be locally re-enabled with `#[allow(unsafe_code)]`. The
-# ONE exception is `crates/jemalloc-stats`, whose two `mallctl` FFI calls are
-# irreducibly unsafe — it does NOT opt into this table and instead pins its own
-# `deny` + a narrow `#[allow(unsafe_code)]` on each documented call site. This
-# governs OUR source only; dependencies (tokio, jemalloc, …) use unsafe freely
-# and are unaffected. See ADR-discussion / jemalloc-stats/src/lib.rs SAFETY notes.
+# exceptions are the crates whose FFI or socket-option calls are irreducibly
+# unsafe (`jemalloc-stats`, `sip-net`, `alloc-counter`): they do NOT opt into
+# this table, pin their own `deny` + a narrow `#[allow(unsafe_code)]` on each
+# documented call site, and otherwise restate the workspace lint tables exactly
+# (scripts/purity.py checks it). This governs OUR source only; dependencies
+# (tokio, jemalloc, …) use unsafe freely and are unaffected.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 # Function-size ceiling (threshold in clippy.toml, 200 lines initially): a
 # function past it is presumed to be several concepts and wants extraction.
 # `warn` only — surfaced by `cargo clippy`, not a build gate yet.
+#
+# The disallowed lists of clippy.toml are the panic and purity rules of
+# ADR-0051; scripts/panic-sites.py runs them over the tiered crates, so every
+# other clippy run, test code included, holds them at `allow`.
 [workspace.lints.clippy]
 too_many_lines = "warn"
+disallowed_macros = "allow"
+disallowed_methods = "allow"
+disallowed_types = "allow"

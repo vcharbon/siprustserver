@@ -43,7 +43,7 @@ impl StatusMatch {
         match self {
             StatusMatch::Any => true,
             StatusMatch::Code(c) => c == status,
-            StatusMatch::Class(c) => (status / 100) as u8 == c,
+            StatusMatch::Class(c) => status / 100 == u16::from(c),
         }
     }
 }

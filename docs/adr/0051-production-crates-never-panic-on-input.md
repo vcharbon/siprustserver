@@ -57,17 +57,22 @@ fails, whatever crate unified it in.
   becomes a parse error. Rewriting every `i + 1` to checked or saturating form would add error
   branches no input reaches and invite silent defaults. Deadline arithmetic goes through one
   checked helper of the clock crate. Division by an input value is checked by hand.
-- `#[expect(clippy::…, reason = "…")]` only where an access is provably safe (a constant table).
+- `#[expect(clippy::…, reason = "…")]` only where an access is provably safe (a constant table),
+  on the statement or item of that one site.
 - `#[no_panic]` is not used: allocation defeats it and its guard needs `unsafe`.
 
 ### 3. Mechanics
 
-One root `clippy.toml`: clippy reads the nearest one and does not merge. No crate-level
-`[lints]` tables. Before a crate reaches zero, a ratchet pass runs clippy with the set as `-W`
-flags on `--lib --bins` and holds per-file counts in `panic-sites.allow` (counts only go down,
-a new file starts at 0), so no workspace `-D warnings` gate sees the set early. At zero the
-crate carries `#![cfg_attr(not(test), deny(…))]` at its root, which exempts all test code, and
-leaves the ratchet.
+One root `clippy.toml`: clippy reads the nearest one and does not merge. Every member
+inherits `[lints] workspace = true`; a crate with audited `unsafe` restates the workspace
+table with `unsafe_code = "deny"` as its one difference, which the tier check verifies. A
+ratchet pass runs clippy with the set force-warned on `--lib --bins` of every tiered crate and
+holds per-file counts in `panic-sites.allow`, so no workspace `-D warnings` gate sees the set
+early and no source attribute hides a site from it. An entry goes down, or up only by sites
+git sees moved into its file from a counted site elsewhere; the total never rises. At zero
+the crate carries `#![cfg_attr(not(test), deny(…))]` with the eleven lints at its roots,
+which exempts all test code; the disallowed lists stay with the pass for every tiered crate,
+since one list holds both tiers' entries.
 
 ### 4. Abort-class failures
 

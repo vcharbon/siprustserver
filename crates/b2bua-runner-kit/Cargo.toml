@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Reusable B2BUA runner composition: the env -> config -> bind -> deps -> spawn -> drain plumbing shared by every runner binary (the in-tree b2bua-runner and downstream integrators composing their own runner per ADR-0016), so runner policy — env grammar, advertise coercion, overload-brake wiring, drain behavior — lives once instead of being copied per binary."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 

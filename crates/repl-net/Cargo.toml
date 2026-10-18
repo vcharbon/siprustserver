@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "HA replication wire layer: the five positional-msgpack replication frames + single-frame codec + 4-byte length-prefix framing. Call-agnostic — bodies are opaque bytes. The transport seam lives in `transport`. See ADR-0011 X9 / docs/plan/on-proper-migration-of-lazy-pancake.md."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 

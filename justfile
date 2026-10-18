@@ -58,7 +58,7 @@ test-cpu-quota:
 
 # ── review gates ───────────────────────────────────────────────────────
 
-lint: file-size
+lint: file-size purity panic-sites
     cargo clippy --workspace --all-targets
 
 # File-size budget: a first-party .rs file has at most 500 lines, a test file
@@ -80,6 +80,36 @@ large-files:
 # included (under a second).
 file-size-check:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/file-size-check
+
+# The tiers of the production closure (scripts/purity.py, purity.toml,
+# ADR-0051 §1): each production binary's closure, built alone, reaches no
+# `testkit`/`test-util` feature and no first-party crate without a tier; a pure
+# crate depends on pure crates and `pure-deps` only; every member's lint table
+# is the workspace's. The pre-commit hook checks the staged known entries.
+purity:
+    scripts/purity.py
+
+# The panic-sites ratchet (scripts/panic-sites.py, panic-sites.allow,
+# ADR-0051 §2-§3): one clippy pass with the panic set over the tiered crates;
+# a file holds at most its listed count, a site inside the branch's hunks
+# fails, a crate at zero carries the deny attribute. The pre-commit hook checks
+# the staged allowlist.
+panic-sites:
+    scripts/panic-sites.py
+
+# Lowers each entry to its file's count and removes the entries at zero; never
+# raises nor adds one.
+panic-sites-update:
+    scripts/panic-sites.py --update
+
+# The counts per crate, then every file with a site in allowlist form.
+panic-sites-report:
+    @scripts/panic-sites.py --report
+
+# Both checks on throwaway cargo workspaces, one real clippy pass under this
+# repository's clippy.toml included (a few seconds).
+purity-check:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/purity-check
 
 # Rewrites every file outside Rust that restates the RFC rule list (the token
 # fixture, the TypeScript `RFC_RULES`) from the rule registry. pivot-schema's
