@@ -58,8 +58,24 @@ test-cpu-quota:
 
 # ── review gates ───────────────────────────────────────────────────────
 
-lint: file-size purity panic-sites
+lint: file-size purity panic-sites audit-gate
     cargo clippy --workspace --all-targets
+
+# The RustSec audit of Cargo.lock (scripts/audit.py, .cargo/audit.toml): a
+# vulnerability not ignored there fails when the branch touches Cargo.lock or
+# .cargo/audit.toml, and is a warning otherwise.
+audit-gate:
+    scripts/audit.py
+
+# The full `cargo audit` report, then the outdated direct dependencies
+# (`cargo upgrade --dry-run --incompatible allow`); it prints, it never fails.
+audit:
+    @scripts/audit.py --report
+
+# The audit script on throwaway repositories, one real cargo-audit run on a
+# vulnerable lockfile included (under a few seconds).
+audit-check:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/audit-check
 
 # File-size budget: a first-party .rs file has at most 500 lines, a test file
 # 800, a file `file-size.allow` lists at most its listed size
@@ -184,7 +200,8 @@ hakit-check:
 
 # ── environment ────────────────────────────────────────────────────────
 
-# Check this machine can build the workspace (toolchain, mold, a real compile).
+# Check this machine can build the workspace (toolchain, mold, a real compile);
+# the audit tools are reported, a missing one does not fail.
 doctor:
     @echo "toolchain: $(rustc -vV | sed -n 's/^release: //p') ($(rustup show active-toolchain | cut -d' ' -f1))"
     @command -v mold >/dev/null \
@@ -193,6 +210,12 @@ doctor:
     @command -v jq >/dev/null \
         && echo "jq:        $(jq --version)" \
         || { echo "jq:        MISSING -> apt-get install jq (scripts/check-test-layout.sh)"; exit 1; }
+    @command -v cargo-audit >/dev/null \
+        && echo "audit:     $(cargo audit --version | cut -d' ' -f2)" \
+        || echo "audit:     MISSING -> cargo install cargo-audit (just audit, just audit-gate)"
+    @command -v cargo-upgrade >/dev/null \
+        && echo "upgrade:   $(cargo upgrade --version | cut -d' ' -f2)" \
+        || echo "upgrade:   MISSING -> cargo install cargo-edit (just audit's outdated report)"
     @cargo build -p sip-clock --quiet && echo "build:     ok"
 
 # ── disk ───────────────────────────────────────────────────────────────
