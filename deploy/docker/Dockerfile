@@ -49,13 +49,16 @@ COPY . .
 # `target/` is NOT part of the image filesystem, so a later
 # `COPY --from=builder /src/target/...` would find nothing — copy the binaries
 # OUT of the mount into a plain dir (/out) in the SAME RUN.
+# Each production binary is built by a cargo command of its own, so no feature
+# a test tool turns on (`testkit`, tokio `test-util`) is unified into it: its
+# resolution is the one `just purity` checks (ADR-0051 §1). The lab binaries
+# share the last command; the shared target dir rebuilds only what differs.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release \
-        -p sip-proxy-runner -p b2bua-runner \
-        -p call-limiter-runner -p cdr-consumer-runner \
-        -p loadgen \
+    cargo build --release -p sip-proxy-runner \
+ && cargo build --release -p call-limiter-runner \
+ && cargo build --release -p b2bua-runner -p cdr-consumer-runner -p loadgen \
  && mkdir -p /out \
  && cp target/release/sip-proxy-runner \
        target/release/b2bua-runner \
