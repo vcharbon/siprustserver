@@ -8,29 +8,18 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use bytes::Bytes;
 use sip_message::{SipMessage, SipParseError};
 
-/// What the parse of one datagram gave.
-#[derive(Debug)]
-pub enum Parsed {
-    /// The message the datagram carries.
-    Message(SipMessage),
-    /// The parser refused the datagram.
-    Malformed(SipParseError),
-    /// The parser panicked on the datagram: a parser defect. The caller drops
-    /// the datagram and counts it.
-    Panicked,
-}
+/// The parser panicked on a datagram: a parser defect. The caller drops the
+/// datagram and counts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParserPanicked;
 
-/// Parse the datagram `raw` with `parse`; a panic inside `parse` is caught and
-/// returned as [`Parsed::Panicked`].
+/// Parse the datagram `raw` with `parse`: the parse's own result, or
+/// [`ParserPanicked`] when `parse` panics.
 pub fn parse_datagram(
     raw: Bytes,
     parse: impl FnOnce(Bytes) -> Result<SipMessage, SipParseError>,
-) -> Parsed {
-    match catch_unwind(AssertUnwindSafe(|| parse(raw))) {
-        Ok(Ok(message)) => Parsed::Message(message),
-        Ok(Err(error)) => Parsed::Malformed(error),
-        Err(_payload) => Parsed::Panicked,
-    }
+) -> Result<Result<SipMessage, SipParseError>, ParserPanicked> {
+    catch_unwind(AssertUnwindSafe(|| parse(raw))).map_err(|_payload| ParserPanicked)
 }
 
 #[cfg(test)]
@@ -49,23 +38,23 @@ mod tests {
         Content-Length: 0\r\n\r\n";
 
     #[test]
-    fn a_parse_that_panics_is_returned_as_panicked() {
+    fn a_parse_that_panics_is_returned_as_parser_panicked() {
         let parsed = parse_datagram(Bytes::from_static(OPTIONS), |_| panic!("probe: parser panic"));
-        assert!(matches!(parsed, Parsed::Panicked), "{parsed:?}");
+        assert!(matches!(parsed, Err(ParserPanicked)), "{parsed:?}");
     }
 
     #[test]
-    fn a_parse_that_refuses_is_returned_as_malformed() {
+    fn a_parse_that_refuses_returns_its_error() {
         let parser = CustomParser::new();
         let parsed =
             parse_datagram(Bytes::from_static(b"\x00garbage"), |raw| parser.parse_shared(raw));
-        assert!(matches!(parsed, Parsed::Malformed(_)), "{parsed:?}");
+        assert!(matches!(parsed, Ok(Err(_))), "{parsed:?}");
     }
 
     #[test]
     fn a_parse_that_succeeds_returns_the_message() {
         let parser = CustomParser::new();
         let parsed = parse_datagram(Bytes::from_static(OPTIONS), |raw| parser.parse_shared(raw));
-        assert!(matches!(parsed, Parsed::Message(SipMessage::Request(_))), "{parsed:?}");
+        assert!(matches!(parsed, Ok(Ok(SipMessage::Request(_)))), "{parsed:?}");
     }
 }

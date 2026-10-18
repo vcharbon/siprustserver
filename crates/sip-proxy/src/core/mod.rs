@@ -32,7 +32,7 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::UdpEndpoint;
-use sip_txn::parse_guard::{parse_datagram, Parsed};
+use sip_txn::parse_guard::{parse_datagram, ParserPanicked};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
@@ -425,13 +425,13 @@ impl ProxyCore {
             // message's `raw`/`body` then share it and no packet byte is copied.
             let raw = bytes::Bytes::from(pkt.raw);
             let msg = match parse_datagram(raw, |raw| self.parser.parse_shared(raw)) {
-                Parsed::Message(msg) => msg,
+                Ok(Ok(msg)) => msg,
                 // Malformed datagram — drop silently.
-                Parsed::Malformed(_) => {
+                Ok(Err(_)) => {
                     self.pulse.waiting(self.shard);
                     continue;
                 }
-                Parsed::Panicked => {
+                Err(ParserPanicked) => {
                     self.metrics.record_parse_panic();
                     self.pulse.waiting(self.shard);
                     continue;

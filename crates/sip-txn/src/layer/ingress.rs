@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use sip_message::SipMessage;
 use sip_net::UdpEndpoint;
 
-use crate::parse_guard::{parse_datagram, Parsed};
+use crate::parse_guard::{parse_datagram, ParserPanicked};
 
 use super::owner::Owner;
 
@@ -22,14 +22,14 @@ impl Owner {
         // message's `raw`/`body` then share it and no packet byte is copied.
         let raw = bytes::Bytes::from(packet.raw);
         let parsed = match parse_datagram(raw, |raw| self.parser.parse_shared(raw)) {
-            Parsed::Message(m) => m,
-            Parsed::Malformed(_) => {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
                 // Parse error: the datagram is dropped. Count it so a
                 // malformed-traffic flood / parser regression is visible.
                 self.metrics.parse_errors.fetch_add(1, Relaxed);
                 return;
             }
-            Parsed::Panicked => {
+            Err(ParserPanicked) => {
                 self.metrics.parse_panics.fetch_add(1, Relaxed);
                 return;
             }
