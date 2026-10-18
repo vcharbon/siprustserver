@@ -9,9 +9,10 @@ run's stream directory and dropped. Without a scratch the generator works in
 the stream directory itself. Every effect goes through the executor.
 
 A tmpfs page is charged to the memory limit of the container that wrote it,
-so each limit holds its files beside its process: the UAC its record file
-(about 0.5 KB a call, kept for the run) and the trimmed tails of its stat and
-error files; the exporter twin its errors.kept.log (sipp_driver.py).
+so each limit holds its files beside its process, none growing with the run:
+the UAC the trimmed tails of its stat and error files, its records crossing a
+FIFO to the twin; the exporter twin its errors.kept.log and its record buffer
+(sipp_driver.py).
 """
 
 from __future__ import annotations

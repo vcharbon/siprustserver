@@ -40,6 +40,9 @@ Headline series (labelled by scenario/role/job from the env):
   sipp_records_shipped_total    counter records posted to VictoriaLogs
   sipp_records_ship_failures_total counter failed posts (the lines stay queued)
   sipp_records_pending          gauge   records read and not yet posted
+  sipp_records_lost_total       counter records the copier dropped (record_copy.py):
+                                        its buffer was full or the disk write failed
+  sipp_records_buffered_bytes   gauge   bytes the copier holds on their way to disk
 
 Env:
   SIPP_STAT_FILE  (default /stats/stat.csv)
@@ -64,8 +67,13 @@ Env:
                                          receive timer, appended whole; empty
                                          disables it
   SIPP_ERROR_KEPT_BYTES (default 0)   -> tail of that file kept on disk; 0 keeps all
-  SIPP_RECORD_FILE (default "")       -> the UAC's call-outcome record file;
+  SIPP_RECORD_FILE (default "")       -> the call-outcome record file shipped;
                                          empty disables record shipping
+  SIPP_RECORD_FIFO (default "")       -> the UAC's -log_file, a FIFO the copier
+                                         carries into SIPP_RECORD_FILE; empty
+                                         when the UAC writes the record file itself
+  SIPP_RECORD_BUFFER_BYTES (default 100 MiB) -> the copier's buffer
+  SIPP_RECORD_STATUS (default "")     -> the copier's status file; empty writes none
   SIPP_RECORD_URL (default "")        -> VictoriaLogs base URL the records go to
   SIPP_RUN        (default "")        -> run id put on a record line that does not parse
 """
@@ -74,6 +82,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import error_follow
+import record_copy
 import record_ship
 import stat_trim
 
@@ -92,12 +101,16 @@ SHAPE = os.environ.get("SIPP_SHAPE", "")
 START = os.environ.get("SIPP_START", "")
 RECORD_FILE = os.environ.get("SIPP_RECORD_FILE", "")
 RECORD_URL = os.environ.get("SIPP_RECORD_URL", "")
+RECORD_FIFO = os.environ.get("SIPP_RECORD_FIFO", "")
+RECORD_BUFFER_BYTES = int(os.environ.get("SIPP_RECORD_BUFFER_BYTES", str(100 * 1024 * 1024)))
+RECORD_STATUS = os.environ.get("SIPP_RECORD_STATUS", "")
 RUN = os.environ.get("SIPP_RUN", "")
 
 # Set by main() when enabled; read by every scrape.
 TRIMMER = None
 FOLLOWER = None
 SHIPPER = None
+COPIER = None
 
 # Longest header line read; a stat row is about 0.5 KB, its header a few KB.
 HEADER_MAX = 64 * 1024
@@ -189,8 +202,11 @@ def read_last_row(path):
     return None, None
 
 
-def render(path=STAT_FILE, trimmer=None, follower=None, shipper=None):
+def render(path=STAT_FILE, trimmer=None, follower=None, shipper=None, copier=None):
     out = []
+    if copier is not None:
+        out.append(fmt("sipp_records_lost_total", copier.lost()))
+        out.append(fmt("sipp_records_buffered_bytes", copier.held()))
     if shipper is not None:
         counts = shipper.snapshot()
         for ending, n in sorted(counts.by_ending.items()):
@@ -283,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            payload = render(STAT_FILE, TRIMMER, FOLLOWER, SHIPPER).encode()
+            payload = render(STAT_FILE, TRIMMER, FOLLOWER, SHIPPER, COPIER).encode()
         except Exception as exc:  # never crash the scrape
             payload = (f"sipp_up 0\n# exporter error: {exc}\n").encode()
         self.send_response(200)
@@ -300,7 +316,9 @@ def main():
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"sipp_stat_exporter: serving :{PORT}/metrics from {STAT_FILE} "
           f"(scenario={SCENARIO} role={ROLE} job={JOB or '-'})", file=sys.stderr)
-    global TRIMMER, FOLLOWER, SHIPPER
+    global TRIMMER, FOLLOWER, SHIPPER, COPIER
+    if RECORD_FIFO and RECORD_FILE:
+        COPIER = record_copy.start(RECORD_FIFO, RECORD_FILE, RECORD_STATUS or None, RECORD_BUFFER_BYTES)
     if KEEP_BYTES > 0:
         TRIMMER = stat_trim.Trimmer(STAT_FILE, KEEP_BYTES).start()
     if ERROR_FILE:

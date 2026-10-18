@@ -2,7 +2,7 @@
 
 The simulated lab answers what a healthy one would: every executable exits 0
 with no facts, a generator runs until it is drained, places no call, the
-system under test holds no call, a loadgen image registers every shape of the
+system under test holds no call, a SIPp twin's record copy is complete, a loadgen image registers every shape of the
 search path, the API server serves every resource definition asked for (Chaos
 Mesh's included), and every Service a stream targets has a cluster IP. Each effect is recorded, and the timeline
 printed from the run's own `events.jsonl`.
@@ -95,6 +95,8 @@ class SimulatedLab:
             return ProcResult(0, "0\n", "")
         if call.kind == "read" and call.path is not None and call.path.name == "stat.csv":
             return STAT_HEADER + STAT_ROW
+        if call.kind == "read" and call.path is not None and call.path.name == "records.copy.json":
+            return '{"complete": true, "lines": 0, "lost": 0}\n'
         if call.kind == "read" and call.path == Path("/proc/meminfo"):
             return "MemAvailable: 67108864 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n"
         if call.kind == "read" and call.path == Path("/proc/loadavg"):

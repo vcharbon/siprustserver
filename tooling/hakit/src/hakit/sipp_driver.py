@@ -2,23 +2,28 @@
 
 The twin starts first and holds the stream's address; the UAC joins its network
 namespace, so the twin keeps shipping the last records after the UAC exits.
-The UAC writes one call-outcome record per call into `records.jsonl` of the
-generator's working directory (its `<log>` action, workdir.py); the twin
-ships each line to VictoriaLogs and serves the stat counters (ADR-0049 §4.2).
-Neither container swaps: a page of SIPp's swapped out stalls every call.
+The UAC writes one call-outcome record per call (its `<log>` action) into a
+FIFO in the generator's working directory (workdir.py); the twin carries the
+records through a bounded buffer into `records.jsonl` of the stream directory
+on disk, ships each line to VictoriaLogs and serves the stat counters
+(ADR-0049 §4.2, §6.4). Its status file counts the records it dropped and says
+when every record SIPp wrote is on disk. Neither container swaps: a page of
+SIPp's swapped out stalls every call.
 
 A drain is SIGUSR1: SIPp places no new call and exits once its calls are done.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import jsonval as jv
 from .executor import Executor
-from .generator import Tally
+from .generator import RecordCopy, Tally
 from .lab import Lab, resolve_target
 from .paths import SIPP_EXPORTER_DIR
 from .profile import Stream
@@ -33,10 +38,17 @@ ERROR_KEEP_BYTES = 16 * 1024 * 1024
 # Every error entry but the scenario's own receive timer, kept whole for the
 # run (the tail above holds minutes at a high rate), bounded by this tail. The
 # twin writes it, so its tmpfs pages are charged to the twin's TWIN_MEMORY,
-# beside the exporter's own resident memory (workdir.py).
+# beside its record buffer and the exporter's own resident memory (workdir.py).
 ERROR_KEPT_FILE = "/stats/errors.kept.log"
 ERROR_KEPT_BYTES = 64 * 1024 * 1024
-TWIN_MEMORY = "256m"
+TWIN_MEMORY = "512m"
+# The UAC's -log_file, a FIFO in the working directory; the twin's copy of it in
+# the stream directory, mounted at /records, and the copy's status beside it.
+RECORD_FIFO = "records.fifo"
+RECORD_FILE = "records.jsonl"
+RECORD_STATUS = "records.copy.json"
+# The records the twin holds while the disk is slower than SIPp.
+RECORD_BUFFER_BYTES = 100 * 1024 * 1024
 # Margin of the global `-recv_timeout` above every timeout of the scenario.
 RECV_BACKSTOP_MARGIN_S = 60
 # SIPp's remote control port, where a rate step is sent.
@@ -104,16 +116,20 @@ class SippStream:
         lab: Lab,
         executor: Executor,
         call_id_tag: str = "",
+        records_dir: Path | None = None,
     ) -> None:
-        """`call_id_tag` follows the run id in every Call-ID: two generators of
-        one stream in one run (two firings of a load incident) each carry their
-        own, so no Call-ID repeats."""
+        """`stream_dir` is the working directory; `records_dir` the directory on
+        disk the twin writes the records into (the working directory when
+        None). `call_id_tag` follows the run id in every Call-ID: two
+        generators of one stream in one run (two firings of a load incident)
+        each carry their own, so no Call-ID repeats."""
         self.run = run
         self.call_id_tag = call_id_tag
         self.stream = stream
         self.slot = slot
         self.scenario = scenario
         self.dir = stream_dir
+        self.records_dir = records_dir or stream_dir
         self.lab = lab
         self.executor = executor
         self.uac = f"hakit-{stream.name}"
@@ -121,7 +137,11 @@ class SippStream:
 
     @property
     def records_path(self) -> Path:
-        return self.dir / "records.jsonl"
+        return self.records_dir / RECORD_FILE
+
+    @property
+    def fifo_path(self) -> Path:
+        return self.dir / RECORD_FIFO
 
     def recv_timeout_ms(self) -> int:
         s = self.stream
@@ -176,7 +196,7 @@ class SippStream:
             str(self.recv_timeout_ms()),
             "-trace_logs",
             "-log_file",
-            "/stats/records.jsonl",
+            f"/stats/{RECORD_FIFO}",
             "-trace_err",
             "-error_file",
             "/stats/errors.log",
@@ -203,15 +223,20 @@ class SippStream:
         ip = self.lab.sipp_ip(self.slot)
         labels = ["--label", f"hakit-run={self.run}", "--label", f"hakit-stream={self.stream.name}"]
         self.remove()
+        fifo = self.executor.run(["mkfifo", str(self.fifo_path)], timeout_s=30)
+        if fifo.rc != 0:
+            return f"record FIFO of {self.stream.name} not made: {fifo.stderr.strip()[:300]}"
         twin = self.executor.run(
             ["docker", "run", "-d", "--name", self.twin, "--user", self.lab.generator_user, *labels]
             + ["--network", self.lab.sipp_network, "--ip", ip, "--cpus", "0.5", "--memory", TWIN_MEMORY, "--memory-swap", TWIN_MEMORY]
-            + ["-v", f"{self.dir}:/stats", "-v", f"{SIPP_EXPORTER_DIR}:/exporter:ro"]
+            + ["-v", f"{self.dir}:/stats", "-v", f"{self.records_dir}:/records", "-v", f"{SIPP_EXPORTER_DIR}:/exporter:ro"]
             + ["-e", "SIPP_STAT_FILE=/stats/stat.csv", "-e", f"SIPP_SCENARIO={self.scenario.name}"]
             + ["-e", f"SIPP_ROLE={self.stream.name}", "-e", f"SIPP_JOB={self.uac}"]
             + ["-e", f"SIPP_STREAM={self.stream.name}", "-e", f"SIPP_SHAPE={self.stream.shape}"]
             + ["-e", f"SIPP_START={self.stream.start}"]
-            + ["-e", "SIPP_RECORD_FILE=/stats/records.jsonl", "-e", f"SIPP_RUN={self.run}"]
+            + ["-e", f"SIPP_RECORD_FIFO=/stats/{RECORD_FIFO}", "-e", f"SIPP_RECORD_FILE=/records/{RECORD_FILE}"]
+            + ["-e", f"SIPP_RECORD_STATUS=/records/{RECORD_STATUS}", "-e", f"SIPP_RECORD_BUFFER_BYTES={RECORD_BUFFER_BYTES}"]
+            + ["-e", f"SIPP_RUN={self.run}"]
             + ["-e", f"SIPP_ERROR_KEEP_BYTES={ERROR_KEEP_BYTES}"]
             + ["-e", f"SIPP_ERROR_KEPT_FILE={ERROR_KEPT_FILE}", "-e", f"SIPP_ERROR_KEPT_BYTES={ERROR_KEPT_BYTES}"]
             + ["-e", f"SIPP_RECORD_URL={self.lab.vlogs_url_from_generators}"]
@@ -280,5 +305,17 @@ class SippStream:
         text = self.executor.read_text(self.records_path) or ""
         return sum(1 for ln in text.splitlines() if ln.strip())
 
+    def record_copy(self) -> RecordCopy:
+        """The twin's status: complete once SIPp closed the FIFO and every
+        record is on disk or counted lost."""
+        raw = self.executor.read_text(self.records_dir / RECORD_STATUS)
+        try:
+            doc = jv.as_obj(json.loads(raw or "{}"))
+            return RecordCopy(jv.boolean(doc, "complete", False), jv.opt_int(doc, "lost") or 0)
+        except ValueError:
+            return RecordCopy(False)
+
     def remove(self) -> None:
+        """Remove both containers, then the FIFO, so it never reaches the run directory."""
         self.executor.run(["docker", "rm", "-f", self.uac, self.twin], timeout_s=60)
+        self.executor.run(["rm", "-f", "--", str(self.fifo_path)], timeout_s=30)

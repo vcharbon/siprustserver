@@ -58,6 +58,7 @@ class Firing:
     not_placed: int = 0
     generator_failures: int | None = None
     local: int = 0
+    lost: int = 0
     exit_code: int | None = None
     collected: bool = False
 
@@ -106,7 +107,9 @@ class StreamSet:
         (sdir / "inject.csv").write_text(render(shape, self.content.catalogs[shape.catalog], self.lab.callees))
         wd.prepare(self.executor, [sdir / "inject.csv"])
         scenario = self.content.scenarios[stream.scenario or ""]
-        gen = SippStream(self.run, stream, self._slot(stream), scenario, wd.work, self.lab, self.executor, call_id_tag=tag)
+        gen = SippStream(
+            self.run, stream, self._slot(stream), scenario, wd.work, self.lab, self.executor, call_id_tag=tag, records_dir=sdir
+        )
         return Firing(event, gen, wd)
 
     def _remove(self, f: Firing) -> None:
@@ -196,11 +199,18 @@ class StreamSet:
         return ok, facts
 
     def _settle(self, f: Firing, wait: Waiter) -> int | None:
-        """Read the firing's counter and records, and wait (bounded) until
-        VictoriaLogs holds every record the stream wrote so far."""
+        """Read the firing's counter, wait (bounded) until its records are all
+        on disk, read them, and wait (bounded) until VictoriaLogs holds every
+        record the stream wrote so far."""
         tally = f.gen.tally()
         f.calls, f.not_placed, f.generator_failures = tally.calls, tally.not_placed, tally.generator_failures
         f.exit_code = f.gen.exit_code()
+        deadline = self.clock.now_ms() + SHIP_WAIT_S * 1000
+        copy = f.gen.record_copy()
+        while not copy.complete and self.clock.now_ms() < deadline:
+            wait(min(deadline, self.clock.now_ms() + POLL_MS))
+            copy = f.gen.record_copy()
+        f.lost = copy.lost
         f.local = f.gen.local_records()
         name = f.gen.stream.name
         expected = sum(x.local for x in self.firings[name])
@@ -276,6 +286,7 @@ class StreamSet:
                     "drained": all(f.drained for f in fs if f.stop == "drain"),
                     "exit_code": fs[-1].exit_code if fs else None,
                     "local_records": sum(f.local for f in fs),
+                    "lost_records": sum(f.lost for f in fs),
                     "shipped_records": shipped,
                     **({} if failed is None else {"generator_failures": failed}),
                 }

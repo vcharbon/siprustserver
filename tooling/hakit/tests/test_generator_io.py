@@ -124,7 +124,7 @@ def test_without_a_scratch_generators_write_into_the_stream_dir(tmp_path: Path) 
     run_dir, calls = run(tmp_path, {"HAKIT_GENERATOR_SCRATCH": ""})
     stats = [m for m in mounts(docker_runs(calls)["hakit-basic"]) if m.endswith(":/stats")]
     assert stats == [f"{run_dir / 'streams' / 'basic'}:/stats"]
-    assert not any(c.kind == "run" and c.argv[:1] in (["cp"], ["rm"]) for c in calls)
+    assert not any(c.kind == "run" and (c.argv[:1] == ["cp"] or c.argv[:2] == ["rm", "-r"]) for c in calls)
 
 
 def test_a_pod_generators_shared_directory_is_memory_backed(tmp_path: Path) -> None:
@@ -194,12 +194,54 @@ EXPORTER_RSS = 64 << 20
 GENERATOR_RSS = 1024 << 20
 
 
-def test_a_twins_kept_error_file_leaves_its_exporter_room_in_its_memory(tmp_path: Path) -> None:
-    """errors.kept.log is written by the twin, so its tmpfs pages are charged to the twin's memory."""
+def env_bytes(argv: list[str], name: str) -> int:
+    return next(int(e.split("=", 1)[1]) for e in argv if e.startswith(f"{name}="))
+
+
+def test_a_twins_kept_error_file_and_record_buffer_leave_its_exporter_room_in_its_memory(tmp_path: Path) -> None:
+    """errors.kept.log is written by the twin, so its tmpfs pages are charged to
+    the twin's memory, beside the records it holds on their way to the disk."""
     _, calls = run(tmp_path, {"HAKIT_GENERATOR_SCRATCH": SCRATCH})
     twin = docker_runs(calls)["hakit-basic-exporter"]
-    kept = next(int(e.split("=", 1)[1]) for e in twin if e.startswith("SIPP_ERROR_KEPT_BYTES="))
-    assert kept + EXPORTER_RSS <= mib(flag(twin, "--memory"))
+    held = env_bytes(twin, "SIPP_ERROR_KEPT_BYTES") + env_bytes(twin, "SIPP_RECORD_BUFFER_BYTES")
+    assert held + EXPORTER_RSS <= mib(flag(twin, "--memory"))
+
+
+def test_a_sipp_uacs_records_cross_a_fifo_to_the_stream_dir_and_never_fill_its_tmpfs(tmp_path: Path) -> None:
+    """The memory charged to the UAC does not grow with its calls: it writes its
+    records into a FIFO made in its working directory before either container
+    starts, and the twin carries them into the stream directory on disk; the
+    FIFO goes with the containers, before the working directory is collected."""
+    run_dir, calls = run(tmp_path, {"HAKIT_GENERATOR_SCRATCH": SCRATCH})
+    runs = docker_runs(calls)
+    uac, twin = runs["hakit-basic"], runs["hakit-basic-exporter"]
+    work = f"{SCRATCH}/{run_dir.name}/streams/basic"
+    keep = run_dir / "streams" / "basic"
+    assert flag(uac, "-log_file") == "/stats/records.fifo"
+    assert f"{keep}:/records" in mounts(twin)
+    assert {"SIPP_RECORD_FIFO=/stats/records.fifo", "SIPP_RECORD_FILE=/records/records.jsonl"} <= set(twin)
+    argvs = [c.argv for c in calls if c.kind == "run"]
+    fifo = f"{work}/records.fifo"
+    assert argvs.index(["mkfifo", fifo]) < argvs.index(twin) < argvs.index(uac)
+    assert argvs.index(["rm", "-f", "--", fifo], argvs.index(uac)) < argvs.index(["cp", "-a", f"{work}/.", str(keep)])
+
+
+def test_records_the_twins_buffer_dropped_are_a_record_gap_naming_their_stream(tmp_path: Path) -> None:
+    """A disk slower than SIPp for longer than the twin's buffer holds loses
+    records; the twin counts them and the run says so."""
+
+    def full(c: Call) -> str | None:
+        if c.kind == "read" and c.path is not None and c.path.name == "records.copy.json" and "basic" in str(c.path):
+            return '{"complete": true, "lines": 0, "lost": 7}\n'
+        return None
+
+    clock, fake = simulated([full], shapes=["basic"])
+    r = Runner(content(tmp_path), SCHEMAS, lab_from_env({"HAKIT_GENERATOR_SCRATCH": SCRATCH}), fake, clock,
+               tmp_path / "results", say=lambda _m: None)
+    verdict = json.loads((r.run("io") / "verdict.json").read_text())
+    lost = [i for i in verdict["integrity"] if "record buffer" in str(i["detail"])]
+    assert [(i["kind"], i["stream"]) for i in lost] == [("record_gap", "basic")]
+    assert str(lost[0]["detail"]).startswith("7 records")
 
 
 def test_a_pod_generators_files_leave_its_process_room_in_its_memory(tmp_path: Path) -> None:

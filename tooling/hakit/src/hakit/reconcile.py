@@ -1,7 +1,8 @@
 """Each stream's records against its generator's own counters (ADR-0049 §4.5, §3.12).
 
 The records plus the calls not placed plus the calls the generator failed
-equal its offered-call counter; a difference is `record_gap`. A count of calls
+equal its offered-call counter; a difference is `record_gap`, and so are the
+records dropped on their way to the disk (`lost_records`). A count of calls
 the generator failed above 0 is `generator_failure`.
 """
 
@@ -30,6 +31,9 @@ def reconcile(
         failed = jv.opt_int(s, "generator_failures")
         n = records.get(name, 0)
         reconciled = jv.boolean(s, "reconciled", True)
+        lost = jv.opt_int(s, "lost_records") or 0
+        if lost:
+            found.append(integrity("record_gap", f"{lost} records dropped: the generator's record buffer was full", stream=name))
         if failed:
             found.append(integrity("generator_failure", f"the generator failed {failed} calls without a record", stream=name))
         if calls is None and reconciled:

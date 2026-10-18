@@ -704,12 +704,20 @@ made. A run profile joins the two.
    swap and as the runner's user, and a pod generator's directory is
    memory-backed. A tmpfs page is charged to the memory of the container
    that wrote it, so each limit holds the files its container writes beside
-   its process: the SIPp UAC its record file (about 0.5 KB a call) and the
-   kept tails of its stat and error files, the exporter twin its
-   `errors.kept.log` (64 MiB at most in 256 MiB), a pod generator its
-   emptyDir (512 MiB at most in 1536 MiB). A firing whose files stay in the
-   scratch is a `generator_failure`, and `hakit cleanup` copies out the
-   scratch of every run whose runner is gone.
+   its process, and none grows with the run's calls: the SIPp UAC the kept
+   tails of its stat and error files, the exporter twin its
+   `errors.kept.log` (64 MiB at most) and its record buffer (100 MiB) in
+   512 MiB, a pod generator its emptyDir (512 MiB at most in 1536 MiB). The
+   SIPp UAC's records (about 0.5 KB a call) leave through a FIFO the runner
+   makes in the working directory: the twin reads them out of the pipe into
+   its bounded buffer and appends them to `records.jsonl` of the stream
+   directory on disk, which it ships from, so a disk stall the buffer
+   absorbs never blocks SIPp. Records that do not fit the buffer are counted
+   in the twin's `records.copy.json`, which also says when every record is
+   on disk; the runner waits for that before it counts the records, and a
+   count of dropped records is a `record_gap` naming the stream. A firing
+   whose files stay in the scratch is a `generator_failure`, and `hakit
+   cleanup` copies out the scratch of every run whose runner is gone.
 5. **Before the load.** The runner records the host (free memory, swap, disk,
    load) and refuses the run outside the profile's `preflight` limits; it
    refuses to start while the system under test holds calls (a

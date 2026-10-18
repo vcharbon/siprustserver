@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 
 from .executor import Executor, ProcResult
-from .generator import Tally
+from .generator import RecordCopy, Tally
 from .jsonval import Json, as_list, as_obj
 from .lab import Lab, resolve_target
 from .loadgen import FINAL_METRICS, METRICS_PORT, LoadgenStream, parse_metrics
@@ -199,6 +199,10 @@ class PodLoadgenStream:
             res = self._kubectl("get", "--raw", raw, timeout_s=30)
             text = res.stdout if res.rc == 0 else ""
         return parse_metrics(text or "", self.stream.name)
+
+    def record_copy(self) -> RecordCopy:
+        """loadgen writes its record file itself."""
+        return RecordCopy(True)
 
     def local_records(self) -> int:
         text = self._read("records.jsonl") or ""

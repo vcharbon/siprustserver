@@ -21,7 +21,7 @@ import re
 from pathlib import Path
 
 from .executor import Executor
-from .generator import Tally
+from .generator import RecordCopy, Tally
 from .lab import Lab, resolve_target
 from .model import Scalar
 from .profile import Stream
@@ -261,6 +261,10 @@ class LoadgenStream:
             res = self.executor.http("GET", f"http://{self.ip}:{METRICS_PORT}/metrics", timeout_s=10)
             text = res.body if res.status == 200 else ""
         return parse_metrics(text, self.stream.name)
+
+    def record_copy(self) -> RecordCopy:
+        """loadgen writes its record file itself."""
+        return RecordCopy(True)
 
     def local_records(self) -> int:
         text = self.executor.read_text(self.records_path) or ""

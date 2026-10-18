@@ -22,6 +22,16 @@ class Tally:
     generator_failures: int | None = None
 
 
+@dataclass(frozen=True)
+class RecordCopy:
+    """How a generator's records reach `records_path`: `complete` once every
+    record it wrote is there or counted in `lost`, the records dropped on the
+    way."""
+
+    complete: bool
+    lost: int = 0
+
+
 class Generator(Protocol):
     stream: Stream
     call_id_tag: str
@@ -58,5 +68,7 @@ class Generator(Protocol):
     def tally(self) -> Tally: ...
 
     def local_records(self) -> int: ...
+
+    def record_copy(self) -> RecordCopy: ...
 
     def remove(self) -> None: ...
