@@ -550,6 +550,8 @@ made. A run profile joins the two.
    - a `<recv response>` without `response_txn` takes only the responses to
      the CSeq methods of the `<send>`s placed before it in the file, so a wait
      follows the requests it waits for and `_unexp.main` follows every send;
+     the SIPp image reads that method from the CSeq header line
+     (`deploy/k8s/sipp/cseq-method.patch`), not from any `CSeq` text;
    - a message landing while the call runs its handler aborts the call, so a
      handler path answers and resumes in one step (the resume is an action of
      its send); an `ontimeout` naming the end of the scenario counts the call

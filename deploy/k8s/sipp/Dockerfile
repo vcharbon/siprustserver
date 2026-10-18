@@ -11,6 +11,10 @@ RUN apt-get update \
       libpcap-dev libncurses-dev libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch v3.7.7 https://github.com/SIPp/sipp.git /src
+# A response's CSeq method is read from the CSeq header line (RFC 3261 7.3.1),
+# not from the first "CSeq" text of the message.
+COPY cseq-method.patch /tmp/
+RUN git -C /src apply /tmp/cseq-method.patch
 WORKDIR /src/build
 RUN cmake .. -DUSE_PCAP=1 -DUSE_SSL=1 \
  && make -j"$(nproc)"

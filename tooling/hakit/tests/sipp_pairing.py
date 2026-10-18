@@ -8,7 +8,9 @@ never as a scenario mismatch.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import os
 import shutil
 import signal
 import socket
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hakit.jsonval import Json, as_obj
-from hakit.paths import BASE_CONTENT
+from hakit.paths import BASE_CONTENT, REPO_ROOT
 from hakit.scenario_lint import key_defaults
 
 PEERS = Path(__file__).parent / "sipp_peers"
@@ -28,8 +30,33 @@ SCENARIOS = BASE_CONTENT / "scenarios"
 UAC = SCENARIOS / "uac-basic-hold.xml"
 UAS = SCENARIOS / "uas-basic.xml"
 SIPP = shutil.which("sipp")
+# The build context of the SIPp image the deployment runs (its source patches included).
+SIPP_CONTEXT = REPO_ROOT / "deploy" / "k8s" / "sipp"
 # The keys every UAC pairing passes: a 3 s setup deadline, a 1.5 s hold.
 UAC_KEYS = {"run": "loopback", "stream": "basic", "shape": "basic", "hold_ms": "1500", "setup_ms": "3000"}
+
+
+def sipp_image() -> str:
+    """The tag of the SIPp image built from this checkout's build context, named
+    by the hash of its Dockerfile and patches so a changed patch names a new
+    tag. Fails, naming the build command, when the image is absent."""
+    digest = hashlib.sha256()
+    for f in [SIPP_CONTEXT / "Dockerfile", *sorted(SIPP_CONTEXT.glob("*.patch"))]:
+        digest.update(f.read_bytes())
+    tag = f"sipp:hakit-test-{digest.hexdigest()[:12]}"
+    inspect = subprocess.run(["docker", "image", "inspect", tag], capture_output=True, check=False)
+    assert inspect.returncode == 0, f"the SIPp image {tag} is absent: docker build -t {tag} {SIPP_CONTEXT}"
+    return tag
+
+
+def _sipp_argv(image: str | None, cwd: Path, *dirs: Path) -> list[str]:
+    """SIPp on the host, or in `image` on the host network with `cwd` and `dirs` mounted."""
+    if image is None:
+        assert SIPP is not None, "sipp is not on PATH"
+        return [SIPP]
+    mounts = [a for m in sorted({str(cwd), *map(str, dirs)}) for a in ("-v", f"{m}:{m}")]
+    user = f"{os.getuid()}:{os.getgid()}"
+    return ["docker", "run", "--rm", "--init", "--network", "host", "--user", user, *mounts, "-w", str(cwd), image, "sipp"]
 
 
 def exit_note(rc: int | None, pid: int) -> str:
@@ -132,19 +159,20 @@ def run_pair(
     peer_keys: Mapping[str, str] | None = None,
     ruri_user: str = "service",
     trace: bool = False,
+    image: str | None = None,
 ) -> Pairing:
     """`calls` calls of a UAC scenario at `rate` per second against a peer
     callee (a file of `sipp_peers`, or a scenario path); `trace` keeps the
-    UAC's message log."""
-    assert SIPP is not None, "sipp is not on PATH"
+    UAC's message log; `image` runs both in that SIPp image, else the host's."""
     peer_path = peer if isinstance(peer, Path) else PEERS / peer
     d = Path(tempfile.mkdtemp(prefix=f"{scenario.stem}-{peer_path.stem}-{calls}-", dir=work))
+    sipp = _sipp_argv(image, d, peer_path.parent, scenario.parent)
     (d / "inject.csv").write_text(f"SEQUENTIAL\n{ruri_user};X-Test: loopback;;;\n")
     caller = _free_port_pair()
     callee = caller + 1
     common = ["-i", "127.0.0.1", "-m", str(calls), "-nostdin", "-max_invite_retrans", "3", "-max_non_invite_retrans", "3"]
     proc = subprocess.Popen(
-        [SIPP, "-sf", str(peer_path), "-p", str(callee), *common, *key_args(peer_path, peer_keys or {})]
+        [*sipp, "-sf", str(peer_path), "-p", str(callee), *common, *key_args(peer_path, peer_keys or {})]
         + ["-recv_timeout", "15000"],
         cwd=d,
         stdout=subprocess.DEVNULL,
@@ -152,7 +180,7 @@ def run_pair(
     )
     traces = ["-trace_msg", "-message_file", "messages.log"] if trace else []
     uac = subprocess.Popen(
-        [SIPP, f"127.0.0.1:{callee}", "-sf", str(scenario), "-p", str(caller), *common, "-r", str(rate)]
+        [*sipp, f"127.0.0.1:{callee}", "-sf", str(scenario), "-p", str(caller), *common, "-r", str(rate)]
         + ["-inf", "inject.csv", *key_args(scenario, {**UAC_KEYS, **(keys or {})}), "-recv_timeout", "60000"]
         + ["-cid_str", "%u-%p-loopback@%s", "-trace_logs", "-log_file", "records.jsonl"]
         + ["-trace_err", "-trace_stat", "-stf", "stat.csv", "-fd", "1", *traces],

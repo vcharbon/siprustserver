@@ -5,7 +5,9 @@ exit (answer, reject, a refusal with a Retry-After, ring forever, silence, a lat
 CANCEL, far-end BYE, 481 or no final to the BYE, an in-dialog request the
 caller cannot serve, a 2xx retransmitted after the ACK) and checks the record
 the call left and that the peer, which fails on any missing ACK, BYE or
-answer, exits 0. Needs `sipp` on PATH: without it the tests fail.
+answer, exits 0. Needs `sipp` on PATH: without it the tests fail. The case
+of a response carrying `CSeq` text outside its CSeq header runs the SIPp image
+the deployment builds, and fails, naming the build command, without it.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from sipp_pairing import SIPP, Pairing, run_pair
+from sipp_pairing import SIPP, Pairing, run_pair, sipp_image
 
 from hakit import jsonval as jv
 from hakit.schemas import SchemaSet
@@ -105,3 +107,17 @@ def test_a_response_landing_on_a_deadline_check_is_acted_on(pairings: dict[str, 
     assert p.counter("TotalCallCreated") == BULK_CALLS
     # The handler did act: about four in ten of these answers land on the check.
     assert p.counter("GenericCounter2(C)") > 0
+
+
+def test_a_response_whose_route_carries_cseq_text_is_acted_on(tmp_path: Path) -> None:
+    """The SIPp the deployment runs reads a response's CSeq method from its
+    CSeq header line: a 180 and a 200 whose Record-Route carries the text
+    `CSeq` ahead of that header are taken by method. The call is answered,
+    ACKed and torn down."""
+    p = run_pair("peer-cseq-text-in-route.xml", tmp_path, image=sipp_image())
+    assert (p.uac_rc, p.peer_rc) == (0, 0), f"sipp {p.uac_exit}, the peer {p.peer_exit}"
+    assert len(p.records) == 1
+    r = p.records[0]
+    assert SchemaSet.load().errors("call-outcome.v1", r) == []
+    assert (r["ending"], r["final_code"], r["phase_reached"]) == ("answered", 200, "released")
+    assert r["first_provisional_at_ms"] is not None
