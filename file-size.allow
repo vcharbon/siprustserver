@@ -115,7 +115,7 @@ crates/sip-net/src/contracts.rs 870
 crates/sip-pcap/src/bin/sipflow.rs 1059
 crates/sip-pcap/src/flow.rs 820
 crates/sip-pcap/src/flow/tests.rs 1000
-crates/sip-proxy-runner/src/main.rs 706
+crates/sip-proxy-runner/src/main.rs 506
 crates/sip-proxy/src/observability/metrics.rs 571
 crates/sip-txn/src/layer/client.rs 746
 crates/sip-txn/tests/it/bounded_queue.rs 806

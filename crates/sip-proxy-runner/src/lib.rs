@@ -2,6 +2,7 @@
 //! pool, its health sampler, its intake shed, its readiness, the state its
 //! recv shards share, and what its `/metrics` body holds.
 
+pub mod binds;
 pub mod config;
 pub mod discovery;
 pub mod health_sampler;
