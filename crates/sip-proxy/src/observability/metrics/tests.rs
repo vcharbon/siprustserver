@@ -1,3 +1,5 @@
+use sip_net::UdpEndpoint;
+
 use super::*;
 
 /// A shard's stats sum its two faces: the external face, where callers

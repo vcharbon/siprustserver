@@ -32,6 +32,7 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::UdpEndpoint;
+use sip_txn::parse_guard::{parse_datagram, Parsed};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
@@ -357,7 +358,9 @@ impl ProxyCore {
     }
 
     /// The recv loop. Runs until the endpoint's queue is closed (the endpoint
-    /// is dropped). Parse failures are dropped silently (RFC 3261 §16.3).
+    /// is dropped). Parse failures are dropped silently (RFC 3261 §16.3); a
+    /// datagram the parser panics on is dropped and counted, and the loop
+    /// goes on.
     pub async fn run(self) {
         // The shared `(Call-ID|CSeq#)` LRU sweeper — spawned exactly once per
         // LRU however many recv-shard cores share it (see
@@ -420,10 +423,19 @@ impl ProxyCore {
             let src = pkt.src;
             // Hand the receive buffer to the parser instead of lending it: the
             // message's `raw`/`body` then share it and no packet byte is copied.
-            let Ok(msg) = self.parser.parse_shared(bytes::Bytes::from(pkt.raw)) else {
+            let raw = bytes::Bytes::from(pkt.raw);
+            let msg = match parse_datagram(raw, |raw| self.parser.parse_shared(raw)) {
+                Parsed::Message(msg) => msg,
                 // Malformed datagram — drop silently.
-                self.pulse.waiting(self.shard);
-                continue;
+                Parsed::Malformed(_) => {
+                    self.pulse.waiting(self.shard);
+                    continue;
+                }
+                Parsed::Panicked => {
+                    self.metrics.record_parse_panic();
+                    self.pulse.waiting(self.shard);
+                    continue;
+                }
             };
             match msg {
                 SipMessage::Request(_) => self.handle_request(msg, src, face).await,

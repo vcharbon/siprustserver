@@ -8,7 +8,6 @@ use std::sync::Mutex;
 
 use metric_catalogue::{FixedCounts, HistogramValue, OpenRows};
 use sip_message::method::Method;
-use sip_net::UdpEndpoint;
 
 use super::catalogue;
 use pool::PoolGauges;
@@ -16,9 +15,11 @@ use pool::PoolGauges;
 mod face;
 mod no_target;
 mod pool;
+mod udp_shard;
 use crate::resolver::{outcome, refresh_outcome};
 pub use face::{Face, UntrustedClaim};
 pub use no_target::NoTargetDrop;
+pub use udp_shard::UdpShardStats;
 
 /// Inbound vs outbound: the first half of `sip_messages_total`'s
 /// `label="direction:result"`.
@@ -153,58 +154,6 @@ fn count_outcome(counters: &[AtomicU64], labels: &[&str], label: &str) {
     }
 }
 
-/// One recv shard's endpoint state: receive-queue gauges and the endpoints'
-/// lifetime counters, every field summed over the shard's faces.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct UdpShardStats {
-    pub queue_depth: u64,
-    pub queue_max: u64,
-    pub enqueued: u64,
-    pub tail_dropped: u64,
-    pub intake_shed: u64,
-    pub send_would_block: u64,
-    /// Datagrams the kernel dropped on the shard's sockets before the recv
-    /// pump read them (a full `SO_RCVBUF`).
-    pub kernel_rx_dropped: u64,
-}
-
-impl UdpShardStats {
-    /// The shard's stats over its internal face and, in dual-face mode, its
-    /// external face, where callers arrive.
-    pub fn of_faces(internal: &dyn UdpEndpoint, external: Option<&dyn UdpEndpoint>) -> Self {
-        let mut stats = Self::of_endpoint(internal);
-        if let Some(ext) = external {
-            stats += Self::of_endpoint(ext);
-        }
-        stats
-    }
-
-    fn of_endpoint(ep: &dyn UdpEndpoint) -> Self {
-        let c = ep.counters();
-        Self {
-            queue_depth: ep.queue_depth() as u64,
-            queue_max: ep.queue_max() as u64,
-            enqueued: c.enqueued,
-            tail_dropped: c.tail_dropped,
-            intake_shed: c.pre_ingress_dropped,
-            send_would_block: c.send_would_block,
-            kernel_rx_dropped: c.kernel_rx_dropped,
-        }
-    }
-}
-
-impl std::ops::AddAssign for UdpShardStats {
-    fn add_assign(&mut self, o: Self) {
-        self.queue_depth += o.queue_depth;
-        self.queue_max += o.queue_max;
-        self.enqueued += o.enqueued;
-        self.tail_dropped += o.tail_dropped;
-        self.intake_shed += o.intake_shed;
-        self.send_would_block += o.send_would_block;
-        self.kernel_rx_dropped += o.kernel_rx_dropped;
-    }
-}
-
 /// Live proxy metrics. Cheap to share behind an `Arc`.
 pub struct ProxyMetrics {
     /// `[direction][result]` — fixed slots, lock-free (multiple increments per
@@ -265,6 +214,8 @@ pub struct ProxyMetrics {
     /// `sip_messages_total{outbound,forwarded}` counts hand-off to the send
     /// path, so this is the delta dashboards need under overload.
     send_failures: AtomicU64,
+    /// Inbound datagrams the parser panicked on and a recv shard dropped.
+    parse_panics: AtomicU64,
     /// Endpoint receive-queue stats, one slot per recv shard, published by
     /// each core's maintenance tick — without them a tail-dropping queue shows
     /// 100% forwarded. Keyed by shard index so N reuse-port cores don't stomp
@@ -313,6 +264,7 @@ impl Default for ProxyMetrics {
             resolver_refresh: Default::default(),
             resolver_cache_size: Default::default(),
             send_failures: Default::default(),
+            parse_panics: Default::default(),
             udp_shards: Default::default(),
             pool: Default::default(),
             recv_shards_stalled: Default::default(),
@@ -428,6 +380,16 @@ impl ProxyMetrics {
 
     pub fn record_send_failure(&self) {
         self.send_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One inbound datagram the parser panicked on, dropped.
+    pub fn record_parse_panic(&self) {
+        self.parse_panics.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Inbound datagrams the parser panicked on (counter).
+    pub fn parse_panics(&self) -> u64 {
+        self.parse_panics.load(Ordering::Relaxed)
     }
 
     /// Record one per-peer failure of `kind` against `peer` in `scope`
@@ -553,6 +515,7 @@ impl ProxyMetrics {
         c::RESOLVER_REFRESH.render(&mut s, |series| load(&self.resolver_refresh[series.at(0)]));
         c::RESOLVER_CACHE_SIZE.render_value(&mut s, load(&self.resolver_cache_size));
         c::SEND_FAILURES.render_value(&mut s, load(&self.send_failures));
+        c::PARSE_PANICS.render_value(&mut s, load(&self.parse_panics));
         let udp = self.udp_totals();
         c::UDP_QUEUE_DEPTH.render_value(&mut s, udp.queue_depth);
         c::UDP_QUEUE_MAX.render_value(&mut s, udp.queue_max);

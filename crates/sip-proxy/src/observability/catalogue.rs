@@ -243,6 +243,12 @@ pub const SEND_FAILURES: Family = Family::counter(
     "Outbound datagrams the endpoint failed to send.",
 );
 
+pub const PARSE_PANICS: Family = Family::counter(
+    "sip_proxy_parse_panics_total",
+    Labels::None,
+    "Inbound datagrams the SIP parser panicked on and the recv shard dropped; each one is a parser defect, expected 0.",
+);
+
 pub const UDP_QUEUE_DEPTH: Family = Family::gauge(
     "sip_proxy_udp_queue_depth",
     Labels::None,
@@ -435,6 +441,7 @@ pub const PROXY: &[Family] = &[
     RESOLVER_REFRESH,
     RESOLVER_CACHE_SIZE,
     SEND_FAILURES,
+    PARSE_PANICS,
     UDP_QUEUE_DEPTH,
     UDP_QUEUE_MAX,
     UDP_ENQUEUED,

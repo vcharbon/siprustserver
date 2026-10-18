@@ -1,6 +1,6 @@
 //! The owner task's state: transaction-map + timer-wheel bookkeeping (kept in
-//! lockstep), timer dispatch, inbound-packet parsing, and the periodic sweep
-//! tick; its `select!` loop is `run`. Protocol behavior does NOT live here — the UAC FSM is
+//! lockstep), timer dispatch, and the periodic sweep tick; its `select!` loop
+//! is `run`, its inbound-packet parsing `ingress`. Protocol behavior does NOT live here — the UAC FSM is
 //! `layer::client`, the UAS FSM is `layer::server`, output-queue discipline is
 //! `layer::events`.
 
@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use sip_message::{SipMessage, SipParser};
+use sip_message::SipParser;
 use sip_net::UdpEndpoint;
 use tokio::sync::mpsc;
 use tokio_util::time::{delay_queue::Key, DelayQueue};
@@ -472,33 +472,6 @@ impl Owner {
                 }
                 let _ = reply.send(());
             }
-        }
-    }
-
-    // ── inbound packet dispatch ───────────────────────────────────────────────
-
-    pub(super) async fn handle_packet(
-        &mut self,
-        endpoint: &dyn UdpEndpoint,
-        packet: sip_net::UdpPacket,
-    ) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let src = packet.src;
-        // Hand the receive buffer to the parser instead of lending it: the
-        // message's `raw`/`body` then share it and no packet byte is copied.
-        let parsed = match self.parser.parse_shared(bytes::Bytes::from(packet.raw)) {
-            Ok(m) => m,
-            Err(_e) => {
-                // Parse error: the datagram is dropped. Count it so a
-                // malformed-traffic flood / parser regression is visible.
-                self.metrics.parse_errors.fetch_add(1, Relaxed);
-                return;
-            }
-        };
-
-        match parsed {
-            SipMessage::Request(req) => self.handle_inbound_request(endpoint, req, src).await,
-            SipMessage::Response(resp) => self.handle_inbound_response(endpoint, resp, src).await,
         }
     }
 }

@@ -65,6 +65,12 @@ pub const PARSE_ERRORS: Family = Family::counter(
     "Inbound datagrams the SIP parser rejected and the transaction layer dropped: a malformed-traffic flood or a parser regression.",
 );
 
+pub const PARSE_PANICS: Family = Family::counter(
+    "b2bua_txn_parse_panics_total",
+    Labels::None,
+    "Inbound datagrams the SIP parser panicked on and the transaction layer dropped; each one is a parser defect, expected 0.",
+);
+
 pub const SEND_ERRORS: Family = Family::counter(
     "b2bua_txn_send_errors_total",
     Labels::None,

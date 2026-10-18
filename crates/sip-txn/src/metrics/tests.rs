@@ -1,5 +1,7 @@
 use metric_catalogue::{DEFAULT_CAP, OVERFLOW};
+use sip_message::Method;
 
+use super::retransmits::MethodSlot;
 use super::*;
 use crate::catalogue::RETRANSMITS;
 

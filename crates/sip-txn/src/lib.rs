@@ -23,6 +23,7 @@ pub mod catalogue;
 pub mod event;
 pub mod layer;
 pub mod metrics;
+pub mod parse_guard;
 pub mod pulse;
 pub mod rng;
 pub mod seed;

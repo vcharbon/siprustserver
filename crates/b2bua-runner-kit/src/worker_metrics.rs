@@ -103,6 +103,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::RETRANSMIT_BUF_BYTES.render_value(&mut s, m.retransmit_buf_bytes());
     c::SERVER_FINAL_UNSEEN_BRANCH.render_value(&mut s, m.server_final_unseen_branch());
     c::PARSE_ERRORS.render_value(&mut s, m.parse_errors());
+    c::PARSE_PANICS.render_value(&mut s, m.parse_panics());
     c::SEND_ERRORS.render_value(&mut s, m.send_errors());
     c::EVENT_QUEUE_DEPTH.render_value(&mut s, m.event_queue_depth());
     c::EVENT_QUEUE_CAPACITY.render_value(&mut s, m.event_queue_capacity());

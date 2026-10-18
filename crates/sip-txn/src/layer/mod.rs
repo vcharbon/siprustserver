@@ -18,7 +18,8 @@
 //! is a B2BUA-only concern; this layer is shared with the proxy).
 //!
 //! Module map: `handle` (public API + the command funnel) · `run` (the actor
-//! loop, one pulse-stamped turn per `select!`) · `owner` (map/wheel bookkeeping) · `client` (RFC 3261 §17.1 UAC FSM) ·
+//! loop, one pulse-stamped turn per `select!`) · `owner` (map/wheel bookkeeping) ·
+//! `ingress` (an inbound datagram parsed, a parser panic contained to it) · `client` (RFC 3261 §17.1 UAC FSM) ·
 //! `server` (§17.2 UAS FSM) · `server_cancel` (§9.2: a CANCEL of a server
 //! INVITE) · `shrink` (a drained table's memory returned) · `lifetime` (when a transaction leaves the map:
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
@@ -35,6 +36,7 @@ mod bind;
 mod client;
 mod events;
 mod handle;
+mod ingress;
 mod key;
 mod lifetime;
 mod orphan;

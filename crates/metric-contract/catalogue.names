@@ -129,6 +129,7 @@ b2bua-runner b2bua_txn_timer_queue_len gauge fixed {}
 b2bua-runner b2bua_txn_retransmit_buf_bytes gauge fixed {}
 b2bua-runner b2bua_txn_server_final_unseen_branch_total counter fixed {}
 b2bua-runner b2bua_txn_parse_errors_total counter fixed {}
+b2bua-runner b2bua_txn_parse_panics_total counter fixed {}
 b2bua-runner b2bua_txn_send_errors_total counter fixed {}
 b2bua-runner b2bua_txn_event_queue_depth gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_capacity gauge fixed {}
@@ -228,6 +229,7 @@ sip-proxy-runner sip_proxy_named_sends_total counter fixed {outcome}
 sip-proxy-runner sip_proxy_resolver_refresh_total counter fixed {outcome}
 sip-proxy-runner sip_proxy_resolver_cache_size gauge fixed {}
 sip-proxy-runner sip_proxy_send_failures_total counter fixed {}
+sip-proxy-runner sip_proxy_parse_panics_total counter fixed {}
 sip-proxy-runner sip_proxy_udp_queue_depth gauge fixed {}
 sip-proxy-runner sip_proxy_udp_queue_max gauge fixed {}
 sip-proxy-runner sip_proxy_udp_enqueued_total counter fixed {}
