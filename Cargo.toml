@@ -164,13 +164,13 @@ libc = "0.2"
 # hand-rolled RFC 3550 encoder (the rtp.js role in the TS port). `rustfft` backs
 # the audio comparator's MFCC signature in the test-only `media-harness`. See
 # docs/plan/lexical-doodling-boot.md.
-rtp = "0.12"
-rtcp = "0.12"
+rtp = "0.17.2"
+rtcp = "0.17.2"
 rustfft = "6"
 # `bytes` is the buffer type `rtp`/`rtcp` marshal to / unmarshal from;
 # `webrtc-util` provides the Marshal/Unmarshal traits they implement.
 bytes = "1"
-webrtc-util = "0.10"
+webrtc-util = "0.17.2"
 # Observability (ADR-0026). `tracing` is the instrumentation facade every crate
 # may depend on; `tracing-subscriber` builds the process subscriber (registry +
 # compact fmt layer) and `tracing-opentelemetry`/`opentelemetry*` the OTLP span
