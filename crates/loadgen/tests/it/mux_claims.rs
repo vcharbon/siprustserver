@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use loadgen::{CallRouting, ClaimRule, Correlation, EndpointSpec, MuxCore, Role};
 use sip_clock::Clock;
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 const RECV: Duration = Duration::from_secs(20);
 

@@ -11,6 +11,7 @@ members = [
     "crates/metric-contract",
     "crates/layer-harness",
     "crates/sip-net",
+    "crates/sip-net-testkit",
     "crates/sip-txn",
     "crates/call",
     "crates/sip-proxy",
@@ -52,8 +53,8 @@ members = [
 # One crate per migration layer (see MIGRATION_STATUS.md): `sip-message` is the
 # pure SIP message layer, `sip-net` the network layer. `layer-harness` is the
 # test-only contract+recording foundation
-# (Recorder / RunContext / severity / recording helpers) shared by sip-net and
-# every later layer's `contracts` module — it carries no production code and no
+# (Recorder / RunContext / severity / recording helpers) shared by the layers'
+# testkit crates and every harness — it carries no production code and no
 # domain types, so it does not contradict ADR-0002's "no premature shared
 # types crate" reasoning (that is about *production* cross-layer cycles). A
 # shared *production* foundation/types crate is still extracted only when the

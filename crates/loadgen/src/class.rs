@@ -29,7 +29,7 @@ pub enum CallOutcome {
     /// The call otherwise succeeded but its sampled trace failed the RFC audit
     /// — carries the structured findings so the case key can bucket by rule id
     /// (the joined human detail is derived in [`detail`](Self::detail)).
-    RfcAuditFail(Vec<sip_net::RfcFinding>),
+    RfcAuditFail(Vec<sip_net_testkit::RfcFinding>),
     /// The call otherwise succeeded but its attached Test case's checks failed
     /// over the sampled trace — carries the FAILED verdicts only. Sampled calls
     /// only — checks are a per-sample oracle, like the RFC audit.
@@ -139,7 +139,7 @@ impl CallOutcome {
     /// that is no failure, and any finding it returns makes the call
     /// [`CallOutcome::RfcAuditFail`] (carried structured, so the report
     /// buckets samples by rule id).
-    pub fn audited(self, audit: impl FnOnce() -> Vec<sip_net::RfcFinding>) -> Self {
+    pub fn audited(self, audit: impl FnOnce() -> Vec<sip_net_testkit::RfcFinding>) -> Self {
         if !self.is_checkable() {
             return self;
         }
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     #[ignore = "slow lane: loadgen"]
     fn an_accepted_branch_is_audited_and_checked() {
-        let finding = sip_net::RfcFinding {
+        let finding = sip_net_testkit::RfcFinding {
             rule: "unacked-invite-non-2xx-final".to_string(),
             lane: "10.0.0.1:5060".to_string(),
             detail: "reject never ACKed".to_string(),

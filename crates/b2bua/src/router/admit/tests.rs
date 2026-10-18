@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 use super::*;
 use crate::admission::Class;

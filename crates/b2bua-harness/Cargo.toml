@@ -14,6 +14,7 @@ b2bua = { path = "../b2bua" }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
+sip-net-testkit = { path = "../sip-net-testkit" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 scenario-harness = { path = "../scenario-harness" }

@@ -207,7 +207,7 @@ async fn a_refused_send_fails_the_call() {
         let caller: SocketAddr = addr(base);
         let sends = Arc::new(AtomicU32::new(0));
         let counted = sends.clone();
-        let fault: sip_net::SendFault = Arc::new(move |src, _dst| {
+        let fault: sip_net_testkit::SendFault = Arc::new(move |src, _dst| {
             (src == caller && counted.fetch_add(1, Ordering::SeqCst) + 1 == refused_send)
                 .then(|| "refused by the test fabric".to_string())
         });

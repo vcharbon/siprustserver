@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
-use sip_net::{with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, UdpEndpoint};
+use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 
 use super::addr_alloc::AddrAlloc;
 use super::artifact_dump::ArtifactDump;
@@ -49,7 +49,7 @@ const SUT_QUEUE_MAX: usize = 256;
 /// hands out [`Agent`]s. Drop or [`finish`](Harness::finish) when done.
 pub struct Harness {
     network: Arc<dyn SignalingNetwork>,
-    recording: sip_net::RecordingSignalingNetwork,
+    recording: sip_net_testkit::RecordingSignalingNetwork,
     recorder: Recorder,
     ids: Arc<Ids>,
     name: String,
@@ -125,7 +125,7 @@ impl Harness {
     /// runtime is a determinism trap (the delivery `sleep(0)` races the txn →
     /// router → dispatcher pipeline, so timer cancels land after the timer
     /// fired). A non-zero delay makes each `recv` park auto-advance
-    /// deterministically. See [`sip_net::SimulatedSignalingNetwork::new`].
+    /// deterministically. See [`sip_net_testkit::SimulatedSignalingNetwork::new`].
     pub fn with_transit_delay(scenario_name: impl Into<String>, transit_delay_ms: u64) -> Self {
         Self::with_transit_delay_and_send_fault(scenario_name, transit_delay_ms, None)
     }
@@ -138,9 +138,9 @@ impl Harness {
     pub fn with_transit_delay_and_send_fault(
         scenario_name: impl Into<String>,
         transit_delay_ms: u64,
-        fault: Option<sip_net::SendFault>,
+        fault: Option<sip_net_testkit::SendFault>,
     ) -> Self {
-        let net = sip_net::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
         let net = match fault {
             Some(fault) => net.with_send_fault(fault),
             None => net,
@@ -181,11 +181,11 @@ impl Harness {
         recv_timeout: Duration,
     ) -> Self {
         let recorder = Recorder::with_clock(transport_kind, clock);
-        let audit_opts = ScopedAuditOptions {
-            cross_message_rules: sip_net::rfc_cross_message_rules(),
+        let audit_opts = sip_net_testkit::ScopedAuditOptions {
+            cross_message_rules: sip_net_testkit::rfc_cross_message_rules(),
             ..Default::default()
         };
-        let wrapped = with_all_contracts(
+        let wrapped = sip_net_testkit::with_all_contracts(
             raw_network,
             recorder.clone(),
             RunContext::TestWithRecorder,
@@ -351,8 +351,8 @@ impl Harness {
     /// locate the 1-based index of an offending message to scope a
     /// [`WaiverScope::at_position`] before `finish` — the SAME index a finding's
     /// `offending` field carries.
-    pub fn wire_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
-        sip_net::audit_wire_entries(&self.recording.channel().snapshot())
+    pub fn wire_entries(&self) -> Vec<sip_net_testkit::RecordedSipEntry> {
+        sip_net_testkit::audit_wire_entries(&self.recording.channel().snapshot())
     }
 
     /// Register a future that [`finish`](Self::finish) and
@@ -675,7 +675,7 @@ impl Harness {
     /// directly over the trace WITHOUT consuming the harness or invoking the
     /// structural layer-close checks. Used by long-lived multi-SUT harnesses
     /// (e.g. the failover matrix) that assert the RFC CSeq check mid-life.
-    pub fn recording(&self) -> sip_net::RecordingSignalingNetwork {
+    pub fn recording(&self) -> sip_net_testkit::RecordingSignalingNetwork {
         self.recording.clone()
     }
 
@@ -724,7 +724,7 @@ impl Harness {
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the hard
         // gate below and is seeded into the report so the projection reuses it.
-        let audit = sip_net::evaluate_rfc_audit(&events);
+        let audit = sip_net_testkit::evaluate_rfc_audit(&events);
         let rfc_findings = audit.findings;
         // Hard gate on the RFC CSeq rule(s) BEFORE the structural close: a CSeq
         // violation must fail the test (a real UA would reject these). Skip if the
@@ -808,7 +808,7 @@ impl Harness {
     /// The unused-waiver check is [`finish`](Self::finish)-only: this collecting
     /// path applies the waivers but does NOT error on one that filtered nothing
     /// (an executor keeps the report over a dead-waiver abort).
-    pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
+    pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net_testkit::RfcFinding>) {
         self.dump.disarm();
         self.artifact_dump.disarm();
         self.cseq_gate.disarm();
@@ -818,7 +818,7 @@ impl Harness {
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the gate,
         // the returned gating findings, and (seeded) the report projection.
-        let audit = sip_net::evaluate_rfc_audit(&events);
+        let audit = sip_net_testkit::evaluate_rfc_audit(&events);
         let rfc_findings = audit.findings;
         // The gating set the scoped waivers leave unwaived. Computed in a scope
         // so the borrow is released before the `close().await` below.

@@ -52,6 +52,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+sip-net-testkit = { path = "../sip-net-testkit" }
 # A stand-in API server for the discovery test: kube::Client over a tower
 # service answering the EndpointSlice list and holding the watch open.
 tower = { version = "0.5", features = ["util"] }

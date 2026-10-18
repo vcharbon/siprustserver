@@ -230,9 +230,9 @@ scope (later slices).
 | Area | Rust home | Status |
 |---|---|---|
 | Recorder / channels / severity / lane conflict | `layer-harness/tests/it/recorder.rs` | ✅ 5 |
-| Simulated routing, already-bound, undeliverable, send-fault, tail-drop, pre-ingress, unbind-on-drop | `sip-net/tests/it/simulated.rs` | ✅ 7 |
+| Simulated routing, already-bound, undeliverable, send-fault, tail-drop, pre-ingress, unbind-on-drop | `sip-net-testkit/tests/it/simulated.rs` | ✅ 7 |
 | Real loopback send/recv, pre-ingress reply round-trip, no-transit invariants | `sip-net/tests/it/real_loopback.rs` | ✅ 3 |
-| Recording capture, paranoid defects, queue-leak (advisory), undeliverable (deferred-fail), peer-rule fail, real-run silencing | `sip-net/tests/it/contracts.rs` | ✅ 7 |
+| Recording capture, paranoid defects, queue-leak (advisory), undeliverable (deferred-fail), peer-rule fail, real-run silencing | `sip-net-testkit/tests/it/contracts.rs` | ✅ 7 |
 
 ### Un-ported with justification
 - **`UdpTransport.ts`** — the **Tier-1 overload brake `preIngress` policy is now

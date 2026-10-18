@@ -25,3 +25,4 @@ webrtc-util = { workspace = true }
 # test analogue of Effect's TestClock, used by the play→record tests.
 tokio = { workspace = true, features = ["test-util"] }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
+sip-net-testkit = { path = "../sip-net-testkit" }

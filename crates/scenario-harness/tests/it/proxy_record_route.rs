@@ -131,7 +131,7 @@ fn fmt_addr(a: std::net::SocketAddr) -> String {
     a.to_string()
 }
 fn fwd_bye_source(
-    entries: &[sip_net::RecordedSipEntry],
+    entries: &[sip_net_testkit::RecordedSipEntry],
     alice: std::net::SocketAddr,
     proxy: std::net::SocketAddr,
 ) -> Vec<u8> {

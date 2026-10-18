@@ -2,7 +2,7 @@
 //! knowledge. A rule body here is written once against the wire model in
 //! [`wire`] and consumed by two adapters: the capture-side census
 //! (`sip_pcap::rfc`, reading pcap flows documents) and the live recorded-trace
-//! audit (`sip_net::rfc_audit`, reading the harness event channel). What
+//! audit (`sip_net_testkit::rfc_audit`, reading the harness event channel). What
 //! differs between those consumers is OBSERVATION POLICY — how the stream was
 //! seen, whether the recording is complete, what to do with an undecidable or
 //! relay-attributed finding — and all of it is data on the model

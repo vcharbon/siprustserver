@@ -202,15 +202,8 @@ crates/sip-message/src/sniff.rs 21
 crates/sip-message/src/sniff/via_stamp.rs 5
 crates/sip-message/src/template.rs 2
 crates/sip-message/src/types.rs 3
-crates/sip-net/src/contracts.rs 8
 crates/sip-net/src/fragmentation.rs 2
 crates/sip-net/src/real.rs 3
-crates/sip-net/src/repeat.rs 2
-crates/sip-net/src/rfc_audit/occasions.rs 3
-crates/sip-net/src/rfc_audit/wire_adapter.rs 1
-crates/sip-net/src/rfc_audit/wire_adapter/dialog.rs 2
-crates/sip-net/src/rfc_audit/wire_adapter/final_response.rs 1
-crates/sip-net/src/simulated.rs 14
 crates/sip-net/src/socket_stats.rs 1
 crates/sip-proxy-runner/src/binds.rs 4
 crates/sip-proxy-runner/src/config.rs 8

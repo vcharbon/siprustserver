@@ -12,7 +12,8 @@ use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::IdGen;
 use topology::{Membership, Peer, SimulatedMembership};
 

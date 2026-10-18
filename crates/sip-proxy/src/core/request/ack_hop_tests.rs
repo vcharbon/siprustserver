@@ -15,7 +15,8 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::parser::SipParserLimits;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::SignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 use crate::addr::ProxyAddr;
 use crate::core::{ProxyCore, ProxyCoreBuilder};

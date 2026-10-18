@@ -22,7 +22,8 @@ use loadgen::{
 };
 use scenario_harness::Harness;
 use sip_clock::Clock;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::SignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;

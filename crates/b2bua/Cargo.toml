@@ -58,6 +58,7 @@ alloc-counter = { path = "../alloc-counter" }
 http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
+sip-net-testkit = { path = "../sip-net-testkit" }
 # IdGen for the rule-engine `ActionExecutor` in state-machine tests.
 sip-txn = { path = "../sip-txn" }
 # ADR-0020 X7 refactor gate: the obligation extraction must be effect-multiset

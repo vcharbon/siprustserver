@@ -4,7 +4,8 @@
 //! INVITE ends its reliable provisionals (RFC 3262 §3).
 
 use super::*;
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use tokio::time::{timeout, Duration as TokioDuration};
 
 async fn sim_rig() -> (Arc<CallTxns>, Box<dyn UdpEndpoint>, SocketAddr) {

@@ -13,7 +13,8 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::parser::SipParserLimits;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{invite_txn_key, INVITE_ENTRY_TTL_MS};

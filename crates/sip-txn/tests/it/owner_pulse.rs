@@ -8,9 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sip_message::CustomParser;
 use sip_net::{
-    BindUdpOpts, SendError, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint,
-    UdpEndpointCounters, UdpPacket,
+    BindUdpOpts, SendError, SignalingNetwork, UdpEndpoint, UdpEndpointCounters, UdpPacket,
 };
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::{TransactionConfig, TransactionEvent, TransactionLayer};
 use tokio::sync::mpsc;
 

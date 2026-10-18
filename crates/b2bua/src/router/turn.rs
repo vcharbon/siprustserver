@@ -108,7 +108,8 @@ mod tests {
 
     use sip_message::parser::custom::CustomParser;
     use sip_message::SipParser;
-    use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+    use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
+    use sip_net_testkit::SimulatedSignalingNetwork;
 
     use super::*;
     use crate::router::resolve::resolve;

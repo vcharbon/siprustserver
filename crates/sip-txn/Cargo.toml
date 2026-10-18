@@ -35,6 +35,7 @@ getrandom.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 # A test endpoint double implements the `UdpEndpoint` async trait.
 async-trait = { workspace = true }
+sip-net-testkit = { path = "../sip-net-testkit" }
 
 [features]
 # Harness seams on the layer's counters, for a post-call gate proven to fire.

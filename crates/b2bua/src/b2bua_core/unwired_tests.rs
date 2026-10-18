@@ -9,7 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sip_clock::Clock;
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::IdGen;
 
 use crate::cdr::InMemoryCdrWriter;

@@ -67,10 +67,10 @@ pub(crate) fn render_dialog_panic(name: &str, verdicts: &[GatedVerdict]) -> Stri
 
 /// The verdicts as gating audit findings, for a run that collects instead of
 /// panicking.
-pub(crate) fn as_findings(verdicts: Vec<GatedVerdict>) -> Vec<sip_net::RfcFinding> {
+pub(crate) fn as_findings(verdicts: Vec<GatedVerdict>) -> Vec<sip_net_testkit::RfcFinding> {
     verdicts
         .into_iter()
-        .map(|g| sip_net::RfcFinding {
+        .map(|g| sip_net_testkit::RfcFinding {
             rule: g.verdict.rule().to_string(),
             lane: g.party,
             detail: g.verdict.to_string(),

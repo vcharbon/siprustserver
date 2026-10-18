@@ -14,7 +14,7 @@ use media::codec::{g711_round_trip, G711Codec};
 use media::sdp::{MediaDirection, NegotiatedMedia};
 use media::{MediaEndpoint, NetAddr, OpenOptions, PlayScript, StreamDirection, PCMA};
 use sip_clock::testkit::advance_settled;
-use sip_net::SimulatedSignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 const PTIME_SAMPLES: usize = 160; // 20 ms @ 8 kHz
 

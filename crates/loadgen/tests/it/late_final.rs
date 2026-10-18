@@ -12,7 +12,8 @@ use sip_clock::Clock;
 use sip_message::sniff::{
     call_id, cseq_value, header_value, header_values, request_uri, via_branch,
 };
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 const RECV: Duration = Duration::from_secs(20);
 const BRANCH: &str = "z9hG4bK-late-1";

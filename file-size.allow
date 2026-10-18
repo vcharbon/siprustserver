@@ -56,7 +56,7 @@ crates/call/tests/it/model_helpers.rs 937
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1280
-crates/failover-harness/src/harness.rs 2321
+crates/failover-harness/src/harness.rs 2202
 crates/failover-harness/src/runner.rs 636
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 1017
 crates/failover-harness/tests/it/failover.rs 1570
@@ -111,7 +111,7 @@ crates/sip-message/src/parser/custom/structured_headers.rs 871
 crates/sip-message/src/sdp_answer.rs 535
 crates/sip-message/src/sniff.rs 687
 crates/sip-message/tests/it/generators.rs 1402
-crates/sip-net/src/contracts.rs 870
+crates/sip-net-testkit/src/contracts.rs 870
 crates/sip-pcap/src/bin/sipflow.rs 1059
 crates/sip-pcap/src/flow.rs 820
 crates/sip-pcap/src/flow/tests.rs 1000

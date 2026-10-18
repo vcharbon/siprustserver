@@ -9,7 +9,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use call::{Call, CallBodyCodec, CallModelState, LegState, MsgpackCodec};
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 use b2bua_sdk::event::CallEvent;
 

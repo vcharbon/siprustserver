@@ -153,7 +153,7 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
 
 /// Assert at least one delivered request `method` flowed `from → to`.
 fn assert_hop(
-    entries: &[sip_net::RecordedSipEntry],
+    entries: &[sip_net_testkit::RecordedSipEntry],
     from: std::net::SocketAddr,
     to: std::net::SocketAddr,
     method: &str,
@@ -173,7 +173,7 @@ fn is_lb_proxy_route(entry: &RecordRouteEntry) -> bool {
 
 /// Find the first request `method` on the `from → to` hop.
 fn find_request(
-    entries: &[sip_net::RecordedSipEntry],
+    entries: &[sip_net_testkit::RecordedSipEntry],
     from: std::net::SocketAddr,
     to: std::net::SocketAddr,
     method: &str,

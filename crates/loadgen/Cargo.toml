@@ -35,6 +35,9 @@ regex = { workspace = true }
 serde_json = { workspace = true }
 # The mux is a SignalingNetwork; recording layers on top via AgentBinder.
 sip-net = { path = "../sip-net" }
+# The random-loss model, the RFC audit findings and the wire-trace entries a
+# case records.
+sip-net-testkit = { path = "../sip-net-testkit" }
 # `GET /debug/flamegraph` on the metrics socket — the load driver runs the shared
 # sip-message parse path at a saturated core, so it is the high-signal vantage
 # for parse/alloc CPU (the runner tiers serve the same route via probe-http).

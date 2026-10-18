@@ -28,7 +28,7 @@ use ha_harness::{frame_summary, ReplReport};
 use layer_harness::{NetworkTag, RecordedScenario};
 use repl_net::transport::Direction;
 use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow, ViewChange};
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 use scenario_harness::report::wire::{facets, wire_text};
 

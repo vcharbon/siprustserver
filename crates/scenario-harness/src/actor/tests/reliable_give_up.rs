@@ -21,7 +21,7 @@ use crate::{Harness, StepError, ANSWER_SDP, OFFER_SDP};
 async fn a_callee_rejects_5xx_when_its_reliable_183_is_never_pracked() {
     let alice_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
     let cut = Arc::new(AtomicBool::new(false));
-    let fault: sip_net::SendFault = {
+    let fault: sip_net_testkit::SendFault = {
         let cut = cut.clone();
         Arc::new(move |src, _dst| {
             (cut.load(Ordering::SeqCst) && src == alice_addr).then(|| "PRACK lost".to_string())

@@ -16,4 +16,5 @@ rustfft = { workspace = true }
 
 [dev-dependencies]
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
+sip-net-testkit = { path = "../sip-net-testkit" }
 tokio = { workspace = true, features = ["test-util"] }

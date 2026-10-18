@@ -32,7 +32,7 @@
 //!   each leg's endpoint. Every per-call endpoint deregisters its keys on
 //!   `Drop`; a reaper sweeps pending-UAS entries whose leg never arrived.
 //! - `loss` — per-call loss injection: the network layer's
-//!   [`sip_net::RandomLoss`] + the deterministic, test-owned [`TargetedDrop`].
+//!   [`sip_net_testkit::RandomLoss`] + the deterministic, test-owned [`TargetedDrop`].
 //! - `retransmit` — opt-in per-call SIP transaction engine (Timer A/E/G)
 //!   recovering modeled loss.
 //! - `rtt` — per-endpoint SIP round-trip timing (request → 100 / 18x /

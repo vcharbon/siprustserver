@@ -4,7 +4,7 @@
 //!
 //! Party attribution is a MECHANISM, not a convention: it references the
 //! offending message STRUCTURALLY. A finding carries
-//! [`RfcFinding::offending`](sip_net::RfcFinding) — the wire-entry index of the
+//! [`RfcFinding::offending`](sip_net_testkit::RfcFinding) — the wire-entry index of the
 //! exact message that violated the rule — and the party is the finding's
 //! `charged` bind (who sent it, or for an omission who owed it), else that
 //! entry's `from_lane` party. A party-scoped waiver filters a finding only
@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 
 use layer_harness::Stamped;
-use sip_net::{audit_wire_entries, RecordedSipEntry, RfcFinding, SignalingNetworkEvent};
+use sip_net_testkit::{audit_wire_entries, RecordedSipEntry, RfcFinding, SignalingNetworkEvent};
 
 /// A data-constructible RFC-audit waiver scoped to `(rule, party, position)`.
 /// Scenario-file portable (plain data). Without a party it covers the rule on
@@ -214,7 +214,7 @@ pub(crate) struct Waived<T> {
 /// waiver used) — the shared core of both apply variants. Attribution
 /// references each finding's `offending` wire-entry index directly. Takes the
 /// PRE-EVALUATED suite output so a caller that already ran
-/// `sip_net::evaluate_rfc_findings` (the finish gate) never runs it twice.
+/// `sip_net_testkit::evaluate_rfc_findings` (the finish gate) never runs it twice.
 fn survivors(
     findings: &[RfcFinding],
     events: &[Stamped<SignalingNetworkEvent>],
@@ -276,7 +276,7 @@ pub(crate) fn apply_waivers_findings(
     waivers: &[WaiverState],
     attr: &Attribution,
 ) -> Vec<RfcFinding> {
-    let findings = sip_net::evaluate_rfc_findings(events);
+    let findings = sip_net_testkit::evaluate_rfc_findings(events);
     survivors(&findings, events, waivers, attr).gating.into_iter().map(|(f, _)| f).collect()
 }
 

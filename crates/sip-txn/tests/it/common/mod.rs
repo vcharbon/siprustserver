@@ -28,7 +28,8 @@ use std::sync::Arc;
 
 use sip_message::header::SentBy;
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::{IdGen, ServerTxnKey, TransactionConfig, TransactionEvent, TransactionLayer};
 use tokio::sync::mpsc;
 

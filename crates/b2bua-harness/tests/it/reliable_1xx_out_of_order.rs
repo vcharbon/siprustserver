@@ -15,7 +15,7 @@ use std::time::Duration;
 use b2bua_harness::{settle_until, B2buaSut};
 use call::features::{Relay18xMessages, RelayFirst18xStrategy};
 use scenario_harness::{Harness, WaiverScope};
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const EARLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";

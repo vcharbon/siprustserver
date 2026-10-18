@@ -629,7 +629,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
     // ── toward the cut node: the callee's 180; from it: its Timer A rungs ────
     uas.respond(180, "Ringing").await;
     fh.advance(Duration::from_secs(2)).await;
-    let touching: Vec<sip_net::RecordedSipEntry> = fh
+    let touching: Vec<sip_net_testkit::RecordedSipEntry> = fh
         .sip_entries()
         .into_iter()
         .filter(|e| e.seq > cut_seq && (e.from == pri_sip || e.to == pri_sip))
@@ -638,7 +638,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
     let from = touching.iter().filter(|e| e.from == pri_sip).count();
     assert!(toward >= 1, "the proxy attempted a datagram toward the cut worker (the 180)");
     assert!(from >= 1, "the cut worker attempted a datagram of its own (an INVITE rung)");
-    let crossed: Vec<&sip_net::RecordedSipEntry> =
+    let crossed: Vec<&sip_net_testkit::RecordedSipEntry> =
         touching.iter().filter(|e| e.delivered).collect();
     assert!(
         crossed.is_empty(),
@@ -662,7 +662,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
         })
         .await;
     assert!(crossed, "a datagram from {pri_sip} crosses once the cut is restored");
-    let inside: Vec<sip_net::RecordedSipEntry> = fh
+    let inside: Vec<sip_net_testkit::RecordedSipEntry> = fh
         .sip_entries()
         .into_iter()
         .filter(|e| e.from == pri_sip || e.to == pri_sip)
@@ -747,7 +747,7 @@ async fn crash_stops_every_frame_and_datagram_from_the_node() {
         sent_by_dead.len(),
         sent_by_dead.first().map(|f| format!("{} → {}: {}", f.from, f.to, frame_summary(&f.frame))),
     );
-    let sip_from_dead: Vec<sip_net::RecordedSipEntry> =
+    let sip_from_dead: Vec<sip_net_testkit::RecordedSipEntry> =
         fh.sip_entries().into_iter().filter(|e| e.seq > crash_seq && e.from == pri_sip).collect();
     assert!(
         sip_from_dead.is_empty(),

@@ -24,9 +24,9 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::{
-    BindUdpOpts, SendError, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint,
-    UdpEndpointCounters, UdpPacket,
+    BindUdpOpts, SendError, SignalingNetwork, UdpEndpoint, UdpEndpointCounters, UdpPacket,
 };
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::IdGen;
 use tokio::sync::watch;
 use topology::{Peer, SimulatedMembership};

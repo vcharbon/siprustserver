@@ -349,7 +349,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "slow lane: loadgen"]
     async fn the_body_holds_its_catalogue_exactly() {
-        let sim = Arc::new(sip_net::SimulatedSignalingNetwork::new(1));
+        let sim = Arc::new(sip_net_testkit::SimulatedSignalingNetwork::new(1));
         let core = MuxCore::bind_on(
             sim.as_ref(),
             vec![EndpointSpec { addr: "127.0.0.1:7001".parse().unwrap(), role: Role::Caller }],

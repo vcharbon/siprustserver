@@ -138,7 +138,8 @@ mod tests {
     use super::*;
 
     async fn txn_layer() -> sip_txn::TransactionLayer {
-        use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+        use sip_net::{BindUdpOpts, SignalingNetwork};
+        use sip_net_testkit::SimulatedSignalingNetwork;
         let net = SimulatedSignalingNetwork::new(1);
         let endpoint = net
             .bind_udp(BindUdpOpts::new("127.0.0.1:5070".parse().unwrap(), 64))

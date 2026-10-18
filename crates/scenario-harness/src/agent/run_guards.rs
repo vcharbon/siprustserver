@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 
 use layer_harness::{Channel, NetworkTag, Recorder};
-use sip_net::{audit_wire_entries, RfcFinding, SignalingNetworkEvent};
+use sip_net_testkit::{audit_wire_entries, RfcFinding, SignalingNetworkEvent};
 
 use super::dialog_gate::{render_dialog_panic, surviving_verdicts};
 use super::failure_dump::Judges;
@@ -105,7 +105,7 @@ pub(super) fn rfc_hard_gate_findings(
     recorder: &Recorder,
 ) -> HardGate {
     // `findings` is the output of the ONE shared evaluator
-    // (`sip_net::evaluate_rfc_findings`, subject dispatch applied) — the SAME
+    // (`sip_net_testkit::evaluate_rfc_findings`, subject dispatch applied) — the SAME
     // set the report projection lists — so the gate and the report can never
     // disagree on which endpoint a rule applies to.
     let names = addr_names(recorder);
@@ -203,7 +203,7 @@ impl Drop for CseqGate {
             let waivers = self.waivers.borrow();
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let events = self.channel.snapshot();
-                let suite = sip_net::evaluate_rfc_findings(&events);
+                let suite = sip_net_testkit::evaluate_rfc_findings(&events);
                 rfc_hard_gate_findings(&suite, &events, &waivers, &self.recorder).gating
             })) {
                 Ok(f) => f,

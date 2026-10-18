@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use layer_harness::{Channel, Recorder};
-use sip_net::{to_sip_entries, SignalingNetworkEvent};
+use sip_net_testkit::{to_sip_entries, SignalingNetworkEvent};
 
 use crate::report::wire::{facets, format_relative};
 

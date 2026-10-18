@@ -7,7 +7,7 @@
 //! and replay the step list.
 //! Every `send_to` / `recv` flows through the recording decorator, so the
 //! `layer-harness` `Recorder` *is* the trace — the reports are projected from
-//! its channel snapshot afterwards (`sip_net::to_sip_entries`), exactly the
+//! its channel snapshot afterwards (`sip_net_testkit::to_sip_entries`), exactly the
 //! "have pseudo alice and bob do the recording" design.
 
 use std::collections::HashMap;
@@ -18,9 +18,10 @@ use layer_harness::{NetworkTag, RecordedScenario, Recorder, RunContext, Stamped,
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-use sip_net::{
-    to_sip_entries, with_all_contracts, BindUdpOpts, RecordedSipEntry, ScopedAuditOptions,
-    SignalingAuditViolation, SignalingNetworkEvent, SimulatedSignalingNetwork, UdpEndpoint,
+use sip_net::{BindUdpOpts, UdpEndpoint};
+use sip_net_testkit::{
+    to_sip_entries, with_all_contracts, RecordedSipEntry, ScopedAuditOptions,
+    SignalingAuditViolation, SignalingNetworkEvent, SimulatedSignalingNetwork,
 };
 
 use crate::anchors::AnchorTag;
@@ -64,7 +65,7 @@ pub struct RunReport {
     /// The full RFC-suite finding set over `events`, computed at most once per
     /// report — the suite re-parses every recorded frame, so every consumer
     /// (gate, report projection) shares this set via [`Self::rfc_findings`].
-    rfc_findings: std::sync::OnceLock<Vec<sip_net::RfcFinding>>,
+    rfc_findings: std::sync::OnceLock<Vec<sip_net_testkit::RfcFinding>>,
     /// Per rule, the findings charged to the SUT that a waiver naming it
     /// covered at `finish`.
     waived_sut_findings: std::collections::BTreeMap<String, usize>,
@@ -101,7 +102,7 @@ impl RunReport {
     /// Seed the memoized RFC finding set with one already evaluated over the
     /// SAME `events` this report carries (the `finish` paths run the suite for
     /// the hard gate and hand the result here). No-op if already seeded.
-    pub(crate) fn seed_rfc_findings(&self, findings: Vec<sip_net::RfcFinding>) {
+    pub(crate) fn seed_rfc_findings(&self, findings: Vec<sip_net_testkit::RfcFinding>) {
         let _ = self.rfc_findings.set(findings);
     }
 
@@ -121,10 +122,10 @@ impl RunReport {
     }
 
     /// The full RFC-suite finding set (advisory tags included) over the
-    /// recorded events — `sip_net::evaluate_rfc_findings`, evaluated at most
+    /// recorded events — `sip_net_testkit::evaluate_rfc_findings`, evaluated at most
     /// once per report and shared by every consumer.
-    pub fn rfc_findings(&self) -> &[sip_net::RfcFinding] {
-        self.rfc_findings.get_or_init(|| sip_net::evaluate_rfc_findings(&self.events))
+    pub fn rfc_findings(&self) -> &[sip_net_testkit::RfcFinding] {
+        self.rfc_findings.get_or_init(|| sip_net_testkit::evaluate_rfc_findings(&self.events))
     }
 
     /// `true` when every `Expect` matched and no extra anomaly gates.

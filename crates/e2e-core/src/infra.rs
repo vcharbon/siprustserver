@@ -158,7 +158,7 @@ impl InfraRuntime {
     /// every call and released every limiter hold
     /// ([`B2buaSut::assert_fully_reaped`]); a leak is a gating anomaly on the
     /// report, so the cell fails with its diagram and findings.
-    pub async fn finish(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
+    pub async fn finish(self) -> (RunReport, Vec<sip_net_testkit::RfcFinding>) {
         // Drain already-due in-flight deliveries (SUT teardown, final 200s, CDR)
         // before the snapshot — the generic analogue of b2bua-harness
         // `settle_until`. Under a paused clock each yield auto-advances virtual
@@ -254,7 +254,7 @@ impl InfraShape for FakeLsbcB2bua {
         // fabric + paused test clock — so the config's `recv_timeout_ms` is
         // honoured here too (0-transit coercion to ≥1ms per the sim hazard).
         let net: Arc<dyn sip_net::SignalingNetwork> =
-            Arc::new(sip_net::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)));
+            Arc::new(sip_net_testkit::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)));
         let h = Harness::with_network_and_clock(
             scenario_name.to_string(),
             net.clone(),
@@ -372,7 +372,7 @@ impl InfraShape for FakeRegisterProxy {
     async fn build(&self, scenario_name: &str, cfg: &EndpointConfig) -> InfraRuntime {
         cfg.assert_binds(self.id());
         let net: Arc<dyn sip_net::SignalingNetwork> =
-            Arc::new(sip_net::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)));
+            Arc::new(sip_net_testkit::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)));
         let clock = Clock::test_at(0);
         let h = Harness::with_network_and_clock(
             scenario_name.to_string(),

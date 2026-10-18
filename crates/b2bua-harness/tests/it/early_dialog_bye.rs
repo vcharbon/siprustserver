@@ -27,7 +27,7 @@ use b2bua_harness::{invite_final_statuses, settle_until, stated, stated_by_respo
 use call::{CdrEventType, TerminationCause};
 use scenario_harness::{Agent, Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";

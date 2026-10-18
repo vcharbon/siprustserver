@@ -6,9 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sip_net::types::PreIngressAction;
-use sip_net::{
-    BindErrorReason, BindUdpOpts, PreIngressHook, SignalingNetwork, SimulatedSignalingNetwork,
-};
+use sip_net::{BindErrorReason, BindUdpOpts, PreIngressHook, SignalingNetwork};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use tokio::time::timeout;
 
 fn opts(addr: &str, queue_max: usize) -> BindUdpOpts {

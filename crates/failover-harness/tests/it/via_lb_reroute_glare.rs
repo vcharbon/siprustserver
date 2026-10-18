@@ -16,7 +16,7 @@
 //!    response→client-transaction matching at the relay).
 //!
 //! These are audit-gated end to end (the harness hard-gates every bind's trace
-//! through `sip_net::rfc_audit`), so the tests pin BOTH halves of the contract:
+//! through `sip_net_testkit::rfc_audit`), so the tests pin BOTH halves of the contract:
 //! every worker/proxy transaction toward a shared next hop presents a distinct
 //! top-Via branch, and each response correlates (per §17.1.3, BY BRANCH) to
 //! exactly the client transaction that sent it.

@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 
 use layer_harness::Stamped;
-use sip_net::{RecordedSipEntry, SignalingNetworkEvent};
+use sip_net_testkit::{RecordedSipEntry, SignalingNetworkEvent};
 
 /// One RFC-audit rule accepted over a bounded slice of the run, in capture order.
 struct AcceptanceWindow {
@@ -108,10 +108,10 @@ impl RfcAcceptance {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> (Vec<Finding>, Vec<Finding>) {
-        let entries = sip_net::audit_wire_entries(events);
+        let entries = sip_net_testkit::audit_wire_entries(events);
         let mut gating = Vec::new();
         let mut accepted = Vec::new();
-        for rule in sip_net::rfc_cross_message_rules() {
+        for rule in sip_net_testkit::rfc_cross_message_rules() {
             // Honour the advisory tier exactly as the scenario-harness hard gate
             // does: a `force_advisory` rule (a documented B2BUA-architectural
             // divergence — per-leg SDP re-origin, OPTIONS-keepalive response

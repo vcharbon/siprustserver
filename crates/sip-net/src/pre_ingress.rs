@@ -14,7 +14,7 @@ use crate::types::{PreIngressAction, PreIngressHook};
 /// The verdict of `hook` on `raw` from `src` at queue depth `depth`:
 /// [`PreIngressAction::Accept`] with no hook, or when the hook panics (counted
 /// in `pre_ingress_panics`).
-pub(crate) fn judge(
+pub fn judge(
     hook: Option<&PreIngressHook>,
     raw: &[u8],
     src: SocketAddr,

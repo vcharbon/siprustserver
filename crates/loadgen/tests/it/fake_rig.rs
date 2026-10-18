@@ -14,7 +14,8 @@ use loadgen::{
 };
 use scenario_harness::Harness;
 use sip_clock::Clock;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::SignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 /// Per-recv timeout. Virtual time: a doomed call idles this long on the
 /// paused timeline (cheap), a healthy call returns at its datagram. Wide
@@ -72,7 +73,7 @@ pub(crate) async fn setup_fake_shaped(
 /// the SUT `fault` may refuse.
 pub(crate) async fn setup_fake_faulty(
     base: u16,
-    fault: sip_net::SendFault,
+    fault: sip_net_testkit::SendFault,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     let sim = SimulatedSignalingNetwork::new(1).with_send_fault(fault);
     setup_fake_on(sim, base, B2buaSut::route_all_with_refer, |_| {}).await

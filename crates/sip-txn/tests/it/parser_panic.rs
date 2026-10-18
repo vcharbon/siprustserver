@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use sip_message::{CustomParser, SipMessage, SipParseError, SipParser};
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::{TransactionConfig, TransactionEvent, TransactionLayer};
 
 use crate::common::{addr, elapse_ms, inbound_request, B2BUA, PEER};

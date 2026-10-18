@@ -14,7 +14,7 @@
 
 use layer_harness::{Lane as RecLane, NetworkTag, RecordedScenario};
 use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 use super::wire::{facets, wire_text};
 
@@ -252,7 +252,7 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
 /// correlated to the call but had no live logical endpoint to land on.
 fn entry_lane_ids(e: &RecordedSipEntry) -> (String, String) {
     let from = e.from_lane.clone().unwrap_or_else(|| e.from.to_string());
-    let to = if e.recv_note == Some(sip_net::RecvNote::Unrouted) {
+    let to = if e.recv_note == Some(sip_net_testkit::RecvNote::Unrouted) {
         format!("{}#noendpoint", e.to)
     } else {
         e.to_lane.clone().unwrap_or_else(|| e.to.to_string())
@@ -367,7 +367,7 @@ mod tests {
         routed.from_lane = Some("10.0.0.1:5060".into());
         routed.to_lane = Some("10.0.0.2:5070#callee".into());
         let mut unrouted = entry("10.0.0.1:5060", "10.0.0.2:5070", raw, 20, 2);
-        unrouted.recv_note = Some(sip_net::RecvNote::Unrouted);
+        unrouted.recv_note = Some(sip_net_testkit::RecvNote::Unrouted);
 
         let doc = sip_doc("lanes", None, &[routed, unrouted], &scenario, true, &[]);
 

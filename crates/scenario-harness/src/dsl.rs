@@ -10,7 +10,7 @@
 //! and carries no SUT/tier machinery, `or`-branching, `parallel`, media, or
 //! chaos steps.
 //! The trace the reports render is **not** built here — it is projected from
-//! the recording layer after the run (`sip_net::to_sip_entries`).
+//! the recording layer after the run (`sip_net_testkit::to_sip_entries`).
 
 use std::net::SocketAddr;
 

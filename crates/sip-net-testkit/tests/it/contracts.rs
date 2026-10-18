@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use layer_harness::{Recorder, RunContext, Severity, Stamped};
-use sip_net::{
-    with_all_contracts, BindUdpOpts, PeerAuditRule, ScopedAuditOptions, SignalingNetworkEvent,
+use sip_net::BindUdpOpts;
+use sip_net_testkit::{
+    with_all_contracts, PeerAuditRule, ScopedAuditOptions, SignalingNetworkEvent,
     SimulatedSignalingNetwork,
 };
 use tokio::time::timeout;
@@ -227,16 +228,16 @@ async fn unconsumed_arrival_is_recorded_at_delivery_and_noted() {
         "no consumption marker without a recv()"
     );
 
-    let entries = sip_net::to_sip_entries(&snapshot);
+    let entries = sip_net_testkit::to_sip_entries(&snapshot);
     let e = entries.iter().find(|e| e.raw.starts_with(b"ACK")).unwrap();
     assert!(e.delivered, "the wire fact is delivery");
-    assert_eq!(e.recv_note, Some(sip_net::RecvNote::Unconsumed));
+    assert_eq!(e.recv_note, Some(sip_net_testkit::RecvNote::Unconsumed));
 
     // The audit view keeps the arrival (that is the whole point).
     assert!(snapshot
         .iter()
         .filter(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
-        .all(|s| sip_net::audit_visible_event(&s.event)));
+        .all(|s| sip_net_testkit::audit_visible_event(&s.event)));
 
     drop(b);
     drop(a);
@@ -272,7 +273,7 @@ async fn consumed_arrival_pairs_with_its_consumption_marker() {
         .seq;
     assert!(item_seq < consumed_seq, "arrival sequences before consumption");
 
-    let entries = sip_net::to_sip_entries(&snapshot);
+    let entries = sip_net_testkit::to_sip_entries(&snapshot);
     let e = entries.iter().find(|e| e.raw.starts_with(b"OPTIONS")).unwrap();
     assert_eq!(e.recv_note, None, "a consumed message carries no note");
 }
@@ -310,13 +311,13 @@ async fn overflow_arrival_is_recorded_with_its_disposition() {
         "the overflowed datagram is still a recorded arrival"
     );
 
-    let entries = sip_net::to_sip_entries(&snapshot);
+    let entries = sip_net_testkit::to_sip_entries(&snapshot);
     let two = entries.iter().find(|e| e.raw.starts_with(b"NOTIFY two")).unwrap();
-    assert_eq!(two.recv_note, Some(sip_net::RecvNote::InboxOverflow));
+    assert_eq!(two.recv_note, Some(sip_net_testkit::RecvNote::InboxOverflow));
     assert!(two.delivered, "it arrived on the wire — overflow is inbox-side");
 
     // Overflow arrivals stay audit-visible (true wire), unlike modeled loss.
-    assert!(sip_net::audit_visible_event(
+    assert!(sip_net_testkit::audit_visible_event(
         &snapshot
             .iter()
             .filter(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
@@ -338,14 +339,14 @@ fn audit_view_hides_consumption_markers_and_modeled_loss() {
         bind_key: "10.0.0.2:5060".to_string(),
         packet: pkt.clone(),
         disposition,
-        wire: sip_net::WireStamp::of_bytes(b"BYE sip:x SIP/2.0\r\n"),
+        wire: sip_net_testkit::WireStamp::of_bytes(b"BYE sip:x SIP/2.0\r\n"),
     };
-    assert!(sip_net::audit_visible_event(&item(RecvDisposition::Delivered)));
-    assert!(sip_net::audit_visible_event(&item(RecvDisposition::InboxOverflow)));
-    assert!(!sip_net::audit_visible_event(&item(RecvDisposition::InboxClosed)));
-    assert!(!sip_net::audit_visible_event(&item(RecvDisposition::LossModel)));
-    assert!(!sip_net::audit_visible_event(&item(RecvDisposition::AbsorbedRetransmit)));
-    assert!(!sip_net::audit_visible_event(&SignalingNetworkEvent::RecvConsumed {
+    assert!(sip_net_testkit::audit_visible_event(&item(RecvDisposition::Delivered)));
+    assert!(sip_net_testkit::audit_visible_event(&item(RecvDisposition::InboxOverflow)));
+    assert!(!sip_net_testkit::audit_visible_event(&item(RecvDisposition::InboxClosed)));
+    assert!(!sip_net_testkit::audit_visible_event(&item(RecvDisposition::LossModel)));
+    assert!(!sip_net_testkit::audit_visible_event(&item(RecvDisposition::AbsorbedRetransmit)));
+    assert!(!sip_net_testkit::audit_visible_event(&SignalingNetworkEvent::RecvConsumed {
         bind_key: "10.0.0.2:5060".to_string(),
         packet: pkt,
     }));
@@ -364,7 +365,7 @@ const STAMPED_INVITE: &str = "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
     Content-Length: 0\r\n\r\n";
 
 /// Every `RecvItem` on a bind's lane, in capture order.
-fn recv_items(wrapped: &sip_net::WrappedNetwork) -> Vec<Stamped<SignalingNetworkEvent>> {
+fn recv_items(wrapped: &sip_net_testkit::WrappedNetwork) -> Vec<Stamped<SignalingNetworkEvent>> {
     wrapped
         .recording
         .channel()
@@ -374,7 +375,7 @@ fn recv_items(wrapped: &sip_net::WrappedNetwork) -> Vec<Stamped<SignalingNetwork
         .collect()
 }
 
-fn wire_of(s: &Stamped<SignalingNetworkEvent>) -> &sip_net::WireStamp {
+fn wire_of(s: &Stamped<SignalingNetworkEvent>) -> &sip_net_testkit::WireStamp {
     match &s.event {
         SignalingNetworkEvent::RecvItem { wire, .. } => wire,
         _ => unreachable!(),

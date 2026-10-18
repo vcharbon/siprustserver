@@ -18,7 +18,7 @@ use std::sync::Arc;
 use futures::FutureExt;
 
 use layer_harness::{Channel, Recorder};
-use sip_net::SignalingNetworkEvent;
+use sip_net_testkit::SignalingNetworkEvent;
 
 use super::call_trace::render_call_traces;
 use super::ladder::render_ladder;

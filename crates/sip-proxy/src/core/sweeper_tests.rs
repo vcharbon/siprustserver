@@ -177,7 +177,8 @@ async fn run_records_packet_age_at_dequeue() {
 #[tokio::test(start_paused = true)]
 async fn intake_age_is_immune_to_wall_versus_monotonic_divergence() {
     use sip_net::types::BindUdpOpts;
-    use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+    use sip_net::SignalingNetwork;
+    use sip_net_testkit::SimulatedSignalingNetwork;
 
     use crate::self_gate::AGE_CRITICAL_MS;
 

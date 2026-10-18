@@ -4,7 +4,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::self_gate::{AdmitDecision, ShedReason};
 

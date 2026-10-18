@@ -41,6 +41,7 @@ tracing = { workspace = true }
 observe = { path = "../observe", default-features = false }
 
 [dev-dependencies]
+sip-net-testkit = { path = "../sip-net-testkit" }
 scenario-harness = { path = "../scenario-harness" }
 layer-harness = { path = "../layer-harness" }
 # The per-packet trace-tier budget: an untraced proxy allocates nothing.

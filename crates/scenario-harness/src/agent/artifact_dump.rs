@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use layer_harness::{Channel, Recorder};
-use sip_net::SignalingNetworkEvent;
+use sip_net_testkit::SignalingNetworkEvent;
 
 use crate::anchors::AnchorTag;
 use crate::run::{ExpectOutcome, RunReport};

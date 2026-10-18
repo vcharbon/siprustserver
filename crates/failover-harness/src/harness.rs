@@ -53,7 +53,7 @@ use sip_proxy::registry::WorkerRegistry;
 use sip_txn::IdGen;
 use topology::{Peer, SimulatedMembership};
 
-use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
+use crate::rfc_acceptance::RfcAcceptance;
 use crate::views::{Belief, Incarnation, ViewLedger};
 
 mod acceptance;
@@ -62,6 +62,7 @@ mod proxy_sut;
 mod release_all;
 mod repl_faults;
 mod repl_wiring;
+mod rfc_audit;
 pub use proxy_sut::ProxySut;
 use repl_wiring::ReplWiring;
 
@@ -966,11 +967,12 @@ impl FailoverHarness {
         let sip_cut: Arc<Mutex<std::collections::BTreeSet<SocketAddr>>> =
             Arc::new(Mutex::new(std::collections::BTreeSet::new()));
         let cut = sip_cut.clone();
-        let fault: sip_net::SendFault = Arc::new(move |src: SocketAddr, dst: SocketAddr| {
-            let cut = cut.lock().unwrap();
-            (cut.contains(&src) || cut.contains(&dst))
-                .then(|| format!("{src} is cut off the signalling fabric"))
-        });
+        let fault: sip_net_testkit::SendFault =
+            Arc::new(move |src: SocketAddr, dst: SocketAddr| {
+                let cut = cut.lock().unwrap();
+                (cut.contains(&src) || cut.contains(&dst))
+                    .then(|| format!("{src} is cut off the signalling fabric"))
+            });
         let harness = Harness::with_transit_delay_and_send_fault(name, 1, Some(fault)).describe(
             "S10b goal-2 simulated failover: alice → proxy → 2 replicating b2buas \
              over the SIM SIP + SIM repl fabrics under one fake clock.",
@@ -1374,8 +1376,8 @@ impl FailoverHarness {
     /// the dual-face tests assert per-face source-address discipline on it
     /// (every datagram a caller receives originates from the external face's
     /// bind, every worker-bound one from the internal face's).
-    pub fn sip_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
-        sip_net::to_sip_entries(&self.harness.recording().channel().snapshot())
+    pub fn sip_entries(&self) -> Vec<sip_net_testkit::RecordedSipEntry> {
+        sip_net_testkit::to_sip_entries(&self.harness.recording().channel().snapshot())
     }
 
     /// Bind a replicating B2BUA worker `ordinal` (declared in [`new`](Self::new))
@@ -1829,128 +1831,7 @@ impl FailoverHarness {
     }
 
     // -- report ------------------------------------------------------------
-
-    /// Run the built-in RFC 3261 signaling audit (CSeq in-dialog ordering, …)
-    /// over the recorded SIP trace and panic on any violation — the SIP-plane
-    /// analogue of the universal teardown sweep's "all clean" check, applied to
-    /// EVERY cell once the scenario has fully run. Reads the recording channel
-    /// directly (no layer-close structural checks, no consume), so it can run
-    /// mid-life on the long-lived multi-SUT harness. Catches a takeover that
-    /// probes a dialog with a stale CSeq — a regression a real UAC rejects as
-    /// `unexpected_msg` but a test UA answers silently.
-    /// Run the FULL RFC audit suite — the per-bind **peer** rules (Via echo /
-    /// response↔transaction correlation, tags, CANCEL/RAck correlation, …) on
-    /// top of the cross-message rules — over the recorded trace and panic on
-    /// any non-advisory finding, honouring
-    /// [`allow_rfc_violation`](Self::allow_rfc_violation) waivers.
-    ///
-    /// The Drop-time gate deliberately runs only the endpoint-scoped
-    /// cross-message rules (a transparent failover splits one dialog's CSeq
-    /// stream across worker binds, so per-bind peer rules would report phantom
-    /// findings on the internal nodes). A NON-failover via-LB test — where no
-    /// call ever changes workers — can and should opt into the full per-bind
-    /// suite, which is exactly what gates the downstream e2e runs:
-    /// it is the only lane that judges the **relay (proxy) bind's** own client
-    /// transactions (e.g. `response-echoes-request-via` §8.1.3/§17.1.3 response matching).
-    pub fn assert_full_rfc_clean(&self, cell: &str) {
-        let events = self.harness.recording().channel().snapshot();
-        // `offending` is a 1-based index into the AUDIT-visible wire entries — the
-        // same view `evaluate_rfc_findings` hands the rules — so a window must be
-        // resolved against `audit_wire_entries`, never the raw snapshot (whose
-        // extra ReEmit / invisible-disposition rows shift every later index).
-        let entries = sip_net::audit_wire_entries(&events);
-        let findings: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
-            .into_iter()
-            .filter(|f| !f.advisory && !self.rfc_acceptance.waived(&f.rule))
-            .filter(|f| !self.rfc_acceptance.accepts(&f.rule, f.offending, &entries))
-            .collect();
-        assert!(
-            findings.is_empty(),
-            "[{cell}] full-suite RFC audit violation(s) on the recorded trace:\n{}",
-            findings
-                .iter()
-                .map(|f| format!("  • [{}] {}: {}", f.lane, f.rule, f.detail))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-
-    pub fn assert_sip_rfc_clean(&self, cell: &str) {
-        let findings = self.rfc_audit_findings();
-        assert!(
-            findings.is_empty(),
-            "[{cell}] SIP RFC audit violation(s) on the recorded trace \
-             (a real UA would have rejected these):\n{}",
-            findings
-                .iter()
-                .map(|(lane, detail)| format!("  • [{lane}] {detail}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-
-    /// The RFC 3261 cross-message audit findings that GATE — everything the
-    /// recorded trace violated except what an acceptance window covers (the
-    /// `(lane, detail)` pairs `assert_sip_rfc_clean` panics on). Reads the
-    /// recording channel snapshot NON-consuming, so it is safe to call mid-run AND
-    /// from `Drop`. Empty ⇒ clean. Shared by the explicit `assert_sip_rfc_clean`
-    /// and the automatic Drop-time enforcement so the SAME rule set runs on every
-    /// FailoverHarness-based test with no per-test opt-in.
-    fn rfc_audit_findings(&self) -> Vec<(String, String)> {
-        lane_details(self.partition_rfc_findings().0)
-    }
-
-    /// Split the endpoint-scoped cross-message audit into `(gating, accepted)` —
-    /// see [`RfcAcceptance::partition`].
-    #[allow(clippy::type_complexity)]
-    fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Finding>) {
-        self.rfc_acceptance.partition(&self.audited_events())
-    }
-
-    /// The findings an acceptance window covered this run — the deviations the
-    /// scenario declared accepted via
-    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now).
-    /// They do not gate, but they are recorded (advisory anomalies in the unified
-    /// report) so an accepted trade-off stays visible, and a test can assert on
-    /// them to prove its window matched something.
-    pub fn accepted_rfc_deviations(&self) -> Vec<(String, String)> {
-        lane_details(self.partition_rfc_findings().1)
-    }
-
-    /// The recorded SIP events the audit judges — the endpoint-scoped view.
-    fn audited_events(&self) -> Vec<layer_harness::Stamped<sip_net::SignalingNetworkEvent>> {
-        // RFC 3261 conformance is only observable from OUTSIDE the proxy/LB — at
-        // the real UAs (alice/bob). A *transparent* failover legitimately splits
-        // ONE logical dialog across several cluster workers: alice's in-dialog
-        // CSeq stream 1→2→3 can land 1 on the primary, 2 on the backup (takeover),
-        // 3 on the reclaimed primary. Auditing per **worker** bind then reports a
-        // phantom "CSeq 3 skips ahead of CSeq 1" on the worker that happened to
-        // serve 1 and 3 — even though alice SENT 1,2,3 contiguously and bob
-        // RECEIVED 1,2,3 contiguously on its leg. No real UA ever sees that gap.
-        //
-        // So scope the audit to the dialog as observed at the endpoints, not at
-        // the internal cluster nodes: drop the worker binds. Equivalent to
-        // regrouping per dialog independent of which worker handled each request —
-        // the surviving streams (alice, bob, and the proxy, which forwards EVERY
-        // request and so sees the whole 1,2,3 sequence) are each CSeq-monotonic.
-        // The endpoint/proxy binds still catch a genuine same-leg CSeq collision
-        // (e.g. a keepalive OPTIONS and a later BYE reusing one CSeq toward bob).
-        let incarnation_binds = self.views.all_sip_addrs();
-        let worker_binds: std::collections::HashSet<String> = self
-            .all_worker_sip_addrs
-            .iter()
-            .chain(self.relay_sip_addrs.iter())
-            .chain(incarnation_binds.iter())
-            .map(|a| a.to_string())
-            .collect();
-        let snapshot = self.harness.recording().channel().snapshot();
-        snapshot
-            .into_iter()
-            .filter(|s| {
-                !worker_binds.contains(s.event.bind_key()) && sip_net::audit_visible_event(&s.event)
-            })
-            .collect()
-    }
+    // The RFC audit gates live in `rfc_audit`.
 
     /// Record a rebooted worker's NEW SIP address into the RFC-audit exclusion
     /// set — the PRE-reboot incarnation's bind must stay excluded too, else the
@@ -2009,7 +1890,7 @@ impl FailoverHarness {
     /// long-lived multi-SUT harness without finishing the SIP harness.
     pub fn unified_doc(&self, title: &str, passed: bool) -> seq_report::SeqDoc {
         let recording = self.harness.recording();
-        let entries = sip_net::to_sip_entries(&recording.channel().snapshot());
+        let entries = sip_net_testkit::to_sip_entries(&recording.channel().snapshot());
         let scenario = recording.recorder().snapshot();
         let repl = self.repl_report();
         let mut doc = crate::combine::combine_doc(
@@ -2314,7 +2195,7 @@ impl HarnessHandle {
     /// caller can read its append-only signaling channel + recorder snapshot
     /// (for the RFC audit AND the unified report) without taking or consuming
     /// the harness.
-    fn recording(&self) -> sip_net::RecordingSignalingNetwork {
+    fn recording(&self) -> sip_net_testkit::RecordingSignalingNetwork {
         let g = self.inner.lock().unwrap();
         g.as_ref().expect("harness taken (already finished?)").recording()
     }

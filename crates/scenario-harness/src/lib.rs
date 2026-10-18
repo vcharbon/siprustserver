@@ -6,7 +6,7 @@
 //! `RecordingSignalingNetwork` tees every `send_to`/`recv` onto the
 //! `layer-harness` `Recorder` — and **the recording is the trace**. The
 //! reports are *projected* from the recorded events
-//! (`sip_net::to_sip_entries`) + the recorder's lane registry, never from
+//! (`sip_net_testkit::to_sip_entries`) + the recorder's lane registry, never from
 //! harness-maintained state.
 //!
 //! **TEST-ONLY.** This crate composes the recording/audit decorators, which

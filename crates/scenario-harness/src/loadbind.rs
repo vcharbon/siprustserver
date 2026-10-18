@@ -45,10 +45,8 @@ pub struct CheckNote {
 
 use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
-use sip_net::{
-    with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork,
-    SimulatedSignalingNetwork,
-};
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::{with_all_contracts, ScopedAuditOptions, SimulatedSignalingNetwork};
 
 use crate::agent::{decide_rr_fold, Agent, Ids};
 use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
@@ -58,7 +56,7 @@ use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 /// anything" mask aligned to the input scopes — the load driver buckets the
 /// findings by rule id and folds `used` into the per-CAMPAIGN unused gate.
 pub struct WaiverOutcome {
-    pub findings: Vec<sip_net::RfcFinding>,
+    pub findings: Vec<sip_net_testkit::RfcFinding>,
     pub used: Vec<bool>,
 }
 
@@ -70,7 +68,7 @@ pub struct AgentBinder {
     /// when recording, else the raw network (zero overhead).
     network: Arc<dyn SignalingNetwork>,
     /// Present only when recording — the handle to snapshot the trace.
-    recording: Option<sip_net::RecordingSignalingNetwork>,
+    recording: Option<sip_net_testkit::RecordingSignalingNetwork>,
     /// Present only when recording — the lane registry + event channel owner.
     recorder: Option<Recorder>,
     ids: Arc<Ids>,
@@ -166,7 +164,7 @@ impl AgentBinder {
         // so a sampled call's trace can be projected and RFC-audited.
         let recorder = Recorder::with_clock(transport_kind, clock);
         let audit_opts = ScopedAuditOptions {
-            cross_message_rules: sip_net::rfc_cross_message_rules(),
+            cross_message_rules: sip_net_testkit::rfc_cross_message_rules(),
             ..Default::default()
         };
         let wrapped = with_all_contracts(
@@ -355,21 +353,26 @@ impl AgentBinder {
     /// half of what the e2e check engine evaluates over (the anchors half rides
     /// the per-call `CallCtx`).
     /// The FULL RFC-suite finding set over this call's recorded trace, advisory
-    /// tags included (`sip_net::evaluate_rfc_findings`), with the audit-view
+    /// tags included (`sip_net_testkit::evaluate_rfc_findings`), with the audit-view
     /// wire entries a finding's `offending` index lands in — what a bundle
     /// writes beside the gating subset [`rfc_findings`](Self::rfc_findings)
     /// returns. `None` when not recording: an absence the caller states, never
     /// an empty audit it reports.
-    pub fn rfc_audit(&self) -> Option<(Vec<sip_net::RfcFinding>, Vec<sip_net::RecordedSipEntry>)> {
+    pub fn rfc_audit(
+        &self,
+    ) -> Option<(Vec<sip_net_testkit::RfcFinding>, Vec<sip_net_testkit::RecordedSipEntry>)> {
         self.recording.as_ref().map(|rec| {
             let events = rec.channel().snapshot();
-            (sip_net::evaluate_rfc_findings(&events), sip_net::audit_wire_entries(&events))
+            (
+                sip_net_testkit::evaluate_rfc_findings(&events),
+                sip_net_testkit::audit_wire_entries(&events),
+            )
         })
     }
 
-    pub fn recorded_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
+    pub fn recorded_entries(&self) -> Vec<sip_net_testkit::RecordedSipEntry> {
         match &self.recording {
-            Some(rec) => sip_net::to_sip_entries(&rec.channel().snapshot()),
+            Some(rec) => sip_net_testkit::to_sip_entries(&rec.channel().snapshot()),
             None => Vec::new(),
         }
     }
@@ -384,7 +387,7 @@ impl AgentBinder {
     ) -> Option<seq_report::SeqDoc> {
         let (recording, recorder) = (self.recording.as_ref()?, self.recorder.as_ref()?);
         let events = recording.channel().snapshot();
-        let entries = sip_net::to_sip_entries(&events);
+        let entries = sip_net_testkit::to_sip_entries(&events);
         let scenario = recorder.snapshot();
         // On a failure, surface the reason both as the doc description (the header
         // banner next to the FAIL status) and as an explicit anomaly in the list,

@@ -6,7 +6,8 @@ use std::time::Duration;
 use sip_message::header::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::{TransactionConfig, TransactionEvent};
 use tokio::sync::{mpsc, Notify};
 

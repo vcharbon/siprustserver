@@ -24,7 +24,8 @@ use b2bua::admission::{Class, Refusals};
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::UdpTransportMetrics;
 use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::IdGen;
 
 const TRANSIT_MS: u64 = 15;

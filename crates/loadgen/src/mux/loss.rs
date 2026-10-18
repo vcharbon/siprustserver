@@ -1,6 +1,6 @@
 //! Per-call loss injection, composed of two deliberately separate pieces:
 //! - **random loss** — a fabric property, so its model is the network layer's
-//!   [`sip_net::RandomLoss`]; this module only holds a per-endpoint instance.
+//!   [`sip_net_testkit::RandomLoss`]; this module only holds a per-endpoint instance.
 //! - **targeted loss** ([`TargetedDrop`]) — a deterministic, message-precise
 //!   drop for reproducing a specific lost-message scenario. Pure test
 //!   machinery, so it lives here in the loadgen, NOT in the network layer.
@@ -8,7 +8,7 @@
 use std::sync::Mutex;
 
 use sip_message::sniff::{cseq_method_label, cseq_number, is_response};
-use sip_net::RandomLoss;
+use sip_net_testkit::RandomLoss;
 
 /// Which direction a [`TargetedDrop`] fires on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

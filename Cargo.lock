@@ -509,6 +509,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "sip-retransmit",
  "sip-txn",
  "thiserror 2.0.18",
@@ -542,6 +543,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "sip-proxy",
  "sip-retransmit",
  "sip-txn",
@@ -586,6 +588,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "sip-txn",
  "tokio",
  "tokio-executor-trait",
@@ -1228,6 +1231,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "sip-proxy",
  "sip-txn",
  "tokio",
@@ -1244,7 +1248,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sip-message",
- "sip-net",
+ "sip-net-testkit",
 ]
 
 [[package]]
@@ -1395,6 +1399,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "sip-proxy",
  "sip-txn",
  "tokio",
@@ -2438,6 +2443,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "tokio",
  "uuid",
 ]
@@ -2504,6 +2510,7 @@ dependencies = [
  "rtp",
  "sip-clock",
  "sip-net",
+ "sip-net-testkit",
  "thiserror 2.0.18",
  "tokio",
  "webrtc-util",
@@ -2517,6 +2524,7 @@ dependencies = [
  "rustfft",
  "sip-clock",
  "sip-net",
+ "sip-net-testkit",
  "tokio",
 ]
 
@@ -3851,6 +3859,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "tokio",
  "tracing",
 ]
@@ -4159,12 +4168,24 @@ name = "sip-net"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "layer-harness",
  "libc",
- "rfc-rules",
  "sip-clock",
  "sip-message",
  "socket2 0.6.4",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "sip-net-testkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "layer-harness",
+ "rfc-rules",
+ "sip-clock",
+ "sip-message",
+ "sip-net",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -4203,6 +4224,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "sip-txn",
  "subtle",
  "thiserror 2.0.18",
@@ -4231,6 +4253,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "sip-proxy",
  "sip-txn",
  "tikv-jemallocator",
@@ -4259,6 +4282,7 @@ dependencies = [
  "sha2",
  "sip-message",
  "sip-net",
+ "sip-net-testkit",
  "sip-retransmit",
  "tokio",
  "tokio-util",

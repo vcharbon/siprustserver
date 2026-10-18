@@ -1,7 +1,7 @@
 use super::*;
 
 fn rfc_fail(rule: &str, detail: &str) -> CallOutcome {
-    CallOutcome::RfcAuditFail(vec![sip_net::RfcFinding {
+    CallOutcome::RfcAuditFail(vec![sip_net_testkit::RfcFinding {
         rule: rule.to_string(),
         lane: "10.0.0.1:5060".to_string(),
         detail: detail.to_string(),
