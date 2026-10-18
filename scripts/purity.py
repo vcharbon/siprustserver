@@ -15,6 +15,9 @@ The configuration (`purity.toml` at the root of DIR's repository):
                                  features no binary may reach: a bare name
                                  is that feature of any crate
   pure-deps = ["serde", ...]     third-party crates a pure crate may reach
+  dockerfiles = ["deploy/x/Dockerfile"]
+                                 the images the binaries ship in, relative
+                                 to the repository root
   [known]                        breaches held until their fix lands
   untiered = ["a-harness"]       closure crates without a tier
   [known.pure-reaches]
@@ -25,7 +28,12 @@ Checks:
   closure    each binary's `cargo tree -p <binary> -e normal,features`, its
              resolution when built by a cargo command of its own: a test
              feature fails, and so does a first-party crate without a tier
-  pure       over each pure member's `cargo tree -p <crate> -e
+  images     every `cargo build` of the listed Dockerfiles: a command that
+             builds a binary with another package, the whole workspace or a
+             feature flag fails, and so does a binary no command builds
+             alone (`cargo build [--release] -p <binary>`), the resolution
+             the closure check holds (purity_images.py)
+  pure      over each pure member's `cargo tree -p <crate> -e
              normal,no-proc-macro` and each binary's (the features the
              binary turns on): a first-party crate a pure crate depends on
              is pure, a third-party crate it reaches is in `pure-deps`; a
@@ -37,8 +45,9 @@ Checks:
              merge); no `.cargo/config` that caps lints, lowers one in
              rustflags or sets CLIPPY_CONF_DIR
   base       against the base (REV, by default the merge-base of HEAD and
-             `develop`, else HEAD): no known breach added, no binary or test
-             feature removed; a known entry whose breach is gone is stale
+             `develop`, else HEAD): no known breach added, no binary, test
+             feature or Dockerfile removed; a known entry whose breach is
+             gone is stale
 
   --staged   the staged configuration against the same base only (a
              pre-commit hook)
@@ -52,6 +61,8 @@ import re
 import subprocess
 import sys
 import tomllib
+
+import purity_images
 
 TIERS = ("pure", "shell")
 LINE = re.compile(r"^(\d+)(\S+) (?:v(\S+)(?: \(([^)]*)\))?|feature \"([^\"]+)\")")
@@ -89,11 +100,12 @@ class Config:
             data = tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
             fail_setup(f"{path}: {e}")
-        unknown = set(data) - {"binaries", "test-features", "pure-deps", "known"}
+        unknown = set(data) - {"binaries", "dockerfiles", "test-features", "pure-deps", "known"}
         if unknown:
             fail_setup(f"{path}: unknown key(s) {', '.join(sorted(unknown))}")
         self.path = path
         self.binaries = data.get("binaries", [])
+        self.dockerfiles = data.get("dockerfiles", [])
         self.test_features = set(data.get("test-features", []))
         self.pure_deps = set(data.get("pure-deps", []))
         known = data.get("known", {})
@@ -193,6 +205,19 @@ def closure(ws, config):
         bad.append(f"{config.path} lists {name} as untiered, which no binary links or it "
                    "declares a tier: remove the entry")
     return bad
+
+
+def images(root, config):
+    """The listed Dockerfiles' `cargo build` commands against the binaries."""
+    files, bad = {}, []
+    for rel in config.dockerfiles:
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            bad.append(f"{config.path} lists dockerfile {rel}, which does not exist")
+            continue
+        with open(path) as f:
+            files[rel] = f.read()
+    return bad + purity_images.violations(config.binaries, files)
 
 
 class Graph:
@@ -335,6 +360,8 @@ def against_base(config, base):
             for b in base.binaries if b not in config.binaries]
     bad += [f"{config.path} drops test feature {f}, which {base.path} lists"
             for f in sorted(base.test_features - config.test_features)]
+    bad += [f"{config.path} drops dockerfile {d}, which {base.path} lists"
+            for d in base.dockerfiles if d not in config.dockerfiles]
     return bad
 
 
@@ -366,6 +393,7 @@ def main():
     ws = Workspace(root)
     rc = report(ws.bad_tiers())
     rc = report(closure(ws, config)) or rc
+    rc = report(images(root, config)) or rc
     rc = report(pure_violations(ws, config)) or rc
     rc = report(lint_tables(ws)) or rc
     return report(against_base(config, base_config(root, base, a.config))) or rc

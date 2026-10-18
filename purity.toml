@@ -7,6 +7,10 @@
 # never removed while it ships.
 binaries = ["sip-proxy-runner", "call-limiter-runner"]
 
+# The images the binaries ship in: each binary is built there by a `cargo
+# build -p <binary>` of its own, the resolution the closure check holds.
+dockerfiles = ["deploy/docker/Dockerfile"]
+
 # Features no production binary may reach: test support, and the schedules
 # no RFC prescribes (ADR-0032 X1). A bare name is that feature of any crate.
 test-features = ["testkit", "test-util", "sip-retransmit/authored", "sip-message/rvoip-oracle"]

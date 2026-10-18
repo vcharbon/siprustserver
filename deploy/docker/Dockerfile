@@ -52,7 +52,8 @@ COPY . .
 # Each production binary is built by a cargo command of its own, so no feature
 # a test tool turns on (`testkit`, tokio `test-util`) is unified into it: its
 # resolution is the one `just purity` checks (ADR-0051 §1). The lab binaries
-# share the last command; the shared target dir rebuilds only what differs.
+# share the last command, which turns tokio `test-util` on: most of the tree
+# compiles a second time.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \

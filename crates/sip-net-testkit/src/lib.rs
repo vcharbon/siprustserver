@@ -23,7 +23,7 @@ pub mod report;
 pub mod rfc_audit;
 pub mod simulated;
 
-// The production layer's modules, under the names the moved code reads them by.
+// sip-net's modules, imported under the paths this crate's modules read them by.
 use sip_net::{net, pre_ingress, queue, types};
 
 pub use contracts::{

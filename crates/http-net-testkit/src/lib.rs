@@ -23,7 +23,7 @@ mod recording;
 pub mod scripted;
 mod simulated;
 
-// The seam's types and modules, under the names the moved code reads them by.
+// The seam's types and modules, imported under the paths this crate's modules read them by.
 use http_net::{
     peer, settings, BindError, HttpAnswer, HttpError, HttpRequest, HttpResponse, HttpServerHandle,
     HttpService, HttpTransport,

@@ -83,9 +83,10 @@ file-size-check:
 
 # The tiers of the production closure (scripts/purity.py, purity.toml,
 # ADR-0051 §1): each production binary's closure, built alone, reaches no
-# `testkit`/`test-util` feature and no first-party crate without a tier; a pure
-# crate depends on pure crates and `pure-deps` only; every member's lint table
-# is the workspace's. The pre-commit hook checks the staged known entries.
+# `testkit`/`test-util` feature and no first-party crate without a tier, and
+# the listed Dockerfiles build it by a cargo command of its own; a pure crate
+# depends on pure crates and `pure-deps` only; every member's lint table is the
+# workspace's. The pre-commit hook checks the staged known entries.
 purity:
     scripts/purity.py
 

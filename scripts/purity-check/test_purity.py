@@ -8,22 +8,27 @@ SCRIPT = "purity.py"
 
 
 def config(binaries=("bin",), untiered=(), reaches=None, tests=("testkit", "test-util"),
-           pure_deps=()):
-    text = (f"binaries = {list(binaries)!r}\ntest-features = {list(tests)!r}\n"
+           pure_deps=(), dockerfiles=("Dockerfile",)):
+    text = (f"binaries = {list(binaries)!r}\ndockerfiles = {list(dockerfiles)!r}\n"
+            f"test-features = {list(tests)!r}\n"
             f"pure-deps = {list(pure_deps)!r}\n[known]\nuntiered = {list(untiered)!r}\n")
     text += "[known.pure-reaches]\n" + "".join(
         f"{c} = {ds!r}\n" for c, ds in (reaches or {}).items())
     return text.replace("'", '"')
 
 
+IMAGE = "FROM rust AS builder\nRUN cargo build --release -p bin\n"
+
+
 class Case(unittest.TestCase):
-    def workspace(self, conf, crates):
+    def workspace(self, conf, crates, image=IMAGE):
         ws = Workspace()
         self.addCleanup(ws.tmp.cleanup)
         for name, tier, deps, features in crates:
             ws.crate(name, tier, deps=deps, features=features,
                      bin="fn main() {}\n" if name == "bin" else None)
         ws.write("purity.toml", conf)
+        ws.write("Dockerfile", image)
         ws.commit()
         return ws
 
@@ -72,6 +77,63 @@ class Closure(Case):
         rc, out = ws.run(SCRIPT)
         self.assertEqual(rc, 1)
         self.assertIn("bin declares tier `impure`", out)
+
+
+class Images(Case):
+    """The listed Dockerfiles build each binary by a cargo command of its own."""
+
+    CRATES = [("bin", "shell", (), None), ("tool", None, (), None)]
+
+    def run_image(self, image, **conf):
+        ws = self.workspace(config(**conf), self.CRATES, image=image)
+        return ws.run(SCRIPT)
+
+    def test_a_binary_built_alone_passes_beside_a_shared_tool_command(self):
+        image = ("FROM rust AS builder\n# the binary alone, then the tools\n"
+                 "RUN --mount=type=cache,target=/src/target \\\n"
+                 "    cargo build --release -p bin \\\n"
+                 " && cargo build --release -p tool --features x \\\n"
+                 " && cp target/release/bin /out/\n")
+        self.assertEqual(self.run_image(image), (0, ""))
+
+    def test_a_binary_built_with_another_package_fails(self):
+        for line in ("cargo build --release -p bin -p tool",
+                     "cargo build --release --package=tool --package bin",
+                     "cargo build -ptool -pbin"):
+            with self.subTest(line):
+                rc, out = self.run_image(f"FROM rust\nRUN {line}\n")
+                self.assertEqual(rc, 1)
+                self.assertIn("Dockerfile:2 builds production binary bin with -p tool", out)
+                self.assertIn("production binary bin is built alone by no `cargo build` of "
+                              "Dockerfile", out)
+
+    def test_the_whole_workspace_or_a_feature_flag_fails(self):
+        for line, what in (("cargo build --release", "the whole workspace"),
+                           ("cargo build --workspace", "the whole workspace"),
+                           ("cargo build -p bin --features testkit", "--features"),
+                           ("cargo build -p bin --all-features", "--all-features")):
+            with self.subTest(line):
+                rc, out = self.run_image(f"FROM rust\nRUN echo build; {line}\n")
+                self.assertEqual(rc, 1)
+                self.assertIn(f"Dockerfile:2 builds production binary bin with {what}", out)
+
+    def test_a_binary_no_command_builds_fails(self):
+        rc, out = self.run_image("FROM rust\nRUN cargo build -p tool\n")
+        self.assertEqual(rc, 1)
+        self.assertIn("production binary bin is built alone by no `cargo build`", out)
+        rc, out = self.run_image(IMAGE, dockerfiles=())
+        self.assertEqual(rc, 1)
+        self.assertIn("built alone by no `cargo build` of a listed Dockerfile", out)
+
+    def test_a_missing_or_dropped_dockerfile_fails(self):
+        rc, out = self.run_image(IMAGE, dockerfiles=("Dockerfile", "gone/Dockerfile"))
+        self.assertEqual(rc, 1)
+        self.assertIn("lists dockerfile gone/Dockerfile, which does not exist", out)
+        ws = self.workspace(config(), self.CRATES)
+        ws.write("purity.toml", config(dockerfiles=()))
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1)
+        self.assertIn("purity.toml drops dockerfile Dockerfile, which", out)
 
 
 class PureRule(Case):

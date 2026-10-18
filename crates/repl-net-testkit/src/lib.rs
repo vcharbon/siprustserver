@@ -15,7 +15,7 @@
 mod recording;
 mod simulated;
 
-// The seam's types and modules, under the names the moved code reads them by.
+// The seam's types and modules, imported under the paths this crate's modules read them by.
 use repl_net::transport::{
     AcceptError, ConnectError, ListenError, ReplicationConnection, ReplicationListener,
     ReplicationNetwork, SendError,
