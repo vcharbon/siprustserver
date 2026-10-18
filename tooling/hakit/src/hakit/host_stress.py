@@ -5,7 +5,9 @@ The stressed intervals of `host.jsonl` (host.py) are merged into spans. A
 generator stall, a spoiled measurement or a finding with an instant that
 overlaps a span, and a record gap of a stream with such a stall, make one
 `host_under_stress` finding for the span: its instants, the worst io and
-memory full share and swap-in rate in it, and what it overlapped. It stands
+memory full share and swap-in rate in it, and what it overlapped. Consecutive
+spans over the same generator stalls make one finding: from the first span's
+start to the last one's end, their count, and the worst values among them. It stands
 beside the plain `generator_stall`, so a stall on a stressed host is never
 investigated as a fault of the system under test or of the tooling.
 """
@@ -65,6 +67,53 @@ def spans(ivs: Sequence[Interval], t: Thresholds) -> list[Span]:
     return out
 
 
+@dataclass
+class _Group:
+    """Consecutive stressed spans and what they overlapped."""
+
+    spans: list[Span]
+    stalls: list[Stall]
+    timed: list[Json]
+    gaps: list[Json]
+
+    def take(self, sp: Span, timed: list[Json]) -> None:
+        self.spans.append(sp)
+        self.timed += [f for f in timed if not any(f is g for g in self.timed)]
+
+
+def _finding(g: _Group, spoiled: Mapping[Stall, int], load_start_ms: float) -> Json:
+    first, last = g.spans[0], g.spans[-1]
+    io = max(sp.io_full_pct for sp in g.spans)
+    mem = max(sp.memory_full_pct for sp in g.spans)
+    swapin = max(sp.swapin_pages_s for sp in g.spans)
+    what: list[str] = []
+    if g.stalls:
+        what.append(f"{len(g.stalls)} generator stalls ({sum(spoiled.get(st, 0) for st in g.stalls)} measurements spoiled)")
+    if g.timed:
+        what.append(f"{len(g.timed)} findings ({', '.join(sorted({str(f['kind']) for f in g.timed}))})")
+    if g.gaps:
+        what.append(f"record gaps of {', '.join(sorted(str(f['stream']) for f in g.gaps))}")
+    rel = (first.start_ms - load_start_ms) / 1000
+    stressed_s = sum(sp.end_ms - sp.start_ms for sp in g.spans) / 1000
+    when = (
+        f"at +{rel:.0f} s for {stressed_s:.1f} s"
+        if len(g.spans) == 1
+        else f"{len(g.spans)} times from +{rel:.0f} s to +{(last.end_ms - load_start_ms) / 1000:.0f} s, {stressed_s:.1f} s in all"
+    )
+    peak = "peak " if len(g.spans) > 1 else ""
+    detail = (
+        f"host under stress {when} ({peak}io full {io:.1f} %, memory full {mem:.1f} %, "
+        f"swap-in {swapin:.0f} pages/s): {'; '.join(what)}"
+    )
+    return {
+        "kind": "host_under_stress",
+        "detail": detail,
+        "at_ms": first.start_ms,
+        "until_ms": last.end_ms,
+        "host": {"io_full_pct": round(io, 2), "memory_full_pct": round(mem, 2), "swapin_pages_s": round(swapin, 1)},
+    }
+
+
 def stress_findings(
     run_dir: Path,
     t: Thresholds,
@@ -73,7 +122,7 @@ def stress_findings(
     found: Sequence[Json],
     load_start_ms: float,
 ) -> list[Json]:
-    out: list[Json] = []
+    groups: list[_Group] = []
     for sp in spans(intervals(read_jsonl(run_dir / HOST_FILE)), t):
         hit = [st for st in stalls if sp.overlaps(st.at_ms, st.until_ms)]
         streams = {st.stream for st in hit}
@@ -85,30 +134,9 @@ def stress_findings(
         gaps = [f for f in found if f.get("kind") == "record_gap" and f.get("stream") in streams]
         if not (hit or timed or gaps):
             continue
-        what: list[str] = []
-        if hit:
-            what.append(f"{len(hit)} generator stalls ({sum(spoiled.get(st, 0) for st in hit)} measurements spoiled)")
-        if timed:
-            what.append(f"{len(timed)} findings ({', '.join(sorted({str(f['kind']) for f in timed}))})")
-        if gaps:
-            what.append(f"record gaps of {', '.join(sorted(str(f['stream']) for f in gaps))}")
-        rel = (sp.start_ms - load_start_ms) / 1000
-        detail = (
-            f"host under stress at +{rel:.0f} s for {(sp.end_ms - sp.start_ms) / 1000:.1f} s "
-            f"(io full {sp.io_full_pct:.1f} %, memory full {sp.memory_full_pct:.1f} %, "
-            f"swap-in {sp.swapin_pages_s:.0f} pages/s): {'; '.join(what)}"
-        )
-        out.append(
-            {
-                "kind": "host_under_stress",
-                "detail": detail,
-                "at_ms": sp.start_ms,
-                "until_ms": sp.end_ms,
-                "host": {
-                    "io_full_pct": round(sp.io_full_pct, 2),
-                    "memory_full_pct": round(sp.memory_full_pct, 2),
-                    "swapin_pages_s": round(sp.swapin_pages_s, 1),
-                },
-            }
-        )
-    return out
+        last = groups[-1] if groups else None
+        if hit and last is not None and last.stalls == hit:
+            last.take(sp, timed)
+        else:
+            groups.append(_Group([sp], hit, timed, gaps))
+    return [_finding(g, spoiled, load_start_ms) for g in groups]

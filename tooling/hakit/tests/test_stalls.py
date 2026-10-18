@@ -217,3 +217,25 @@ def test_the_sipp_call_limit_covers_every_call_at_its_worst() -> None:
     stream = SippStream("r", s, 0, scenario, Path("."), lab_from_env({}), None)  # type: ignore[arg-type]
     assert worst_call_s(s) == 96
     assert stream.max_concurrent() == 50 * 96 + 10
+
+
+def test_the_gap_between_two_firings_of_an_incident_stream_is_no_stall(tmp_path: Path) -> None:
+    from hakit.readers.run_view import read_run
+    from hakit.windows import event_line, facts_line, phase_line
+
+    burst = {"name": "burst", "driver": "sipp", "shape": "basic", "scenario": "uac-basic-hold.xml", "cps": 2}
+    streams = [{**burst, "setup_deadline_s": 32, "start": "incident"}]
+    events: list[Json] = []
+    for seq, at in ((1, T0 + 10_000), (2, T0 + 100_000)):
+        ev = f"00{seq}-spike"
+        events += [
+            event_line(ev, "schedule", ["spike"], "any", 20, 720),
+            phase_line(ev, "spike", "inject", at),
+            facts_line(ev, "spike", "inject", {"stream": "burst", "firing": seq}),
+            phase_line(ev, "spike", "recovered", at + 15_000),
+        ]
+    # Each firing starts its calls for 10 s, 80 s apart; the second stalls 2 s.
+    second = [r for r in paced("b", T0 + 100_000, T0 + 110_000, 2, stream="burst") if not T0 + 105_000 < jv.number(r, "started_at_ms") < T0 + 107_000]
+    recs = paced("a", T0 + 10_000, T0 + 20_000, 2, stream="burst") + second
+    d = run_dir(tmp_path, recs, calls=None, events=events, cps=2, profile={"streams": streams})
+    assert read_run(d).stalls == [Stall("burst", T0 + 105_500, T0 + 107_000)]

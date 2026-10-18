@@ -1,7 +1,8 @@
 """`hakit pcap <run-dir> <call-id>`: one call's packets out of a run's capture.
 
 Reads every classic pcap file under the run directory's `pcap/` (the window
-copies and the last ring), keeps the packets whose bytes hold the Call-ID,
+copies and the last ring), keeps the packets whose Call-ID header (`Call-ID`
+or its compact `i`) holds the Call-ID asked, byte for byte (RFC 3261 §20.8),
 drops the copies a window and the ring share, and writes them in time order,
 one file per link type (the bridge ring and a node's `any` ring differ).
 """
@@ -64,9 +65,14 @@ def write(path: Path, linktype: int, packets: list[Packet]) -> None:
     path.write_bytes(bytes(out))
 
 
+def call_id_header(call_id: str) -> re.Pattern[bytes]:
+    """A Call-ID header line whose whole value is `call_id`; the header name is case-insensitive."""
+    return re.compile(rb"(?m)^(?i:call-id|i)[ \t]*:[ \t]*" + re.escape(call_id.encode()) + rb"[ \t]*\r?$")
+
+
 def extract(run_dir: Path, call_id: str, out_dir: Path) -> list[Path]:
     """Write the call's packets under `out_dir`; the files written."""
-    needle = call_id.encode()
+    header = call_id_header(call_id)
     by_link: dict[int, dict[tuple[int, bytes], Packet]] = {}
     for f in sorted((run_dir / "pcap").rglob("sip.pcap*")):
         try:
@@ -75,7 +81,7 @@ def extract(run_dir: Path, call_id: str, out_dir: Path) -> list[Path]:
             continue
         kept = by_link.setdefault(pf.linktype, {})
         for p in pf.packets:
-            if needle in p.data:
+            if header.search(p.data):
                 kept[(p.ts_ns, p.data)] = p
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = re.sub(r"[^A-Za-z0-9._-]", "_", call_id)

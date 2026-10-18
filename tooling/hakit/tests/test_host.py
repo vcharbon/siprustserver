@@ -124,13 +124,19 @@ def test_preflight_refuses_a_host_under_stress_and_names_what() -> None:
 def host_lines(stressed_from: float, stressed_until: float, io_full_us: int = 200_000, swapin: int = 400) -> list[Json]:
     """One sample a second over the first two minutes; the seconds from
     `stressed_from` to `stressed_until` stall io `io_full_us` and swap in `swapin` pages each."""
+    return host_spans([(stressed_from, stressed_until, swapin)], io_full_us)
+
+
+def host_spans(stressed: list[tuple[float, float, int]], io_full_us: int = 200_000) -> list[Json]:
+    """`host_lines` with several stressed ranges, each `(from, until, swap-in pages a second)`."""
     lines: list[Json] = []
     total = pages = 0
     for i in range(121):
         at = T0 + i * 1000
-        if stressed_from < at <= stressed_until:
-            total += io_full_us
-            pages += swapin
+        for stressed_from, stressed_until, swapin in stressed:
+            if stressed_from < at <= stressed_until:
+                total += io_full_us
+                pages += swapin
         psi = {k: {"avg10": 0.0, "total": 0} for k in ("some", "full")}
         lines.append({"at_ms": at, "cpu": psi, "memory": psi, "io": {"some": {"avg10": 0.0, "total": total},
                       "full": {"avg10": 0.0, "total": total}}, "pswpin": pages, "pswpout": 0})
@@ -203,3 +209,17 @@ def test_a_run_is_refused_while_the_host_is_under_stress_and_samples_while_it_ru
     span_s = (jv.number(samples[-1], "at_ms") - jv.number(samples[0], "at_ms")) / 1000
     # One sample a second while the runner waits, over the whole run.
     assert span_s >= 600 and len(samples) >= span_s * 0.9
+
+
+def test_stress_repeated_over_one_stall_is_one_finding_and_one_summary_line(tmp_path: Path) -> None:
+    at = T0 + 60_000
+    recs = [r for r in paced("p", T0, T0 + 120_000, 20) if not at < jv.number(r, "started_at_ms") < at + 10_000]
+    d = run_dir(tmp_path, recs, calls=len(recs), events=[], profile={})
+    # Two stressed spans, calm between them, both inside the 9.95 s stall.
+    write_jsonl(d / HOST_FILE, host_spans([(T0 + 61_000, T0 + 63_000, 400), (T0 + 66_000, T0 + 67_000, 900)]))
+    v = compute(d, SCHEMAS)
+    (h,) = [i for i in jv.objs(v, "integrity") if i["kind"] == "host_under_stress"]
+    assert (h["at_ms"], h["until_ms"]) == (T0 + 61_000, T0 + 67_000)
+    assert h["host"] == {"io_full_pct": 20.0, "memory_full_pct": 0.0, "swapin_pages_s": 900.0}
+    assert str(h["detail"]).startswith("host under stress 2 times from +61 s to +67 s, 3.0 s in all (peak io full 20.0 %")
+    assert [ln for ln in render(v).splitlines() if ln.startswith("- `host_under_stress`")] == [f"- `host_under_stress`: {h['detail']}"] * 2

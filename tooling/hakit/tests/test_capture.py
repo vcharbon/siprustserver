@@ -125,6 +125,16 @@ def test_pcap_extracts_one_calls_packets_across_copies_and_link_types(tmp_path: 
     assert read(out[1]).linktype == 276 and len(read(out[1]).packets) == 1
 
 
+def test_pcap_matches_the_call_id_header_exactly(tmp_path: Path) -> None:
+    ring = tmp_path / "pcap" / "ring" / "bridge"
+    ring.mkdir(parents=True)
+    compact = b"\x00" * 42 + b"BYE sip:x SIP/2.0\r\ni: 13-1-r@192.0.2.1\r\nCSeq: 2 BYE\r\n\r\n"
+    longer = [Packet(n, udp(cid, 1)) for n, cid in ((2_000, "113-1-r@192.0.2.1"), (3_000, "13-1-r@192.0.2.10"))]
+    write(ring / "sip.pcap0", 1, [Packet(1_000, udp("13-1-r@192.0.2.1", 1)), *longer, Packet(4_000, compact)])
+    (out,) = extract(tmp_path, "13-1-r@192.0.2.1", tmp_path / "calls")
+    assert [p.ts_ns for p in read(out).packets] == [1_000, 4_000]
+
+
 def test_pcap_reads_a_microsecond_tcpdump_file_and_stops_at_a_torn_record(tmp_path: Path) -> None:
     head = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, 1)
     rec = struct.pack("<IIII", 5, 7, 4, 4) + b"abcd"

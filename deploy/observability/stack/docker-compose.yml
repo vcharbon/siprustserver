@@ -15,7 +15,9 @@ services:
       - "8428:8428"
     volumes:
       - ./data/victoriametrics:/storage
-      - ./victoriametrics/prometheus.yml:/etc/vm/prometheus.yml:ro
+      # The directory, not the file: a git checkout replaces prometheus.yml (a
+      # new inode) and a single-file bind mount keeps showing the old one.
+      - ./victoriametrics:/etc/vm:ro
     command:
       - "-storageDataPath=/storage"
       - "-retentionPeriod=2d"
