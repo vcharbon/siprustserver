@@ -26,7 +26,7 @@ use sip_message::worker_report::{self, Readiness as WorkerReadiness};
 use sip_message::HeaderName;
 use sip_message::SipRequest;
 use sip_message::SipStr;
-use sip_txn::IdGen;
+use sip_txn::{IdGen, StatelessTagger};
 
 use super::{PeerLink, Readiness, ReadinessSource};
 use crate::overload::OverloadSignal;
@@ -63,6 +63,11 @@ fn uri_of(text: &str) -> Uri {
 }
 
 fn options_probe() -> SipRequest {
+    options_probe_on("z9hG4bKprobe")
+}
+
+/// [`options_probe`] on the top-`Via` branch `branch`.
+fn options_probe_on(branch: &str) -> SipRequest {
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(uri_of("sip:b2bua@127.0.0.1:5070")),
         call_id: "probe-w0-1234-ab@10.0.0.1".into(),
@@ -72,7 +77,7 @@ fn options_probe() -> SipRequest {
         ),
         to: Some(header::To::from_uri(uri_of("sip:b2bua@127.0.0.1:5070"))),
         cseq: 1,
-        via: Some(Via::udp("10.0.0.1", 5060).with_branch(SipStr::from_static("z9hG4bKprobe"))),
+        via: Some(Via::udp("10.0.0.1", 5060).with_branch(SipStr::owned(branch))),
         contact: Some(header::Contact::from_uri(
             Uri::sip_user("probe", "10.0.0.1").with_port(5060),
         )),
@@ -104,6 +109,26 @@ fn refusing(cause: &str) -> Option<WorkerReadiness> {
     Some(WorkerReadiness::refuse(cause))
 }
 
+/// No transaction holds the answer, so every copy of one OPTIONS draws the
+/// same To-tag and another OPTIONS draws its own (RFC 3261 §8.2.7).
+#[test]
+fn options_answer_to_tag_is_derived_from_the_request() {
+    let r = Readiness::always_ready();
+    let tagger = StatelessTagger::from_id_gen(&IdGen::seeded(0x8_2_7));
+    let tag = |req: &SipRequest| {
+        let resp =
+            build_options_health_response(&r, &ov(), &tagger, req, &CapabilitySet::default());
+        resp.to().tag().expect("a To-tag").to_string()
+    };
+
+    assert_eq!(tag(&options_probe()), tag(&options_probe()), "a copy draws the same tag");
+    assert_ne!(
+        tag(&options_probe()),
+        tag(&options_probe_on("z9hG4bKnext")),
+        "another draws its own"
+    );
+}
+
 /// The full transition the proxy probe observes as a node boots and drains:
 /// `503` with nothing but its incarnation, then `200` accepting, then `200`
 /// refusing with `cause=draining`, each stating the same incarnation.
@@ -111,10 +136,10 @@ fn refusing(cause: &str) -> Option<WorkerReadiness> {
 fn options_reports_not_ready_then_ready_then_draining() {
     let src = FlagSource::new(false, false);
     let r = Readiness::new(src.clone()).with_incarnation(1_792_155_573_698);
-    let id_gen = IdGen::seeded(0x57);
+    let tagger = StatelessTagger::from_id_gen(&IdGen::seeded(0x57));
     let req = options_probe();
 
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(resp.to().tag().is_some(), "503 to out-of-dialog OPTIONS needs a To-tag");
     assert_eq!(readiness_of(&resp), None, "a node serving nothing states no acceptance");
@@ -122,14 +147,14 @@ fn options_reports_not_ready_then_ready_then_draining() {
     assert_eq!(worker_report::incarnation(&resp), Some(1_792_155_573_698));
 
     src.set(true, true);
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert!(resp.to().tag().is_some(), "200 to out-of-dialog OPTIONS needs a To-tag");
     assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
     assert_eq!(worker_report::incarnation(&resp), Some(1_792_155_573_698));
 
     r.set_draining();
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200, "a draining node still serves its dialogs");
     assert_eq!(readiness_of(&resp), refusing("draining"));
     assert!(x_overload(&resp).is_some(), "with its load payload");
@@ -142,23 +167,23 @@ fn options_reports_not_ready_then_ready_then_draining() {
 fn options_latches_ready_across_blip_then_drains() {
     let src = FlagSource::new(true, true);
     let r = Readiness::new(src.clone());
-    let id_gen = IdGen::seeded(7);
+    let tagger = StatelessTagger::from_id_gen(&IdGen::seeded(7));
     let req = options_probe();
 
     assert_eq!(
-        build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default()).status(),
+        build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default()).status(),
         200
     );
 
     // Peer blip: no longer current/bootstrapped — must NOT revert to 503.
     src.set(false, false);
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200, "latched Ready must not flap to NotReady");
     assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
 
     // Draining still wins over the latched Ready.
     r.set_draining();
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert_eq!(readiness_of(&resp), refusing("draining"));
 }
@@ -170,16 +195,16 @@ fn an_open_backend_breaker_refuses_new_calls_on_a_200() {
     let r = Readiness::always_ready();
     let (breaker, open) = tokio::sync::watch::channel(true);
     r.gate_options_on(open);
-    let id_gen = IdGen::seeded(9);
+    let tagger = StatelessTagger::from_id_gen(&IdGen::seeded(9));
     let req = options_probe();
 
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert_eq!(readiness_of(&resp), refusing("backend"));
     assert!(x_overload(&resp).is_some(), "a refusing node keeps its load payload");
 
     breaker.send_replace(false);
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
 }
 
@@ -191,14 +216,14 @@ fn an_open_backend_breaker_refuses_new_calls_on_a_200() {
 /// serves nothing yet carries none.
 #[test]
 fn options_200_stamps_x_overload_503_does_not() {
-    let id_gen = IdGen::seeded(0x08);
+    let tagger = StatelessTagger::from_id_gen(&IdGen::seeded(0x08));
     let req = options_probe();
 
     // Ready → 200 with an X-Overload header in the exact zero-state v=1 schema.
     let overload = OverloadSignal::live();
     let ready = Readiness::always_ready();
     let resp =
-        build_options_health_response(&ready, &overload, &id_gen, &req, &CapabilitySet::default());
+        build_options_health_response(&ready, &overload, &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     let xo = x_overload(&resp).expect("OPTIONS 200 must advertise the worker load signal");
     assert_eq!(xo, "v=1; elu=0.000; gc=0.000; adm=0");
@@ -207,7 +232,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     overload.increment_non_emergency_admitted();
     overload.increment_non_emergency_admitted();
     let resp =
-        build_options_health_response(&ready, &overload, &id_gen, &req, &CapabilitySet::default());
+        build_options_health_response(&ready, &overload, &tagger, &req, &CapabilitySet::default());
     let xo = x_overload(&resp).unwrap();
     assert_eq!(
         xo, "v=1; elu=0.000; gc=0.000; adm=2",
@@ -219,7 +244,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     let resp = build_options_health_response(
         &not_ready,
         &overload,
-        &id_gen,
+        &tagger,
         &req,
         &CapabilitySet::default(),
     );
@@ -234,7 +259,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     let resp = build_options_health_response(
         &draining,
         &overload,
-        &id_gen,
+        &tagger,
         &req,
         &CapabilitySet::default(),
     );
@@ -306,7 +331,7 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     );
 
     let readiness = Readiness::new(Arc::new(a_sup.clone()));
-    let id_gen = IdGen::seeded(0xBEEF);
+    let tagger = StatelessTagger::from_id_gen(&IdGen::seeded(0xBEEF));
     let req = options_probe();
 
     // Before start/catch-up: no peers known yet OR not current → NotReady. We
@@ -314,7 +339,7 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     a_sup
         .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
     let resp =
-        build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
+        build_options_health_response(&readiness, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503, "before catch-up: NotReady");
     assert_eq!(readiness_of(&resp), None);
 
@@ -327,14 +352,14 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
 
     // Gate now open → 200 OK; readiness latches.
     let resp =
-        build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
+        build_options_health_response(&readiness, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert_eq!(readiness_of(&resp), Some(WorkerReadiness::accept()));
 
     // SIGTERM → still serving, refusing new calls.
     readiness.set_draining();
     let resp =
-        build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
+        build_options_health_response(&readiness, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert_eq!(readiness_of(&resp), refusing("draining"));
 }
@@ -388,7 +413,7 @@ async fn own_endpoint_withdrawn_latches_without_sigterm() {
     let resp = build_options_health_response(
         &readiness,
         &ov(),
-        &IdGen::seeded(1),
+        &StatelessTagger::from_id_gen(&IdGen::seeded(1)),
         &options_probe(),
         &CapabilitySet::default(),
     );
@@ -486,11 +511,11 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
 
     // End to end through the readiness latch + OPTIONS responder: 200 OK.
     let readiness = Readiness::new(Arc::new(a_sup.clone()));
-    let id_gen = IdGen::seeded(0xC0FFEE);
+    let tagger = StatelessTagger::from_id_gen(&IdGen::seeded(0xC0FFEE));
     let resp = build_options_health_response(
         &readiness,
         &ov(),
-        &id_gen,
+        &tagger,
         &options_probe(),
         &CapabilitySet::default(),
     );
@@ -503,14 +528,14 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
 #[test]
 fn options_200_advertises_the_node_capability_set() {
     let r = Readiness::new(FlagSource::new(true, true));
-    let id_gen = IdGen::seeded(0xA11);
+    let tagger = StatelessTagger::from_id_gen(&IdGen::seeded(0xA11));
     let req = options_probe();
     let value = |resp: &sip_message::SipResponse, name: HeaderName| {
         resp.raw_text(name).next().map(|v| v.as_str().to_string())
     };
 
     // Undeclared → the stack set, byte for byte.
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &CapabilitySet::default());
     assert_eq!(
         value(&resp, HeaderName::Allow).as_deref(),
         Some(sip_message::generators::B2BUA_ALLOW)
@@ -525,7 +550,7 @@ fn options_200_advertises_the_node_capability_set() {
         header::Allow::of(["INVITE", "ACK", "CANCEL", "BYE", "OPTIONS"]),
         header::Supported::of(["timer"]),
     );
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &declared);
+    let resp = build_options_health_response(&r, &ov(), &tagger, &req, &declared);
     assert_eq!(
         value(&resp, HeaderName::Allow).as_deref(),
         Some("INVITE, ACK, CANCEL, BYE, OPTIONS")

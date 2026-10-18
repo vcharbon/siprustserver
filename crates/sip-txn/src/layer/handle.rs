@@ -66,6 +66,12 @@ pub struct TransactionConfig {
     /// and an initial INVITE this layer admits is held there while its
     /// transaction lives. `None` — the default — shares nothing.
     pub invite_refusals: Option<InviteRefusals>,
+    /// Whether an out-of-dialog OPTIONS (no To-tag) opens no server
+    /// transaction: every copy reaches the consumer as a `Message`, and the
+    /// answer it sends leaves raw, so the consumer derives its To-tag from
+    /// the request (RFC 3261 §8.2.7). `false` — the default — holds one
+    /// transaction per OPTIONS for 64·T1 like any other non-INVITE.
+    pub stateless_options: bool,
 }
 
 impl TransactionConfig {
@@ -85,6 +91,7 @@ impl Default for TransactionConfig {
             strict_to_tag: true,
             deferred_bound: None,
             invite_refusals: None,
+            stateless_options: false,
         }
     }
 }

@@ -20,13 +20,14 @@
 //! Module map: `handle` (public API + the command funnel) · `run` (the actor
 //! loop, one pulse-stamped turn per `select!`) · `owner` (map/wheel bookkeeping) · `client` (RFC 3261 §17.1 UAC FSM) ·
 //! `server` (§17.2 UAS FSM) · `server_cancel` (§9.2: a CANCEL of a server
-//! INVITE) · `lifetime` (when a transaction leaves the map:
+//! INVITE) · `shrink` (a drained table's memory returned) · `lifetime` (when a transaction leaves the map:
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
 //! `relinquish` (a call's transactions deleted for another node to serve) ·
 //! `events` (output-queue discipline) · `backlog` (new-call admission against
 //! the deferred backlog) · `refusals` (the node's shared refusals of new
-//! INVITEs) · `txn` (per-transaction state) · `key` (a server transaction's
+//! INVITEs) · `txn` (per-transaction state) · `unanswered` (server
+//! transactions the consumer will not answer) · `key` (a server transaction's
 //! §17.2.3 identity).
 
 mod backlog;
@@ -44,7 +45,9 @@ mod run;
 mod seed;
 mod server;
 mod server_cancel;
+mod shrink;
 mod txn;
+mod unanswered;
 
 pub use backlog::{DeferredBound, InviteClass};
 pub use handle::{TransactionConfig, TransactionLayer, TransactionLayerClosed};

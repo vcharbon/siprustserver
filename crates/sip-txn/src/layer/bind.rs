@@ -14,7 +14,8 @@ use crate::event::TxnKind;
 use crate::timers::{ms, TIMER_L};
 
 use super::key::ServerTxnId;
-use super::owner::{shrink_idle, Owner};
+use super::owner::Owner;
+use super::shrink::shrink_idle;
 
 /// What the layer holds one response to.
 enum Bound {

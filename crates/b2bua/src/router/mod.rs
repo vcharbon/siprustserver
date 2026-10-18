@@ -182,6 +182,9 @@ pub struct RouterCtx {
     /// Self-reported readiness driving the OPTIONS health responder. The
     /// unwired node uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
+    /// The To-tag of the OPTIONS health answer, derived from the request: the
+    /// transaction layer holds no transaction for an out-of-dialog OPTIONS.
+    pub options_tagger: sip_txn::StatelessTagger,
     /// Whether a call's primary has departed (ADR-0047). `None` on an unwired
     /// node: no call there has another primary.
     pub departed: Option<crate::repl::DepartedProbe>,

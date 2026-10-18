@@ -10,7 +10,7 @@ use sip_message::worker_report::{
     incarnation_value, Readiness as WorkerReadiness, X_INCARNATION, X_READINESS,
 };
 use sip_message::{SipRequest, SipResponse};
-use sip_txn::IdGen;
+use sip_txn::{IdGen, StatelessTagger};
 
 use crate::overload::OverloadSignal;
 use crate::repl::{OptionsReport, Readiness};
@@ -116,7 +116,8 @@ pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> 
 
 /// Build the self-reported readiness reply to an out-of-dialog OPTIONS
 /// keepalive, on the two axes of [`Readiness::options_report`] (ADR-0050 §2).
-/// Every reply mints a local To-tag (RFC 3261 §8.2.6.2) and states the
+/// Every reply carries a To-tag derived from the request (RFC 3261 §8.2.7:
+/// no transaction holds it, so every copy draws the same tag) and states the
 /// process's boot generation (`X-Incarnation`), so a proxy tells a restart
 /// at the same address from the process it last read:
 ///   - serving dialogs (Ready, Cordoned, Draining) → `200 OK` with the capabilities
@@ -132,7 +133,7 @@ pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> 
 pub(crate) fn build_options_health_response(
     readiness: &Readiness,
     overload: &OverloadSignal,
-    id_gen: &IdGen,
+    tagger: &StatelessTagger,
     req: &sip_message::SipRequest,
     capabilities: &CapabilitySet,
 ) -> sip_message::SipResponse {
@@ -167,7 +168,7 @@ pub(crate) fn build_options_health_response(
         status,
         reason,
         &GenerateResponseOpts {
-            to_tag: Some(id_gen.new_tag()),
+            to_tag: Some(tagger.for_request(req).0),
             extra_headers,
             ..Default::default()
         },

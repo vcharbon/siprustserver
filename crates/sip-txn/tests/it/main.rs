@@ -31,5 +31,6 @@ mod request_back_to_sender;
 mod response_leaves_as_its_image;
 mod seed;
 mod shared_refusals;
+mod stateless_options;
 mod to_tag_binding;
 mod unanswered;

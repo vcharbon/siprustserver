@@ -21,6 +21,7 @@ use super::backlog::DeferredBound;
 use super::handle::{Command, TransactionConfig};
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
 use super::refusals::InviteRefusals;
+use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
 use super::txn::{CancelWire, Timer, Transaction, TxnId, TxnRef, TxnRole};
 
 pub(super) struct Owner {
@@ -95,6 +96,8 @@ pub(super) struct Owner {
     pub(super) recent_uas_tags: HashMap<(String, String), (String, tokio::time::Instant)>,
     /// [`TransactionConfig::strict_to_tag`](crate::TransactionConfig).
     pub(super) strict_to_tag: bool,
+    /// [`TransactionConfig::stateless_options`](crate::TransactionConfig).
+    pub(super) stateless_options: bool,
 }
 
 /// The live transactions of one call, by role ([`Owner::txn_index`]).
@@ -111,20 +114,6 @@ impl CallTxns {
 
     fn is_empty(&self) -> bool {
         self.client.is_empty() && self.server.is_empty()
-    }
-}
-
-/// Below this many buckets a table is never shrunk: the saving is noise and a
-/// small idle node would rehash on every sweep.
-const SHRINK_MIN_CAPACITY: usize = 1024;
-
-/// Give a drained table back to the allocator: once it is under a quarter full
-/// it is rehashed to twice its length. The factor-of-four gap is the hysteresis
-/// that keeps a table oscillating around one size from rehashing every sweep.
-pub(super) fn shrink_idle<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
-    let cap = map.capacity();
-    if cap > SHRINK_MIN_CAPACITY && map.len() < cap / 4 {
-        map.shrink_to(map.len() * 2);
     }
 }
 
@@ -160,6 +149,7 @@ impl Owner {
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
+            stateless_options: config.stateless_options,
         }
     }
 

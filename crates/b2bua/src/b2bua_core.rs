@@ -9,12 +9,11 @@ use observe::{spawn_keeping_node, NodeScope};
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
-use sip_txn::{DeferredBound, IdGen, TransactionConfig, TransactionLayer};
+use sip_txn::{IdGen, TransactionLayer};
 
 use crate::admission::Refusals;
 use crate::capacity::{CapacityGate, Occupancy};
 use crate::cdr::CdrWriter;
-use crate::config::B2buaConfig;
 use crate::dispatch::PerCallDispatcher;
 use crate::metrics::B2buaMetrics;
 use crate::overload::OverloadSignal;
@@ -34,6 +33,8 @@ mod drain_tests;
 mod loops_tests;
 mod readiness;
 mod release_all;
+mod txn_config;
+use txn_config::txn_config;
 #[cfg(test)]
 mod unwired_tests;
 
@@ -322,6 +323,7 @@ impl B2buaCore {
             reentry_tx.clone(),
         );
         tasks.extend(limiter_tasks);
+        let options_tagger = sip_txn::StatelessTagger::from_id_gen(&id_gen);
         let ctx = Arc::new(RouterCtx {
             outbound_proxy: crate::router::outbound_proxy_target(&config),
             config,
@@ -345,6 +347,7 @@ impl B2buaCore {
             // contributed kind registers here via `.with(...)` (ADR-0020 X7).
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
+            options_tagger,
             departed: supervisor.as_ref().map(crate::repl::departed_probe),
             overload: overload.clone(),
             capacity: capacity.clone(),
@@ -717,39 +720,6 @@ impl B2buaCore {
             self.metrics.set_repl_store_gauges(meta_total, meta_backup, cl_entries, cl_peers);
         }
     }
-}
-
-/// The transaction layer's tunables for this worker: its event queue, the
-/// deployment's INVITE bounds and CANCEL policy, the worker's shared
-/// `refusals`, and the ceilings on the deferred backlog
-/// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own.
-fn txn_config(
-    config: &B2buaConfig,
-    id_gen: &Arc<IdGen>,
-    refusals: &Refusals,
-    ceilings: Option<DeferredBound>,
-) -> TransactionConfig {
-    let mut txn_config = TransactionConfig {
-        // Sizes the events channel at 4096: room for a new-INVITE burst
-        // beside the in-dialog traffic of established calls, whose keepalive
-        // responses a full channel would drop.
-        udp_queue_max: 1024,
-        id_gen: id_gen.clone(),
-        // The deployment's initial-INVITE bound (default 158 s):
-        // `config.validate()` keeps `setup_timeout_ms` strictly below
-        // it, so the rules path always gives up before the txn layer.
-        invite_initial_timeout_ms: config.invite_txn_timeout_ms(),
-        // The TU's first-response deadline on an initial INVITE
-        // (ADR-0044; default Timer B, which arms nothing).
-        invite_first_response_timeout_ms: config.invite_first_response_timeout_ms(),
-        strict_to_tag: true,
-        deferred_bound: None,
-        invite_refusals: Some(refusals.memo().clone()),
-    };
-    txn_config.deferred_bound = Some(
-        ceilings.unwrap_or_else(|| crate::admission::deferred_bound(txn_config.event_capacity())),
-    );
-    txn_config
 }
 
 #[cfg(test)]

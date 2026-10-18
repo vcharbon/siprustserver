@@ -74,7 +74,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                 let resp = build_options_health_response(
                     &ctx.readiness,
                     &ctx.overload,
-                    &ctx.id_gen,
+                    &ctx.options_tagger,
                     req,
                     &ctx.config.node_capabilities,
                 );
