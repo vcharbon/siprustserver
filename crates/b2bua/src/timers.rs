@@ -324,7 +324,8 @@ async fn driver(
 
 /// The longest delay the driver arms, below the ceiling past which
 /// `DelayQueue::insert` panics (its wheel holds 2^36 ms, about 2.2 years). A
-/// deadline further out — a replicated `fire_at` no rule mints — arms here.
+/// deadline further out — a replicated `fire_at` read against a skewed or
+/// corrupt clock, a configured duration past a year — arms here.
 const MAX_TIMER_DELAY: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// The delay from `now_ms` to the absolute deadline `fire_at`: zero when past
