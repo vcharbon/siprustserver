@@ -16,13 +16,15 @@ use crate::resolved_target::ResolvedTarget;
 use crate::settings::ClientSettings;
 
 /// A pooled `http://` client under `settings`, its name lookups going
-/// through `target` when one is given.
+/// through `target` when one is given. It follows no redirect: a 3xx is the
+/// endpoint's answer, returned to the caller as its status.
 pub(super) fn build(
     settings: &ClientSettings,
     target: Option<Arc<ResolvedTarget>>,
 ) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .http1_only()
         .connect_timeout(settings.connect_timeout)
         .timeout(settings.ceiling)

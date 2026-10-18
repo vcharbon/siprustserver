@@ -88,3 +88,34 @@ async fn a_refused_backend_behind_a_tls_named_path_counts_as_refused() {
     assert_eq!(failures::get(&peer, FailureCause::Refused), 1, "{}", failures::prometheus_text());
     assert_eq!(failures::get(&peer, FailureCause::Tls), 0, "{}", failures::prometheus_text());
 }
+
+/// Answers a POST to `/moved` with `302 Found` to `/landing`, and anything
+/// sent to `/landing` with `200`.
+struct RedirectService;
+
+#[async_trait]
+impl HttpService for RedirectService {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        match req.path.as_str() {
+            "/moved" => HttpResponse::status(302).header("location", "/landing"),
+            _ => HttpResponse::ok(b"landed".to_vec()),
+        }
+    }
+}
+
+/// A unary RPC's answer is the endpoint's own: a 3xx reaches the caller as
+/// its status. Following it would re-send a POST as a body-less GET and hand
+/// the caller the redirect target's 200 as the acknowledgement.
+#[tokio::test]
+async fn a_redirect_is_returned_not_followed() {
+    let net = RealHttpNetwork::new();
+    let handle =
+        net.serve("127.0.0.1:0".parse().unwrap(), Arc::new(RedirectService)).await.unwrap();
+
+    let resp = net
+        .request(handle.local_addr(), HttpRequest::post("/moved", b"{}".to_vec()))
+        .await
+        .unwrap();
+
+    assert_eq!((resp.status, resp.body.as_slice()), (302, &b""[..]));
+}
