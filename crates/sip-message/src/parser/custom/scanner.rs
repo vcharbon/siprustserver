@@ -2,7 +2,7 @@
 //! All character classification is direct byte comparison — zero regex.
 //!
 //! The cursor never leaves its buffer: every read is checked access and every
-//! move goes through [`Scanner::bump`], which stops at the end, so the offset
+//! move goes through `Scanner::bump`, which stops at the end, so the offset
 //! arithmetic of the parser lives here and nowhere else (ADR-0051 §2). The
 //! fallible methods (`expect`, `expect_crlf`) return `Result<_, SipParseError>`;
 //! the rest are infallible.
