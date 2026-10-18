@@ -28,6 +28,8 @@ use sip_clock::Clock;
 async fn main() {
     // Subscriber first (ADR-0026); the guard drains the log writer at exit.
     let _observe = observe::init_production("call-limiter-runner");
+    // Installed before anything else: as PID 1 an unhandled SIGTERM is lost.
+    let sigterm = sigterm();
 
     let env = env::from_lookup(|key| std::env::var(key).ok())
         .unwrap_or_else(|e| panic!("invalid call-limiter config: {e}"));
@@ -37,8 +39,6 @@ async fn main() {
     let store = Arc::new(CallStore::new(cfg, Clock::system()));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
 
-    // Installed before the bind: no SIGTERM finds the port open and unhandled.
-    let sigterm = sigterm();
     let net = RealHttpNetwork::new();
     let handle =
         net.serve(addr, server).await.unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
