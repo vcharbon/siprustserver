@@ -516,6 +516,9 @@
         "securityContext": {
           "type": "object"
         },
+        "terminationGracePeriodSeconds": {
+          "$ref": "#/definitions/count"
+        },
         "resources": {
           "$ref": "#/definitions/resources"
         },

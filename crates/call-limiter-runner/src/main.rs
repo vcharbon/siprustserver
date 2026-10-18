@@ -9,6 +9,10 @@
 //! re-register their sets on their next refresh (ADR-0040). The b2bua fails
 //! open during the downtime. Deployed as a single replica (ClusterIP).
 //!
+//! SIGTERM or SIGINT stops serving at once: the listener and every open
+//! connection close before exit, so a terminating pod never answers beside its
+//! replacement (one authoritative store at a time). Its state is not worth a drain.
+//!
 //! Configured from the env: [`env`](mod@env) states the grammar.
 
 mod env;
@@ -33,8 +37,10 @@ async fn main() {
     let store = Arc::new(CallStore::new(cfg, Clock::system()));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
 
+    // Installed before the bind: no SIGTERM finds the port open and unhandled.
+    let sigterm = sigterm();
     let net = RealHttpNetwork::new();
-    let _handle =
+    let handle =
         net.serve(addr, server).await.unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
     tracing::info!(
         %addr,
@@ -56,9 +62,29 @@ async fn main() {
         }
     });
 
-    // Run until terminated.
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => tracing::info!(signal = "SIGINT", "shutting down"),
-        Err(e) => tracing::warn!(error = %e, "signal handler error"),
+    let signal = tokio::select! {
+        _ = tokio::signal::ctrl_c() => "SIGINT",
+        _ = sigterm => "SIGTERM",
+    };
+    drop(handle);
+    tracing::info!(signal, "stopped serving; exiting");
+}
+
+/// The SIGTERM of a pod termination. A handler that cannot be installed is
+/// fatal: as PID 1 the signal would be ignored and the pod would serve on.
+#[cfg(unix)]
+fn sigterm() -> impl std::future::Future<Output = ()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).unwrap_or_else(|e| {
+        panic!("call-limiter-runner FATAL: cannot install the SIGTERM handler: {e}")
+    });
+    async move {
+        term.recv().await;
     }
+}
+
+/// Never resolves: only Ctrl-C drives shutdown off unix.
+#[cfg(not(unix))]
+fn sigterm() -> impl std::future::Future<Output = ()> {
+    std::future::pending::<()>()
 }

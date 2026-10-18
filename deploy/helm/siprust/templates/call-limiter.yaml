@@ -1,7 +1,9 @@
 {{- if .Values.callLimiter.enabled }}
 {{- /*
 The call limiter: one in-memory admission set per call, shared cluster-wide.
-One replica, Recreate: never two authoritative sets at once. A restart empties
+One replica, Recreate: never two authoritative sets at once on a rollout. A
+delete or an eviction starts the replacement at once, so the terminating pod
+stops serving on SIGTERM and the grace stays short. A restart empties
 the store and the counted calls re-register on their next refresh (ADR-0040);
 workers fail open meanwhile, so it is a single point of failure of the limiter
 function only. Inert until a decision returns `call_limiter` entries.
@@ -33,6 +35,7 @@ spec:
     spec:
       {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.scheduling" $l | trim }}{{ . | nindent 6 }}{{- end }}
+      terminationGracePeriodSeconds: {{ int $l.terminationGracePeriodSeconds }}
       containers:
         - name: call-limiter
           {{- include "siprust.image" (dict "root" $ "image" $l.image) | nindent 10 }}

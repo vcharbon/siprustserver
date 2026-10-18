@@ -188,6 +188,8 @@ callLimiter:
   podAnnotations: {}
   podLabels: {}
   securityContext: {}
+  # The runner exits on SIGTERM; the grace only bounds a process that does not.
+  terminationGracePeriodSeconds: 2
   resources:
     requests: { cpu: "100m", memory: "32Mi" }
     limits: { memory: "256Mi" }

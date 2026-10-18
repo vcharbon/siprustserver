@@ -204,6 +204,7 @@ spec:
             memory: 32Mi
       nodeSelector:
         tier: infra
+      terminationGracePeriodSeconds: 2
       tolerations:
       - effect: NoSchedule
         key: tier

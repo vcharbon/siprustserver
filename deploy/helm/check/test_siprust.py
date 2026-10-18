@@ -146,6 +146,10 @@ class Backends(unittest.TestCase):
         w = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
         self.assertNotIn("LIMITER_URL", w)
 
+    def test_a_terminating_limiter_is_gone_within_seconds(self) -> None:
+        limiter = find(render(SIPRUST, *KIND), "Deployment", "call-limiter")
+        self.assertLessEqual(pod_spec(limiter)["terminationGracePeriodSeconds"], 2)
+
     def test_each_component_turns_off_alone(self) -> None:
         every = names(render(SIPRUST, *KIND))
         for key, gone in (
