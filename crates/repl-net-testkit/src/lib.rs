@@ -1,7 +1,6 @@
 //! `repl-net-testkit` — the test support of the replication transport seam.
 //!
-//! Both types implement or wrap the
-//! [`ReplicationNetwork`](repl_net::ReplicationNetwork) seam:
+//! Both types implement or wrap the [`ReplicationNetwork`] seam:
 //! - [`SimulatedReplicationNetwork`] — in-process ordered delivery, the
 //!   workhorse for the fake-clock tests. Mandatory, not a convenience: real
 //!   `TcpStream` readiness does **not** obey `tokio::time::pause`, so the

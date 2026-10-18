@@ -1,7 +1,6 @@
 //! `http-net-testkit` — the test support of the unary HTTP transport seam.
 //!
-//! Every type here implements or serves the
-//! [`HttpTransport`](http_net::HttpTransport) seam:
+//! Every type here implements or serves the [`HttpTransport`] seam:
 //! - [`SimulatedHttpNetwork`] — an in-memory routing table keyed by
 //!   `SocketAddr`. A `request` looks up the bound service, applies the per-`dst`
 //!   [`Fault`] (pause / cutoff / error), waits the transit delay, and invokes
