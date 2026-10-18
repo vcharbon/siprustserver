@@ -13,7 +13,7 @@
 //!   enforces the length so no caller can accidentally accept a 1-byte prefix
 //!   (a ≤256-guess forgery).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 

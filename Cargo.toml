@@ -138,9 +138,9 @@ rmp = "0.8"
 # primitive here — it is the fast, well-distributed hash behind rendezvous
 # (HRW) worker selection (top 8 bytes as a u64). `arc-swap` backs the lock-free
 # worker-registry snapshot read on the routing hot path. See ADR-0009.
-hmac = "0.12"
-sha2 = "0.10"
-sha1 = "0.10"
+hmac = "0.13.0"
+sha2 = "0.11.1"
+sha1 = "0.11.0"
 # The key of `sip-txn`'s identifier PRF (Via branches, tags) comes from the OS
 # RNG, so an off-path host cannot guess the next branch.
 getrandom = "0.3"

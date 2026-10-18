@@ -9,7 +9,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 /// Branch identifiers MUST start with this magic cookie (RFC 3261 §8.1.1.7).
