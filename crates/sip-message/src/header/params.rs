@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 
 use crate::sip_str::SipStr;
 
-use super::scan::{read_quoted, scan_until, skip_ws, sub};
+use super::scan::{byte_at, read_quoted, scan_until, skip_ws, sub};
 use super::wire::Wire;
 
 /// What a parameter carries: nothing (`;lr`), a bare token (`;branch=z9hG4bK1`)
@@ -219,7 +219,7 @@ fn collect_semicolon_params(
     let bytes = base.as_bytes();
     loop {
         let at = skip_ws(bytes, i);
-        if at >= bytes.len() || bytes[at] != b';' {
+        if byte_at(bytes, at) != Some(b';') {
             return i;
         }
         i = read_one(base, skip_ws(bytes, at + 1), style, params);
@@ -239,7 +239,7 @@ pub(crate) fn parse_comma_params(base: &SipStr, mut i: usize) -> Params {
         }
         i = read_one(base, i, &STYLE, &mut params);
         i = skip_ws(bytes, i);
-        if i < bytes.len() && bytes[i] == b',' {
+        if byte_at(bytes, i) == Some(b',') {
             i += 1;
         } else {
             return params;
@@ -250,15 +250,14 @@ pub(crate) fn parse_comma_params(base: &SipStr, mut i: usize) -> Params {
 /// Read one `name[=value]` at byte `i`; yields the position after it.
 fn read_one(base: &SipStr, mut i: usize, style: &ParamStyle, params: &mut Params) -> usize {
     let bytes = base.as_bytes();
-    let len = bytes.len();
 
     let name_end = scan_until(bytes, i, style.name_delims);
     let name = sub(base, i, name_end);
     i = skip_ws(bytes, name_end);
 
-    if i < len && bytes[i] == b'=' {
+    if byte_at(bytes, i) == Some(b'=') {
         i = skip_ws(bytes, i + 1);
-        if i < len && bytes[i] == b'"' {
+        if byte_at(bytes, i) == Some(b'"') {
             let (text, end) = read_quoted(base, i);
             params.push(name, ParamValue::Quoted(text));
             return end;

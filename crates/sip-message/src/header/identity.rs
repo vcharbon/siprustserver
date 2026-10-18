@@ -5,7 +5,7 @@ use crate::method::Method;
 use crate::sip_str::SipStr;
 
 use super::name::HeaderName;
-use super::scan::{digits_end, parse_u32, skip_ws, sub, sub_trimmed};
+use super::scan::{clamped, digits_end, parse_u32, skip_ws, sub, sub_trimmed};
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
 
@@ -92,6 +92,7 @@ pub struct CSeq {
     method: Method,
 }
 
+#[deny(clippy::arithmetic_side_effects)]
 impl CSeq {
     pub fn new(seq: u32, method: Method) -> Self {
         Self { seq, method }
@@ -105,9 +106,10 @@ impl CSeq {
         &self.method
     }
 
-    /// The next request in this dialog (RFC 3261 §12.2.1.1).
-    pub fn stepped(&self, method: Method) -> Self {
-        Self { seq: self.seq.saturating_add(1), method }
+    /// The next request in this dialog (RFC 3261 §12.2.1.1); `None` where the
+    /// sequence number is the largest one, which has no next.
+    pub fn stepped(&self, method: Method) -> Option<Self> {
+        Some(Self { seq: self.seq.checked_add(1)?, method })
     }
 
     /// The same sequence under another method — what ACK and CANCEL carry.
@@ -130,7 +132,7 @@ impl HeaderValue for CSeq {
         let bytes = value.as_bytes();
         let start = skip_ws(bytes, 0);
         let end = digits_end(bytes, start);
-        let seq = parse_u32(&value.as_str()[start..end], "CSeq sequence")?;
+        let seq = parse_u32(clamped(value.as_str(), start, end), "CSeq sequence")?;
         let method = sub_trimmed(&value, end, bytes.len());
         if method.is_empty() {
             return Err(SipParseError::new(format!("CSeq has no method: {:?}", value.as_str())));
@@ -185,11 +187,11 @@ impl HeaderValue for RAck {
         let bytes = value.as_bytes();
         let mut i = skip_ws(bytes, 0);
         let rseq_end = digits_end(bytes, i);
-        let rseq = parse_u32(&value.as_str()[i..rseq_end], "RAck response-num")?;
+        let rseq = parse_u32(clamped(value.as_str(), i, rseq_end), "RAck response-num")?;
 
         i = skip_ws(bytes, rseq_end);
         let seq_end = digits_end(bytes, i);
-        let seq = parse_u32(&value.as_str()[i..seq_end], "RAck CSeq-num")?;
+        let seq = parse_u32(clamped(value.as_str(), i, seq_end), "RAck CSeq-num")?;
 
         let method = sub(&value, skip_ws(bytes, seq_end), bytes.len());
         if method.is_empty() || method.bytes().any(|b| b == b' ' || b == b'\t') {
@@ -222,8 +224,9 @@ mod tests {
     #[test]
     fn dialog_stepping_keeps_the_sequence_contract() {
         let c = CSeq::new(1, Method::Invite);
-        assert_eq!(c.stepped(Method::Bye).to_wire(), "2 BYE");
+        assert_eq!(c.stepped(Method::Bye).map(|s| s.to_wire()).as_deref(), Some("2 BYE"));
         assert_eq!(c.as_method(Method::Ack).to_wire(), "1 ACK");
+        assert_eq!(CSeq::new(u32::MAX, Method::Invite).stepped(Method::Bye), None);
     }
 
     #[test]

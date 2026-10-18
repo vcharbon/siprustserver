@@ -265,6 +265,18 @@ fn synthetic() -> Vec<Seed> {
                 "SIP/2.0 200 OK\r\nContact: <sip:carol@example.org>\r\n",
             ),
         ),
+    ];
+    seeds.extend(more_synthetic());
+    seeds
+        .into_iter()
+        .map(|(name, bytes)| Seed { name: format!("synthetic/{name}"), bytes })
+        .collect()
+}
+
+/// The synthetic seeds past the dialog's own requests: bodies, registration,
+/// challenges, refusals, compact forms, refreshes and non-ASCII text.
+fn more_synthetic() -> Vec<(&'static str, Vec<u8>)> {
+    let mut seeds = vec![
         (
             "info-mscml",
             message(
@@ -389,7 +401,4 @@ fn synthetic() -> Vec<Seed> {
         ),
     ));
     seeds
-        .into_iter()
-        .map(|(name, bytes)| Seed { name: format!("synthetic/{name}"), bytes })
-        .collect()
 }

@@ -5,7 +5,7 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::params::{parse_semicolon_params, ParamValue, Params, HEADER_PARAMS};
-use super::scan::{index_of, read_quoted, skip_ws, sub_trimmed};
+use super::scan::{byte_at, index_of, read_quoted, skip_ws, sub_trimmed};
 use super::uri::Uri;
 use super::wire::Wire;
 
@@ -80,7 +80,7 @@ impl NameAddr {
         let len = bytes.len();
         let start = skip_ws(bytes, 0);
 
-        let (display, uri_text, params_at) = if start < len && bytes[start] == b'"' {
+        let (display, uri_text, params_at) = if byte_at(bytes, start) == Some(b'"') {
             let (text, after) = read_quoted(&value, start);
             let open = skip_ws(bytes, after);
             let (uri_text, params_at) = angle_uri(&value, open)?;
@@ -144,12 +144,9 @@ impl NameAddr {
         let value = raw.trimmed();
         let bytes = value.as_bytes();
         let start = skip_ws(bytes, 0);
-        if start >= bytes.len() {
-            return None;
-        }
-        if bytes[start] == b'"' {
+        if byte_at(bytes, start)? == b'"' {
             let (_, after) = read_quoted(&value, start);
-            return Some(value.subspan(start, after - start));
+            return Some(value.subspan(start, after.saturating_sub(start)));
         }
         let open = index_of(bytes, b'<', start)?;
         let before = sub_trimmed(&value, start, open);
@@ -175,7 +172,7 @@ impl NameAddr {
 /// header parameters that follow it.
 fn angle_uri(value: &SipStr, open: usize) -> Result<(SipStr, usize), SipParseError> {
     let bytes = value.as_bytes();
-    if open >= bytes.len() || bytes[open] != b'<' {
+    if byte_at(bytes, open) != Some(b'<') {
         return Err(SipParseError::new(format!(
             "name-addr display name is not followed by <uri>: {:?}",
             value.as_str()

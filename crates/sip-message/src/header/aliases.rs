@@ -78,7 +78,7 @@ impl MediaType {
     pub fn is_multipart(&self) -> bool {
         const COMPOSITE: &[u8] = b"multipart/";
         let token = self.token().as_bytes();
-        token.len() >= COMPOSITE.len() && token[..COMPOSITE.len()].eq_ignore_ascii_case(COMPOSITE)
+        token.get(..COMPOSITE.len()).is_some_and(|head| head.eq_ignore_ascii_case(COMPOSITE))
     }
 }
 

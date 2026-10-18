@@ -1,5 +1,6 @@
 //! [`NumericHeader`] — the single-number headers (Max-Forwards,
 //! Content-Length, Expires, RSeq, Min-Expires, Min-SE).
+#![deny(clippy::arithmetic_side_effects)]
 
 use std::marker::PhantomData;
 

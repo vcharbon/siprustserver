@@ -11,7 +11,7 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::params::{parse_semicolon_params, ParamValue, Params, URI_PARAMS};
-use super::scan::{digits_end, index_of, parse_port, scan_until, sub, sub_lower};
+use super::scan::{byte_at, clamped, digits_end, index_of, parse_port, scan_until, sub, sub_lower};
 use super::wire::Wire;
 
 /// A host with an optional explicit port. An IPv6 literal is held WITHOUT its
@@ -75,8 +75,7 @@ impl HostPort {
     /// colon.
     pub(crate) fn parse_at(base: &SipStr, i: usize) -> Result<(Self, usize), SipParseError> {
         let bytes = base.as_bytes();
-        let len = bytes.len();
-        let (host, mut j) = if i < len && bytes[i] == b'[' {
+        let (host, mut j) = if byte_at(bytes, i) == Some(b'[') {
             match index_of(bytes, b']', i + 1) {
                 Some(close) => (sub(base, i + 1, close), close + 1),
                 None => return Err(SipParseError::new("unclosed IPv6 reference")),
@@ -87,21 +86,22 @@ impl HostPort {
             // would name a host the peer never wrote — and a router that
             // resolves it is worse than one that refuses the URI.
             let authority = scan_until(bytes, i, b";,> \t?");
-            let colon = index_of(&bytes[..authority], b':', i);
-            if colon.is_some_and(|c| index_of(&bytes[..authority], b':', c + 1).is_some()) {
+            let head = bytes.get(..authority).unwrap_or(bytes);
+            let colon = index_of(head, b':', i);
+            if colon.is_some_and(|c| index_of(head, b':', c + 1).is_some()) {
                 return Err(SipParseError::new(format!(
                     "unbracketed IPv6 host (RFC 3261 §19.1.1 requires []): {:?}",
-                    &base.as_str()[i..authority]
+                    clamped(base.as_str(), i, authority)
                 )));
             }
             let end = colon.unwrap_or(authority);
             (sub(base, i, end), end)
         };
         let mut port = None;
-        if j < len && bytes[j] == b':' {
+        if byte_at(bytes, j) == Some(b':') {
             let digits = digits_end(bytes, j + 1);
             if digits > j + 1 {
-                port = Some(parse_port(&base.as_str()[j + 1..digits])?);
+                port = Some(parse_port(clamped(base.as_str(), j + 1, digits))?);
             }
             j = digits;
         }
@@ -407,7 +407,7 @@ impl Uri {
         // the `@` search runs to the end of the value rather than stopping at
         // the first parameter.
         let at = scan_until(bytes, i, b"@>");
-        let user = if at < len && bytes[at] == b'@' {
+        let user = if byte_at(bytes, at) == Some(b'@') {
             let u = sub(&value, i, at);
             i = at + 1;
             Some(u)
@@ -419,11 +419,12 @@ impl Uri {
         let (params, after_params) = parse_semicolon_params(&value, after_host, &URI_PARAMS);
 
         let mut headers = Vec::new();
-        if after_params < len && bytes[after_params] == b'?' {
-            for pair in value.as_str()[after_params + 1..].split('&') {
-                match pair.find('=') {
-                    Some(eq) => headers
-                        .push((value.reslice(&pair[..eq]), Some(value.reslice(&pair[eq + 1..])))),
+        if byte_at(bytes, after_params) == Some(b'?') {
+            for pair in clamped(value.as_str(), after_params + 1, len).split('&') {
+                match pair.split_once('=') {
+                    Some((name, val)) => {
+                        headers.push((value.reslice(name), Some(value.reslice(val))))
+                    }
                     None => headers.push((value.reslice(pair), None)),
                 }
             }

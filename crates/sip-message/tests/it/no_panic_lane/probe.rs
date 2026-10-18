@@ -253,7 +253,10 @@ fn typed_reads(msg: &SipMessage, d: &mut Digest) {
         d.note("max-forwards", &(mf.decremented(), mf.incremented()));
     }
     if let Some(Ok(cseq)) = msg.header::<header::CSeq>() {
-        d.note("cseq-stepped", &cseq.stepped(Method::Bye));
+        match cseq.stepped(Method::Bye) {
+            Some(next) => d.note("cseq-stepped", &next),
+            None => d.note("cseq-stepped", &"no next sequence number"),
+        }
     }
 }
 

@@ -14,10 +14,10 @@ pub fn network_host(uri: &str) -> Option<&str> {
     {
         return None;
     }
-    let authority = &rest[..rest.find(['/', '?', '#', '>']).unwrap_or(rest.len())];
+    let authority = rest.split(['/', '?', '#', '>']).next().unwrap_or_default();
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let host = if host_port.starts_with('[') {
-        &host_port[..=host_port.find(']')?]
+        host_port.get(..=host_port.find(']')?)?
     } else {
         host_port.split(':').next().unwrap_or_default()
     };
@@ -29,7 +29,7 @@ pub fn network_host(uri: &str) -> Option<&str> {
 pub fn host_of(hostport: &str) -> &str {
     let hostport = hostport.trim();
     if hostport.starts_with('[') {
-        return hostport.find(']').map_or(hostport, |end| &hostport[..=end]);
+        return hostport.split_inclusive(']').next().unwrap_or(hostport);
     }
     match hostport.rsplit_once(':') {
         Some((host, port)) if !host.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) => {
@@ -48,7 +48,7 @@ pub fn message_id_domain(value: &str) -> Option<&str> {
         value
             .get(..scheme.len())
             .filter(|s| s.eq_ignore_ascii_case(scheme))
-            .map(|_| &value[scheme.len()..])
+            .and_then(|_| value.get(scheme.len()..))
     });
     // With no message-id scheme, a value naming one has no scheme at all.
     let id = id.or_else(|| (!value.contains(':')).then_some(value))?;
