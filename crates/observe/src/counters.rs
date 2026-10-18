@@ -35,8 +35,8 @@ pub static TRACE_ADMITTED: AtomicU64 = AtomicU64::new(0);
 /// population, which is what makes the count worth having.
 pub static TRACE_ADOPTION_REFUSED: AtomicU64 = AtomicU64::new(0);
 
-/// Panics at a source location the process panic hook already reported:
-/// counted, not reported again ([`crate::panic_report`]).
+/// Panics at a source location the process panic hook reported less than
+/// its interval ago: counted, not reported ([`crate::panic_report`]).
 pub static PANICS_REPEATED: AtomicU64 = AtomicU64::new(0);
 
 /// Bump a counter by one.
@@ -102,7 +102,7 @@ pub const TRACE_ADOPTION_REFUSED_TOTAL: Family = Family::counter(
 pub const PANICS_REPEATED_TOTAL: Family = Family::counter(
     "panics_repeated_total",
     Labels::None,
-    "Panics at a source location the process panic hook already reported once: counted, not reported again.",
+    "Panics at a source location the process panic hook reported less than its interval (60 s) ago: counted, not reported.",
 );
 
 /// Every family [`prometheus_text`] renders, in exposition order.

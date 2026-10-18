@@ -242,6 +242,8 @@ pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: 
                 let failure = match outcome {
                     Err(e) if e.is_panic() => {
                         ctx.metrics.bump_handler_panic();
+                        // The panic hook names the site; this names the call.
+                        tracing::error!(call_ref = %call_ref, "a handler body panicked; the reaper takes the call");
                         Some(HandlerFailure::Panicked)
                     }
                     Err(e) if e.is_cancelled() => Some(HandlerFailure::Aborted),

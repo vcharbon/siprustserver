@@ -88,7 +88,7 @@ fn lifecycle_only() -> FilterFn<fn(&tracing::Metadata<'_>) -> bool> {
 ///    lifecycle helpers therefore never compiles the export tree.
 ///
 /// It also installs the process panic hook ([`crate::panic_report`]), which
-/// reports the first panic at each source location and counts the repeats.
+/// reports a panic site at most once per interval and counts the rest.
 ///
 /// Hold the returned guard until the process exits.
 #[cfg_attr(not(feature = "otlp"), allow(unused_variables))]
