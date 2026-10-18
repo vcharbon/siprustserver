@@ -15,6 +15,7 @@ mod header_cardinality;
 mod header_registry_typing;
 mod header_round_trip;
 mod lazy_headers;
+mod no_panic_lane;
 mod parser;
 mod parser_body_bound;
 mod parser_extraction;

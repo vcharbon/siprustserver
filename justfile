@@ -39,12 +39,19 @@ test filter='':
     cargo nextest run --workspace --no-tests=warn {{ filter }}
     cargo test --doc --workspace {{ filter }}
 
-# Slow lane: the real-clock >= 1 s and loadgen tests `#[ignore]`d out of `test`,
-# under nextest's `slow` profile in a release build. Optional nextest filterset:
-# `just test-slow 'package(=loadgen)'` runs one crate's slow lane.
+# The no-panic property lanes (ADR-0051 §8): the slow-lane tests of every
+# module named `no_panic_lane`, run in the test profile so overflow checks and
+# debug assertions hold while they run.
+property_lane := "test(/(^|::)no_panic_lane::/)"
+
+# Slow lane: the real-clock >= 1 s, loadgen and property-lane tests `#[ignore]`d
+# out of `test`, under nextest's `slow` profile, in a release build but for the
+# property lanes. Optional nextest filterset: `just test-slow 'package(=loadgen)'`
+# runs one crate's slow lane.
 test-slow *filter:
     scripts/check-test-layout.sh
-    cargo nextest run --workspace --release -P slow --run-ignored only {{ if filter == "" { "" } else { "-E " + quote(filter) } }}
+    cargo nextest run --workspace --release -P slow --run-ignored only --no-tests=warn -E {{ quote("(not " + property_lane + ")" + if filter == "" { "" } else { " & (" + filter + ")" }) }}
+    cargo nextest run --workspace -P slow --run-ignored only --no-tests=warn -E {{ quote(property_lane + if filter == "" { "" } else { " & (" + filter + ")" }) }}
 
 # Both lanes.
 test-all: test test-slow
