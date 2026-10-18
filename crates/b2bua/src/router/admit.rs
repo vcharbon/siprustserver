@@ -96,16 +96,16 @@ pub(crate) struct UnbornCall {
     cseq: u32,
 }
 
+/// Runs while a panicking turn unwinds, so nothing in it panics: a panic
+/// there aborts the process.
 impl Drop for UnbornCall {
     fn drop(&mut self) {
         let mut by_call = self.inner.lock();
         if let Some(held) = by_call.get_mut(&self.call_ref) {
-            if let Some(at) = held.iter().position(|(c, _)| *c == self.cseq) {
-                held[at].1 -= 1;
-                if held[at].1 == 0 {
-                    held.swap_remove(at);
-                }
+            if let Some((_, n)) = held.iter_mut().find(|(c, _)| *c == self.cseq) {
+                *n = n.saturating_sub(1);
             }
+            held.retain(|&(_, n)| n > 0);
             if held.is_empty() {
                 by_call.remove(&self.call_ref);
             }

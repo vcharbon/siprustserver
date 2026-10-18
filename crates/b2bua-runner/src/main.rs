@@ -116,8 +116,11 @@ fn stress_limiter_from_env() -> Option<LimiterEntry> {
     Some(LimiterEntry { id, limit })
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
+    b2bua_runner_kit::runtime::block_on("b2bua-runner", serve())
+}
+
+async fn serve() -> std::process::ExitCode {
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) actually
     // parsed — a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms
     // gauges on /metrics.

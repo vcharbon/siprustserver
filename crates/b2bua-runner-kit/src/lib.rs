@@ -74,7 +74,6 @@ use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use http_net::{RealHttpNetwork, SystemResolver};
 use sip_clock::Clock;
-use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_txn::IdGen;
@@ -90,7 +89,9 @@ mod null_cdr;
 mod outbound_proxy_env;
 mod probe;
 mod replication;
+pub mod runtime;
 mod shutdown;
+mod socket_buffers;
 mod worker_metrics;
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
@@ -100,6 +101,7 @@ pub use cdr_rabbitmq::{
 pub use null_cdr::NullCdrWriter;
 pub use outbound_proxy_env::{parse_outbound_proxy, validate_outbound_proxy_requirement};
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
+use socket_buffers::log_socket_buffers;
 pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
 
 /// Env var with a default when unset.
@@ -111,39 +113,6 @@ pub fn env_or(key: &str, default: &str) -> String {
 /// when unset, `None` (the kernel default) when set blank.
 fn socket_buffer_knob(key: &str) -> Option<usize> {
     stated(Some(env_or(key, "4194304"))).map(|s| s.parse().unwrap_or_else(|_| panic!("{key}")))
-}
-
-/// Log the buffer sizes the kernel granted the signalling socket, warning when
-/// it clamped a request ([`was_clamped`]).
-fn log_socket_buffers(
-    service: &str,
-    endpoint: &dyn UdpEndpoint,
-    recv_requested: Option<usize>,
-    send_requested: Option<usize>,
-) {
-    let Some(granted) = endpoint.socket_buffers() else { return };
-    tracing::info!(
-        service,
-        rcvbuf = granted.recv,
-        rcvbuf_requested = ?recv_requested,
-        sndbuf = granted.send,
-        sndbuf_requested = ?send_requested,
-        "signalling socket buffers"
-    );
-    for (knob, requested, effective, cap) in [
-        ("B2BUA_UDP_RCVBUF", recv_requested, granted.recv, "net.core.rmem_max"),
-        ("B2BUA_UDP_SNDBUF", send_requested, granted.send, "net.core.wmem_max"),
-    ] {
-        if let Some(requested) = requested.filter(|&r| was_clamped(r, effective)) {
-            tracing::warn!(
-                service,
-                knob,
-                requested,
-                effective,
-                "the kernel clamped the socket buffer: raise {cap}"
-            );
-        }
-    }
 }
 
 /// `value` trimmed, `None` when it is absent or blank: a knob set to nothing

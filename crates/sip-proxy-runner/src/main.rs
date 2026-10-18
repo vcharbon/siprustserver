@@ -139,6 +139,7 @@ use sip_proxy_runner::discovery::{discovered_pool, static_pool};
 use sip_proxy_runner::health_sampler::HealthSampler;
 use sip_proxy_runner::intake_shed::{intake_shed_hook, intake_shed_watermark};
 use sip_proxy_runner::shards::SharedRouting;
+use sip_proxy_runner::signal::sigterm;
 use sip_txn::IdGen;
 
 /// Log the buffer sizes the kernel granted one face's signalling socket,
@@ -240,8 +241,11 @@ fn pod_namespace() -> Option<String> {
         .map(|ns| ns.trim().to_string())
 }
 
-#[tokio::main]
-async fn main() {
+fn main() -> std::process::ExitCode {
+    sip_proxy_runner::runtime::block_on(serve())
+}
+
+async fn serve() {
     // Subscriber first (ADR-0026): every line below it is a lifecycle log, and
     // the guard drains the writer + flushes spans at exit.
     let observe_guard = observe::init_production("sip-proxy-runner");
@@ -696,25 +700,6 @@ async fn main() {
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
-}
-
-/// The SIGTERM (pod termination) that starts the drain. A handler that
-/// cannot be installed is fatal: without it the proxy is killed undrained.
-#[cfg(unix)]
-fn sigterm() -> impl std::future::Future<Output = ()> {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut term = signal(SignalKind::terminate()).unwrap_or_else(|e| {
-        panic!("sip-proxy-runner FATAL: cannot install the SIGTERM handler: {e}")
-    });
-    async move {
-        term.recv().await;
-    }
-}
-
-/// Never resolves: only Ctrl-C drives shutdown off unix.
-#[cfg(not(unix))]
-fn sigterm() -> impl std::future::Future<Output = ()> {
-    std::future::pending::<()>()
 }
 
 #[cfg(test)]
