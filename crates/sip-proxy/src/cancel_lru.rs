@@ -35,6 +35,7 @@ use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
+use crate::poison::locked;
 use crate::strategy::RouteParams;
 
 /// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
@@ -218,14 +219,15 @@ impl CancelBranchLru {
     /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos.
     pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
         let expires_at_ms = self.now_ms() + ttl_ms;
-        self.table.lock().unwrap().insert(key.to_string(), StoredEntry { entry, expires_at_ms });
+        locked(&self.table, "invite branch lru")
+            .insert(key.to_string(), StoredEntry { entry, expires_at_ms });
     }
 
     /// Look up a remembered entry (for a CANCEL / ACK). Lazily evicts an expired
     /// entry and returns `None` for it.
     pub fn lookup(&self, key: &str) -> Option<CancelEntry> {
         let now = self.now_ms();
-        let mut table = self.table.lock().unwrap();
+        let mut table = locked(&self.table, "invite branch lru");
         match table.get(key) {
             Some(e) if e.expires_at_ms <= now => {
                 table.remove(key);
@@ -238,14 +240,14 @@ impl CancelBranchLru {
 
     /// Current map size — tests/metrics.
     pub fn size(&self) -> usize {
-        self.table.lock().unwrap().len()
+        locked(&self.table, "invite branch lru").len()
     }
 
     /// Drop all expired entries; returns the count swept. The owner task calls
     /// this periodically.
     pub fn sweep_expired(&self) -> usize {
         let now = self.now_ms();
-        let mut table = self.table.lock().unwrap();
+        let mut table = locked(&self.table, "invite branch lru");
         let before = table.len();
         table.retain(|_, e| e.expires_at_ms > now);
         before - table.len()
@@ -280,6 +282,25 @@ mod tests {
 
     fn key(call_id: &str) -> String {
         invite_txn_key(&via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1"), call_id, Some("t"), 1)
+    }
+
+    /// A panic under the table's lock leaves the table serving: the next
+    /// caller takes it as it stands, and the recovery is counted.
+    #[test]
+    fn a_panic_under_the_table_lock_leaves_it_serving() {
+        let lru = Arc::new(CancelBranchLru::with_clock(Clock::test_at(0)));
+        lru.remember(&key("before"), entry("z9hG4bK-before"), 60_000);
+        let poisoner = lru.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.table.lock();
+            panic!("a panic under the table lock");
+        })
+        .join();
+        let recovered = crate::poison::poisoned_lock_recoveries();
+        assert_eq!(lru.size(), 1, "the table as it stood");
+        lru.remember(&key("after"), entry("z9hG4bK-after"), 60_000);
+        assert!(lru.lookup(&key("after")).is_some());
+        assert!(crate::poison::poisoned_lock_recoveries() > recovered, "the recovery is counted");
     }
 
     #[test]

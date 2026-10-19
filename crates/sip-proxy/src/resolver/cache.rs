@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use sip_clock::Clock;
 
 use super::ResolverConfig;
+use crate::poison::locked;
 
 /// One cached resolution outcome. `None` = negative entry (lookup failed).
 struct CacheEntry {
@@ -43,7 +44,7 @@ impl NameCache {
 
     pub(super) fn lookup(&self, key: &str) -> CacheLookup {
         let now = self.now_ms();
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = locked(&self.entries, "resolver cache");
         match entries.get_mut(key) {
             Some(e) if e.expires_at_ms <= now => {
                 entries.remove(key);
@@ -65,7 +66,7 @@ impl NameCache {
     /// negative) — the refresh treats that like "unused".
     pub(super) fn take_used(&self, key: &str) -> Option<bool> {
         let now = self.now_ms();
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = locked(&self.entries, "resolver cache");
         let e = entries.get_mut(key)?;
         if e.expires_at_ms <= now || e.outcome.is_none() {
             return None;
@@ -83,7 +84,7 @@ impl NameCache {
         let now = self.now_ms();
         let ttl =
             if outcome.is_some() { self.cfg.positive_ttl_ms } else { self.cfg.negative_ttl_ms };
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = locked(&self.entries, "resolver cache");
         if entries.len() >= self.cfg.max_entries && !entries.contains_key(key) {
             entries.retain(|_, e| e.expires_at_ms > now);
             if entries.len() >= self.cfg.max_entries {

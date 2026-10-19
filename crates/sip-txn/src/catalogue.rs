@@ -71,6 +71,12 @@ pub const PARSE_PANICS: Family = Family::counter(
     "Inbound datagrams the SIP parser panicked on and the transaction layer dropped; each one is a parser defect, expected 0.",
 );
 
+pub const POISONED_LOCK_RECOVERIES: Family = Family::counter(
+    "b2bua_txn_poisoned_lock_recoveries_total",
+    Labels::None,
+    "Transaction-layer locks a panic poisoned, taken as they stood and cleared (process-wide); each one is a defect, expected 0.",
+);
+
 pub const SEND_ERRORS: Family = Family::counter(
     "b2bua_txn_send_errors_total",
     Labels::None,

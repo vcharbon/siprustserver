@@ -2,8 +2,6 @@
 //! per face, and the claims of the internal plane the external face does not
 //! honour (ADR-0048).
 
-use std::sync::atomic::Ordering;
-
 use super::{Direction, ProxyMetrics};
 
 /// Which proxy face a datagram crossed, for
@@ -71,19 +69,23 @@ impl UntrustedClaim {
 impl ProxyMetrics {
     /// Count one datagram RECEIVED on `face` (the recv loop's arrival socket).
     pub fn record_face_ingress(&self, face: Face) {
-        self.face_messages[face as usize][Direction::Inbound as usize]
-            .fetch_add(1, Ordering::Relaxed);
+        self.count_face(face, Direction::Inbound);
     }
 
     /// Count one datagram EGRESSED on `face` (the destination-picked socket).
     pub fn record_face_egress(&self, face: Face) {
-        self.face_messages[face as usize][Direction::Outbound as usize]
-            .fetch_add(1, Ordering::Relaxed);
+        self.count_face(face, Direction::Outbound);
+    }
+
+    fn count_face(&self, face: Face, direction: Direction) {
+        if let Some(row) = self.face_messages.get(face as usize) {
+            super::bump(row, direction as usize);
+        }
     }
 
     /// Read one per-face counter (test/assertion surface).
     pub fn face_messages_total(&self, face: Face, direction: Direction) -> u64 {
-        self.face_messages[face as usize][direction as usize].load(Ordering::Relaxed)
+        self.face_messages.get(face as usize).map_or(0, |row| super::read(row, direction as usize))
     }
 
     /// Count one message on the external face carrying `claim`.

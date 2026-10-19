@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use metric_catalogue::{FixedCounts, HistogramValue, OpenRows};
 use sip_message::method::Method;
@@ -15,10 +16,12 @@ use pool::PoolGauges;
 mod face;
 mod no_target;
 mod pool;
+mod slots;
 mod udp_shard;
 use crate::resolver::{outcome, refresh_outcome};
 pub use face::{Face, UntrustedClaim};
 pub use no_target::NoTargetDrop;
+use slots::{bump, read};
 pub use udp_shard::UdpShardStats;
 
 /// Inbound vs outbound: the first half of `sip_messages_total`'s
@@ -147,9 +150,7 @@ fn method_slot(method: &str) -> Option<usize> {
 /// a label outside the list is a caller's bug.
 fn count_outcome(counters: &[AtomicU64], labels: &[&str], label: &str) {
     match labels.iter().position(|l| *l == label) {
-        Some(i) => {
-            counters[i].fetch_add(1, Ordering::Relaxed);
-        }
+        Some(i) => bump(counters, i),
         None => debug_assert!(false, "{label} is no outcome of {labels:?}"),
     }
 }
@@ -281,7 +282,9 @@ impl ProxyMetrics {
     }
 
     pub fn record_message(&self, direction: Direction, result: MessageResult) {
-        self.messages[direction as usize][result as usize].fetch_add(1, Ordering::Relaxed);
+        if let Some(row) = self.messages.get(direction as usize) {
+            bump(row, result as usize);
+        }
     }
 
     /// Count one inbound request by SIP method (uppercased by the caller), for
@@ -289,9 +292,7 @@ impl ProxyMetrics {
     /// slot, an extension method under its own label, under the cap.
     pub fn record_request(&self, method: &str) {
         match method_slot(method) {
-            Some(slot) => {
-                self.requests[slot].fetch_add(1, Ordering::Relaxed);
-            }
+            Some(slot) => bump(&self.requests, slot),
             None => self.request_extensions.add(&[method], 1),
         }
     }
@@ -309,16 +310,17 @@ impl ProxyMetrics {
     }
 
     pub fn record_routing_decision(&self, kind: RoutingDecisionKind) {
-        self.routing_decisions[kind as usize].fetch_add(1, Ordering::Relaxed);
+        bump(&self.routing_decisions, kind as usize);
     }
 
-    pub fn observe_routing_duration(&self, seconds: f64) {
+    pub fn observe_routing_duration(&self, elapsed: Duration) {
+        let us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         self.routing_duration_count.fetch_add(1, Ordering::Relaxed);
-        self.routing_duration_sum_us.fetch_add((seconds * 1_000_000.0) as u64, Ordering::Relaxed);
+        self.routing_duration_sum_us.fetch_add(us, Ordering::Relaxed);
     }
 
     pub fn record_hmac_failure(&self, reason: HmacFailureReason) {
-        self.hmac_failures[reason as usize].fetch_add(1, Ordering::Relaxed);
+        bump(&self.hmac_failures, reason as usize);
     }
 
     /// Count one locally decided reject by reason, for
@@ -429,16 +431,11 @@ impl ProxyMetrics {
         self.calls.load(Ordering::Relaxed)
     }
     pub fn named_send_count(&self, outcome: &str) -> u64 {
-        outcome::ALL
-            .iter()
-            .position(|o| *o == outcome)
-            .map_or(0, |i| self.named_sends[i].load(Ordering::Relaxed))
+        outcome::ALL.iter().position(|o| *o == outcome).map_or(0, |i| read(&self.named_sends, i))
     }
     pub fn resolver_refresh_count(&self, outcome: &str) -> u64 {
-        refresh_outcome::ALL
-            .iter()
-            .position(|o| *o == outcome)
-            .map_or(0, |i| self.resolver_refresh[i].load(Ordering::Relaxed))
+        let at = refresh_outcome::ALL.iter().position(|o| *o == outcome);
+        at.map_or(0, |i| read(&self.resolver_refresh, i))
     }
     pub fn resolver_cache_size(&self) -> u64 {
         self.resolver_cache_size.load(Ordering::Relaxed)
@@ -462,15 +459,10 @@ impl ProxyMetrics {
         use catalogue as c;
         let mut s = String::new();
         let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        c::MESSAGES.render(&mut s, |series| {
-            let (d, r) =
-                (series.at(0) / MessageResult::ALL.len(), series.at(0) % MessageResult::ALL.len());
-            load(&self.messages[d][r])
-        });
-        c::FACE_MESSAGES.render(&mut s, |series| {
-            let (f, d) = (series.at(0) / Direction::ALL.len(), series.at(0) % Direction::ALL.len());
-            load(&self.face_messages[f][d])
-        });
+        // A series of a two-label family is its row-major cell.
+        c::MESSAGES.render(&mut s, |series| read(self.messages.as_flattened(), series.at(0)));
+        c::FACE_MESSAGES
+            .render(&mut s, |series| read(self.face_messages.as_flattened(), series.at(0)));
         self.external_untrusted.render(&mut s);
         let native = Method::NATIVE_TOKENS
             .iter()
@@ -480,9 +472,9 @@ impl ProxyMetrics {
         c::REQUESTS_OVERFLOW.render_value(&mut s, self.request_extensions.overflowed());
         self.responses.render(&mut s);
         c::CALLS.render_value(&mut s, load(&self.calls));
-        c::ROUTING_DECISION.render(&mut s, |series| load(&self.routing_decisions[series.at(0)]));
+        c::ROUTING_DECISION.render(&mut s, |series| read(&self.routing_decisions, series.at(0)));
         self.rejects.render(&mut s);
-        c::HMAC_FAILURES.render(&mut s, |series| load(&self.hmac_failures[series.at(0)]));
+        c::HMAC_FAILURES.render(&mut s, |series| read(&self.hmac_failures, series.at(0)));
         self.cancel_lookups.render(&mut s);
         self.no_target_dropped.render(&mut s);
         // A histogram without finite buckets: the count and the sum.
@@ -495,11 +487,12 @@ impl ProxyMetrics {
         });
         c::RECORD_ROUTE_INSERTED.render_value(&mut s, load(&self.record_route_inserted));
         c::PENDING_INVITE_LRU_SIZE.render_value(&mut s, load(&self.pending_invite_lru_size));
-        c::NAMED_SENDS.render(&mut s, |series| load(&self.named_sends[series.at(0)]));
-        c::RESOLVER_REFRESH.render(&mut s, |series| load(&self.resolver_refresh[series.at(0)]));
+        c::NAMED_SENDS.render(&mut s, |series| read(&self.named_sends, series.at(0)));
+        c::RESOLVER_REFRESH.render(&mut s, |series| read(&self.resolver_refresh, series.at(0)));
         c::RESOLVER_CACHE_SIZE.render_value(&mut s, load(&self.resolver_cache_size));
         c::SEND_FAILURES.render_value(&mut s, load(&self.send_failures));
         c::PARSE_PANICS.render_value(&mut s, load(&self.parse_panics));
+        c::POISONED_LOCK_RECOVERIES.render_value(&mut s, crate::poison::poisoned_lock_recoveries());
         let udp = self.udp_totals();
         c::UDP_QUEUE_DEPTH.render_value(&mut s, udp.queue_depth);
         c::UDP_QUEUE_MAX.render_value(&mut s, udp.queue_max);
@@ -546,7 +539,8 @@ pub fn self_gate_text(gate: Option<&crate::self_gate::ProxySelfGateMetrics>) -> 
     c::SELF_GATE_EXTERNAL_INVITES_ADMITTED
         .render_value(&mut s, count(|m| m.external_admitted_total));
     let rejected = [count(|m| m.rejected_intake_age_total), count(|m| m.rejected_cps_total)];
-    c::SELF_GATE_EXTERNAL_INVITES_REJECTED.render(&mut s, |series| rejected[series.at(0)]);
+    c::SELF_GATE_EXTERNAL_INVITES_REJECTED
+        .render(&mut s, |series| rejected.get(series.at(0)).copied().unwrap_or(0));
     c::SELF_GATE_EMERGENCY_BYPASSED.render_value(&mut s, count(|m| m.emergency_bypassed_total));
     c::SELF_GATE_INTERNAL_BYPASSED.render_value(&mut s, count(|m| m.internal_bypassed_total));
     s

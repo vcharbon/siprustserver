@@ -32,16 +32,17 @@ const FACE_LABELS: [&str; 4] = ["int:inbound", "int:outbound", "ext:inbound", "e
 /// gets its own series, under the family's cap.
 pub const METHOD: Dim = Dim::new("method", &Method::NATIVE_TOKENS);
 
+#[expect(clippy::indexing_slicing, reason = "a const: an index past its table fails the build")]
 const ANSWERED_METHOD_VALUES: [&str; 13] = {
     let mut out = [""; 13];
-    let mut i = 0;
+    let mut rest: &[&str] = &Method::NATIVE_TOKENS;
     let mut j = 0;
-    while i < Method::NATIVE_TOKENS.len() {
-        if !matches!(Method::NATIVE_TOKENS[i].as_bytes(), b"ACK") {
-            out[j] = Method::NATIVE_TOKENS[i];
+    while let [first, tail @ ..] = rest {
+        if !matches!(first.as_bytes(), b"ACK") {
+            out[j] = *first;
             j += 1;
         }
-        i += 1;
+        rest = tail;
     }
     out
 };
@@ -249,6 +250,12 @@ pub const PARSE_PANICS: Family = Family::counter(
     "Inbound datagrams the SIP parser panicked on and the recv shard dropped; each one is a parser defect, expected 0.",
 );
 
+pub const POISONED_LOCK_RECOVERIES: Family = Family::counter(
+    "sip_proxy_poisoned_lock_recoveries_total",
+    Labels::None,
+    "Proxy locks a panic poisoned, taken as they stood and cleared (process-wide); each one is a defect, expected 0.",
+);
+
 pub const UDP_QUEUE_DEPTH: Family = Family::gauge(
     "sip_proxy_udp_queue_depth",
     Labels::None,
@@ -448,6 +455,7 @@ pub const PROXY: &[Family] = &[
     RESOLVER_CACHE_SIZE,
     SEND_FAILURES,
     PARSE_PANICS,
+    POISONED_LOCK_RECOVERIES,
     UDP_QUEUE_DEPTH,
     UDP_QUEUE_MAX,
     UDP_ENQUEUED,

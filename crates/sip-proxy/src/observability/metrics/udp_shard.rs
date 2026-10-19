@@ -52,13 +52,13 @@ impl super::ProxyMetrics {
     /// lifetime counters (monotonic, endpoint-owned — stored, not accumulated).
     /// Single-socket deployments are just `shard = 0`.
     pub fn set_udp_endpoint_stats(&self, shard: usize, stats: UdpShardStats) {
-        self.udp_shards.lock().unwrap().insert(shard, stats);
+        crate::poison::locked(&self.udp_shards, "udp shard stats").insert(shard, stats);
     }
 
     /// Cross-shard aggregate.
     pub(super) fn udp_totals(&self) -> UdpShardStats {
         let mut t = UdpShardStats::default();
-        for v in self.udp_shards.lock().unwrap().values() {
+        for v in crate::poison::locked(&self.udp_shards, "udp shard stats").values() {
             t += *v;
         }
         t

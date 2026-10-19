@@ -37,6 +37,7 @@ pub mod health;
 pub mod liveness;
 pub mod load_observer;
 pub mod observability;
+mod poison;
 pub mod refusals;
 pub mod registry;
 pub mod resolver;

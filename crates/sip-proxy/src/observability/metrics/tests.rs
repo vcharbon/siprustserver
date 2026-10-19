@@ -94,7 +94,7 @@ fn counters_move_and_render() {
     m.record_message(Direction::Inbound, MessageResult::Forwarded);
     m.record_message(Direction::Outbound, MessageResult::Forwarded);
     m.record_routing_decision(RoutingDecisionKind::SelectNew);
-    m.observe_routing_duration(0.0005);
+    m.observe_routing_duration(std::time::Duration::from_micros(500));
     m.record_route_inserted();
     assert_eq!(m.messages_total(), 2);
     assert_eq!(m.routing_decisions_total(), 1);

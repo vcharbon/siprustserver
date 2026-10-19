@@ -26,6 +26,8 @@ use std::sync::{Arc, RwLock};
 
 use observe::{CallIdentity, CallSpan, SampleAdmission};
 
+use crate::poison::{read, write};
+
 /// How long a root span survives with no datagram naming its call.
 pub const SPAN_IDLE_TTL_MS: i64 = 900_000;
 
@@ -127,7 +129,7 @@ impl ProxyTraces {
 
     /// Root spans currently open.
     pub fn active(&self) -> usize {
-        self.spans.read().expect("proxy trace registry lock").len()
+        read(&self.spans, "proxy trace registry").len()
     }
 
     /// Is any call sampled? One relaxed load — the whole cost of the trace tier
@@ -169,7 +171,7 @@ impl ProxyTraces {
         // Stale entries are reclaimed BEFORE the draw, so a span whose teardown
         // this hop never saw frees its cap slot for the call now asking for one.
         self.sweep_if_due(now_ms);
-        let mut spans = self.spans.write().expect("proxy trace registry lock");
+        let mut spans = write(&self.spans, "proxy trace registry");
         if let Some(open) = spans.get(call_id) {
             // The same leg attempting the setup again: the span follows the new
             // transaction. A different leg's dialog-creating INVITE under this
@@ -212,7 +214,7 @@ impl ProxyTraces {
         if !self.any_sampled() {
             return false;
         }
-        let spans = self.spans.read().expect("proxy trace registry lock");
+        let spans = read(&self.spans, "proxy trace registry");
         let Some(entry) = spans.get(call_id) else {
             return false;
         };
@@ -238,7 +240,7 @@ impl ProxyTraces {
         if !self.any_sampled() {
             return;
         }
-        let spans = self.spans.read().expect("proxy trace registry lock");
+        let spans = read(&self.spans, "proxy trace registry");
         let Some(entry) = spans.get(call_id) else {
             return;
         };
@@ -260,7 +262,7 @@ impl ProxyTraces {
             return false;
         }
         {
-            let spans = self.spans.read().expect("proxy trace registry lock");
+            let spans = read(&self.spans, "proxy trace registry");
             match spans.get(call_id) {
                 Some(entry) if entry.closes_on_ack.load(Ordering::Relaxed) => {}
                 _ => return false,
@@ -276,7 +278,7 @@ impl ProxyTraces {
         if !self.any_sampled() {
             return;
         }
-        let mut spans = self.spans.write().expect("proxy trace registry lock");
+        let mut spans = write(&self.spans, "proxy trace registry");
         spans.remove(call_id);
         self.any.store(!spans.is_empty(), Ordering::Relaxed);
     }
@@ -294,7 +296,7 @@ impl ProxyTraces {
         }
         self.next_sweep_at_ms
             .store(now_ms + (self.idle_ttl_ms / SWEEP_DIVISOR).max(1), Ordering::Relaxed);
-        let mut spans = self.spans.write().expect("proxy trace registry lock");
+        let mut spans = write(&self.spans, "proxy trace registry");
         spans.retain(|_, e| e.expires_at_ms.load(Ordering::Relaxed) > now_ms);
         self.any.store(!spans.is_empty(), Ordering::Relaxed);
     }

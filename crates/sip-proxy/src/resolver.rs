@@ -87,6 +87,7 @@ use sip_net::UdpEndpoint;
 
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
+use crate::poison::locked;
 
 use cache::{CacheLookup, NameCache};
 #[cfg(test)]
@@ -185,7 +186,7 @@ impl Inner {
     /// publishes its outcome and frees its slot in one step under this lock
     /// ([`release`](Self::release)), so the packet sees one or the other.
     fn join(&self, key: &str, bytes: Option<&[u8]>) -> Join {
-        let mut in_flight = self.in_flight.lock().unwrap();
+        let mut in_flight = locked(&self.in_flight, "resolver in-flight lookups");
         if bytes.is_some() && !in_flight.contains_key(key) {
             match self.cache.lookup(key) {
                 CacheLookup::Hit(dst) => return Join::Cached(dst),
@@ -216,7 +217,9 @@ impl Inner {
     /// each counted `lookup_timed_out`; the slot stays taken until the lookup
     /// returns ([`release`](Self::release)).
     fn time_out_waiting(&self, key: &str) {
-        let waiting = self.in_flight.lock().unwrap().get_mut(key).and_then(Option::take);
+        let waiting = locked(&self.in_flight, "resolver in-flight lookups")
+            .get_mut(key)
+            .and_then(Option::take);
         for _ in waiting.unwrap_or_default() {
             self.metrics.record_named_send(outcome::LOOKUP_TIMED_OUT);
         }
@@ -237,7 +240,7 @@ impl Inner {
         let key = target.to_string();
         loop {
             let waiting = {
-                let mut in_flight = self.in_flight.lock().unwrap();
+                let mut in_flight = locked(&self.in_flight, "resolver in-flight lookups");
                 let waiting = in_flight
                     .get_mut(&key)
                     .and_then(|w| w.as_mut().map(std::mem::take))
@@ -314,8 +317,8 @@ impl Inner {
     fn arm_refresh(self: &Arc<Self>, target: &ProxyAddr) {
         let key = target.to_string();
         {
-            let pinned = self.pinned.lock().unwrap().contains(&key);
-            let mut armed = self.refresh_armed.lock().unwrap();
+            let pinned = locked(&self.pinned, "resolver pins").contains(&key);
+            let mut armed = locked(&self.refresh_armed, "resolver refreshes");
             if !pinned && armed.len() >= self.cache.cfg.max_entries {
                 return; // flood guard: names beyond the cache cap get no proactive refresh
             }
@@ -327,8 +330,8 @@ impl Inner {
         let target = target.clone();
         observe::spawn_keeping_node(async move {
             tokio::time::sleep(Duration::from_millis(inner.cache.cfg.refresh_after_ms())).await;
-            inner.refresh_armed.lock().unwrap().remove(&key);
-            let pinned = inner.pinned.lock().unwrap().contains(&key);
+            locked(&inner.refresh_armed, "resolver refreshes").remove(&key);
+            let pinned = locked(&inner.pinned, "resolver pins").contains(&key);
             let used = inner.cache.take_used(&key).unwrap_or(false);
             if !pinned && !used {
                 // One-shot name: stop refreshing; the entry (if still there)
@@ -426,7 +429,7 @@ impl NamedForwarder {
     /// `sip_proxy_resolver_refresh_total{outcome=prewarmed|prewarm_failed}`.
     pub fn prewarm(&self, targets: Vec<ProxyAddr>) {
         for target in targets {
-            self.0.pinned.lock().unwrap().insert(target.to_string());
+            locked(&self.0.pinned, "resolver pins").insert(target.to_string());
             let inner = self.0.clone();
             observe::spawn_keeping_node(async move {
                 inner

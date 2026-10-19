@@ -117,8 +117,8 @@ impl ProxyCore {
             self.traces.close_on_ack(call_id);
         }
 
-        let duration = (self.now_ms().saturating_sub(start_ms)) as f64 / 1000.0;
-        self.metrics.observe_routing_duration(duration);
+        let elapsed_ms = self.now_ms().saturating_sub(start_ms);
+        self.metrics.observe_routing_duration(std::time::Duration::from_millis(elapsed_ms));
         self.metrics.record_routing_decision(outcome.decision);
     }
 

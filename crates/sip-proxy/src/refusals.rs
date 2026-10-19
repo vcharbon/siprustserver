@@ -190,7 +190,7 @@ impl Refusals {
 
     fn lock(&self, key: u64) -> MutexGuard<'_, Memo> {
         let stripe = &self.stripes[(key % STRIPES as u64) as usize];
-        stripe.lock().unwrap_or_else(|p| p.into_inner())
+        crate::poison::locked(stripe, "refusals memo")
     }
 
     fn count(&self, added: usize, forgotten: usize) {
