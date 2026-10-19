@@ -17,9 +17,6 @@ workspace = true
 # harnesses and the reference runner route with. No production binary turns it
 # on (ADR-0051 §1).
 testkit = []
-# The notes' differential (`turn_notes_shadow`): every call traced, each
-# turn's notes compared with the direct emission path's record.
-turn-notes-shadow = []
 
 [dependencies]
 tokio = { workspace = true }

@@ -147,8 +147,6 @@ pub(super) fn rule_chain_turn(
         call = call::helpers::record_cancelled_invite(call, &res.source_leg_id);
     }
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
-        ctx.metrics.record_repeat_give_up(obligation.kind());
-        crate::turn_notes_shadow::metric("repeat_give_up", obligation.kind());
         exec.turn.notes.repeat_give_up(obligation.kind());
         exec.give_up(&mut call, &mut ladder_fx, obligation);
     }
@@ -187,10 +185,6 @@ pub(super) fn rule_chain_turn(
     // (an earlier call under this call_ref) releases that key when owed.
     let fx = &mut ladder_fx;
     if let Some(report) = crate::limiter::report::apply_to_call(&mut call, event, rules_read, fx) {
-        if crate::trace::sampled(&call) {
-            let what = format!("{:?} -> {:?}", report.entries, report.outcome);
-            crate::trace::emit::limiter(&call, now_ms, "admit", &what);
-        }
         let what = || format!("admit: {:?} -> {:?}", report.entries, report.outcome);
         exec.turn.notes.trace(&call, "limiter", now_ms, what);
     }

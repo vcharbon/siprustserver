@@ -63,7 +63,6 @@ pub(crate) mod timer_arm;
 pub mod timers;
 pub mod trace;
 pub mod turn_notes;
-pub mod turn_notes_shadow;
 pub mod turn_scope;
 pub mod wire_faults;
 

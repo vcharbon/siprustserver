@@ -241,11 +241,8 @@ pub async fn handle_initial_invite(
             .await;
             let mut exec = ActionExecutor { config, turn, now_ms, wire_faults };
             let setup_event = setup_event(&result.call, &a_invite);
-            crate::turn_notes_shadow::begin(&exec.turn.notes);
             let from_a = call::Direction::FromA;
-            let seeded = seed_services(result, services, &mut exec, &setup_event, "a", from_a);
-            crate::turn_notes_shadow::check(&exec.turn.notes);
-            seeded
+            seed_services(result, services, &mut exec, &setup_event, "a", from_a)
         }
         Ok(NewCallResponse::Reject(reject)) => apply_reject(
             call,

@@ -1,17 +1,12 @@
-// Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
 //! A cursor move a lifecycle handler makes reaches the trace (ADR-0026).
 //!
 //! A service hearing a lifecycle event the engine delivers after a turn's
 //! claim may move its own machine's cursor. That move is a state-machine
-//! transition like a claim's, and a traced call records it as one: a
-//! `rule.transition` naming the handler, its machine and the edge, beside the
-//! `rule.lifecycle` delivery itself.
-//!
-//! The trace registry is process-wide, so this file holds exactly ONE test and
-//! installs its own gate.
+//! transition like a claim's, and a traced call's turn notes it as one
+//! (ADR-0052 §4): a `rule.transition` naming the handler, its machine and the
+//! edge, beside the `rule.lifecycle` delivery itself.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
@@ -20,11 +15,9 @@ use b2bua::rules::{
     execute_rules, ActionExecutor, Match, RuleAction, RuleCall, RuleContext, RuleDefinition,
     RuleHandleResult, SERVICE_LAYER,
 };
-use b2bua::trace::{install_process_traces, traces, CallTraces};
 use b2bua::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 use call::{Direction, LegState, MachineId, StateLabel};
-use observe::{activation_bucket, RateDraw, SampleAdmission};
 use sip_ids::TurnIds;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -86,7 +79,7 @@ fn ending_claimer() -> RuleDefinition {
     )
 }
 
-/// A sampled call with an open root span and the listening machine at S0.
+/// A sampled call with the listening machine at S0.
 fn traced_call() -> call::Call {
     let invite = match CustomParser::new().parse(INVITE).expect("fixture INVITE parses") {
         SipMessage::Request(r) => r,
@@ -97,21 +90,12 @@ fn traced_call() -> call::Call {
         build_initial_call(&invite, src, &B2buaConfig::default(), &mut TurnIds::fixed(1), 0);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Early);
     call.sm_cursors.insert(MachineId::new(MACHINE), StateLabel::new("S0"));
-    traces()
-        .activate(&call.call_ref, b2bua::trace::registry::call_identity(&call), Some(1.0), 0)
-        .expect("the gate samples every call");
     call.sampled = Some(true);
     call
 }
 
 #[test]
 fn a_lifecycle_handlers_cursor_move_is_on_the_trace() {
-    install_process_traces(Arc::new(CallTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(5), activation_bucket(0)),
-        false,
-    )));
-    let (_log_guard, log) = observe_testkit::test_buffer();
-
     let call = traced_call();
     let event = CallEvent::InternalEvent {
         call_ref: call.call_ref.clone(),
@@ -150,18 +134,16 @@ fn a_lifecycle_handlers_cursor_move_is_on_the_trace() {
         "the listener moved its cursor",
     );
 
+    let facts = exec.turn.notes.trace_facts();
+    let of = |kind: &str| facts.iter().filter(|f| f.kind == kind).collect::<Vec<_>>();
     assert!(
-        log.matching("kind=rule.lifecycle")
+        of("rule.lifecycle").iter().any(|f| f.detail == "test-leg-end-listener leg-ended"),
+        "the call is traced: the delivery itself is on the trace: {facts:?}",
+    );
+    assert!(
+        of("rule.transition")
             .iter()
-            .any(|e| e.contains("test-leg-end-listener leg-ended")),
-        "the call is traced: the delivery itself is on the trace",
+            .any(|f| f.detail == "test-leg-end-listener listening-machine: S0 -> S1"),
+        "the listener's move is a traced transition: {facts:?}",
     );
-    let transitions = log.matching("kind=rule.transition");
-    assert!(
-        transitions.iter().any(|e| e.contains("test-leg-end-listener listening-machine: S0 -> S1")),
-        "the listener's move is a traced transition: {:?}",
-        transitions.iter().map(|e| e.line()).collect::<Vec<_>>(),
-    );
-
-    traces().close(&call.call_ref);
 }

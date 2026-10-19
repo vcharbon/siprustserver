@@ -6,6 +6,7 @@
 //! `cargo nextest run --workspace -E 'package(=b2bua) & binary(it)' <module>::`.
 
 mod ingress_brake;
+mod lifecycle_transition_trace;
 mod lost_round_rules;
 mod materialised_admit_numbers;
 mod media_leg_advertisement;

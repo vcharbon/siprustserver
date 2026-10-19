@@ -13,12 +13,14 @@
 //! Run with output:
 //! `cargo test -p b2bua --test trace_alloc_budget -- --nocapture`.
 
+use std::cell::RefCell;
 use std::net::SocketAddr;
 
 use alloc_counter::{measure, CountingAlloc};
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::trace;
+use b2bua::turn_notes::TurnNotes;
 use call::{Call, CallModelState, TimerEntry, TimerKey, TimerType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -85,36 +87,18 @@ fn an_unsampled_call_allocates_nothing_for_tracing() {
     // calls it. `black_box` on the call keeps the optimizer from proving the
     // flag constant and deleting the whole site.
     let timer = TimerEntry { key: TimerKey::call(TimerType::Keepalive), generation: 1, fire_at: 0 };
-    let sites: [Site<'_>; 13] = [
+    let notes = RefCell::new(TurnNotes::default());
+    let sites: [Site<'_>; 9] = [
         ("sampled", Box::new(|| assert!(!trace::sampled(std::hint::black_box(&call))))),
         ("sip.in", Box::new(|| trace::emit::sip_in(std::hint::black_box(&call), 0, peer, WIRE))),
         ("sip.out", Box::new(|| trace::emit::sip_out(std::hint::black_box(&call), 0, peer, WIRE))),
         (
-            "rule.fired",
-            Box::new(|| trace::emit::rule_fired(std::hint::black_box(&call), 0, "confirm-dialog")),
-        ),
-        (
-            "rule.transition",
+            "turn trace fact",
             Box::new(|| {
-                trace::emit::rule_transition(
-                    std::hint::black_box(&call),
-                    0,
-                    "confirm-dialog",
-                    "transfer",
-                    "idle",
-                    "ringing",
-                )
-            }),
-        ),
-        (
-            "call.transition",
-            Box::new(|| {
-                trace::emit::context_transition(
-                    std::hint::black_box(&call),
-                    0,
-                    CallModelState::Active,
-                    CallModelState::Terminating,
-                )
+                let (from, to) = (CallModelState::Active, CallModelState::Terminating);
+                notes.borrow_mut().trace(std::hint::black_box(&call), "call.transition", 0, || {
+                    format!("{from:?} -> {to:?}")
+                })
             }),
         ),
         (
@@ -125,16 +109,6 @@ fn an_unsampled_call_allocates_nothing_for_tracing() {
         (
             "timer.cancel",
             Box::new(|| trace::emit::timer_cancel(std::hint::black_box(&call), 0, &timer.key)),
-        ),
-        (
-            "timer.fire",
-            Box::new(|| trace::emit::timer_fire(std::hint::black_box(&call), 0, &timer.key, 1)),
-        ),
-        (
-            "timer.drop",
-            Box::new(|| {
-                trace::emit::timer_drop(std::hint::black_box(&call), 0, &timer.key, 1, "stale")
-            }),
         ),
         (
             "http round trip",

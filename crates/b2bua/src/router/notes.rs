@@ -1,11 +1,20 @@
 //! A turn's notes drained (ADR-0052 §4): as each core call returns, before
-//! the turn records or sends anything else.
+//! the turn records or sends anything else, its trace facts reach the call's
+//! trace and its counts the metrics, in the order the turn met them.
 
 use super::RouterCtx;
 use crate::turn_scope::TurnScope;
 
-/// Drain what `turn` has reported on `call_ref`. The direct emission path
-/// has already traced and counted all of it, so the notes go.
+/// Drain what `turn` has reported on `call_ref`.
 pub(super) fn drain(ctx: &RouterCtx, call_ref: &str, turn: &mut TurnScope) {
-    let _ = (ctx, call_ref, turn.notes.take());
+    let notes = turn.notes.take();
+    for fact in notes.trace_facts() {
+        crate::trace::emit::turn_fact(call_ref, fact);
+    }
+    for kind in notes.repeat_give_ups() {
+        ctx.metrics.record_repeat_give_up(kind);
+    }
+    for _ in 0..notes.message_caps() {
+        ctx.metrics.bump_message_cap_terminated();
+    }
 }

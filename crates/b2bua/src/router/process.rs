@@ -141,9 +141,7 @@ pub(super) async fn process(
         // A timer fire reaches the call only while its ledger holds the fired
         // instance, which leaves the ledger as it is delivered.
         let mut call = call;
-        crate::turn_notes_shadow::begin(&turn.notes);
         let screened = super::timer_screen::screen(&mut call, &event, now_ms, &mut turn.notes);
-        crate::turn_notes_shadow::check(&turn.notes);
         super::notes::drain(ctx, &call_ref, &mut turn);
         if screened.is_err() {
             return;
@@ -207,11 +205,7 @@ pub(super) async fn process(
             // A relay no node can finish is gone before the rules read the
             // call, so its request is relayed afresh.
             let call = drop_superseded_relay(call, &event);
-            crate::turn_notes_shadow::begin(&turn.notes);
-            let ruled =
-                rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms, &mut turn);
-            crate::turn_notes_shadow::check(&turn.notes);
-            ruled
+            rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms, &mut turn)
         }
     };
     super::notes::drain(ctx, &call_ref, &mut turn);

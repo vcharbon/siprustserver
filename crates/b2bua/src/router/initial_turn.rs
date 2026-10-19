@@ -225,10 +225,7 @@ pub(super) async fn initial_invite_turn(
     );
     let mut exec =
         ActionExecutor { config: &ctx.config, turn, now_ms, wire_faults: &ctx.wire_faults };
-    crate::turn_notes_shadow::begin(&exec.turn.notes);
-    let closed = close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec);
-    crate::turn_notes_shadow::check(&exec.turn.notes);
-    Turn::Result(Box::new(closed))
+    Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)))
 }
 
 /// [`refused_unavailable`] from the pre-handler call ([`discarded_turn`]), so

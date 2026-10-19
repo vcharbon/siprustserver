@@ -11,7 +11,7 @@
 
 use std::net::SocketAddr;
 
-use call::{Call, CallModelState, TimerEntry, TimerKey};
+use call::{Call, TimerEntry, TimerKey};
 use observe::TraceEvent;
 
 use super::registry::{traces, RoundTripSide};
@@ -19,7 +19,7 @@ use super::registry::{traces, RoundTripSide};
 /// Whether this call is traced. The ONE guard every emission site uses.
 #[inline]
 pub fn sampled(call: &Call) -> bool {
-    cfg!(feature = "turn-notes-shadow") || call.sampled == Some(true)
+    call.sampled == Some(true)
 }
 
 /// A SIP message received for the call, with its raw wire bytes.
@@ -48,44 +48,9 @@ pub fn sip_out_note(call: &Call, at_ms: i64, detail: &str) {
     record(call, "sip.out", at_ms, detail, b"");
 }
 
-/// The rule that handled an event.
-pub fn rule_fired(call: &Call, at_ms: i64, rule_id: &str) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "rule.fired", at_ms, rule_id, b"");
-}
-
-/// A service rule that handled a lifecycle event the engine delivered after
-/// the turn's claim (`event`: the event's kind).
-pub fn lifecycle_delivered(call: &Call, at_ms: i64, rule_id: &str, event: &str) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "rule.lifecycle", at_ms, &format!("{rule_id} {event}"), b"");
-}
-
-/// A state-machine cursor move a rule caused (ADR-0016 X1).
-pub fn rule_transition(
-    call: &Call,
-    at_ms: i64,
-    rule_id: &str,
-    machine: &str,
-    from: &str,
-    to: &str,
-) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "rule.transition", at_ms, &format!("{rule_id} {machine}: {from} -> {to}"), b"");
-}
-
-/// The call's own lifecycle transition (Active → Terminating → Terminated).
-pub fn context_transition(call: &Call, at_ms: i64, from: CallModelState, to: CallModelState) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "call.transition", at_ms, &format!("{from:?} -> {to:?}"), b"");
+/// One fact a turn's notes carried (ADR-0052 §4), on its call's trace.
+pub fn turn_fact(call_ref: &str, fact: &crate::turn_notes::TraceFact) {
+    traces().record(call_ref, TraceEvent::new(fact.kind, fact.at_ms, &fact.detail));
 }
 
 /// A limiter admit / refresh / release outcome.
@@ -111,22 +76,6 @@ pub fn timer_cancel(call: &Call, at_ms: i64, key: &TimerKey) {
         return;
     }
     record(call, "timer.cancel", at_ms, &format!("{key:?}"), b"");
-}
-
-/// A timer's fire delivered to the call: the ledger held its instance.
-pub fn timer_fire(call: &Call, at_ms: i64, key: &TimerKey, generation: u64) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "timer.fire", at_ms, &format!("{key:?} gen {generation}"), b"");
-}
-
-/// A timer's fire dropped before any rule read it, and why.
-pub fn timer_drop(call: &Call, at_ms: i64, key: &TimerKey, generation: u64, reason: &str) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "timer.drop", at_ms, &format!("{key:?} gen {generation}: {reason}"), b"");
 }
 
 /// One outbound HTTP round trip as a child span carrying both bodies.
@@ -191,6 +140,5 @@ fn record(call: &Call, kind: &'static str, at_ms: i64, detail: &str, body: &[u8]
     if !sampled(call) {
         return;
     }
-    crate::turn_notes_shadow::trace(kind, at_ms, detail);
     traces().record(&call.call_ref, TraceEvent::new(kind, at_ms, detail).with_body(body));
 }

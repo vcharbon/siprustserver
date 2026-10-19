@@ -52,9 +52,6 @@ pub(crate) fn screen(
     }
     #[expect(clippy::disallowed_methods, reason = "at is the position just found")]
     call.timers.remove(at);
-    if crate::trace::sampled(call) {
-        crate::trace::emit::timer_fire(call, now_ms, key, *generation);
-    }
     notes.trace(call, "timer.fire", now_ms, || format!("{key:?} gen {generation}"));
     Ok(())
 }
@@ -67,9 +64,6 @@ fn trace_drop(
     notes: &mut TurnNotes,
 ) {
     let CallEvent::Timer { key, generation, .. } = event else { return };
-    if crate::trace::sampled(call) {
-        crate::trace::emit::timer_drop(call, now_ms, key, *generation, dropped.reason());
-    }
     let reason = dropped.reason();
     notes.trace(call, "timer.drop", now_ms, || format!("{key:?} gen {generation}: {reason}"));
     tracing::debug!(

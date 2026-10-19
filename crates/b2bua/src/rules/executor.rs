@@ -196,11 +196,9 @@ fn record_transitions(
     if !crate::trace::sampled(after) {
         return;
     }
-    crate::trace::emit::rule_fired(after, now_ms, rule.id);
     notes.trace(after, "rule.fired", now_ms, || rule.id.to_string());
     record_cursor_moves(rule, before, after, now_ms, notes);
     if before.state != after.state {
-        crate::trace::emit::context_transition(after, now_ms, before.state, after.state);
         let (from, to) = (before.state, after.state);
         notes.trace(after, "call.transition", now_ms, || format!("{from:?} -> {to:?}"));
     }
@@ -220,7 +218,6 @@ pub(super) fn record_cursor_moves(
         return;
     }
     let mut moved = |machine: &call::MachineId, from: &str, to: &str| {
-        crate::trace::emit::rule_transition(after, now_ms, rule.id, machine.as_str(), from, to);
         notes.trace(after, "rule.transition", now_ms, || {
             format!("{} {}: {from} -> {to}", rule.id, machine.as_str())
         });
