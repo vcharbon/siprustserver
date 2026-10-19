@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::B2buaConfig;
+use sip_txn::IdGen;
 
 /// The worker always bounds the deferred backlog, at one and two event
 /// queues.

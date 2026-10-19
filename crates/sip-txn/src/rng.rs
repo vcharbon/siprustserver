@@ -39,20 +39,22 @@ impl IdGen {
 
     /// Production generator, keyed with 256 bits from the OS RNG, so every
     /// process — two pods behind one load-balancer address included — draws
-    /// its own unpredictable stream.
-    ///
-    /// # Panics
-    ///
-    /// When the OS RNG is unavailable: identifiers would be guessable.
-    pub fn from_entropy() -> Self {
+    /// its own unpredictable stream. [`EntropyUnavailable`] when the OS RNG
+    /// does not answer: identifiers would be guessable.
+    pub fn from_entropy() -> Result<Self, EntropyUnavailable> {
         let mut key = [0u8; 32];
-        getrandom::fill(&mut key).expect("the OS RNG keys the SIP identifier generator");
-        Self::keyed(&key)
+        getrandom::fill(&mut key).map_err(EntropyUnavailable)?;
+        Ok(Self::keyed(&key))
     }
 
-    fn keyed(key: &[u8]) -> Self {
-        let prf = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
-        Self { prf, counter: AtomicU64::new(0) }
+    /// The generator under `key`, at most the hash's 64-byte block: a
+    /// shorter key is zero-padded to it, as HMAC keys it (RFC 2104 §2).
+    fn keyed<const N: usize>(key: &[u8; N]) -> Self {
+        let mut block = hmac::digest::Key::<Hmac<Sha256>>::default();
+        for (slot, byte) in block.iter_mut().zip(key) {
+            *slot = *byte;
+        }
+        Self { prf: Hmac::<Sha256>::new(&block), counter: AtomicU64::new(0) }
     }
 
     /// The next PRF output: HMAC(key, counter), its first 8 bytes.
@@ -60,8 +62,11 @@ impl IdGen {
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         let mut mac = self.prf.clone();
         mac.update(&n.to_le_bytes());
-        let out = mac.finalize().into_bytes();
-        u64::from_le_bytes(out[..8].try_into().expect("a SHA-256 output holds 8 bytes"))
+        let mut first = [0u8; 8];
+        for (slot, byte) in first.iter_mut().zip(mac.finalize().into_bytes()) {
+            *slot = byte;
+        }
+        u64::from_le_bytes(first)
     }
 
     /// A uniform 64-bit draw, for a value picked at random (a `Retry-After`).
@@ -90,20 +95,29 @@ impl IdGen {
     }
 }
 
-impl Default for IdGen {
-    fn default() -> Self {
-        Self::from_entropy()
+/// The OS RNG did not answer, so no generator was keyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntropyUnavailable(getrandom::Error);
+
+impl std::fmt::Display for EntropyUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the OS RNG is unavailable to key the SIP identifier generator: {}", self.0)
     }
 }
 
+impl std::error::Error for EntropyUnavailable {}
+
+/// The last `len` (at most 16) base-36 digits of `v`.
 fn to_base36(mut v: u64, len: usize) -> String {
     const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut buf = [b'0'; 16];
     for slot in buf.iter_mut().rev() {
-        *slot = ALPHABET[(v % 36) as usize];
+        #[expect(clippy::indexing_slicing, reason = "a remainder of 36 indexes the 36 digits")]
+        let digit = ALPHABET[(v % 36) as usize];
+        *slot = digit;
         v /= 36;
     }
-    String::from_utf8_lossy(&buf[buf.len() - len..]).into_owned()
+    buf.iter().skip(buf.len().saturating_sub(len)).map(|&b| char::from(b)).collect()
 }
 
 #[cfg(test)]
@@ -188,7 +202,7 @@ mod tests {
     fn entropy_keys_are_neither_shared_nor_zero() {
         let zero = IdGen::seeded(0);
         let (zero_branch, zero_tag) = (zero.new_branch(), zero.new_tag());
-        let (a, b) = (IdGen::from_entropy(), IdGen::from_entropy());
+        let (a, b) = (IdGen::from_entropy().unwrap(), IdGen::from_entropy().unwrap());
         let (a_branch, a_tag) = (a.new_branch(), a.new_tag());
         let (b_branch, b_tag) = (b.new_branch(), b.new_tag());
         assert_ne!(a_branch, b_branch);

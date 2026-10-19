@@ -1,5 +1,7 @@
 //! [`ProxyCoreBuilder`] — the one place the defaults of a [`ProxyCore`] live.
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::sync::Arc;
 
 use sip_clock::Clock;
@@ -20,8 +22,14 @@ use crate::trace::ProxyTraces;
 
 use super::{ExternalFaceParts, ProxyCore, ProxyCoreParts};
 
+/// A generator seeded from the process's random hash state (`RandomState`,
+/// keyed by the standard library from the OS once per process).
+fn process_random_id_gen() -> IdGen {
+    IdGen::seeded(RandomState::new().hash_one("sip-proxy refusals"))
+}
+
 /// Convenience builder for the common all-defaults wiring (AlwaysAdmitGate +
-/// fresh metrics + entropy IdGen + system clock).
+/// fresh metrics + a process-random IdGen + system clock).
 pub struct ProxyCoreBuilder {
     advertised: ProxyAddr,
     external: Option<ExternalFaceParts>,
@@ -80,7 +88,9 @@ impl ProxyCoreBuilder {
         self.external = Some(parts);
         self
     }
-    /// The entropy the default [`Refusals`] draws its To-tag secret from.
+    /// The entropy the default [`Refusals`] draws its To-tag secret from; by
+    /// default a generator seeded from the process's random hash state. A
+    /// deployment passes its own [`refusals`](Self::refusals).
     pub fn id_gen(mut self, id_gen: Arc<IdGen>) -> Self {
         self.id_gen = Some(id_gen);
         self
@@ -159,7 +169,7 @@ impl ProxyCoreBuilder {
         let clock = self.clock.unwrap_or_else(Clock::system);
         let traces = self.traces.unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
         let refusals = self.refusals.unwrap_or_else(|| {
-            let id_gen = self.id_gen.unwrap_or_else(|| Arc::new(IdGen::from_entropy()));
+            let id_gen = self.id_gen.unwrap_or_else(|| Arc::new(process_random_id_gen()));
             Arc::new(Refusals::new(&id_gen, 0))
         });
         ProxyCore::new(ProxyCoreParts {

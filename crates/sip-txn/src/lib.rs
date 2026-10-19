@@ -24,6 +24,7 @@ pub mod event;
 pub mod layer;
 pub mod metrics;
 pub mod parse_guard;
+mod poison;
 pub mod pulse;
 pub mod rng;
 pub mod seed;
@@ -44,7 +45,9 @@ pub use event::{ClientTransactionHandle, EventQueueClass, TimeoutKind, Transacti
 pub use metrics::{RetransmitRow, TransactionMetrics};
 // Identifier generation seam (Via branch / To-tag), and the request-derived
 // identity of a stateless answer.
-pub use rng::IdGen;
+pub use rng::{EntropyUnavailable, IdGen};
 pub use stateless_tag::StatelessTagger;
 // Whether the owner loop is turning (`TransactionLayer::owner_pulse`).
 pub use pulse::LoopPulse;
+// This crate's locks a panic poisoned, recovered (ADR-0051 §7).
+pub use poison::poisoned_lock_recoveries;

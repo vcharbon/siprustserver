@@ -40,6 +40,11 @@ pub fn addr(s: &str) -> SocketAddr {
     s.parse().unwrap()
 }
 
+/// The layer's defaults, identifiers drawn deterministically.
+pub fn config() -> TransactionConfig {
+    TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
+}
+
 /// A bound transaction layer over the simulated fabric, plus a peer endpoint
 /// for injecting wire bytes at it.
 pub struct Stack {
@@ -56,11 +61,7 @@ impl Stack {
         Self::build_with_config(
             transit_ms,
             b2bua_queue,
-            TransactionConfig {
-                udp_queue_max,
-                id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
-                ..Default::default()
-            },
+            TransactionConfig { udp_queue_max, ..config() },
         )
         .await
     }

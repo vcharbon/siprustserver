@@ -293,7 +293,7 @@ async fn bounded_stack(normal: usize, emergency: usize) -> Stack {
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             deferred_bound: Some(DeferredBound { normal, emergency, class_of }),
             invite_refusals: Some(InviteRefusals::new(Arc::new(refuse_503))),
-            ..Default::default()
+            ..common::config()
         },
     )
     .await
@@ -544,7 +544,7 @@ async fn an_invite_transaction_past_its_backstop_takes_its_deferred_invite_with_
             udp_queue_max: UDP_QUEUE_MAX,
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: 1_000,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await;
@@ -726,7 +726,7 @@ async fn the_backstop_takes_only_the_unanswered_invite_on_a_shared_branch(
             udp_queue_max: UDP_QUEUE_MAX,
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: 1_000,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await;

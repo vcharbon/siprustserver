@@ -23,7 +23,7 @@ async fn stack() -> Stack {
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: BOUND_MS,
             invite_first_response_timeout_ms: 5_000,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await

@@ -233,7 +233,7 @@ impl InviteRefusals {
     }
 
     fn lock(&self) -> MutexGuard<'_, Memo> {
-        self.shared.memo.lock().unwrap_or_else(|p| p.into_inner())
+        crate::poison::locked(&self.shared.memo, "invite refusals memo")
     }
 
     fn mirror(&self, memo: &Memo) {

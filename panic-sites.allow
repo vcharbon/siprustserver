@@ -176,9 +176,5 @@ crates/sip-proxy/src/security/hmac.rs 1
 crates/sip-proxy/src/self_gate.rs 8
 crates/sip-proxy/src/strategies/load_balancer.rs 3
 crates/sip-proxy/src/trace/registry.rs 14
-crates/sip-txn/src/layer/handle.rs 2
-crates/sip-txn/src/layer/refusals.rs 1
-crates/sip-txn/src/pulse.rs 2
-crates/sip-txn/src/rng.rs 6
 crates/topology/src/k8s/watch_health.rs 3
 crates/topology/src/lib.rs 4

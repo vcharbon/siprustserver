@@ -9,7 +9,7 @@ use observe::{spawn_keeping_node, NodeScope};
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
-use sip_txn::{IdGen, TransactionLayer};
+use sip_txn::TransactionLayer;
 
 use crate::admission::Refusals;
 use crate::capacity::{CapacityGate, Occupancy};
@@ -147,7 +147,7 @@ impl B2buaCore {
                 config.retry_after_base_sec,
                 config.retry_after_jitter_sec,
                 sip_txn::REFUSED_MEMO_MAX,
-                &IdGen::from_entropy(),
+                &crate::admission::secret_apart_from(&id_gen),
             )
         });
         refusals.advertise(&config.minted_final_advertisement);

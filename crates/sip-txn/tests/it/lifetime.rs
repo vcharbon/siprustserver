@@ -22,7 +22,7 @@ async fn stack() -> Stack {
             udp_queue_max: 64,
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: BOUND_MS,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await

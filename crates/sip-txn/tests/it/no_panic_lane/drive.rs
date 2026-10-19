@@ -55,7 +55,6 @@ fn config() -> TransactionConfig {
     });
     TransactionConfig {
         udp_queue_max: 64,
-        id_gen: Arc::new(IdGen::seeded(0x1a5e)),
         deferred_bound: Some(DeferredBound {
             normal: 64,
             emergency: 128,
@@ -63,7 +62,7 @@ fn config() -> TransactionConfig {
         }),
         invite_refusals: Some(InviteRefusals::new(refusal)),
         stateless_options: true,
-        ..TransactionConfig::default()
+        ..TransactionConfig::new(Arc::new(IdGen::seeded(0x1a5e)))
     }
 }
 

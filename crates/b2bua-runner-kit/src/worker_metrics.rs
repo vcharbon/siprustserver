@@ -149,7 +149,7 @@ mod tests {
         let (txn, _events) = sip_txn::TransactionLayer::spawn(
             endpoint,
             parser,
-            sip_txn::TransactionConfig::default(),
+            sip_txn::TransactionConfig::new(Arc::new(sip_txn::IdGen::seeded(1))),
         );
         txn
     }

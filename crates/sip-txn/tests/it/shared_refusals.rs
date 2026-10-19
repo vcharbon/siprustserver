@@ -35,7 +35,7 @@ async fn sharing(refusals: &InviteRefusals) -> Stack {
         TransactionConfig {
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_refusals: Some(refusals.clone()),
-            ..Default::default()
+            ..common::config()
         },
     )
     .await

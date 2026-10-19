@@ -94,11 +94,11 @@ async fn rig() -> Rig {
     let net = SimulatedSignalingNetwork::new(1);
     let ep = net.bind_udp(BindUdpOpts::new(addr(LAYER), 64)).await.unwrap();
     let peer = net.bind_udp(BindUdpOpts::new(addr(PEER), 64)).await.unwrap();
-    let (txn, events) =
-        TransactionLayer::spawn(ep, Arc::new(CustomParser::new()), TransactionConfig::default());
+    let id_gen = Arc::new(IdGen::seeded(7));
+    let config = TransactionConfig::new(id_gen.clone());
+    let (txn, events) = TransactionLayer::spawn(ep, Arc::new(CustomParser::new()), config);
     let metrics = B2buaMetrics::new();
     let dispatcher = PerCallDispatcher::new(8, 64, 1024, metrics.clone());
-    let id_gen = Arc::new(IdGen::seeded(7));
     let refusals = Refusals::new(5, 5, 16, &id_gen);
     Rig { txn, events, peer, dispatcher, metrics, id_gen, refusals, admitted: true }
 }

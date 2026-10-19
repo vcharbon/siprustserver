@@ -6,9 +6,9 @@ use std::sync::Arc;
 use sip_message::{CustomParser, SipMessage, SipParseError, SipParser};
 use sip_net::{BindUdpOpts, SignalingNetwork};
 use sip_net_testkit::SimulatedSignalingNetwork;
-use sip_txn::{TransactionConfig, TransactionEvent, TransactionLayer};
+use sip_txn::{TransactionEvent, TransactionLayer};
 
-use crate::common::{addr, elapse_ms, inbound_request, B2BUA, PEER};
+use crate::common::{addr, config, elapse_ms, inbound_request, B2BUA, PEER};
 
 /// The datagram that makes [`PanicsOnMarker`] panic.
 const MARKER: &[u8] = b"PANIC";
@@ -36,7 +36,7 @@ async fn a_datagram_the_parser_panics_on_is_dropped_and_the_owner_keeps_serving(
     let endpoint = net.bind_udp(BindUdpOpts::new(addr(B2BUA), 64)).await.expect("bind");
     let peer = net.bind_udp(BindUdpOpts::new(addr(PEER), 64)).await.expect("bind peer");
     let parser = Arc::new(PanicsOnMarker(CustomParser::new()));
-    let (txn, mut events) = TransactionLayer::spawn(endpoint, parser, TransactionConfig::default());
+    let (txn, mut events) = TransactionLayer::spawn(endpoint, parser, config());
 
     peer.send_to(MARKER, addr(B2BUA)).await.expect("the marker leaves");
     let options = inbound_request("OPTIONS", "z9hG4bK-after-panic", "after-panic@u", None);

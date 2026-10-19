@@ -11,10 +11,10 @@ use sip_net::{
     BindUdpOpts, SendError, SignalingNetwork, UdpEndpoint, UdpEndpointCounters, UdpPacket,
 };
 use sip_net_testkit::SimulatedSignalingNetwork;
-use sip_txn::{TransactionConfig, TransactionEvent, TransactionLayer};
+use sip_txn::{TransactionEvent, TransactionLayer};
 use tokio::sync::mpsc;
 
-use crate::common::{addr, B2BUA, PEER};
+use crate::common::{addr, config, B2BUA, PEER};
 
 const THRESHOLD: Duration = Duration::from_secs(5);
 
@@ -54,7 +54,7 @@ async fn layer(parking: bool) -> (TransactionLayer, mpsc::Receiver<TransactionEv
     let endpoint: Box<dyn UdpEndpoint> =
         if parking { Box::new(ParkingSends(bound)) } else { bound };
     let parser = Arc::new(CustomParser::new());
-    TransactionLayer::spawn(endpoint, parser, TransactionConfig::default())
+    TransactionLayer::spawn(endpoint, parser, config())
 }
 
 #[tokio::test(start_paused = true)]

@@ -76,12 +76,12 @@ use http_net::{RealHttpNetwork, SystemResolver};
 use sip_clock::Clock;
 use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
-use sip_txn::IdGen;
 
 pub mod backend_url;
 mod capacity_env;
 mod cdr_rabbitmq;
 mod drain_env;
+mod entropy;
 mod limiter_client;
 mod limiter_env;
 mod liveness_env;
@@ -560,7 +560,7 @@ impl RunnerEnv {
             self.retry_after_base_sec,
             self.retry_after_jitter_sec,
             brake_config.memo_capacity(),
-            &IdGen::from_entropy(),
+            &entropy::keyed_id_gen(),
         );
         let brake_hook =
             build_ingress_brake_hook(brake_config, brake_counters.clone(), refusals.clone());
@@ -874,7 +874,7 @@ impl RunnerBase {
             store_faults: Default::default(),
             wire_faults: Default::default(),
             clock: self.clock.clone(),
-            id_gen: Arc::new(IdGen::from_entropy()),
+            id_gen: Arc::new(entropy::keyed_id_gen()),
             // The refusals the ingress brake holds (see [`RunnerBase::refusals`]).
             refusals: Some(self.refusals.clone()),
             deferred_ceilings: None,

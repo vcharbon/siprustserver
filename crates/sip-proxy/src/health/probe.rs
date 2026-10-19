@@ -198,7 +198,7 @@ impl HealthProbe {
         let (txn, events) = TransactionLayer::spawn(
             endpoint,
             Arc::new(CustomParser::default()),
-            TransactionConfig { id_gen: id_gen.clone(), ..Default::default() },
+            TransactionConfig::new(id_gen.clone()),
         );
         Self {
             txn,

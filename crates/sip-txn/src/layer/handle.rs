@@ -74,18 +74,26 @@ pub struct TransactionConfig {
     pub stateless_options: bool,
 }
 
-impl TransactionConfig {
-    /// The output event queue's bound: `max(64, udp_queue_max * 4)`.
-    pub fn event_capacity(&self) -> usize {
-        std::cmp::max(64, self.udp_queue_max * 4)
-    }
-}
+/// The output event queue's floor and ceiling.
+const EVENT_CAPACITY: std::ops::RangeInclusive<usize> = 64..=1 << 20;
 
-impl Default for TransactionConfig {
-    fn default() -> Self {
+/// The command funnel's bound.
+const COMMAND_CAPACITY: usize = 1024;
+
+impl TransactionConfig {
+    /// The output event queue's bound: `udp_queue_max * 4`, at least 64 and
+    /// at most 2^20.
+    pub fn event_capacity(&self) -> usize {
+        self.udp_queue_max.saturating_mul(4).clamp(*EVENT_CAPACITY.start(), *EVENT_CAPACITY.end())
+    }
+
+    /// The defaults, identifiers drawn from `id_gen`: a 256-datagram receive
+    /// queue, the RFC 3261 INVITE bounds, strict To-tag binding, no deferred
+    /// bound, no shared refusals, a transaction per OPTIONS.
+    pub fn new(id_gen: Arc<IdGen>) -> Self {
         Self {
             udp_queue_max: 256,
-            id_gen: Arc::new(IdGen::from_entropy()),
+            id_gen,
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
             strict_to_tag: true,
@@ -220,8 +228,10 @@ impl TransactionLayer {
         parser: Arc<dyn SipParser + Send + Sync>,
         config: TransactionConfig,
     ) -> (Self, mpsc::Receiver<TransactionEvent>) {
+        #[expect(clippy::disallowed_methods, reason = "event_capacity is within EVENT_CAPACITY")]
         let (events_tx, events_rx) = mpsc::channel::<TransactionEvent>(config.event_capacity());
-        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(1024);
+        #[expect(clippy::disallowed_methods, reason = "COMMAND_CAPACITY is not zero")]
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CAPACITY);
         let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
 
         let metrics_inner = Arc::new(MetricsInner::new());

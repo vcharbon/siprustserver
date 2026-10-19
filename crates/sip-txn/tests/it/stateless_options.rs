@@ -21,7 +21,7 @@ async fn stack() -> Stack {
             udp_queue_max: 64,
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             stateless_options: true,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await

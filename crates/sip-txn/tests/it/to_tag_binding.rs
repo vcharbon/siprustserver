@@ -131,7 +131,7 @@ async fn a_wrong_tag_on_a_cancel_answer_is_re_rendered_under_the_bound_one() {
             udp_queue_max: 64,
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             strict_to_tag: false,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await;

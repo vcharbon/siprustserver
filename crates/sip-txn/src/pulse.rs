@@ -36,8 +36,12 @@ impl LoopPulse {
 
     /// The loop took a piece of work, now.
     pub fn turning(&self) {
-        let since = self.epoch.elapsed().as_millis() as u64;
-        self.busy_since.store(since + 1, Ordering::Relaxed);
+        self.busy_since.store(self.elapsed_ms().saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// Milliseconds since the pulse began, saturating past 2^64.
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// The loop is back to waiting for work.
@@ -50,10 +54,7 @@ impl LoopPulse {
     pub fn busy_for(&self) -> Option<Duration> {
         match self.busy_since.load(Ordering::Relaxed) {
             0 => None,
-            stamp => {
-                let now = self.epoch.elapsed().as_millis() as u64;
-                Some(Duration::from_millis(now.saturating_sub(stamp - 1)))
-            }
+            stamp => Some(Duration::from_millis(self.elapsed_ms().saturating_sub(stamp - 1))),
         }
     }
 
