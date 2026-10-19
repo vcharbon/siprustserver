@@ -151,6 +151,7 @@ const WORKER_REST: &[Family] = &[
     worker::UNROUTABLE_INTERNAL,
     worker::UNROUTABLE_INTERNAL_OVERFLOW,
     worker::REPEAT_GIVE_UPS,
+    worker::MODEL_DEFECTS,
     worker::REPL_QUIET_TURNS,
     worker::REPL_APPLIED,
     worker::REPL_NOOPS_SENT,

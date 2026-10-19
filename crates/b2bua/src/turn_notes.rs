@@ -13,6 +13,28 @@ pub struct TraceFact {
     pub detail: String,
 }
 
+/// An owed PRACK names a leg the call does not hold.
+pub const PRACK_HAS_A_LEG: &str = "prack-has-a-leg";
+/// An owed PRACK names a dialog its leg does not hold.
+pub const PRACK_HAS_A_DIALOG: &str = "prack-has-a-dialog";
+/// A machine-bound rule moved its own cursor along an edge it does not
+/// declare (ADR-0016 X1).
+pub const UNDECLARED_TRANSITION: &str = "rule-declares-its-transitions";
+/// A machine-bound rule emitted a side effect it does not declare (ADR-0016 X9).
+pub const UNDECLARED_EFFECT: &str = "rule-declares-its-effects";
+/// A lifecycle handler took an action outside call ext, its own cursor and
+/// its own timers; the action is dropped.
+pub const LIFECYCLE_OUT_OF_SCOPE: &str = "lifecycle-handler-keeps-its-scope";
+
+/// Every defect a turn reports, by name.
+pub const DEFECTS: [&str; 5] = [
+    PRACK_HAS_A_LEG,
+    PRACK_HAS_A_DIALOG,
+    UNDECLARED_TRANSITION,
+    UNDECLARED_EFFECT,
+    LIFECYCLE_OUT_OF_SCOPE,
+];
+
 /// A defect a turn met mid-way: a step that found the record unable to carry
 /// what it must do, or a rule acting outside what it declared. The call is the
 /// record the step read.

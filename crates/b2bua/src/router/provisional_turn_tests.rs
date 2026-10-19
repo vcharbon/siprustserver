@@ -146,7 +146,6 @@ async fn an_out_of_order_ring_is_dropped_unread() {
 /// A PRACK owed on a responder dialog the leg does not hold — no early
 /// dialog was opened for it — is a model defect, reported rather than waived.
 #[test]
-#[should_panic(expected = "prack-has-a-dialog")]
 fn an_owed_prack_on_a_dialog_the_leg_lacks_is_a_defect() {
     let mut call = call_with_a_ringing_callee(true);
     let mut owed = recorded(1);
@@ -162,6 +161,9 @@ fn an_owed_prack_on_a_dialog_the_leg_lacks_is_a_defect() {
     };
     let mut fx = crate::effects::HandlerEffects::new();
     exec.settle_owed_pracks(&mut call, &mut fx, Owed::Call, Settle::TurnEnd);
+    let defects: Vec<_> = scope.notes.defects().iter().map(|d| d.name).collect();
+    assert_eq!(defects, [crate::turn_notes::PRACK_HAS_A_DIALOG]);
+    assert!(fx.outbound.is_empty(), "no PRACK leaves");
 }
 
 /// A PRACK owed on a dialog whose state makes no request (its remote target

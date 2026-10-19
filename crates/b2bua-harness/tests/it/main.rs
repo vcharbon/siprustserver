@@ -104,6 +104,7 @@ mod max_duration_anchor;
 mod max_forwards;
 mod media_leg_provisional;
 mod message_ring;
+mod model_defect_lands;
 mod new_call_outcomes;
 mod new_call_permit_share;
 mod new_invite_at_queue_cap;

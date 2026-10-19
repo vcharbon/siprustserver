@@ -105,6 +105,11 @@ fn answering_claimer() -> RuleDefinition {
 
 /// The BYE turn under `rules`, closed: its lifecycle settled and delivered.
 fn run_bye(rules: &[RuleDefinition], call: &call::Call) -> HandlerResult {
+    run_bye_noting(rules, call).0
+}
+
+/// [`run_bye`], with the details of the defects the turn noted.
+fn run_bye_noting(rules: &[RuleDefinition], call: &call::Call) -> (HandlerResult, Vec<String>) {
     let event = bye_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
@@ -115,9 +120,14 @@ fn run_bye(rules: &[RuleDefinition], call: &call::Call) -> HandlerResult {
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let ctx = ctx_for(call, &event, &config);
-    let claimed =
-        execute_rules(rules, call, &ctx, &mut exec, &b2bua::obligations::ObligationSet::core());
-    close_turn(rules, &TurnStart::of(call), claimed, &mut exec)
+    let claimed = execute_rules(rules, call, &ctx, &mut exec, &ObligationSet::core());
+    let result = close_turn(rules, &TurnStart::of(call), claimed, &mut exec);
+    (result, defects(&exec.turn.notes))
+}
+
+/// The details of the defects `notes` carry.
+fn defects(notes: &b2bua::turn_notes::TurnNotes) -> Vec<String> {
+    notes.defects().iter().map(|d| d.detail.clone()).collect()
 }
 
 fn confirmed_call_in_s0() -> call::Call {
@@ -248,52 +258,50 @@ fn a_core_rule_hears_no_lifecycle_event() {
     assert!(result.call.ext.as_ref().is_none_or(|e| e.get("seen").is_none()));
 }
 
+/// Whether one of `defects` says `wanted`.
+fn noted(defects: &[String], wanted: &str) -> bool {
+    defects.iter().any(|d| d.contains(wanted))
+}
+
+/// What a lifecycle handler may write, as its defect states it.
+const OUT_OF_SCOPE: &str =
+    "a lifecycle handler writes call ext, its own machine's cursor and its own timers only";
+
 /// A lifecycle handler writes call ext, its own cursor and its own timers: a
-/// final in one is an authoring bug, caught in debug builds.
-#[cfg(debug_assertions)]
+/// final in one is an authoring bug, noted as the turn's defect.
 #[test]
-#[should_panic(
-    expected = "a lifecycle handler writes call ext, its own machine's cursor and its own timers only"
-)]
 fn a_lifecycle_handler_stating_a_final_is_an_authoring_bug() {
     let rules = vec![leg_end_listener(on_leg_ended_answering), answering_claimer()];
-    let _ = run_bye(&rules, &confirmed_call_in_s0());
+    let (_, defects) = run_bye_noting(&rules, &confirmed_call_in_s0());
+    assert!(noted(&defects, OUT_OF_SCOPE), "{defects:?}");
 }
 
 /// A core timer is no machine's own.
-#[cfg(debug_assertions)]
 #[test]
-#[should_panic(
-    expected = "a lifecycle handler writes call ext, its own machine's cursor and its own timers only"
-)]
 fn a_lifecycle_handler_arming_a_core_timer_is_an_authoring_bug() {
     let rules = vec![leg_end_listener(on_leg_ended_arming_a_core_timer), answering_claimer()];
-    let _ = run_bye(&rules, &confirmed_call_in_s0());
+    let (_, defects) = run_bye_noting(&rules, &confirmed_call_in_s0());
+    assert!(noted(&defects, OUT_OF_SCOPE), "{defects:?}");
 }
 
 /// Another machine's timer is not the handler's either.
-#[cfg(debug_assertions)]
 #[test]
-#[should_panic(
-    expected = "a lifecycle handler writes call ext, its own machine's cursor and its own timers only"
-)]
 fn a_lifecycle_handler_arming_a_foreign_timer_is_an_authoring_bug() {
     let rules = vec![leg_end_listener(on_leg_ended_arming_a_foreign_timer), answering_claimer()];
-    let _ = run_bye(&rules, &confirmed_call_in_s0());
+    let (_, defects) = run_bye_noting(&rules, &confirmed_call_in_s0());
+    assert!(noted(&defects, OUT_OF_SCOPE), "{defects:?}");
 }
 
 /// A lifecycle handler's cursor move is held to its declared edges.
-#[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "caused an undeclared transition")]
 fn a_lifecycle_handlers_undeclared_move_is_an_authoring_bug() {
     let rules = vec![leg_end_listener(on_leg_ended_undeclared_move), answering_claimer()];
-    let _ = run_bye(&rules, &confirmed_call_in_s0());
+    let (_, defects) = run_bye_noting(&rules, &confirmed_call_in_s0());
+    assert!(noted(&defects, "caused an undeclared transition"), "{defects:?}");
 }
 
-/// In release the actions a lifecycle handler may not take are dropped: the
-/// turn is the claimer's and the handler's admitted writes alone.
-#[cfg(not(debug_assertions))]
+/// The actions a lifecycle handler may not take are dropped: the turn is the
+/// claimer's and the handler's admitted writes alone.
 #[test]
 fn a_lifecycle_handler_leaks_nothing_it_may_not_take() {
     let call = confirmed_call_in_s0();
@@ -314,6 +322,13 @@ fn a_lifecycle_handler_leaks_nothing_it_may_not_take() {
 /// Runs `handle` on an INFO as the machine's rule declaring `WATCH` on the
 /// call's scope.
 fn run_watching(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> HandlerResult {
+    run_watching_noting(handle).0
+}
+
+/// [`run_watching`], with the details of the defects the turn noted.
+fn run_watching_noting(
+    handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+) -> (HandlerResult, Vec<String>) {
     let call = confirmed_call_in_s0();
     let event = info_event();
     let config = B2buaConfig::default();
@@ -326,7 +341,8 @@ fn run_watching(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> Handler
     };
     let rules = vec![RuleDefinition { effects: &WATCH_EFFECTS, ..sm_rule(handle) }];
     let ctx = ctx_for(&call, &event, &config);
-    execute_rules(&rules, &call, &ctx, &mut exec, &b2bua::obligations::ObligationSet::core())
+    let result = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
+    (result, defects(&exec.turn.notes))
 }
 
 /// A timer armed under the scope its declaration names is declared.
@@ -343,28 +359,26 @@ fn a_timer_armed_under_its_declared_scope_is_declared() {
 
 /// The declaration names the timer's type and the kind of scope its key
 /// guards: the same type under another scope is an undeclared timer.
-#[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "emitted an undeclared timer")]
 fn a_timer_armed_under_another_scope_than_declared_is_an_authoring_bug() {
-    let _ = run_watching(|_| {
+    let (_, defects) = run_watching_noting(|_| {
         Some(RuleHandleResult::new(vec![RuleAction::arm(
             TimerKey::leg(WATCH, "a"),
             TimerDelay::secs(5),
         )]))
     });
+    assert!(noted(&defects, "emitted an undeclared timer"), "{defects:?}");
 }
 
 /// A service timer is declared by its owning service and its key: another
 /// key of the same service is an undeclared timer.
-#[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "emitted an undeclared timer")]
 fn a_service_timer_of_another_key_than_declared_is_an_authoring_bug() {
-    let _ = run_watching(|_| {
+    let (_, defects) = run_watching_noting(|_| {
         Some(RuleHandleResult::new(vec![RuleAction::cancel(TimerKey::call(TimerType::service(
             MachineId::new(TEST_MACHINE),
             "other",
         )))]))
     });
+    assert!(noted(&defects, "emitted an undeclared timer"), "{defects:?}");
 }

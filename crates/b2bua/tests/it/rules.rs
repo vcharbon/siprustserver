@@ -1893,12 +1893,9 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
     );
 }
 
-/// Only debug builds panic (release logs and proceeds), so gate the test on
-/// `debug_assertions` — the suite runs in debug.
-#[cfg(debug_assertions)]
+/// The turn goes on; the defect is the turn's to report.
 #[test]
-#[should_panic(expected = "undeclared transition")]
-fn undeclared_transition_trips_debug_assert() {
+fn undeclared_transition_is_a_noted_defect() {
     let mut call = test_call();
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
@@ -1914,14 +1911,19 @@ fn undeclared_transition_trips_debug_assert() {
 
     let ctx = ctx_for(&call, &event, &config);
     let _ = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
+    assert_eq!(defect_names(&exec), [b2bua::turn_notes::UNDECLARED_TRANSITION]);
 }
 
-/// A tracked side effect the handler emits but the rule did not declare trips the
-/// debug drift-check (ADR-0016 X9), the effect analogue of the transition check.
-#[cfg(debug_assertions)]
+/// The names of the defects `exec`'s turn noted.
+fn defect_names(exec: &ActionExecutor) -> Vec<&'static str> {
+    exec.turn.notes.defects().iter().map(|d| d.name).collect()
+}
+
+/// A tracked side effect the handler emits but the rule did not declare is
+/// the drift-check's defect (ADR-0016 X9), the effect analogue of the
+/// transition check.
 #[test]
-#[should_panic(expected = "undeclared")]
-fn undeclared_effect_trips_debug_assert() {
+fn undeclared_effect_is_a_noted_defect() {
     let mut call = test_call();
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
@@ -1938,6 +1940,7 @@ fn undeclared_effect_trips_debug_assert() {
 
     let ctx = ctx_for(&call, &event, &config);
     let _ = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
+    assert_eq!(defect_names(&exec), [b2bua::turn_notes::UNDECLARED_EFFECT]);
 }
 
 /// Declaring the matching `LegMessage` effect satisfies the drift-check — the
@@ -1958,8 +1961,9 @@ fn declared_effect_passes_the_drift_check() {
     let rules = vec![sm_rule_with_effects(handle_emits_leg_message, &SM_EFFECTS_LEG_MESSAGE)];
 
     let ctx = ctx_for(&call, &event, &config);
-    // Must not panic: the emitted Respond is a declared LegMessage.
+    // No defect: the emitted Respond is a declared LegMessage.
     let _ = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
+    assert!(defect_names(&exec).is_empty());
 }
 
 /// `ClearState` (machine deactivation) removes the cursor, and with a declared
@@ -1985,12 +1989,10 @@ fn declared_terminal_clear_state_deactivates_machine() {
     assert!(!r.call.sm_cursors.contains_key(&MachineId::new(TEST_MACHINE)));
 }
 
-/// A `ClearState` whose `S0 => terminal` edge is **not** declared trips the
-/// transition drift-check (only `S0 => S1` is in `SM_TRANSITIONS`).
-#[cfg(debug_assertions)]
+/// A `ClearState` whose `S0 => terminal` edge is **not** declared is the
+/// transition drift-check's defect (only `S0 => S1` is in `SM_TRANSITIONS`).
 #[test]
-#[should_panic(expected = "undeclared transition")]
-fn undeclared_terminal_clear_state_trips_debug_assert() {
+fn undeclared_terminal_clear_state_is_a_noted_defect() {
     let mut call = test_call();
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
@@ -2006,6 +2008,7 @@ fn undeclared_terminal_clear_state_trips_debug_assert() {
 
     let ctx = ctx_for(&call, &event, &config);
     let _ = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
+    assert_eq!(defect_names(&exec), [b2bua::turn_notes::UNDECLARED_TRANSITION]);
 }
 
 // ── b-leg route-set capture (RFC 3261 §12.1.2) ──────────────────────────────

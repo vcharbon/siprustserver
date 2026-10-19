@@ -1,10 +1,14 @@
-//! The model-invariant gate: a B2BUA turn that breaks a model invariant
-//! panics inside the dispatcher, which isolates the panic and lets the call
-//! go on to the reaper. The gate reads the process's record of those
-//! violations ([`b2bua::rules::model_invariants::violations`]) from a
-//! [`Mark`] on, so a run fails on the first one it met, whatever the
-//! scenario did next, and runs that follow one another in one process judge
-//! only their own.
+//! The model-invariant gate: a B2BUA turn that breaks a model invariant, or
+//! notes a defect, lands all the same and leaves the violation in the
+//! process's record ([`b2bua::rules::model_invariants::violations`]). The gate
+//! reads that record from a [`Mark`] on, so a run fails on the first violation
+//! it met, whatever the scenario did next, and runs that follow one another in
+//! one process judge only their own. A test that provokes a violation on
+//! purpose takes it ([`crate::B2buaSut::take_model_violations`]) and judges it
+//! itself.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// A point in the process's record of violations: a gate judges the ones
 /// recorded after it.
@@ -16,6 +20,28 @@ impl Mark {
     /// with the call's dump.
     pub fn now() -> Mark {
         Mark(b2bua::rules::model_invariants::mark())
+    }
+}
+
+/// A run's [`Mark`], shared by its SUT and its failure view, so a test that
+/// takes the run's violations moves the mark for both.
+#[derive(Debug, Clone)]
+pub struct Since(Arc<AtomicUsize>);
+
+impl Since {
+    /// A run starting now.
+    pub fn now() -> Since {
+        Since(Arc::new(AtomicUsize::new(Mark::now().0)))
+    }
+
+    /// Where the run's judged violations start.
+    pub fn mark(&self) -> Mark {
+        Mark(self.0.load(Ordering::Relaxed))
+    }
+
+    /// Judge only the violations recorded from now on.
+    fn restart(&self) {
+        self.0.store(Mark::now().0, Ordering::Relaxed);
     }
 }
 
@@ -44,4 +70,15 @@ pub fn gate_on_drop(since: Mark) {
         return;
     }
     assert_no_model_violation(since);
+}
+
+impl crate::B2buaSut {
+    /// The violations this run kept so far, for a test that provokes one on
+    /// purpose: taken, they no longer fail the run.
+    pub fn take_model_violations(&mut self) -> Vec<String> {
+        let since = self.since.mark().0;
+        let kept = b2bua::rules::model_invariants::violations().into_iter().skip(since).collect();
+        self.since.restart();
+        kept
+    }
 }

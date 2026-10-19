@@ -283,7 +283,7 @@ pub struct B2buaSut {
     /// SUT's bind carries one.
     brake: Option<(b2bua::ingress_brake::IngressBrakeCounters, Arc<AtomicUsize>)>,
     /// Where this SUT's run starts in the process's model-invariant record.
-    since: model_gate::Mark,
+    since: model_gate::Since,
     /// The shell faults the run met ([`reaped::ShellFaults`]).
     shell: reaped::ShellFaults,
     _core: B2buaCore,
@@ -479,7 +479,7 @@ impl B2buaSutBuilder {
     /// Bind the B2BUA at `addr` and spawn its core, consuming the builder.
     pub async fn start(self, h: &Harness, name: &str, addr: &str) -> B2buaSut {
         // This run judges only the violations its own turns record.
-        let since = model_gate::Mark::now();
+        let since = model_gate::Since::now();
         let B2buaSutBuilder {
             decision,
             outbound_proxy,
@@ -606,7 +606,7 @@ impl B2buaSutBuilder {
             name: name.to_string(),
             calls: core.live_calls_probe(),
             clock: clock.clone(),
-            since,
+            since: since.clone(),
         }));
         let shell = reaped::ShellFaults::from_now();
         B2buaSut {
@@ -627,7 +627,7 @@ impl B2buaSutBuilder {
 /// violation a turn of its run met ([`model_gate`]).
 impl Drop for B2buaSut {
     fn drop(&mut self) {
-        model_gate::gate_on_drop(self.since);
+        model_gate::gate_on_drop(self.since.mark());
     }
 }
 
@@ -997,7 +997,7 @@ impl B2buaSut {
     /// and 7 require exactly `leak`, every other check is unchanged.
     #[track_caller]
     pub fn assert_fully_reaped_leaving(&self, leak: LimiterLeak) {
-        model_gate::assert_no_model_violation(self.since);
+        model_gate::assert_no_model_violation(self.since.mark());
         self.assert_calls_reaped();
         // 6. every limiter hold granted is released once, the store counts
         //    none, and the default limiter never failed open.

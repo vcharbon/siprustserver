@@ -18,6 +18,7 @@ use call::{
 };
 
 use crate::effects::HandlerResult;
+use crate::turn_notes::TurnNotes;
 
 use super::actions::ActionExecutor;
 use super::executor::{
@@ -145,7 +146,6 @@ fn deliver(
         }
         // A terminated call is removed as the turn lands: nothing is armed on it.
         let live = active && result.call.state != CallModelState::Terminated;
-        let before = result.call.sm_cursors.clone();
         let sub = {
             let ctx = RuleContext {
                 call: RuleCall::new(&result.call),
@@ -167,12 +167,14 @@ fn deliver(
             for d in &outcome.diagnostics {
                 tracing::warn!(call_ref = %result.call.call_ref, rule = %rule.id, detail = %d, "rule refused an input");
             }
-            let actions = admitted(rule, machine, live, outcome.actions, &result.call);
-            check_declared_effects(rule, &actions);
+            let notes = &mut exec.turn.notes;
+            let actions = admitted(rule, machine, live, outcome.actions, &result.call, notes);
+            check_declared_effects(rule, &actions, &result.call, notes);
             exec.execute(&actions, &result.call, &ctx)
         };
         if live {
-            check_declared_transition(rule, &before, &sub.call.sm_cursors, false);
+            let after = &sub.call.sm_cursors;
+            check_declared_transition(rule, &result.call, after, false, &mut exec.turn.notes);
         }
         let fact = || format!("{} {kind}", rule.id);
         exec.turn.notes.trace(&sub.call, "rule.lifecycle", exec.now_ms, fact);
@@ -185,15 +187,15 @@ fn deliver(
 
 /// The actions a lifecycle handler may take: call-ext writes, and while its
 /// machine is live, its own cursor moves and its own service timers. Any
-/// other action is an authoring bug — it panics under `debug_assertions`,
-/// and is dropped and logged in release. A deactivated machine's bookkeeping
-/// is dropped: the machine is gone.
+/// other action is an authoring bug: it is dropped and noted as a defect on
+/// `call`. A deactivated machine's bookkeeping is dropped: the machine is gone.
 fn admitted(
     rule: &RuleDefinition,
     machine: &MachineId,
     live: bool,
     actions: Vec<RuleAction>,
     call: &Call,
+    notes: &mut TurnNotes,
 ) -> Vec<RuleAction> {
     actions
         .into_iter()
@@ -211,21 +213,14 @@ fn admitted(
             if own {
                 return live;
             }
-            if cfg!(debug_assertions) {
-                panic!(
-                    "rule '{}' handled a lifecycle event with a {:?} action (a lifecycle \
-                     handler writes call ext, its own machine's cursor and its own timers only)",
-                    rule.id,
-                    action.effect_kind(),
-                );
-            }
-            tracing::error!(
-                call_ref = %call.call_ref,
-                rule = %rule.id,
-                action = ?action,
-                "a lifecycle handler may only write call ext, its own cursor and its own timers; \
-                 action dropped"
+            let detail = format!(
+                "rule '{}' handled a lifecycle event with a {:?} action (a lifecycle \
+                 handler writes call ext, its own machine's cursor and its own timers only); \
+                 action dropped: {action:?}",
+                rule.id,
+                action.effect_kind(),
             );
+            notes.defect(crate::turn_notes::LIFECYCLE_OUT_OF_SCOPE, detail, call);
             false
         })
         .collect()

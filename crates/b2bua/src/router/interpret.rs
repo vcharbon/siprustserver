@@ -88,7 +88,7 @@ pub(super) async fn process_result(
             received,
             sent: &result.effects.outbound,
         };
-        crate::rules::model_invariants::check(&turn_record, turn);
+        crate::rules::model_invariants::check(&turn_record, turn, &ctx.metrics);
     }
     // Persist first (state lands before effects run). A quiet turn replaces
     // the live copy without a bump and skips the flush gate below: the armed

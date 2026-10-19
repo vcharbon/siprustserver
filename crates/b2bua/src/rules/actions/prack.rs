@@ -125,8 +125,8 @@ impl ActionExecutor<'_> {
         answer: Option<Vec<u8>>,
     ) {
         let Some(idx) = leg_index(call, &id.leg) else {
-            crate::rules::model_invariants::defect(
-                "prack-has-a-leg",
+            self.turn.notes.defect(
+                crate::turn_notes::PRACK_HAS_A_LEG,
                 format!("an owed PRACK names leg {}, which the call does not hold", id.leg),
                 call,
             );
@@ -135,8 +135,8 @@ impl ActionExecutor<'_> {
         let Some(dialog) =
             call::helpers::dialog_with_peer(leg_at(call, idx), &id.responder_tag).cloned()
         else {
-            crate::rules::model_invariants::defect(
-                "prack-has-a-dialog",
+            self.turn.notes.defect(
+                crate::turn_notes::PRACK_HAS_A_DIALOG,
                 format!(
                     "an owed PRACK names dialog {} on leg {}, which the leg does not hold",
                     id.responder_tag, id.leg

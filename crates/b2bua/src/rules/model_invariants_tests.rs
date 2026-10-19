@@ -484,3 +484,29 @@ fn a_service_timer_of_an_inactive_machine_breaks_the_timer_scope_invariant() {
     let err = no_timer_of_an_inactive_machine(&after(&call)).unwrap_err();
     assert!(err.contains("for machine watching, which is inactive"), "{err}");
 }
+
+/// Every name a violation is counted under is an invariant's or a defect's,
+/// each once, in that order.
+#[test]
+fn the_counted_names_are_the_invariants_then_the_defects() {
+    let named: Vec<&str> = INVARIANTS.iter().map(|(name, _)| *name).collect();
+    let expected = [named.as_slice(), crate::turn_notes::DEFECTS.as_slice()].concat();
+    assert_eq!(NAMES.as_slice(), expected.as_slice());
+}
+
+/// A broken invariant does not stop the turn: it is kept in the record, the
+/// first since the mark with the call's dump, and counted under its name.
+#[test]
+fn a_violation_is_kept_and_counted_and_the_turn_goes_on() {
+    let mut call = call();
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
+    call.a_leg.dialogs.insert(dialog("a2", "atag"));
+    let metrics = crate::metrics::B2buaMetrics::new();
+    let since = mark();
+    check(&after(&call), &"a test turn", &metrics);
+    let kept = violations();
+    let first = kept.get(since).expect("the violation is kept");
+    assert!(first.starts_with("model invariant confirmed-a-leg-one-dialog violated"), "{first}");
+    assert!(first.contains("call_ref"), "the first since the mark carries the dump");
+    assert_eq!(metrics.model_defects_total("confirmed-a-leg-one-dialog"), 1);
+}

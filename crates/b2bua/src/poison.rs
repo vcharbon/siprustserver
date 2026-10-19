@@ -20,6 +20,7 @@ pub(crate) const LIMITER_BREAKER: &str = "limiter_breaker";
 pub(crate) const LIMITER_REFRESH_DUE: &str = "limiter_refresh_due";
 pub(crate) const LIMITER_RELEASE_WAITING: &str = "limiter_release_waiting";
 pub(crate) const LIMITER_REPORTS: &str = "limiter_reports";
+pub(crate) const MODEL_VIOLATIONS: &str = "model_violations";
 pub(crate) const OVERLOAD_SAMPLER: &str = "overload_sampler";
 pub(crate) const OVERLOAD_SIGNAL: &str = "overload_signal";
 pub(crate) const PULLER_BOOTSTRAP: &str = "puller_bootstrap";
@@ -31,7 +32,7 @@ pub(crate) const TRACE_PROCESS: &str = "trace_process";
 pub(crate) const TRACE_SPANS: &str = "trace_spans";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 21] = [
+pub const LOCKS: [&str; 22] = [
     ADMIT_BY_CALL,
     BACKEND_GATE,
     CAPACITY_LIMITS,
@@ -44,6 +45,7 @@ pub const LOCKS: [&str; 21] = [
     LIMITER_REFRESH_DUE,
     LIMITER_RELEASE_WAITING,
     LIMITER_REPORTS,
+    MODEL_VIOLATIONS,
     OVERLOAD_SAMPLER,
     OVERLOAD_SIGNAL,
     PULLER_BOOTSTRAP,

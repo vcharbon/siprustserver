@@ -202,8 +202,10 @@ re-entering the call is not part of this decision.
 ### 8. The model invariant oracle
 
 The model invariant check and the defect report stay in the shell, in every
-build, behind the `model_invariants` configuration flag (on by default in debug
-builds). Neither panics. Each violation, an invariant the landing record breaks
+build. The check runs behind the `model_invariants` configuration flag (on by
+default in debug builds); a defect note is reported whatever the flag, as it
+costs nothing until a turn meets one. Neither panics. Each violation, an
+invariant the landing record breaks
 or a defect note the core returned, is kept in the process's record (the first
 since the last mark with the call's dump, later ones one line each), logs one
 error line, and counts in `b2bua_model_defects_total{invariant}`. The record's

@@ -112,7 +112,7 @@ pub fn execute_rules(
         };
         let before = call.clone();
         report_diagnostics(rule, call, &outcome);
-        check_declared_effects(rule, &outcome.actions);
+        check_declared_effects(rule, &outcome.actions, call, &mut exec.turn.notes);
         let result = exec.execute(&outcome.actions, call, ctx);
         // The rule's OWN cursor move is checked against what the rule
         // produced — the projections, the terminal fold below and the
@@ -123,7 +123,8 @@ pub fn execute_rules(
                 result.call.state,
                 CallModelState::Terminating | CallModelState::Terminated
             );
-        check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors, torn_down);
+        let after = &result.call.sm_cursors;
+        check_declared_transition(rule, &before, after, torn_down, &mut exec.turn.notes);
         let result = invariants::finalize(result);
         let mut enforced = invariants::enforce(
             obligations,
@@ -236,23 +237,23 @@ pub(super) fn record_cursor_moves(
     }
 }
 
-/// Assert any cursor move the winning rule caused on its **own** machine is a
-/// declared `(from, to)` edge (ADR-0016 X1). Keeps the generated diagram
-/// exhaustive and catches authoring bugs. Debug builds panic; release builds log
-/// and proceed — an undeclared transition must never panic a live worker.
-/// `torn_down`: the turn moved the call into `Terminating`/`Terminated`, so a
-/// cursor that vanished is the engine's deactivation of every machine, not a
-/// move of the rule's own.
+/// Hold any cursor move the winning rule caused on its **own** machine to a
+/// declared `(from, to)` edge (ADR-0016 X1), which keeps the generated diagram
+/// exhaustive: an undeclared one is noted as a defect on `call`, and the turn
+/// goes on. `torn_down`: the turn moved the call into
+/// `Terminating`/`Terminated`, so a cursor that vanished is the engine's
+/// deactivation of every machine, not a move of the rule's own.
 pub(super) fn check_declared_transition(
     rule: &RuleDefinition,
-    before: &std::collections::BTreeMap<call::MachineId, call::StateLabel>,
+    call: &Call,
     after: &std::collections::BTreeMap<call::MachineId, call::StateLabel>,
     torn_down: bool,
+    notes: &mut TurnNotes,
 ) {
     let Some(machine) = rule.machine.as_ref() else {
         return;
     };
-    let from = before.get(machine);
+    let from = call.sm_cursors.get(machine);
     let to = after.get(machine);
     if from == to {
         return; // no move (or the rule SetState'd to the same label).
@@ -269,38 +270,33 @@ pub(super) fn check_declared_transition(
         _ => false,
     };
     if !declared {
-        if cfg!(debug_assertions) {
-            panic!(
-                "rule '{}' caused an undeclared transition on machine '{}': {:?} -> {:?} \
-                 (declare it in the rule's `transitions`)",
-                rule.id,
-                machine.as_str(),
-                from.map(call::StateLabel::as_str),
-                to.map(call::StateLabel::as_str),
-            );
-        } else {
-            tracing::warn!(
-                rule = %rule.id,
-                machine = machine.as_str(),
-                from = ?from.map(call::StateLabel::as_str),
-                to = ?to.map(call::StateLabel::as_str),
-                "rule caused an undeclared transition"
-            );
-        }
+        let detail = format!(
+            "rule '{}' caused an undeclared transition on machine '{}': {:?} -> {:?} \
+             (declare it in the rule's `transitions`)",
+            rule.id,
+            machine.as_str(),
+            from.map(call::StateLabel::as_str),
+            to.map(call::StateLabel::as_str),
+        );
+        notes.defect(crate::turn_notes::UNDECLARED_TRANSITION, detail, call);
     }
 }
 
-/// Assert every **tracked** side effect a machine-bound rule emits was declared
-/// in its `effects` (ADR-0016 X9). The check is **by category** ([`EffectKind`]),
-/// so a handler targeting a dynamically-named leg still satisfies a `LegMessage`
-/// declaration; cursor moves (`SetState`/`ClearState`) and bookkeeping are
-/// auto-allowed (`EffectKind::is_tracked` is false). A timer the rule arms or
-/// cancels is held to its declared `GuardTimer`s by type and scope kind
-/// ([`declares_timer`]). Core (machine-less) rules declare
-/// no effects and are not checked. Debug builds panic (a test failure);
-/// release builds log and proceed — an authoring gap must never panic a live
-/// worker. Mirrors [`check_declared_transition`].
-pub(super) fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleAction]) {
+/// Hold every **tracked** side effect a machine-bound rule emits to its
+/// declared `effects` (ADR-0016 X9). The check is **by category**
+/// ([`EffectKind`]), so a handler targeting a dynamically-named leg still
+/// satisfies a `LegMessage` declaration; cursor moves (`SetState`/`ClearState`)
+/// and bookkeeping are auto-allowed (`EffectKind::is_tracked` is false). A
+/// timer the rule arms or cancels is held to its declared `GuardTimer`s by type
+/// and scope kind ([`declares_timer`]). Core (machine-less) rules declare no
+/// effects and are not checked. An undeclared one is noted as a defect on
+/// `call`, and the turn goes on. Mirrors [`check_declared_transition`].
+pub(super) fn check_declared_effects(
+    rule: &RuleDefinition,
+    emitted: &[RuleAction],
+    call: &Call,
+    notes: &mut TurnNotes,
+) {
     if rule.machine.is_none() {
         return;
     }
@@ -320,19 +316,12 @@ pub(super) fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleActio
             }
         };
         let Some(what) = undeclared else { continue };
-        if cfg!(debug_assertions) {
-            panic!(
-                "rule '{}' emitted an undeclared {what} side effect \
-                 (declare it in the rule's `effects`)",
-                rule.id,
-            );
-        } else {
-            tracing::warn!(
-                rule = %rule.id,
-                effect = %what,
-                "rule emitted an undeclared side effect"
-            );
-        }
+        let detail = format!(
+            "rule '{}' emitted an undeclared {what} side effect \
+             (declare it in the rule's `effects`)",
+            rule.id,
+        );
+        notes.defect(crate::turn_notes::UNDECLARED_EFFECT, detail, call);
     }
 }
 

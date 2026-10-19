@@ -1,6 +1,7 @@
 //! A turn's notes drained (ADR-0052 §4): as each core call returns, before
 //! the turn records or sends anything else, its trace facts reach the call's
-//! trace and its counts the metrics, in the order the turn met them.
+//! trace, its counts the metrics, and its defects the model oracle
+//! (ADR-0052 §8), in the order the turn met them.
 
 use super::RouterCtx;
 use crate::turn_scope::TurnScope;
@@ -16,5 +17,8 @@ pub(super) fn drain(ctx: &RouterCtx, call_ref: &str, turn: &mut TurnScope) {
     }
     for _ in 0..notes.message_caps() {
         ctx.metrics.bump_message_cap_terminated();
+    }
+    for defect in notes.defects() {
+        crate::rules::model_invariants::defect(&ctx.metrics, defect);
     }
 }

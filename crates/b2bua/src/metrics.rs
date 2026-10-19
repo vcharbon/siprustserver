@@ -19,6 +19,7 @@ mod operator;
 mod removal_class;
 mod retransmit_row;
 pub mod shell;
+mod turn_counts;
 mod udp_transport;
 mod wire_drops;
 
@@ -183,6 +184,8 @@ struct Rows {
     // Dialog-level ladders that ran to their give-up, by the kind of
     // obligation left undischarged: the peer went deaf.
     repeat_give_ups: FixedCounts,
+    // Model invariants broken and defects met, by name (ADR-0052 §8).
+    model_defects: FixedCounts,
     // Outbound messages left unsent: their next hop is not an IP literal
     // (`router::unaddressable`), by kind.
     outbound_unaddressable: FixedCounts,
@@ -220,6 +223,7 @@ impl Default for Rows {
             responses: OpenRows::new(&w::RESPONSES),
             retransmits: OpenRows::new(&w::RETRANSMITS),
             repeat_give_ups: FixedCounts::new(&w::REPEAT_GIVE_UPS),
+            model_defects: FixedCounts::new(&w::MODEL_DEFECTS),
             outbound_unaddressable: FixedCounts::new(&w::OUTBOUND_UNADDRESSABLE),
             unroutable_dropped: FixedCounts::new(&w::UNROUTABLE_DROPPED),
             unroutable_refused: OpenRows::new(&w::UNROUTABLE_REFUSED),
@@ -480,17 +484,6 @@ impl B2buaMetrics {
         self.inner.rows.retransmits.get(&retransmit_row(ladder, method, code).as_refs())
     }
 
-    /// Count one dialog-level ladder that ran to its give-up, for
-    /// `b2bua_repeat_give_ups_total{obligation}`.
-    pub fn record_repeat_give_up(&self, obligation: &str) {
-        self.inner.rows.repeat_give_ups.add(&[obligation], 1);
-    }
-
-    /// The give-ups of one obligation kind.
-    pub fn repeat_give_ups_total(&self, obligation: &str) -> u64 {
-        self.inner.rows.repeat_give_ups.get(&[obligation])
-    }
-
     /// Record one per-peer failure of `kind` against `peer` in `scope`
     /// (`b2bua_peer_failures_total{peer,scope,kind}`; cardinality-bounded, see
     /// [`crate::peer_failures::PeerFailures`]).
@@ -722,6 +715,7 @@ impl B2buaMetrics {
         rows.unroutable_refused.render(&mut s);
         rows.unroutable_internal.render(&mut s);
         rows.repeat_give_ups.render(&mut s);
+        rows.model_defects.render(&mut s);
         rows.repl_quiet_turns.render(&mut s);
         rows.repl_applied.render(&mut s);
         rows.repl_noops_sent.render(&mut s);

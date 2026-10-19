@@ -32,12 +32,12 @@ pub(crate) struct B2buaFailureView {
     pub calls: LiveCalls,
     pub clock: Clock,
     /// Where this B2BUA's run starts in the process's violation record.
-    pub since: model_gate::Mark,
+    pub since: model_gate::Since,
 }
 
 impl FailureView for B2buaFailureView {
     fn cause(&self) -> Option<String> {
-        model_gate::first_violation(self.since)
+        model_gate::first_violation(self.since.mark())
     }
 
     fn sections(&self) -> Vec<DumpSection> {

@@ -1,8 +1,11 @@
 //! Model invariants: what the call record states at the end of every turn,
 //! checked before the record lands (`router::interpret::process_result`) when
-//! [`B2buaConfig::model_invariants`](crate::B2buaConfig) is on. A violation
-//! panics: its first line names the invariant, the turn and the detail, then
-//! the call's dump follows.
+//! [`B2buaConfig::model_invariants`](crate::B2buaConfig) is on, and the
+//! defects a turn's notes report (ADR-0052 §8). A violation never stops the
+//! turn: it is kept in the process's record (its first line names the
+//! invariant, the turn and the detail, then the call's dump follows), logged
+//! as one error line and counted in `b2bua_model_defects_total{invariant}`.
+//! A harness fails its run from the record.
 //!
 //! [`INVARIANTS`] is the list: one line per invariant, its name and its check.
 //! A check reads the record as the turn left it and, for the monotonic ones,
@@ -33,6 +36,9 @@ use call::{Call, DialogState, EndingBy, Leg, LegState, MessageDirection};
 use sip_message::{Method, SipRequest};
 
 use crate::effects::{OutboundBody, OutboundSipEffect};
+use crate::metrics::B2buaMetrics;
+use crate::poison::{locked, MODEL_VIOLATIONS};
+use crate::turn_notes::Defect;
 
 /// The record before and after one turn, with the request the turn handled
 /// and what it sent.
@@ -70,48 +76,72 @@ pub const INVARIANTS: &[(&str, Check)] = &[
     ("no-timer-of-an-inactive-machine", no_timer_of_an_inactive_machine),
 ];
 
-/// Check every invariant on `turn`; panics on the first violated, naming
-/// it and `label`. The violation is also kept in the process's record
-/// ([`violations`]): the dispatcher isolates a turn's panic, so a harness
-/// reads the record to fail the run. The first violation recorded since the
-/// last [`mark`] carries the call's dump; a later one is its one line, kept
-/// once per invariant and detail, at most [`KEPT_AFTER_FIRST`] of them. A
-/// repeat of a violation already kept unwinds without the panic hook, so a
-/// turn retried in a loop prints its violation once.
-pub fn check(turn: &Turn<'_>, label: &(dyn fmt::Display + Sync)) {
+/// Every name a violation is counted under: each invariant of
+/// [`INVARIANTS`], then each defect a turn reports
+/// ([`crate::turn_notes::DEFECTS`]), in that order.
+pub const NAMES: [&str; 21] = [
+    "dialog-named-once",
+    "one-confirmed-dialog-per-leg",
+    "confirmed-a-leg-one-dialog",
+    "fronts-name-a-dialog",
+    "own-tag-names-a-dialog",
+    "dialog-cseq-never-decreases",
+    "no-early-dialog-past-its-invite",
+    "no-cancelled-dialog-past-its-invites-final",
+    "in-dialog-request-answered-or-relayed",
+    "no-owed-prack-past-its-invite",
+    "no-unshown-owed-prack",
+    "shown-ladder-armed-while-repeating",
+    "no-a-dialog-past-a-rejection",
+    "no-timer-on-a-terminated-leg",
+    "no-timer-on-an-ended-attempt",
+    "no-timer-of-an-inactive-machine",
+    crate::turn_notes::PRACK_HAS_A_LEG,
+    crate::turn_notes::PRACK_HAS_A_DIALOG,
+    crate::turn_notes::UNDECLARED_TRANSITION,
+    crate::turn_notes::UNDECLARED_EFFECT,
+    crate::turn_notes::LIFECYCLE_OUT_OF_SCOPE,
+];
+
+/// Check every invariant on `turn`, reporting each one violated, named with
+/// `label`, on `metrics` ([`report`]).
+pub fn check(turn: &Turn<'_>, label: &(dyn fmt::Display + Sync), metrics: &B2buaMetrics) {
     for (name, check) in INVARIANTS {
         if let Err(detail) = check(turn) {
             let head = format!("model invariant {name} violated after {label}: {detail}");
-            match record(format!("{name}: {detail}"), head, || format!("{:#?}", turn.after)) {
-                Kept::New(violation) => panic!("{violation}"),
-                Kept::Repeat(head) => std::panic::resume_unwind(Box::new(head)),
-            }
+            report(metrics, *name, &turn.after.call_ref, head, &detail, || {
+                format!("{:#?}", turn.after)
+            });
         }
     }
 }
 
-/// Report a model defect a turn met mid-way — a step that found the record
-/// unable to carry what it must do — named `name` with `detail`: in debug
-/// builds it is kept and panics as a violated invariant does, the call's dump
-/// printed once per run; in release builds it is logged and the turn goes on.
-pub fn defect(name: &str, detail: String, call: &Call) {
-    if !cfg!(debug_assertions) {
-        tracing::error!(call_ref = %call.call_ref, defect = name, "{detail}");
-        return;
-    }
-    let head = format!("model defect {name}: {detail}");
-    match record(format!("{name}: {detail}"), head, || format!("{call:#?}")) {
-        Kept::New(violation) => panic!("{violation}"),
-        Kept::Repeat(head) => std::panic::resume_unwind(Box::new(head)),
-    }
+/// Report a model defect a turn's notes carried — a step that found the
+/// record unable to carry what it must do, or a rule outside what it declared
+/// ([`report`]).
+pub fn defect(metrics: &B2buaMetrics, defect: &Defect) {
+    let head = format!("model defect {}: {}", defect.name, defect.detail);
+    report(metrics, defect.name, &defect.call.call_ref, head, &defect.detail, || {
+        format!("{:#?}", defect.call)
+    });
 }
 
-/// A violation as [`record`] kept it.
-enum Kept {
-    /// Not met since the mark: the message its panic states.
-    New(String),
-    /// Already met since the mark: its one line.
-    Repeat(String),
+/// One violation of `name` on `call_ref`, headed `head` with `detail`: kept
+/// in the process's record ([`violations`]), the first since the last
+/// [`mark`] with the call's `dump`, a later one as its one line, once per
+/// name and detail, at most [`KEPT_AFTER_FIRST`] of them; logged as one error
+/// line; counted on `metrics`. The turn goes on.
+fn report(
+    metrics: &B2buaMetrics,
+    name: &'static str,
+    call_ref: &str,
+    head: String,
+    detail: &str,
+    dump: impl FnOnce() -> String,
+) {
+    record(format!("{name}: {detail}"), head, dump);
+    tracing::error!(%call_ref, invariant = name, "{detail}");
+    metrics.record_model_defect(name);
 }
 
 /// How many one-line violations the record keeps past the first since a
@@ -132,36 +162,33 @@ static VIOLATIONS: Mutex<Record> = Mutex::new(Record { kept: Vec::new(), mark: 0
 /// Keep the violation `what` (its invariant and detail) headed `head`: with
 /// the call's `dump` for the first since the mark, as `head` alone for a later
 /// one, and not again for one already kept.
-fn record(what: String, head: String, dump: impl FnOnce() -> String) -> Kept {
-    let mut record = VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner());
+fn record(what: String, head: String, dump: impl FnOnce() -> String) {
+    let mut record = locked(&VIOLATIONS, MODEL_VIOLATIONS);
     let since = record.mark;
-    if record.kept.len() == since {
+    let later = record.kept.get(since..).unwrap_or_default();
+    if later.is_empty() {
         let message = format!("{head}\n{}", dump());
-        record.kept.push((what, message.clone()));
-        return Kept::New(message);
+        record.kept.push((what, message));
+        return;
     }
-    let later = &record.kept[since..];
-    if later.iter().any(|(w, _)| *w == what) {
-        return Kept::Repeat(head);
+    if later.iter().any(|(w, _)| *w == what) || later.len() > KEPT_AFTER_FIRST {
+        return;
     }
-    if later.len() <= KEPT_AFTER_FIRST {
-        record.kept.push((what, head.clone()));
-    }
-    Kept::New(head)
+    record.kept.push((what, head));
 }
 
 /// A point in the process's record: the number of violations kept so far.
 /// The first violation kept after it carries the call's dump.
 pub fn mark() -> usize {
-    let mut record = VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut record = locked(&VIOLATIONS, MODEL_VIOLATIONS);
     record.mark = record.kept.len();
     record.mark
 }
 
-/// The violations [`check`] kept in this process so far, each its panic
-/// message.
+/// The violations kept in this process so far, each its message: its head
+/// line, and the call's dump for the first since a mark.
 pub fn violations() -> Vec<String> {
-    let record = VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let record = locked(&VIOLATIONS, MODEL_VIOLATIONS);
     record.kept.iter().map(|(_, message)| message.clone()).collect()
 }
 

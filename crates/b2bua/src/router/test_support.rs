@@ -37,6 +37,20 @@ pub struct Node {
     pub cdr: InMemoryCdrWriter,
     pub metrics: B2buaMetrics,
     pub clock: Clock,
+    /// The model-invariant record's mark at the node's start: the node fails
+    /// its test on drop with the first violation kept after it.
+    since: usize,
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(first) = crate::rules::model_invariants::violations().get(self.since) {
+            panic!("{first}");
+        }
+    }
 }
 
 /// Spawn a core on simulated SIP and replication fabrics with no peers.
@@ -128,6 +142,7 @@ pub async fn node_on(
         cdr,
         metrics,
         clock,
+        since: crate::rules::model_invariants::mark(),
     }
 }
 

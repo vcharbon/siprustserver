@@ -172,6 +172,16 @@ pub const REPEAT_GIVE_UPS: Family = Family::counter(
     "dialog-level ladders that ran to their give-up with the obligation still undischarged (ack-of-2xx: RFC 3261 §13.3.1.4; a reliable provisional's ladder arms none, its responder rejects); the rate a peer goes deaf at",
 );
 
+/// A model invariant a landing record broke, or a defect a turn reported
+/// (`rules::model_invariants::NAMES`).
+pub const MODEL_INVARIANT: Dim = Dim::new("invariant", &crate::rules::model_invariants::NAMES);
+
+pub const MODEL_DEFECTS: Family = Family::counter(
+    "b2bua_model_defects_total",
+    Labels::Product(&[MODEL_INVARIANT]),
+    "model invariants a turn's landing record broke and defects a turn met (ADR-0052 §8): each one a defect of this node's own; the turn landed all the same",
+);
+
 pub const REPL_QUIET_TURNS: Family = Family::counter(
     "b2bua_repl_quiet_turns_total",
     Labels::Product(&[QUIET_TURN]),
