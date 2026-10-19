@@ -72,7 +72,7 @@ pub mod timer;
 
 pub use attempt::{Attempt, AttemptCause, AttemptId, AttemptOutcome};
 pub use cdr::{CdrEvent, CdrEventType};
-pub use deadline::Deadline;
+pub use deadline::{millis_i64, millis_u64, Deadline};
 pub use decision_log::{DecisionKind, DecisionMark};
 pub use dialog::{
     Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog, PendingRequest,

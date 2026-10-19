@@ -36,7 +36,7 @@ pub enum AdmissionVerdict {
 }
 
 /// Returns true if `host` is an IPv4 or IPv6 literal, bracketed or not: the
-/// send path's own definition ([`sip_net::ip_host`]), so a host admitted as an
+/// send path's own definition ([`sip_message::ip_literal::ip_host`]), so a host admitted as an
 /// IP literal is one the worker can put on the wire.
 ///
 /// The std parser is the chosen definition of an IP literal. Its treatment of
@@ -44,7 +44,7 @@ pub enum AdmissionVerdict {
 /// definition; no host shape this system routes to (K8s FQDNs, canonical pod
 /// IPs) depends on it.
 fn is_ip_literal(host: &str) -> bool {
-    sip_net::ip_host(host).is_some()
+    sip_message::ip_literal::ip_host(host).is_some()
 }
 
 /// Returns true if any suffix in `suffixes` matches `host` (case-insensitive) at a

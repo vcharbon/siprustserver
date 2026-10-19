@@ -23,7 +23,6 @@
     )
 )]
 
-pub mod addr;
 pub mod fragmentation;
 pub mod net;
 pub mod pre_ingress;
@@ -32,9 +31,9 @@ pub mod real;
 pub mod socket_stats;
 pub mod types;
 
-pub use addr::{ip_host, ip_socket_addr};
 pub use net::{SignalingNetwork, UdpEndpoint};
 pub use real::RealSignalingNetwork;
+pub use sip_message::ip_literal::{ip_host, ip_socket_addr};
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
     PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind, SendTap,

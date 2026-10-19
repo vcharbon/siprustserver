@@ -90,7 +90,7 @@ pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
 pub use model::{HeldRequest, OwnNotify};
 // Timers, CDR events, the message ring, the decision log and the termination
 // record on the replicated body.
-pub use model::Deadline;
+pub use model::{millis_i64, millis_u64, Deadline};
 // The routing answers a call dials (attempts).
 pub use model::{Attempt, AttemptCause, AttemptId, AttemptOutcome};
 pub use model::{

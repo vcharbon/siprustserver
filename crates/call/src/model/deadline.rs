@@ -36,8 +36,18 @@ impl Deadline {
     /// The wait in milliseconds, when the deadline is on; a wait past
     /// `i64::MAX` milliseconds reads as `i64::MAX`.
     pub fn millis(self) -> Option<i64> {
-        self.duration().map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        self.duration().map(millis_i64)
     }
+}
+
+/// `d` in whole milliseconds, held at `i64::MAX`.
+pub fn millis_i64(d: Duration) -> i64 {
+    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// `d` in whole milliseconds, held at `u64::MAX`.
+pub fn millis_u64(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

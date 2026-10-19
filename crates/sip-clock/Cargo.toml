@@ -17,6 +17,8 @@ workspace = true
 tokio = { workspace = true }
 # The timer wheel whose range `delay_queue` clamps every delay to.
 tokio-util = { workspace = true }
+# The `Duration` to milliseconds conversions, the call model's (re-exported).
+call = { path = "../call" }
 
 [dev-dependencies]
 # `start_paused` / `pause` / `advance` live behind tokio's test-util feature.

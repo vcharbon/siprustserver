@@ -1,7 +1,8 @@
-//! Socket addresses built from a `(host, port)` pair, structurally. A SIP host
-//! holds an IPv6 literal without its brackets (`sip_message` strips them), so
-//! the text `host:port` does not parse back for IPv6; the IP is read alone
-//! and joined to the port instead. Nothing here resolves a name.
+//! The IP a SIP host names when it is an IP literal, and the socket address
+//! of a `(host, port)` pair built from it, structurally. A SIP host holds an
+//! IPv6 literal without its brackets (the parser strips them), so the text
+//! `host:port` does not parse back for IPv6; the IP is read alone and joined
+//! to the port instead. Nothing here resolves a name.
 
 use std::net::{IpAddr, SocketAddr};
 

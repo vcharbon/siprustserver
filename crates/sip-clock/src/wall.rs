@@ -1,7 +1,7 @@
 //! Wall-clock readings as signed epoch milliseconds, and the boot refusal of
 //! a wall clock set before the UNIX epoch.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The host's wall clock reads before the UNIX epoch: a grossly misconfigured
 /// clock. A node anchored there would skew every replicated deadline it
@@ -24,15 +24,7 @@ impl std::fmt::Display for PreEpochClock {
 
 impl std::error::Error for PreEpochClock {}
 
-/// `d` in whole milliseconds, held at `i64::MAX`.
-pub fn millis_i64(d: Duration) -> i64 {
-    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
-}
-
-/// `d` in whole milliseconds, held at `u64::MAX`.
-pub fn millis_u64(d: Duration) -> u64 {
-    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
-}
+pub use call::{millis_i64, millis_u64};
 
 /// `at` as signed milliseconds since the UNIX epoch: negative before it,
 /// held at the `i64` bounds.

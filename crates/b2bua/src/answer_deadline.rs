@@ -131,8 +131,7 @@ pub fn arm(mut result: HandlerResult, budgets: &AnswerBudgets, now_ms: i64) -> H
         }
     }
     for (timer_type, budget) in deadlines {
-        let fire_at =
-            now_ms.saturating_add(sip_clock::wall::millis_i64(budget.saturating_add(MARGIN)));
+        let fire_at = now_ms.saturating_add(call::millis_i64(budget.saturating_add(MARGIN)));
         crate::timer_arm::arm(
             &mut result.call,
             &mut result.effects,
