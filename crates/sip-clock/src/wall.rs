@@ -29,6 +29,11 @@ pub fn millis_i64(d: Duration) -> i64 {
     i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
 }
 
+/// `d` in whole milliseconds, held at `u64::MAX`.
+pub fn millis_u64(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// `at` as signed milliseconds since the UNIX epoch: negative before it,
 /// held at the `i64` bounds.
 pub fn epoch_ms(at: SystemTime) -> i64 {

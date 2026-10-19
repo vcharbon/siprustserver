@@ -373,30 +373,41 @@ where
     // Subscribe BEFORE the snapshot so no delta between snapshot and subscribe is
     // lost; the initial reconcile runs synchronously so the caller's state is
     // current the moment this returns.
-    let mut changes = membership.changes();
+    let changes = membership.changes();
     reconcile(membership.snapshot());
-    tokio::spawn(async move {
-        // The periodic belt-and-suspenders reconcile (ADR-0012 D2). `interval`'s
-        // first tick fires immediately — consume it; the synchronous initial
-        // reconcile above already covered the boot snapshot.
-        #[expect(clippy::disallowed_methods, reason = "the period is held above zero")]
-        let mut ticker = tokio::time::interval(period.max(MIN_RECONCILE_PERIOD));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        ticker.tick().await;
-        loop {
-            // Every wakeup — a delta, a `Lagged` overflow, or the periodic tick —
-            // takes the same path: reconcile from the authoritative snapshot. Only
-            // `Closed` (source gone) stops us.
-            let proceed = tokio::select! {
-                r = changes.recv() => !matches!(r, Err(broadcast::error::RecvError::Closed)),
-                _ = ticker.tick() => true,
-            };
-            if !proceed {
-                return;
-            }
-            reconcile(membership.snapshot());
+    tokio::spawn(follow_membership(membership, changes, period, reconcile))
+}
+
+/// The loop [`spawn_membership_reconcile`] spawns, over `changes`, a
+/// subscription the caller took before its own last reconcile: every wakeup —
+/// a delta, a `Lagged` overflow, or a `period` tick — reconciles from the
+/// authoritative snapshot; it returns when the source closes. A supervisor
+/// that runs it again after a panic subscribes and reconciles first.
+pub async fn follow_membership<F>(
+    membership: Arc<dyn Membership>,
+    mut changes: broadcast::Receiver<MemberDelta>,
+    period: std::time::Duration,
+    mut reconcile: F,
+) where
+    F: FnMut(Vec<Peer>),
+{
+    // The periodic belt-and-suspenders reconcile (ADR-0012 D2). `interval`'s
+    // first tick fires immediately — consume it; the caller's reconcile
+    // already covered the snapshot it subscribed at.
+    #[expect(clippy::disallowed_methods, reason = "the period is held above zero")]
+    let mut ticker = tokio::time::interval(period.max(MIN_RECONCILE_PERIOD));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    loop {
+        let proceed = tokio::select! {
+            r = changes.recv() => !matches!(r, Err(broadcast::error::RecvError::Closed)),
+            _ = ticker.tick() => true,
+        };
+        if !proceed {
+            return;
         }
-    })
+        reconcile(membership.snapshot());
+    }
 }
 
 /// Parse `ordinal@host,ordinal@host,...` into a peer set. An empty/blank string
