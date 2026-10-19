@@ -154,6 +154,7 @@ mod refer_reject;
 mod refer_timers;
 mod refer_transparent_relay;
 mod refused_invite_one_answer;
+mod refused_reject_code;
 mod reinvite;
 mod reinvite_accept;
 mod reinvite_after_bye;

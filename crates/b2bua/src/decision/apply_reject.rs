@@ -33,7 +33,8 @@ pub(super) fn seed_service_ext(
 /// Apply a reject decision to `call`: mark it (`kind` says which decision
 /// point returned it — the initial INVITE's, or a limiter failover's — and
 /// `leg_id` the leg it answers), seed its `service_ext` (a core-reserved key
-/// is skipped, ADR-0016), then answer the a-leg with the final.
+/// is skipped, ADR-0016), then answer the a-leg with the final. A code that is
+/// no non-2xx final is refused ([`is_reject_code`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_reject(
     call: Call,
@@ -47,6 +48,21 @@ pub(crate) fn apply_reject(
 ) -> HandlerResult {
     let call = mark_decision(call, now_ms, kind, leg_id, reject.label);
     let call = seed_service_ext(call, reject.service_ext);
+    if !is_reject_code(reject.reject_code) {
+        tracing::warn!(call_ref = %call.call_ref, code = reject.reject_code, "reject refused: not a non-2xx final");
+        return crate::initial_invite::reject_call(
+            call,
+            a_invite,
+            500,
+            Some(REFUSED_DECISION_REASON.to_string()),
+            reject.update_headers.as_ref(),
+            &[],
+            advertisement,
+            id_gen,
+            now_ms,
+            TerminationCause::Admission,
+        );
+    }
     crate::initial_invite::reject_call(
         call,
         a_invite,
@@ -61,6 +77,13 @@ pub(crate) fn apply_reject(
     )
 }
 
+/// Whether a reject decision's `code` rejects at all: a non-2xx final (RFC 3261
+/// §21.3–§21.6). A provisional, a 2xx or a code past 699 is refused with the
+/// plain server error, as a redirect decision that is not a 3xx is.
+pub(crate) fn is_reject_code(code: u16) -> bool {
+    (300..=699).contains(&code)
+}
+
 /// Whether a redirect decision's `code` is a redirect at all: a 3xx (RFC 3261
 /// §21.3). Any other code is refused with the plain server error, as an
 /// unreadable redirect target is.
@@ -68,8 +91,8 @@ pub(crate) fn is_redirect_code(code: u16) -> bool {
     (300..=399).contains(&code)
 }
 
-/// The reason phrase of a refused redirect decision's 500.
-pub(crate) const REFUSED_REDIRECT_REASON: &str = "Server Internal Error";
+/// The reason phrase of a refused reject or redirect decision's 500.
+pub(crate) const REFUSED_DECISION_REASON: &str = "Server Internal Error";
 
 /// Apply a redirect decision to `call` as [`apply_reject`] applies a reject:
 /// mark it, seed its `service_ext`, then answer the a-leg with the 3xx and its
@@ -93,7 +116,7 @@ pub(crate) fn apply_redirect(
             call,
             a_invite,
             500,
-            Some(REFUSED_REDIRECT_REASON.to_string()),
+            Some(REFUSED_DECISION_REASON.to_string()),
             redirect.update_headers.as_ref(),
             &[],
             advertisement,

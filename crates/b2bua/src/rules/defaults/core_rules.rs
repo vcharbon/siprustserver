@@ -916,7 +916,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         },
                         RuleAction::RespondToALeg {
                             status: 500,
-                            reason: crate::decision::apply_reject::REFUSED_REDIRECT_REASON
+                            reason: crate::decision::apply_reject::REFUSED_DECISION_REASON
                                 .to_string(),
                             header_updates: Vec::new(),
                             contacts: Vec::new(),
