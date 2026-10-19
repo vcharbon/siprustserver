@@ -138,7 +138,7 @@ async fn next_event(rig: &mut Rig, wait: u64) -> Option<CallEvent> {
         .await
         .ok()
         .flatten()
-        .map(CallEvent::from_txn)
+        .map(crate::router::txn_event::call_event)
 }
 
 /// Park a body on call `c` until the returned gate opens, with the call's

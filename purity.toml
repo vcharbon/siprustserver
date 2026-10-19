@@ -51,8 +51,3 @@ pure-deps = [
   "typenum",
   "zmij",
 ]
-
-# Breaches held until their fix lands. An entry only goes away: one the base
-# does not hold fails, and so does one whose breach no longer holds.
-[known.pure-reaches]
-b2bua-sdk = ["sip-txn"]

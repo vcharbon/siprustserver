@@ -17,4 +17,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }
-sip-txn = { path = "../sip-txn" }

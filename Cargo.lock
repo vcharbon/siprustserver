@@ -620,7 +620,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sip-message",
- "sip-txn",
 ]
 
 [[package]]

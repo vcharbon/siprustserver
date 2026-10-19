@@ -73,6 +73,7 @@ pub(crate) mod test_support;
 pub(crate) mod timer_screen;
 mod turn;
 mod turn_label;
+pub(crate) mod txn_event;
 mod unaddressable;
 mod undecided;
 mod unroutable;
@@ -308,7 +309,7 @@ pub async fn run(
     loop {
         let work = tokio::select! {
             ev = txn_rx.recv() => match ev {
-                Some(ev) => Work::Event(CallEvent::from_txn(ev)),
+                Some(ev) => Work::Event(txn_event::call_event(ev)),
                 None => break,
             },
             ev = timer_rx.recv(), if timers_open => match ev {
