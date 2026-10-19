@@ -101,7 +101,18 @@ impl<'a> OwedAnswer<'a> {
 
     /// A Retry-After, in seconds, jittered over the configured base.
     pub(super) fn jittered_retry_after(&self) -> u32 {
-        let roll = u64::from(self.id_gen.new_sequence_number());
+        self.retry_after_rolled(self.id_gen.new_sequence_number())
+    }
+
+    /// [`Self::jittered_retry_after`] rolled by a draw of the turn `ids`, for
+    /// a refusal a turn answers (ADR-0052 §3).
+    pub(super) fn jittered_retry_after_in(&self, ids: &mut sip_ids::TurnIds) -> u32 {
+        self.retry_after_rolled(ids.new_sequence_number())
+    }
+
+    /// The Retry-After the jitter's `roll` picks over the configured base.
+    fn retry_after_rolled(&self, roll: u32) -> u32 {
+        let roll = u64::from(roll);
         load_shed::retry_after::jittered(
             self.retry_after_base_sec,
             self.retry_after_jitter_sec,

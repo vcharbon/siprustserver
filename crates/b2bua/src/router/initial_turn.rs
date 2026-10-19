@@ -100,7 +100,7 @@ pub(super) async fn initial_invite_turn(
     // A new request on the identity of a call still here: one call per
     // identity, so the caller is told to retry once it is gone (§14.2).
     if resident {
-        let retry_after = super::owed::OwedAnswer::of(ctx).jittered_retry_after();
+        let retry_after = super::owed::OwedAnswer::of(ctx).jittered_retry_after_in(&mut turn.ids);
         let resp = build_retry_later_500(req, Some(turn.ids.new_tag()), retry_after);
         if let Ok(resp) = resp {
             let _ = ctx.txn.send_response(resp, src).await;
