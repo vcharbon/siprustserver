@@ -12,12 +12,20 @@ use repl_net::{
     Watermark, MAX_FRAME_LEN,
 };
 
+fn enc(f: &Frame) -> Vec<u8> {
+    encode_frame(f).expect("the frame encodes")
+}
+
+fn wrap(payload: &[u8]) -> Vec<u8> {
+    frame_with_len_prefix(payload).expect("the payload fits a frame")
+}
+
 fn assert_roundtrip(f: &Frame) {
-    let bytes = encode_frame(f);
+    let bytes = enc(f);
     let back = decode_frame(&bytes).expect("decode should succeed");
     assert_eq!(*f, back, "round-trip mismatch for {f:?}");
     // Byte-determinism: encoding twice yields identical bytes.
-    let bytes2 = encode_frame(f);
+    let bytes2 = enc(f);
     assert_eq!(bytes, bytes2, "encode is not deterministic for {f:?}");
 }
 
@@ -99,7 +107,7 @@ fn roundtrip_data_empty_body_is_some_not_none() {
         incarnation: Some(String::new()),
     };
     assert_roundtrip(&f);
-    if let Frame::Data { body, .. } = decode_frame(&encode_frame(&f)).unwrap() {
+    if let Frame::Data { body, .. } = decode_frame(&enc(&f)).unwrap() {
         assert_eq!(body, Some(Arc::from(&[][..])));
     } else {
         panic!("expected Data");
@@ -215,7 +223,7 @@ fn err_wrong_array_length() {
 #[test]
 fn err_truncated_payload() {
     // Valid Data header but cut off mid-frame.
-    let full = encode_frame(&Frame::Data {
+    let full = enc(&Frame::Data {
         at: Watermark::new(9, 9),
         op: Op::Put,
         partition: Partition::Bak,
@@ -259,8 +267,8 @@ fn err_empty_input() {
 
 #[test]
 fn framing_wrap_then_read_one() {
-    let payload = encode_frame(&Frame::Noop { at: Watermark::new(1, 2) });
-    let wire = frame_with_len_prefix(&payload);
+    let payload = enc(&Frame::Noop { at: Watermark::new(1, 2) });
+    let wire = wrap(&payload);
     assert_eq!(&wire[..4], &(payload.len() as u32).to_be_bytes());
 
     let mut buf = wire.clone();
@@ -273,11 +281,11 @@ fn framing_wrap_then_read_one() {
 
 #[test]
 fn framing_two_concatenated_pop_in_order() {
-    let a = encode_frame(&Frame::Noop { at: Watermark::new(1, 0) });
-    let b = encode_frame(&Frame::ResetToBootstrap { reason: "x".into() });
+    let a = enc(&Frame::Noop { at: Watermark::new(1, 0) });
+    let b = enc(&Frame::ResetToBootstrap { reason: "x".into() });
     let mut buf = Vec::new();
-    buf.extend_from_slice(&frame_with_len_prefix(&a));
-    buf.extend_from_slice(&frame_with_len_prefix(&b));
+    buf.extend_from_slice(&wrap(&a));
+    buf.extend_from_slice(&wrap(&b));
 
     let first = try_read_framed(&mut buf).unwrap().unwrap();
     let second = try_read_framed(&mut buf).unwrap().unwrap();
@@ -290,13 +298,13 @@ fn framing_two_concatenated_pop_in_order() {
 
 #[test]
 fn framing_partial_then_completes() {
-    let payload = encode_frame(&Frame::PullRequest {
+    let payload = enc(&Frame::PullRequest {
         proto_ver: 3,
         caller: "abc".into(),
         partition: Partition::Pri,
         since: Watermark::new(2, 2),
     });
-    let wire = frame_with_len_prefix(&payload);
+    let wire = wrap(&payload);
 
     // Only the first 2 bytes of the length prefix have arrived.
     let mut buf = wire[..2].to_vec();
@@ -317,7 +325,7 @@ fn framing_oversized_prefix_errors() {
     // A length prefix above the cap, no payload bytes needed.
     let mut buf = (MAX_FRAME_LEN + 1).to_be_bytes().to_vec();
     match try_read_framed(&mut buf) {
-        Err(ReplFramingError::Oversized { len }) => assert_eq!(len, MAX_FRAME_LEN + 1),
+        Err(ReplFramingError::Oversized { len }) => assert_eq!(len, MAX_FRAME_LEN as usize + 1),
         other => panic!("expected Oversized, got {other:?}"),
     }
     // Buffer left intact for caller inspection.
@@ -326,11 +334,21 @@ fn framing_oversized_prefix_errors() {
 
 #[test]
 fn framing_empty_payload_roundtrips() {
-    let wire = frame_with_len_prefix(&[]);
+    let wire = wrap(&[]);
     assert_eq!(wire, vec![0, 0, 0, 0]);
     let mut buf = wire;
     let got = try_read_framed(&mut buf).unwrap().unwrap();
     assert!(got.is_empty());
+}
+
+#[test]
+fn a_payload_past_the_frame_cap_is_refused_before_it_is_sent() {
+    let payload = vec![0u8; MAX_FRAME_LEN as usize + 1];
+    match frame_with_len_prefix(&payload) {
+        Err(ReplFramingError::Oversized { len }) => assert_eq!(len, payload.len()),
+        other => panic!("expected Oversized, got {:?}", other.map(|w| w.len())),
+    }
+    assert_eq!(wrap(&payload[1..]).len(), MAX_FRAME_LEN as usize + 4, "the cap itself frames");
 }
 
 // --- watermark ordering: the reboot-incarnation rule -----------------------

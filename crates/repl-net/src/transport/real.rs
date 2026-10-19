@@ -157,7 +157,7 @@ impl RealConnection {
 impl ReplicationConnection for RealConnection {
     async fn send(&self, frame: Frame) -> Result<(), SendError> {
         // Codec + length prefix, then one write.
-        let wire = frame_with_len_prefix(&encode_frame(&frame));
+        let wire = wire_bytes(&frame)?;
         let mut w = self.write.lock().await;
         w.write_all(&wire).await.map_err(|e| classify_write(&e))?;
         w.flush().await.map_err(|e| classify_write(&e))?;
@@ -175,7 +175,7 @@ impl ReplicationConnection for RealConnection {
         // individually, so the receiver's framed `recv` is unchanged.
         let mut buf = Vec::new();
         for frame in &frames {
-            buf.extend_from_slice(&frame_with_len_prefix(&encode_frame(frame)));
+            buf.extend_from_slice(&wire_bytes(frame)?);
         }
         let mut w = self.write.lock().await;
         w.write_all(&buf).await.map_err(|e| classify_write(&e))?;
@@ -208,7 +208,8 @@ impl ReplicationConnection for RealConnection {
                             rs.done = true;
                             return None;
                         }
-                        Ok(n) => rs.buf.extend_from_slice(&chunk[..n]),
+                        // `read` reports at most the chunk's length.
+                        Ok(n) => rs.buf.extend_from_slice(chunk.get(..n).unwrap_or(&chunk)),
                         Err(_) => {
                             rs.done = true;
                             return None;
@@ -231,6 +232,13 @@ impl ReplicationConnection for RealConnection {
     fn local_addr(&self) -> SocketAddr {
         self.local
     }
+}
+
+/// `frame` encoded and length-prefixed; one that does not encode or frame is
+/// [`SendError::Unencodable`], and nothing of it is written.
+fn wire_bytes(frame: &Frame) -> Result<Vec<u8>, SendError> {
+    let payload = encode_frame(frame).map_err(|e| SendError::Unencodable(e.to_string()))?;
+    frame_with_len_prefix(&payload).map_err(|e| SendError::Unencodable(e.to_string()))
 }
 
 fn classify_write(e: &std::io::Error) -> SendError {

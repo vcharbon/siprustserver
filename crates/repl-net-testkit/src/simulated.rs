@@ -949,7 +949,7 @@ impl ReplicationConnection for SimConnection {
         }
 
         // The codec plays through every path: encode to bytes, move bytes.
-        let bytes = encode_frame(&frame);
+        let bytes = encode_frame(&frame).map_err(|e| SendError::Unencodable(e.to_string()))?;
         // Account the frame against the flow-control window (released by the
         // peer's `recv`). Always tracked so `block` can be armed mid-stream.
         self.out_dir.inflight.fetch_add(1, Ordering::SeqCst);

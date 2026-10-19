@@ -87,13 +87,14 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
 proptest! {
     #[test]
     fn roundtrip_identity(f in frame_strat()) {
-        let bytes = encode_frame(&f);
+        let bytes = encode_frame(&f).expect("a generated frame encodes");
         let back = decode_frame(&bytes).expect("decode must succeed for an encoded frame");
         prop_assert_eq!(f, back);
     }
 
     #[test]
     fn encode_is_deterministic(f in frame_strat()) {
-        prop_assert_eq!(encode_frame(&f), encode_frame(&f));
+        let once = encode_frame(&f).expect("a generated frame encodes");
+        prop_assert_eq!(once, encode_frame(&f).expect("a generated frame encodes"));
     }
 }

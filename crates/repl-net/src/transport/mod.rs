@@ -88,6 +88,10 @@ pub enum SendError {
     /// Underlying I/O failure (real transport only).
     #[error("send io error: {0}")]
     Io(String),
+    /// The frame does not encode or exceeds the frame cap; nothing was sent
+    /// and the connection stays usable.
+    #[error("frame not sent: {0}")]
+    Unencodable(String),
 }
 
 /// A connection-oriented, reliable, ordered, framed replication network.

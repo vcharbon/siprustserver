@@ -97,9 +97,6 @@ crates/load-shed/src/sampler.rs 5
 crates/load-shed/src/token_bucket.rs 2
 crates/metric-values/src/fixed.rs 6
 crates/metric-values/src/open.rs 14
-crates/repl-net/src/codec.rs 45
-crates/repl-net/src/framing.rs 7
-crates/repl-net/src/transport/real.rs 1
 crates/sip-proxy-runner/src/binds.rs 4
 crates/sip-proxy-runner/src/config.rs 8
 crates/sip-proxy-runner/src/config/preflight.rs 2

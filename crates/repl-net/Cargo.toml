@@ -28,6 +28,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# The no-panic lane's runner and binary mutations (ADR-0051 §8).
+wire-mutations = { path = "../wire-mutations" }
 # The error-path tests hand-build malformed msgpack arrays directly.
 rmp = { workspace = true }
 # The real-TCP tests run on a non-paused runtime.
