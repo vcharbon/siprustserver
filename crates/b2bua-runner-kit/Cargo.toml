@@ -63,3 +63,6 @@ tokio = { workspace = true, features = ["test-util"] }
 # (tests/support/fake_broker.rs): lapin's own frame codec, so the wire is the
 # client's.
 amq-protocol = { version = "10.6.3", default-features = false }
+# The black-holed broker of the IO-thread test: a listener whose zero backlog is
+# full, so the kernel drops every further SYN.
+socket2 = { workspace = true }

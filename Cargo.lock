@@ -584,6 +584,7 @@ dependencies = [
  "sip-net",
  "sip-net-testkit",
  "sip-txn",
+ "socket2",
  "tokio",
  "topology",
  "tracing",
