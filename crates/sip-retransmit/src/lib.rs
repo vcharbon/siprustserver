@@ -284,6 +284,13 @@ impl Ladder {
         Some((Ladder { schedule, rung: 1, elapsed: first }, first))
     }
 
+    /// Arm the first rung of the schedule an RFC prescribes for `class`: every
+    /// class has one, so the ladder is always armed.
+    pub fn armed_rfc(class: Class) -> (Ladder, Duration) {
+        let first = class.interval(1);
+        (Ladder { schedule: Schedule::rfc(class), rung: 1, elapsed: first }, first)
+    }
+
     /// Rebuild a ladder standing on `rung`, deriving the elapsed time from the
     /// schedule. The form a replicated rung index is restored through.
     pub fn at_rung(schedule: Schedule, rung: u32) -> Ladder {

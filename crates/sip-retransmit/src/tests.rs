@@ -38,6 +38,26 @@ fn every_class_paces_and_bounds_as_its_rfc_states() {
     }
 }
 
+/// Every RFC class arms its first rung, as the schedule it prescribes does.
+#[test]
+fn an_rfc_class_arms_as_its_schedule_does() {
+    for class in [
+        Class::InviteClient,
+        Class::NonInviteClient,
+        Class::NonInviteProceeding,
+        Class::CancelClient,
+        Class::InviteServerFinal,
+        Class::Final2xx,
+        Class::ReliableProvisional,
+    ] {
+        assert_eq!(
+            Some(Ladder::armed_rfc(class)),
+            Ladder::armed(Schedule::rfc(class)),
+            "{class:?}"
+        );
+    }
+}
+
 #[test]
 fn rung_zero_is_the_original_send_and_has_no_wait() {
     let s = Schedule::rfc(Class::Final2xx);
