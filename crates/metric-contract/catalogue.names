@@ -183,6 +183,7 @@ b2bua-runner observe_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner http_request_failures_total counter capped:256 {peer,cause}
 b2bua-runner http_request_failures_overflow_total counter fixed {}
 b2bua-runner http_request_poisoned_lock_recoveries_total counter fixed {lock}
+b2bua-runner b2bua_runner_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner jemalloc_allocated_bytes gauge fixed {}
 b2bua-runner jemalloc_active_bytes gauge fixed {}
 b2bua-runner jemalloc_resident_bytes gauge fixed {}

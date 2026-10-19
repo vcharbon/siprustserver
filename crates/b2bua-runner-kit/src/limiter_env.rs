@@ -67,6 +67,7 @@ pub(crate) fn limiter_from_lookup(
         let n = positive(key, default)?;
         i64::try_from(n).map_err(|_| format!("{key}={n}: too large"))
     };
+    let count = |n: u64| usize::try_from(n).map_err(|_| format!("{n}: past this platform"));
     if let Some(v) = stated(lookup("LIMITER_BREAKER_FAILURES")) {
         return Err(format!(
             "LIMITER_BREAKER_FAILURES={v:?} is not a knob: the breaker opens on \
@@ -84,9 +85,9 @@ pub(crate) fn limiter_from_lookup(
         refresh_timeout_ms: positive("LIMITER_REFRESH_TIMEOUT_MS", 2_000)?,
         refresh_sec: seconds("LIMITER_REFRESH_SECONDS", 40)?,
         refresh_batch_ms: positive("LIMITER_REFRESH_BATCH_MS", 1_000)?,
-        refresh_batch_max: positive("LIMITER_REFRESH_BATCH_MAX", 1_000)? as usize,
+        refresh_batch_max: count(positive("LIMITER_REFRESH_BATCH_MAX", 1_000)?)?,
         release_timeout_ms: positive("LIMITER_RELEASE_TIMEOUT_MS", 2_000)?,
-        queue_cap: positive("LIMITER_RELEASE_QUEUE_CAP", 100_000)? as usize,
+        queue_cap: count(positive("LIMITER_RELEASE_QUEUE_CAP", 100_000)?)?,
         backend: BackendConfig::from_lookup("LIMITER", &defaults, &lookup)?,
     })
 }

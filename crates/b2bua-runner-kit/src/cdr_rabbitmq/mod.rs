@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use b2bua::cdr::{CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
 use b2bua::metrics::B2buaMetrics;
 use call::Call;
+use sip_clock::wall::millis_u64;
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
@@ -175,14 +176,14 @@ impl RabbitMqCdrWriter {
                 Ok(Ok(session)) => link.session = Some(session),
                 Ok(Err(e)) => {
                     let wait = link.backoff.failed(Instant::now());
-                    tracing::warn!(error = %e, retry_in_ms = wait.as_millis() as u64, "CDR broker connect failed");
+                    tracing::warn!(error = %e, retry_in_ms = millis_u64(wait), "CDR broker connect failed");
                     return None;
                 }
                 Err(_) => {
                     let wait = link.backoff.failed(Instant::now());
                     tracing::warn!(
-                        timeout_ms = self.settings.bounds.connect_timeout.as_millis() as u64,
-                        retry_in_ms = wait.as_millis() as u64,
+                        timeout_ms = millis_u64(self.settings.bounds.connect_timeout),
+                        retry_in_ms = millis_u64(wait),
                         "CDR broker connect timed out"
                     );
                     return None;
@@ -236,7 +237,7 @@ impl CdrWriter for RabbitMqCdrWriter {
         if let Some(session) = link.session.take() {
             session.close().await;
         }
-        for tracker in link.retired.drain(..) {
+        for tracker in std::mem::take(&mut link.retired) {
             let _ = tracker.await;
         }
     }

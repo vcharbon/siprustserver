@@ -13,6 +13,7 @@ tier = "shell"
 workspace = true
 
 [dependencies]
+lock-poison = { path = "../lock-poison" }
 metric-catalogue = { path = "../metric-catalogue" }
 jemalloc-stats = { path = "../jemalloc-stats" }
 b2bua = { path = "../b2bua" }
@@ -23,8 +24,8 @@ http-net = { path = "../http-net", features = ["real"] }
 probe-http = { path = "../probe-http" }
 sip-clock = { path = "../sip-clock" }
 # Process subscriber installation (ADR-0026): every runner composed from this
-# kit gets the lifecycle-log + OTLP plumbing at `bind`, so no binary re-derives
-# it. `tracing` is the emission facade for the kit's own lifecycle lines.
+# kit links the lifecycle-log + OTLP plumbing and installs it before `bind`.
+# `tracing` is the emission facade for the kit's own lifecycle lines.
 observe = { path = "../observe", features = ["otlp"] }
 tracing = { workspace = true }
 sip-net = { path = "../sip-net" }

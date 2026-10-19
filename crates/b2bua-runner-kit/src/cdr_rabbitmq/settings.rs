@@ -72,11 +72,12 @@ impl CdrDeliveryBounds {
     fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let d = Self::default();
         let ms = |key: &str, default: Duration, max: u64| -> Result<Duration, String> {
-            bounded(get, key, default.as_millis() as u64, max).map(Duration::from_millis)
+            bounded(get, key, sip_clock::wall::millis_u64(default), max).map(Duration::from_millis)
         };
+        let window = bounded(get, "B2BUA_CDR_RABBITMQ_WINDOW", d.window as u64, MAX_WINDOW)?;
         let bounds = Self {
-            window: bounded(get, "B2BUA_CDR_RABBITMQ_WINDOW", d.window as u64, MAX_WINDOW)?
-                as usize,
+            // At most MAX_WINDOW, so every platform holds it.
+            window: usize::try_from(window).unwrap_or(d.window),
             connect_timeout: ms(
                 "B2BUA_CDR_RABBITMQ_CONNECT_TIMEOUT_MS",
                 d.connect_timeout,

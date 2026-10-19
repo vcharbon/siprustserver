@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use b2bua::repl::{PullerConfig, ServeConfig};
 use repl_net::SocketSettings;
+use sip_clock::wall::millis_u64;
 
 /// The replication link bounds, read once at boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +63,7 @@ impl LinkSettings {
     pub(crate) fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let d = Self::default();
         let ms = |key: &str, default: Duration| {
-            positive(&get, key, default.as_millis() as u64).map(Duration::from_millis)
+            positive(&get, key, millis_u64(default)).map(Duration::from_millis)
         };
         // The kernel counts keepalive times in whole seconds, at most 32 767.
         let keepalive_s = |key: &str, default: Duration| {
@@ -91,8 +92,10 @@ impl LinkSettings {
                     &get,
                     "B2BUA_REPL_KEEPALIVE_RETRIES",
                     u64::from(d.socket.keepalive_retries),
-                )? {
-                    n @ 1..=127 => n as u32,
+                )?
+                .try_into()
+                {
+                    Ok(n @ 1..=127) => n,
                     _ => return Err("B2BUA_REPL_KEEPALIVE_RETRIES must be 1 to 127".into()),
                 },
                 user_timeout: match ms("B2BUA_REPL_USER_TIMEOUT_MS", d.socket.user_timeout)? {
@@ -124,10 +127,10 @@ impl LinkSettings {
     /// timer, these link bounds and backoff ceiling.
     pub(crate) fn puller(&self) -> PullerConfig {
         PullerConfig {
-            connect_timeout_ms: self.connect_timeout.as_millis() as u64,
-            backoff_max_ms: self.backoff_max.as_millis() as u64,
-            idle_timeout_ms: self.idle_timeout.as_millis() as u64,
-            send_stall_ms: self.send_stall.as_millis() as u64,
+            connect_timeout_ms: millis_u64(self.connect_timeout),
+            backoff_max_ms: millis_u64(self.backoff_max),
+            idle_timeout_ms: millis_u64(self.idle_timeout),
+            send_stall_ms: millis_u64(self.send_stall),
             ..PullerConfig::default()
         }
     }

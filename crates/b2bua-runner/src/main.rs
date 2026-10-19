@@ -120,7 +120,27 @@ fn main() -> std::process::ExitCode {
     b2bua_runner_kit::runtime::block_on("b2bua-runner", serve())
 }
 
+/// The worker from boot to exit. The process subscriber comes first
+/// (ADR-0026), so a refused boot is logged once, while its writer runs.
 async fn serve() -> std::process::ExitCode {
+    let _observe = match observe::init_production("b2bua-runner") {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("b2bua-runner FATAL: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    match run().await {
+        Ok(exit) => exit,
+        Err(refusal) => {
+            tracing::error!(error = %refusal, "refusing to start");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Boot and serve until shutdown; `Err` is a refused boot.
+async fn run() -> Result<std::process::ExitCode, String> {
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) actually
     // parsed — a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms
     // gauges on /metrics.
@@ -136,17 +156,17 @@ async fn serve() -> std::process::ExitCode {
 
     // Generic runner plumbing (b2bua-runner-kit): env grammar → bind (ingress
     // brake installed) → advertise coercion → validated config + metrics/clock.
-    let base = RunnerEnv::from_env().bind("b2bua-runner").await;
+    let base = RunnerEnv::from_env()?.bind("b2bua-runner").await?;
 
     // Runner-only coherence (not visible to `B2buaConfig::validate`): the default
     // callee must be admissible under the worker's own allow-list — refuse to
     // boot with a clear message rather than silently 503 every call.
     validate_default_dest(&dest_host, &base.config.worker_allowed_target_suffixes)
-        .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        .map_err(|e| format!("invalid B2BUA config: {e}"))?;
 
     // CDR sink: RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
     // discarding default, either way behind the kit's bounded buffer.
-    let cdr_sink = base.rabbitmq_cdr_sink_from_env();
+    let cdr_sink = base.rabbitmq_cdr_sink_from_env()?;
 
     let mut deps = base
         .deps(
@@ -160,7 +180,7 @@ async fn serve() -> std::process::ExitCode {
         .await;
 
     // Replication (opt-in): `None` leaves the node unwired.
-    deps.replication = base.replication_setup_from_env().await;
+    deps.replication = base.replication_setup_from_env().await?;
 
     // No extra ServiceDefs: the in-tree services (transfer, relay-first-18x)
     // ride `default_rules()` at runtime; `compose_services()` (lib.rs) is the
@@ -196,5 +216,5 @@ async fn serve() -> std::process::ExitCode {
     let _probe = base.spawn_probe_server(&core, extra_metrics, heap).await;
 
     base.spawn_gauge_sampler(&core);
-    base.run_until_shutdown(&core).await
+    Ok(base.run_until_shutdown(&core).await)
 }

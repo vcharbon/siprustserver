@@ -7,6 +7,8 @@
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 
+use crate::poison::{locked, CDR_SOCKET_KILL};
+
 /// Holds a clone of the connection's socket once connected; [`Self::kill`]
 /// shuts it down, now or, when the socket connects after the kill, at once.
 #[derive(Debug, Default)]
@@ -23,7 +25,7 @@ struct KillState {
 impl SocketKill {
     /// Registers the connected socket (a clone sharing its descriptor).
     pub(super) fn arm(&self, socket: TcpStream) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.state, CDR_SOCKET_KILL);
         if state.killed {
             let _ = socket.shutdown(Shutdown::Both);
         } else {
@@ -33,7 +35,7 @@ impl SocketKill {
 
     /// Shuts the socket down in both directions; idempotent.
     pub(super) fn kill(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.state, CDR_SOCKET_KILL);
         state.killed = true;
         if let Some(socket) = state.socket.take() {
             let _ = socket.shutdown(Shutdown::Both);

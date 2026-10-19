@@ -22,6 +22,7 @@ use http_net::{LookupSettings, NameResolver, ResolvedTarget};
 use topology::Peer;
 
 use super::{pod_dns_name, ReplAddressing};
+use crate::poison::{locked, REPL_TARGETS};
 
 /// Resolves a peer to `<address>:repl_port` on every connect attempt.
 pub(crate) struct ReplResolver {
@@ -50,10 +51,7 @@ impl ReplResolver {
     /// up afresh.
     async fn look_up(&self, host: &str) -> Option<SocketAddr> {
         let name = format!("{host}:{}", self.repl_port);
-        let target = self
-            .targets
-            .lock()
-            .unwrap()
+        let target = locked(&self.targets, REPL_TARGETS)
             .entry(name.clone())
             .or_insert_with(|| {
                 Arc::new(ResolvedTarget::name_with_lookup(name, self.names.clone(), self.lookup))

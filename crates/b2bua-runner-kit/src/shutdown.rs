@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use b2bua::drain::{DrainBounds, DrainExit};
 use b2bua::B2buaCore;
+use sip_clock::wall::millis_u64;
 
 use crate::RunnerBase;
 
@@ -87,7 +88,7 @@ pub(crate) async fn serve_until_stop(
 /// Ctrl-C: Draining first, so no new call is admitted while the queued
 /// releases leave; a second Ctrl-C gives them up at once.
 async fn interrupted(core: &B2buaCore, name: &str, bounds: DrainBounds) -> ExitCode {
-    let release_flush_ms = bounds.release_flush.as_millis() as u64;
+    let release_flush_ms = millis_u64(bounds.release_flush);
     tracing::info!(service = name, signal = "SIGINT", release_flush_ms, "shutting down");
     core.begin_draining();
     tokio::select! {
@@ -112,9 +113,9 @@ async fn drained(core: &B2buaCore, name: &str, bounds: DrainBounds, stop: Stop) 
     tracing::info!(
         service = name,
         cause,
-        drain_grace_ms = bounds.grace.as_millis() as u64,
-        drain_min_ms = bounds.floor.as_millis() as u64,
-        release_flush_ms = bounds.release_flush.as_millis() as u64,
+        drain_grace_ms = millis_u64(bounds.grace),
+        drain_min_ms = millis_u64(bounds.floor),
+        release_flush_ms = millis_u64(bounds.release_flush),
         "begin draining"
     );
     let loops = core.loops().clone();
@@ -173,7 +174,7 @@ async fn close_cdr(core: &B2buaCore, name: &str, bound: Duration) {
     core.cdr().close(started + bound).await;
     let cdr_written = metrics.cdr_written_total() - written;
     let cdr_dropped = metrics.cdr_dropped_total() - dropped;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let elapsed_ms = millis_u64(started.elapsed());
     if cdr_dropped == 0 {
         tracing::info!(service = name, cdr_written, elapsed_ms, "CDR sink closed");
     } else {

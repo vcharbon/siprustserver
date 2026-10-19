@@ -51,6 +51,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
         observe::counters::FAMILIES,
         http_net::failures::FAMILIES,
         http_net::poison::FAMILIES,
+        crate::poison::FAMILIES,
         jemalloc_stats::catalogue::FAMILIES,
     ],
 };
@@ -58,13 +59,14 @@ pub const CATALOGUE: Catalogue = Catalogue {
 impl WorkerMetrics {
     /// The `/metrics` body: the worker's families, the process-wide
     /// observability counters (dropped log lines, trace admission), the
-    /// cause-labelled client HTTP failures and the HTTP client's lock
-    /// recoveries, then `extra` (the allocator's exposition).
+    /// cause-labelled client HTTP failures, the HTTP client's and the kit's
+    /// lock recoveries, then `extra` (the allocator's exposition).
     pub fn body(&self, extra: Option<&probe_http::MetricsFn>) -> String {
         let mut text = self.prometheus_text();
         text.push_str(&observe::counters::prometheus_text());
         text.push_str(&http_net::failures::prometheus_text());
         text.push_str(&http_net::poison::prometheus_text());
+        text.push_str(&crate::poison::prometheus_text());
         if let Some(extra) = extra {
             text.push_str(&extra());
         }
@@ -112,10 +114,12 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::EVENT_QUEUE_DEPTH.render_value(&mut s, m.event_queue_depth());
     c::EVENT_QUEUE_CAPACITY.render_value(&mut s, m.event_queue_capacity());
     let class = |series: &metric_catalogue::Series<'_>| {
-        EventQueueClass::ALL[series.index(&c::EVENT_QUEUE_CLASS)]
+        EventQueueClass::ALL.get(series.index(&c::EVENT_QUEUE_CLASS)).copied()
     };
-    c::EVENT_QUEUE_DROPS.render(&mut s, |series| m.event_queue_drops(class(series)));
-    c::EVENT_QUEUE_DEFERRALS.render(&mut s, |series| m.event_queue_deferrals(class(series)));
+    c::EVENT_QUEUE_DROPS
+        .render(&mut s, |series| class(series).map_or(0, |cl| m.event_queue_drops(cl)));
+    c::EVENT_QUEUE_DEFERRALS
+        .render(&mut s, |series| class(series).map_or(0, |cl| m.event_queue_deferrals(cl)));
     c::EVENT_QUEUE_DEFERRED.render_value(&mut s, m.event_queue_deferred());
     c::DEFERRED_SWEPT.render_value(&mut s, m.deferred_swept());
     c::SWEEP_REAPED.render_value(&mut s, m.sweep_reaped());

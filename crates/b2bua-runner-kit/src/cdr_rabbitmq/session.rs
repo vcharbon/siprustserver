@@ -25,6 +25,15 @@ use super::resolver::BrokerResolver;
 use super::settings::RabbitMqCdrSettings;
 use super::socket_kill::{KillOnDrop, SocketKill};
 
+/// The confirm window's permits: `window`, at most the settings' ceiling
+/// (far below the semaphore's).
+fn window_permits(window: usize) -> Semaphore {
+    let bounded = window.min(usize::try_from(super::MAX_WINDOW).unwrap_or(usize::MAX));
+    #[expect(clippy::disallowed_methods, reason = "held within MAX_WINDOW")]
+    let permits = Semaphore::new(bounded);
+    permits
+}
+
 /// Why a session could not be opened.
 #[derive(Debug)]
 pub(super) enum OpenError {
@@ -143,7 +152,7 @@ impl Session {
             ended_at: OnceLock::new(),
             delivered: AtomicBool::new(false),
             nack_logged: AtomicBool::new(false),
-            window: Arc::new(Semaphore::new(settings.bounds.window)),
+            window: Arc::new(window_permits(settings.bounds.window)),
             socket,
         });
         let (pending, rx) = mpsc::unbounded_channel();

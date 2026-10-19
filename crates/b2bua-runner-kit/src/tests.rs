@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner_env::{cdr_ring_from_lookup, switch};
 
 fn suffixes(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
@@ -52,13 +53,14 @@ fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
 #[test]
 fn the_privacy_service_switch_defaults_on_and_reads_off() {
     let read = |v: Option<&str>| switch("B2BUA_PRIVACY_SERVICE", v.map(String::from), true);
-    assert!(read(None));
-    assert!(read(Some(" ")));
-    assert!(read(Some("on")));
-    assert!(!read(Some("off")));
-    assert!(!read(Some("0")));
-    assert!(!read(Some("FALSE")));
-    assert!(std::panic::catch_unwind(|| read(Some("of"))).is_err());
+    assert_eq!(read(None), Ok(true));
+    assert_eq!(read(Some(" ")), Ok(true));
+    assert_eq!(read(Some("on")), Ok(true));
+    assert_eq!(read(Some("off")), Ok(false));
+    assert_eq!(read(Some("0")), Ok(false));
+    assert_eq!(read(Some("FALSE")), Ok(false));
+    let refused = read(Some("of")).expect_err("neither on nor off");
+    assert!(refused.contains("B2BUA_PRIVACY_SERVICE"), "{refused}");
 }
 
 #[test]
@@ -73,27 +75,30 @@ fn a_blank_value_states_nothing() {
 
 #[test]
 fn the_ring_knobs_read_blank_as_unset() {
-    assert_eq!(cdr_ring_from_lookup(lookup(&[])), (0, vec![]));
+    assert_eq!(cdr_ring_from_lookup(lookup(&[])), Ok((0, vec![])));
     assert_eq!(
         cdr_ring_from_lookup(lookup(&[
             ("B2BUA_CDR_MESSAGE_RING", ""),
             ("B2BUA_CDR_CAPTURED_HEADERS", " , ")
         ])),
-        (0, vec![])
+        Ok((0, vec![]))
     );
     assert_eq!(
         cdr_ring_from_lookup(lookup(&[
             ("B2BUA_CDR_MESSAGE_RING", " 16 "),
             ("B2BUA_CDR_CAPTURED_HEADERS", "Allow, Accept")
         ])),
-        (16, vec!["Allow".to_string(), "Accept".to_string()])
+        Ok((16, vec!["Allow".to_string(), "Accept".to_string()]))
     );
 }
 
+/// An unparsable knob is a boot refusal returned to the runner, naming the
+/// variable, never a panic.
 #[test]
-#[should_panic(expected = "B2BUA_CDR_MESSAGE_RING")]
-fn an_unparsable_ring_cap_refuses_the_boot() {
-    cdr_ring_from_lookup(lookup(&[("B2BUA_CDR_MESSAGE_RING", "lots")]));
+fn an_unparsable_ring_cap_is_a_boot_refusal_naming_it() {
+    let refused = cdr_ring_from_lookup(lookup(&[("B2BUA_CDR_MESSAGE_RING", "lots")]))
+        .expect_err("an unparsable cap refuses the boot");
+    assert!(refused.contains("B2BUA_CDR_MESSAGE_RING"), "{refused}");
 }
 
 #[test]
