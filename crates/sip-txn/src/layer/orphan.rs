@@ -9,7 +9,7 @@ use sip_message::generators::{
 use sip_message::sdp_answer::reject_offer;
 use std::net::SocketAddr;
 
-use sip_message::{BuildHeldSdpOptions, SipRequest, SipResponse};
+use sip_message::{BuildHeldSdpOptions, Method, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use call::TxnKind;
@@ -34,11 +34,12 @@ impl Owner {
     /// A 2xx on an orphaned Accepted INVITE client txn, the layer standing in
     /// for the UAC core the release removed (RFC 3261 §13.2.2.4, RFC 6026
     /// §7.2): its dialog's ACK, the same one every time. A dialog whose ACK
-    /// already left — the TU's, or one built here — draws that ACK and nothing
-    /// else. A dialog no ACK left for draws one built from the INVITE
-    /// ([`Owner::orphan_ack`]), kept for its repeats, and its BYE when an
-    /// initial INVITE opened it ([`Owner::bye_unheld_dialog`]). A new dialog
-    /// past the remembered ones draws a built ACK and no BYE.
+    /// already left — the TU's, or one built here — draws that ACK again, where
+    /// it went, and nothing else. A dialog no ACK left for draws one built from
+    /// the INVITE ([`Owner::orphan_ack`]), kept for its repeats, and its BYE
+    /// when an initial INVITE opened it and no BYE left on it yet
+    /// ([`Owner::bye_unheld_dialog`]). A new dialog past the remembered ones
+    /// draws a built ACK and no BYE.
     pub(super) async fn release_2xx(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -46,41 +47,46 @@ impl Owner {
         resp: &SipResponse,
     ) {
         let Some(t) = self.clients.get_mut(branch) else { return };
-        let Some(dest) = t.destination else { return };
-        let known = t.dialog(resp.to().tag()).map(|d| d.ack.clone());
-        if let Some(Some(ack)) = known {
+        let known = t.dialog(resp.to().tag()).map(|d| (d.ack.clone(), d.byed));
+        if let Some((Some((ack, dest)), _)) = known {
             return self.send_buffer(endpoint, &ack, dest).await;
         }
         let Some(invite) = self.accepted_invite(branch) else { return };
-        let Some(ack) = self.orphan_ack(branch, &invite, resp) else { return };
+        let Some((ack, dest)) = self.orphan_ack(branch, &invite, resp) else { return };
         self.send_buffer(endpoint, &ack, dest).await;
-        if known.is_none() {
-            return;
-        }
+        let Some((_, byed)) = known else { return };
         if let Some(dialog) = self.clients.get_mut(branch).and_then(|t| t.dialog(resp.to().tag())) {
-            dialog.ack = Some(ack);
+            dialog.ack = Some((ack, dest));
         }
-        self.bye_unheld_dialog(endpoint, branch, &invite, resp).await;
+        if !byed {
+            self.bye_unheld_dialog(endpoint, branch, &invite, resp).await;
+        }
     }
 
     /// The ACK of `resp` built from `invite`, the INVITE of the client txn at
     /// `branch`, on a fresh branch, answering the offer `resp` carries when one
-    /// is owed ([`owed_answer`]); `None`, logged, where its lines make no ACK.
-    fn orphan_ack(&self, branch: &str, invite: &SipRequest, resp: &SipResponse) -> Option<Bytes> {
+    /// is owed ([`owed_answer`]), with its next hop ([`next_hop`]); `None`,
+    /// logged, where its lines make no ACK or it names no address.
+    fn orphan_ack(
+        &self,
+        branch: &str,
+        invite: &SipRequest,
+        resp: &SipResponse,
+    ) -> Option<(Bytes, SocketAddr)> {
         let t = self.clients.get(branch)?;
         let answer = owed_answer(invite, resp, &t.reliable_offers);
-        generate_ack_for_2xx_from_invite(invite, resp, &self.id_gen.new_branch(), answer)
+        let ack = generate_ack_for_2xx_from_invite(invite, resp, &self.id_gen.new_branch(), answer)
             .inspect_err(|e| unbuilt(branch, "ACK", e))
-            .ok()
-            .map(|ack| ack.image().clone())
+            .ok()?;
+        let dest = next_hop(&ack).or_else(|| unaddressed(branch, "ACK"))?;
+        Some((ack.image().clone(), dest))
     }
 
     /// End with a BYE (§15.1.1) the dialog `resp`, a 2xx to `invite`, the
     /// orphaned initial INVITE at `branch`, created: numbered above every
-    /// request this layer sent on that dialog, sent to the route set's first
-    /// hop where it names an address, else where the INVITE went (§8.1.2), on
-    /// an orphaned non-INVITE transaction of its own. A 2xx to a re-INVITE
-    /// belongs to a dialog its call ended.
+    /// request this layer sent on that dialog, sent to its next hop
+    /// ([`next_hop`]), on an orphaned non-INVITE transaction of its own. A 2xx
+    /// to a re-INVITE belongs to a dialog its call ended.
     async fn bye_unheld_dialog(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -97,7 +103,7 @@ impl Owner {
             let bye = generate_bye_for_2xx_from_invite(orig, resp, cseq, &self.id_gen.new_branch())
                 .inspect_err(|e| unbuilt(branch, "BYE", e))
                 .ok()?;
-            let dest = first_route_address(&bye).or(t.destination)?;
+            let dest = next_hop(&bye).or_else(|| unaddressed(branch, "BYE"))?;
             Some((bye, dest))
         });
         let Some((bye, dest)) = built else { return };
@@ -112,8 +118,9 @@ impl Owner {
 
     /// Raise, on every INVITE client txn of `call_ref` that `req`, a request
     /// inside a dialog, shares its Call-ID and From-tag with, the CSeq of the
-    /// dialog `req`'s To-tag names: a BYE the layer later sends on that dialog
-    /// numbers above it (§12.2.1.1).
+    /// dialog `req`'s To-tag names, so a BYE the layer later sends on that
+    /// dialog numbers above it (§12.2.1.1); a BYE marks the dialog ended, so
+    /// the layer sends it none.
     pub(super) fn note_dialog_cseq(&mut self, call_ref: Option<&str>, req: &SipRequest) {
         let Some(to_tag) = req.to().tag() else { return };
         let Some(txns) = call_ref.and_then(|cr| self.txn_index.get(cr)) else { return };
@@ -127,6 +134,7 @@ impl Owner {
             };
             if let Some(dialog) = t.dialog(Some(to_tag)) {
                 dialog.cseq = dialog.cseq.max(seq);
+                dialog.byed |= *req.method() == Method::Bye;
             }
         }
     }
@@ -160,12 +168,24 @@ impl Owner {
     }
 }
 
-/// The address the first `Route` of `req` names, where its host is one.
-fn first_route_address(req: &SipRequest) -> Option<SocketAddr> {
+/// Where an in-dialog `req` goes (RFC 3261 §8.1.2, §12.2.1.1): its first
+/// `Route` when that one is loose, else its Request-URI — the remote target,
+/// or a strict first hop — when its host is an address.
+fn next_hop(req: &SipRequest) -> Option<SocketAddr> {
     let routes = req.route_set().ok()?;
-    let route = routes.first()?.uri().clone();
-    let host = route.host().parse::<std::net::IpAddr>().ok()?;
-    Some(SocketAddr::new(host, route.port().unwrap_or(5060)))
+    let uri = match routes.first() {
+        Some(route) if route.uri().is_loose_route() => route.uri(),
+        _ => req.request_uri(),
+    };
+    let (host, port) = uri.host_port();
+    sip_net::ip_socket_addr(host, port)
+}
+
+/// Log that the `what` an orphaned transaction at `branch` owes names no
+/// address to send it to: the layer resolves no host name.
+fn unaddressed<T>(branch: &str, what: &str) -> Option<T> {
+    tracing::warn!(%branch, %what, "orphan obligation not sent: its next hop names no address");
+    None
 }
 
 /// The answer the ACK of `resp`, a 2xx to `invite`, owes (RFC 3264 §4):

@@ -54,8 +54,10 @@ pub(crate) struct MetricsInner {
     /// Copies of a refused INVITE answered that refusal again before any
     /// transaction held them (counter).
     pub refused_copies: AtomicU64,
-    /// Client transactions still open when their call was released — orphaned
-    /// (see `Transaction::orphaned`), never cut short (counter).
+    /// Client transactions still resident when their call was released —
+    /// orphaned (see `Transaction::orphaned`), never cut short: the open ones
+    /// and the INVITEs held Accepted, so every answered INVITE whose call
+    /// ends within Timer M of its 2xx counts (counter).
     pub txn_orphaned_on_call_evict: AtomicU64,
     /// Orphaned transactions resident right now, each closing its own
     /// obligations until its timer purges it (gauge).

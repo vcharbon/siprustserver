@@ -132,7 +132,7 @@ impl Owner {
                     }
                     self.send_buffer(endpoint, &buf, dest).await;
                     if msg.method() == Method::Ack {
-                        self.note_tu_ack(&msg, &buf);
+                        self.note_tu_ack(&msg, &buf, dest);
                     }
                     if let Some(branch) = arm {
                         self.arm_cancel_retransmit(&branch);
@@ -555,23 +555,23 @@ impl Owner {
 
             // Snapshot what we need before mutating. The branch and the CSeq
             // method match (RFC 3261 §17.1.3): the branch is unguessable, and
-            // the source goes unchecked (ADR-0007). An Accepted txn its call
-            // still holds takes nothing: what follows its 2xx reaches the TU
-            // as a repeat, matched to none, and the TU owns each ACK.
+            // the source goes unchecked (ADR-0007). A 2xx on an Accepted txn its
+            // call holds goes to the TU, which owns each ACK, matched to none.
+            let is_2xx = (200..300).contains(&resp.status());
             let client_match = self
                 .clients
                 .get(branch)
                 .filter(|t| t.method == *resp.cseq().method())
-                .filter(|t| t.state != TxnState::Accepted || t.orphaned)
+                .filter(|t| t.state != TxnState::Accepted || t.orphaned || !is_2xx)
                 .map(|t| (t.kind, t.state, t.original_request.clone(), t.destination, t.orphaned));
             matched_client_txn = client_match.is_some();
 
             if let Some((kind, state, original_request, destination, orphaned)) = client_match {
                 if state == TxnState::Accepted {
                     // RFC 6026 §7.2 + RFC 3261 §13.2.2.4: the orphan's 2xx
-                    // draws its dialog's ACK from the layer; anything else on
-                    // the branch is absorbed until Timer M.
-                    if (200..300).contains(&resp.status()) {
+                    // draws its dialog's ACK from the layer; a 1xx or a non-2xx
+                    // is absorbed until Timer M (§8.4: only 2xx go up).
+                    if is_2xx {
                         self.release_2xx(endpoint, branch, &resp).await;
                     }
                     return true;

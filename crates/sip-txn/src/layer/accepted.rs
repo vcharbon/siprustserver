@@ -5,6 +5,8 @@
 //! transaction the layer sends them (`layer::orphan`). Also kept here: the
 //! reliable provisionals that carried the offer of an offerless INVITE.
 
+use std::net::SocketAddr;
+
 use bytes::Bytes;
 use sip_message::header::RSeq;
 use sip_message::{SipMessage, SipRequest, SipResponse};
@@ -56,11 +58,11 @@ impl Owner {
         self.settle_accepted(branch);
     }
 
-    /// Record `ack`, which the TU just sent as `image`, on the dialog of the
-    /// Accepted INVITE client txn it acknowledges: one of its call's (Via
-    /// `cr`), on the same Call-ID, From-tag and CSeq number (§13.2.2.4), under
-    /// the ACK's To-tag. An ACK matching none is the TU's alone.
-    pub(super) fn note_tu_ack(&mut self, ack: &SipRequest, image: &Bytes) {
+    /// Record `ack`, which the TU just sent to `dest` as `image`, on the dialog
+    /// of the Accepted INVITE client txn it acknowledges: one of its call's
+    /// (Via `cr`), on the same Call-ID, From-tag and CSeq number (§13.2.2.4),
+    /// under the ACK's To-tag. An ACK matching none is the TU's alone.
+    pub(super) fn note_tu_ack(&mut self, ack: &SipRequest, image: &Bytes, dest: SocketAddr) {
         let ViaMarks { call_ref, .. } = extract_via_custom_params(ack);
         let Some(txns) = call_ref.as_deref().and_then(|cr| self.txn_index.get(cr)) else {
             return;
@@ -83,7 +85,7 @@ impl Owner {
             return;
         };
         if let Some(dialog) = self.clients.get_mut(&branch).and_then(|t| t.dialog(ack.to().tag())) {
-            dialog.ack = Some(image.clone());
+            dialog.ack = Some((image.clone(), dest));
         }
     }
 

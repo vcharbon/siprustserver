@@ -39,15 +39,21 @@ Every INVITE client transaction that takes a 2xx is held in **Accepted** for
 - **While the call holds the transaction**, the TU. The first 2xx is the
   transaction's final; every later 2xx on the branch, a repeat or a fork's,
   reaches the TU as a repeat matched to no transaction, as it would with
-  none, and the layer sends nothing for it. The TU's ACK leaves through the
-  layer (`send_request`, raw), which records it on the dialog it names (the
-  INVITE's Call-ID, From-tag and CSeq number, the ACK's To-tag).
+  none, and the layer sends nothing for it; a 1xx or a non-2xx on the
+  branch is absorbed (RFC 6026 §8.4). The TU's ACK leaves through the layer
+  (`send_request`, raw), which records it and its destination on the dialog
+  it names (the INVITE's Call-ID, From-tag and CSeq number, the ACK's
+  To-tag); a BYE the TU sends on a dialog marks that dialog ended.
 - **Once the call releases it**, the layer, as for any orphan below.
 
 An Accepted transaction is off its call's books: the 2xx met its obligation
 to the call, so `has_txns_for`, `ActiveTxnCount` and the ADR-0014
 `CallQuiesced` timing see it as gone, while `cancel_txns_for_call` orphans it
-and `relinquish_call` deletes it.
+and `relinquish_call` deletes it. A release that does not end the call — a
+takeover copy shed at quiescence while the call lives on at its primary —
+relinquishes the call's Accepted transactions first
+(`relinquish_accepted_of_call`): their dialogs are the primary's, so none
+may draw this layer's ACK or BYE; a later repeat is a new arrival.
 
 `cancel_txns_for_call` **orphans** every client transaction of the released
 call and deletes none. An orphan keeps every timer it was running and closes
@@ -58,19 +64,24 @@ its own obligations with no consumer:
   final is surfaced to nobody.
 - **2xx final** — Accepted for Timer M from the first 2xx, and each dialog's
   ACK sent by the layer, the same datagram for every repeat (§13.2.2.4). A
-  dialog whose ACK the TU sent gets that ACK again and nothing else: the TU
-  held that dialog and its release ended it. A dialog no ACK left for (a 2xx
-  after the release, a fork's, one the TU never acknowledged) gets an ACK
-  built from the INVITE and the 2xx alone on a fresh branch
-  (`generate_ack_for_2xx_from_invite`: the INVITE's route set or the 2xx's,
-  this node's own Via). When the 2xx carries the offer of an offerless INVITE
+  dialog whose ACK the TU sent gets that ACK again, where the TU sent it, and
+  nothing else: the TU held that dialog and its release ended it. A dialog
+  no ACK left for (a 2xx after the release, a fork's, one the TU never
+  acknowledged) gets an ACK built from the INVITE and the 2xx alone on a
+  fresh branch (`generate_ack_for_2xx_from_invite`: the INVITE's route set or
+  the 2xx's, this node's own Via), sent to its next hop (§8.1.2, §12.2.1.1):
+  the first Route when loose, else the Request-URI, the 2xx's Contact; a hop
+  naming no address draws nothing, since the layer resolves no host name.
+  When the 2xx carries the offer of an offerless INVITE
   (RFC 3264 §4) and no reliable provisional of that dialog carried it (RFC
   3262 §5: its PRACK answered it), the ACK answers it rejecting every stream
   (RFC 3264 §6, port 0), the least a dialog about to be released can commit
-  to. A 2xx to an initial INVITE created a dialog nothing holds: the layer
-  then sends its BYE (§15.1.1, `generate_bye_for_2xx_from_invite`), numbered
-  above every request this layer sent on that dialog, on an orphaned
-  non-INVITE transaction of its own, whose final reaches no consumer. A
+  to. A 2xx to an initial INVITE created a dialog nothing holds: unless a
+  BYE already left on it (the TU hung up before any ACK), the layer then
+  sends its BYE (§15.1.1, `generate_bye_for_2xx_from_invite`), numbered
+  above every request this layer sent on that dialog, to the same next hop,
+  on an orphaned non-INVITE transaction of its own, whose final reaches no
+  consumer. A
   transaction remembers 16 dialogs; a new one past them is ACKed each time
   and not BYEd.
 - **A 2xx on no branch this node sent** matches no transaction and draws

@@ -24,7 +24,9 @@ pub(super) enum ReleaseKind {
     /// `Terminated`, what has no final is forgotten or answered. A live copy
     /// shed at quiescence holds no open transaction, and touches none: a
     /// request crossing the shed is still served, and a copy of it forgotten
-    /// or answered here would be served twice.
+    /// or answered here would be served twice. Its Accepted INVITE client
+    /// transactions are relinquished, not orphaned: their dialogs are the
+    /// primary's.
     SelfRelease { ended: bool },
     /// **Stand-down** of a takeover copy on its primary's write (ADR-0047 D7):
     /// local-only as `SelfRelease`, and its transactions are relinquished —
@@ -78,6 +80,12 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
         ReleaseKind::SelfRelease { ended } => {
             if ctx.state.drop_local(call_ref) {
                 ctx.timers.cancel_all(call_ref.to_string()).await;
+                if !ended {
+                    // The call lives on at its primary, which holds every
+                    // dialog an answered INVITE here confirmed: none may draw
+                    // this layer's ACK or BYE (ADR-0034).
+                    let _ = ctx.txn.relinquish_accepted_of_call(call_ref).await;
+                }
                 let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
                 if ended {
                     let _ = ctx.txn.forget_unanswered_of_call(call_ref).await;

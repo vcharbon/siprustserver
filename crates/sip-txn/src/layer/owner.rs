@@ -427,7 +427,7 @@ impl Owner {
             .values()
             .chain(self.servers.values())
             .map(|t| {
-                let acks = t.dialogs.iter().filter_map(|d| d.ack.as_ref());
+                let acks = t.dialogs.iter().filter_map(|d| d.ack.as_ref().map(|(ack, _)| ack));
                 t.retransmit_buf.iter().chain(acks).map(|b| b.len() as u64).sum::<u64>()
             })
             .sum();

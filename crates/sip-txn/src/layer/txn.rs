@@ -41,9 +41,10 @@ pub(super) enum TxnState {
     /// passing every ACK up and handing no copy of its INVITE up; this stack
     /// answers each copy with that 2xx where §8.7 sends nothing (`replay_cached`).
     /// An INVITE client txn that took a 2xx (§7.2): held for Timer M from
-    /// that 2xx. While its call holds it, every later 2xx reaches the TU,
-    /// which owns each ACK (RFC 3261 §13.2.2.4); once orphaned, the layer
-    /// sends each dialog's ACK itself (`layer::orphan`).
+    /// that 2xx, absorbing every 1xx and non-2xx (§8.4). While its call holds
+    /// it, every later 2xx reaches the TU, which owns each ACK (RFC 3261
+    /// §13.2.2.4); once orphaned, the layer sends each dialog's ACK itself
+    /// (`layer::orphan`).
     Accepted,
 }
 
@@ -166,14 +167,16 @@ pub(super) const MAX_DIALOGS: usize = 16;
 
 /// A dialog of an INVITE client txn, by its To-tag (one per fork, RFC 3261
 /// §12.1.2): the highest CSeq this layer sent on it, so a BYE it sends there
-/// numbers above it (§12.2.1.1), and the ACK of its 2xx once one left — the
-/// TU's, seen leaving through the layer, or the one the layer built for an
-/// orphan (§13.2.2.4). A dialog whose ACK left was held by the TU, or
-/// already released by the layer.
+/// numbers above it (§12.2.1.1); whether a BYE already left on it; and the
+/// ACK of its 2xx once one left, with where it went — the TU's, seen leaving
+/// through the layer, or the one the layer built for an orphan (§13.2.2.4).
+/// A dialog whose ACK left was held by the TU, or already released by the
+/// layer; one a BYE left on is ended.
 pub(super) struct InviteDialog {
     pub(super) to_tag: Option<String>,
     pub(super) cseq: u32,
-    pub(super) ack: Option<Bytes>,
+    pub(super) byed: bool,
+    pub(super) ack: Option<(Bytes, SocketAddr)>,
 }
 
 /// What distinguishes one fresh transaction from another: its identity, its
@@ -260,7 +263,7 @@ impl Transaction {
         // One slot at a time: most INVITEs open one dialog, and a held txn's
         // spare capacity is memory held 64·T1.
         self.dialogs.reserve_exact(1);
-        self.dialogs.push(InviteDialog { to_tag, cseq: 0, ack: None });
+        self.dialogs.push(InviteDialog { to_tag, cseq: 0, byed: false, ack: None });
         self.dialogs.last_mut()
     }
 

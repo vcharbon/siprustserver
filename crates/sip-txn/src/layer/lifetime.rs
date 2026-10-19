@@ -39,7 +39,7 @@ pub(super) enum Hold {
     TimerJ,
     /// Server INVITE whose non-2xx final is ACKed (§17.2.1).
     TimerI,
-    /// Orphaned client INVITE whose 2xx the layer ACKed (RFC 6026 §7.2).
+    /// Client INVITE Accepted after a 2xx (RFC 6026 §7.2).
     TimerM,
     /// Client INVITE that gave up: 64·T1 for the final its CANCEL provokes
     /// (§9.1), from the CANCEL's first send, else from the give-up.
