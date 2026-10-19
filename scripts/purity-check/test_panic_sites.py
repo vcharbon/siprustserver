@@ -19,6 +19,11 @@ ZERO = ("#![cfg_attr(not(test), deny(clippy::cast_possible_truncation, clippy::c
         " clippy::cast_sign_loss, clippy::expect_used, clippy::indexing_slicing, clippy::panic,"
         " clippy::string_slice, clippy::todo, clippy::unimplemented, clippy::unreachable,"
         " clippy::unwrap_used))]\n")
+ZERO_PURE = ("#![cfg_attr(not(test), deny(clippy::cast_possible_truncation,"
+             " clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::expect_used,"
+             " clippy::indexing_slicing, clippy::iter_over_hash_type, clippy::panic,"
+             " clippy::string_slice, clippy::todo, clippy::unimplemented, clippy::unreachable,"
+             " clippy::unwrap_used))]\n")
 HEADER = "# budget\n"
 LIB = "pub fn f() {}\n" * 20
 
@@ -207,6 +212,18 @@ class Zero(Case):
         rc, out = self.check(ws, [])
         self.assertEqual(rc, 0, out)
 
+    def test_a_pure_crate_at_zero_denies_hash_iteration_too(self):
+        ws = self.workspace(crates=(("a", "pure"),))
+        ws.write("crates/a/src/lib.rs", ZERO + LIB)
+        ws.commit()
+        rc, out = self.check(ws, [])
+        self.assertEqual(rc, 1)
+        self.assertIn("(missing clippy::iter_over_hash_type)", out)
+        ws.write("crates/a/src/lib.rs", ZERO_PURE + LIB)
+        ws.commit()
+        rc, out = self.check(ws, [])
+        self.assertEqual(rc, 0, out)
+
     def test_every_root_carries_it_the_bin_too(self):
         ws = self.workspace()
         ws.crate("a", "shell", lib=ZERO + LIB, bin="fn main() {}\n")
@@ -241,6 +258,19 @@ class Classification(Case):
         pure_clock = message(ids["p"], "clippy::disallowed_methods", "crates/p/src/lib.rs", 5,
                              reason=self.PURE)
         rc, out = self.check(ws, base + [pure_clock])
+        self.assertEqual(rc, 1)
+        self.assertIn("crates/p/src/lib.rs has 2 panic-class sites, budget 1", out)
+
+    def test_hash_iteration_lint_counts_in_a_pure_crate_only(self):
+        ws = self.workspace(HEADER + "crates/s/src/lib.rs 1\ncrates/p/src/lib.rs 1\n",
+                            crates=(("s", "shell"), ("p", "pure")))
+        ids = ws.ids()
+        base = [message(ids["s"], "clippy::panic", "crates/s/src/lib.rs", 2),
+                message(ids["p"], "clippy::panic", "crates/p/src/lib.rs", 2)]
+        shell_loop = message(ids["s"], "clippy::iter_over_hash_type", "crates/s/src/lib.rs", 5)
+        self.assertEqual(self.check(ws, base + [shell_loop])[0], 0)
+        pure_loop = message(ids["p"], "clippy::iter_over_hash_type", "crates/p/src/lib.rs", 5)
+        rc, out = self.check(ws, base + [pure_loop])
         self.assertEqual(rc, 1)
         self.assertIn("crates/p/src/lib.rs has 2 panic-class sites, budget 1", out)
 
@@ -657,6 +687,13 @@ class RealPass(Case):
             "    let _ = std::path::Path::new(s).exists();\n"
             "    s.parse::<u8>().unwrap() + x[0]\n"
             "}\n"
+            "pub fn g(m: &std::collections::HashMap<u8, u8>) -> usize {\n"
+            "    let mut n = m.keys().len();\n"
+            "    for _ in m {\n"
+            "        n += 1;\n"
+            "    }\n"
+            "    n\n"
+            "}\n"
             "#[cfg(test)]\n"
             "mod tests {\n"
             "    #[test]\n"
@@ -668,7 +705,7 @@ class RealPass(Case):
         ws.commit()
         rc, out = ws.run(SCRIPT, "--report")
         self.assertEqual(rc, 0, out)
-        self.assertIn("crates/a/src/lib.rs 6\n", out)
+        self.assertIn("crates/a/src/lib.rs 8\n", out)
         self.assertNotIn("does not refer to", out)
 
     HIDDEN = (

@@ -33,7 +33,10 @@ crates declare none, so none of them can enter a production binary.
   no clock, randomness, filesystem, network, environment or sleep; no interior mutability
   (`Atomic*`, `Mutex`, `RwLock`, `RefCell`, `Cell`, `thread_local!`). Time and identifiers enter
   as parameters, so a pure function's output depends only on its inputs. `tracing` is allowed:
-  it cannot change an outcome. A process-global registry is not.
+  it cannot change an outcome. A process-global registry is not. A std `HashMap` / `HashSet`
+  serves lookups only: its random seed defends a peer-keyed map, and its iteration order is
+  that seed, so a pure crate never iterates one; where order reaches output it uses a
+  `BTreeMap` / `BTreeSet` or an `IndexMap` / `IndexSet` (insertion order).
 - **shell**: effects allowed.
 - **both**: the panic set of §2.
 
@@ -70,7 +73,8 @@ ratchet pass runs clippy with the set force-warned on `--lib --bins` of every ti
 holds per-file counts in `panic-sites.allow`, so no workspace `-D warnings` gate sees the set
 early and no source attribute hides a site from it. An entry goes down, or up only by sites
 git sees moved into its file from a counted site elsewhere; the total never rises. At zero
-the crate carries `#![cfg_attr(not(test), deny(…))]` with the eleven lints at its roots,
+the crate carries `#![cfg_attr(not(test), deny(…))]` with the eleven lints at its roots
+(a pure crate adds `iter_over_hash_type`, which the pass counts in pure crates only),
 which exempts all test code; the disallowed lists stay with the pass for every tiered crate,
 since one list holds both tiers' entries.
 

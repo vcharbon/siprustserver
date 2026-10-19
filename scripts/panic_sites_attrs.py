@@ -10,7 +10,7 @@ attribute is read.
 """
 import re
 
-from panic_sites_lints import COUNTED, DENIED, HIDING_GROUPS
+from panic_sites_lints import COUNTED, DENIED, HIDING_GROUPS, PURE_DENIED
 
 OPEN = re.compile(r"#\s*(!)?\s*\[")
 META = re.compile(r"([A-Za-z_][\w:\s]*?)\s*(?:\((.*)\))?\s*$", re.S)
@@ -19,7 +19,17 @@ CHAR = re.compile(r"'(\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]{1,6}\}|.)|[^\\'\n])'")
 QUALIFIERS = re.compile(r"\s*(?:#\s*\[|pub\s*\(|pub\b|unsafe\b|auto\b|default\b)")
 CONTAINERS = ("mod", "impl", "trait")
 ZERO = {f"clippy::{lint}" for lint in DENIED}
-ZERO_TEXT = "#![cfg_attr(not(test), deny(" + ", ".join(sorted(ZERO)) + "))]"
+ZERO_PURE = ZERO | {f"clippy::{lint}" for lint in PURE_DENIED}
+
+
+def zero_of(tier):
+    """The lints a crate of `tier` at zero denies."""
+    return ZERO_PURE if tier == "pure" else ZERO
+
+
+def zero_text(tier):
+    """The zero attribute of a crate of `tier`."""
+    return "#![cfg_attr(not(test), deny(" + ", ".join(sorted(zero_of(tier))) + "))]"
 
 
 def blank(text):

@@ -12,7 +12,8 @@ the root clippy.toml (`CLIPPY_CONF_DIR` is the root):
 
   clippy::indexing_slicing  string_slice  unwrap_used  expect_used  panic
   unreachable  todo  unimplemented  cast_possible_truncation  cast_sign_loss
-  cast_possible_wrap, and the three lists of the root clippy.toml:
+  cast_possible_wrap, in pure crates also iter_over_hash_type, and the three
+  lists of the root clippy.toml:
   disallowed_macros  disallowed_methods  disallowed_types
 
 A list entry whose reason starts with `pure tier` counts in pure crates only;
@@ -38,7 +39,8 @@ A crate with no entry is at zero: each of its lib and bin roots carries
 
   #![cfg_attr(not(test), deny(<the eleven lints above>))]
 
-which exempts all test code. The three disallowed lints stay with this pass,
+(a pure crate's with iter_over_hash_type too), which exempts all test code.
+The three disallowed lints stay with this pass,
 whose tier split no crate attribute can state. Attributes that would hide a
 site from a plain clippy run, and `cfg` predicates that keep code out of the
 pass, are refused in a tiered crate (panic_sites_attrs).
@@ -71,9 +73,9 @@ import sys
 
 sys.dont_write_bytecode = True  # the helper modules beside it leave no __pycache__
 
-from panic_sites_attrs import ZERO, ZERO_TEXT, expects, refusals, zero_lints
+from panic_sites_attrs import expects, refusals, zero_lints, zero_of, zero_text
 from panic_sites_diff import lines as diff_lines, renames
-from panic_sites_lints import COUNTED
+from panic_sites_lints import COUNTED, PURE_COUNTED
 from panic_sites_lists import entries as list_entries, loosened
 
 PURE_ONLY = "pure tier"
@@ -305,7 +307,7 @@ def findings_of(text, crates):
         if code == "clippy::disallowed_methods" and os.path.isabs(primary["file_name"]) and \
                 any(u in msg["message"] for u in UNWRAPS):
             continue
-        if crate.tier != "pure" and pure_only(msg):
+        if crate.tier != "pure" and (pure_only(msg) or code in PURE_COUNTED):
             continue
         site = call_site(primary)
         key = (site["file_name"], site["line_start"], site["column_start"], code, msg["message"])
@@ -411,10 +413,10 @@ def zero_attrs(root, crates, allow, counts):
         listed = any(c.owns(rel) for rel in allow.entries)
         at_zero = not listed and not any(c.owns(rel) for rel in counts)
         for rel in c.roots:
-            have = zero_lints(read(root, rel))
-            if at_zero and (have is None or not ZERO <= have):
-                miss = "" if have is None else f" (missing {', '.join(sorted(ZERO - have))})"
-                bad.append(f"{c.name} is at zero: {rel} carries `{ZERO_TEXT}`{miss}")
+            have, want = zero_lints(read(root, rel)), zero_of(c.tier)
+            if at_zero and (have is None or not want <= have):
+                miss = "" if have is None else f" (missing {', '.join(sorted(want - have))})"
+                bad.append(f"{c.name} is at zero: {rel} carries `{zero_text(c.tier)}`{miss}")
             elif listed and have is not None:
                 bad.append(f"{c.name} has allowlist entries: {rel} carries the zero attribute")
     return bad

@@ -29,6 +29,7 @@
         clippy::cast_sign_loss,
         clippy::expect_used,
         clippy::indexing_slicing,
+        clippy::iter_over_hash_type,
         clippy::panic,
         clippy::string_slice,
         clippy::todo,

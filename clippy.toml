@@ -111,6 +111,27 @@ disallowed-methods = [
   { path = "std::io::stdin", reason = "pure tier: reads stdin; take the bytes as a parameter" },
   { path = "std::io::stdout", reason = "pure tier: writes stdout; return the text" },
   { path = "std::io::stderr", reason = "pure tier: writes stderr; return the text" },
+  # Iteration in the random order of a std hash collection: a pure function's
+  # output never depends on the process's hash seed. A hash collection stays
+  # for lookups; `clippy::iter_over_hash_type` counts the `for` loops over one.
+  { path = "std::collections::HashMap::iter", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::iter_mut", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::keys", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::values", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::values_mut", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::into_keys", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::into_values", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::drain", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::extract_if", reason = "pure tier: iterates in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashMap::retain", reason = "pure tier: visits in hash-seed order; use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashSet::iter", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
+  { path = "std::collections::HashSet::drain", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
+  { path = "std::collections::HashSet::extract_if", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
+  { path = "std::collections::HashSet::retain", reason = "pure tier: visits in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
+  { path = "std::collections::HashSet::union", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
+  { path = "std::collections::HashSet::intersection", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
+  { path = "std::collections::HashSet::difference", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
+  { path = "std::collections::HashSet::symmetric_difference", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
 ]
 
 disallowed-types = [
