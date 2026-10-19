@@ -226,6 +226,7 @@ mod unreadable_routing_target;
 mod unrelayed_in_dialog_request;
 mod unroutable;
 mod unrung_answer_dialog_identity;
+mod unusable_record_route;
 mod unwired_store;
 mod update_matrix;
 mod update_offer_pending;

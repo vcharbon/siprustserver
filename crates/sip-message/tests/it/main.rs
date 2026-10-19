@@ -24,6 +24,7 @@ mod parser_fold;
 mod parser_line_folding;
 mod parser_response_totag;
 mod parser_smoke;
+mod recorded_routes;
 mod sdp_answer;
 mod sdp_form;
 mod sdp_offer_answer_grammar;

@@ -56,6 +56,25 @@ fn an_origin_without_its_prefix_is_its_own_value() {
     }
 }
 
+/// The wire reader refuses a From or To whose `<` no `>` closes: a tag a
+/// response adds after it would read as part of the URI, so no response to
+/// the request could carry its To-tag.
+#[test]
+fn an_unterminated_name_addr_is_refused_on_the_wire() {
+    for (from, to) in [
+        ("<sip:a@192.0.2.1>;tag=a1", "\"日本語\" <sip:jp@example.org"),
+        ("<sip:a@192.0.2.1;tag=a1", "<sip:b@192.0.2.2>"),
+    ] {
+        let raw = format!(
+            "MESSAGE sip:b@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-1\r\n\
+             From: {from}\r\nTo: {to}\r\nCall-ID: c1\r\nCSeq: 1 MESSAGE\r\n\
+             Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+        );
+        let read = CustomParser::new().parse(raw.as_bytes());
+        assert!(read.is_err(), "From {from:?} / To {to:?} read as {read:?}");
+    }
+}
+
 /// A leniently read request whose `To` line no response can echo under a
 /// stack tag draws a refusal from the response generator, the same for a
 /// request whose `To` reads with no address at all.
