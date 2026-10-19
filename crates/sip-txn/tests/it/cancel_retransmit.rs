@@ -9,9 +9,10 @@
 //! ACK is exempt: a 2xx ACK is TU-owned and rides no timer (§13.2.2.4).
 
 use crate::common;
+use call::TxnKind;
 use common::*;
 use sip_message::SipMessage;
-use sip_txn::{TransactionEvent, TxnKind};
+use sip_txn::TransactionEvent;
 
 /// The drained events contain the INVITE's final response of `status`.
 fn has_final(events: &[TransactionEvent], status: u16) -> bool {

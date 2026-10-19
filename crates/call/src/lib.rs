@@ -5,7 +5,8 @@
 //! `callRef` derivation ([`callref`]), the call [`incarnation`] grammar, the
 //! SIP routing index grammar ([`index_key`]), decision-engine feature
 //! activations ([`features`]), the header statements a decision makes
-//! ([`header_update`]), and the pluggable body [`codec`].
+//! ([`header_update`]), the transaction kinds a TU names ([`txn`]), and the
+//! pluggable body [`codec`].
 //!
 //! ## What this crate is NOT (deferred — see ADR-0008)
 //!
@@ -28,6 +29,7 @@ pub mod index_key;
 pub mod model;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
+pub mod txn;
 
 // callRef derivation + parsing (a-leg identity → replicated key).
 pub use callref::{call_ref_primary, derive_call_ref, parse_call_ref, ParsedCallRef};
@@ -37,6 +39,8 @@ pub use incarnation::{derive_incarnation, incarnation_mark};
 pub use index_key::{
     call_index_keys, call_index_keys_from_unknown, IndexHit, IndexLookup, KeyKind, Probe,
 };
+// The transaction kinds and timeouts a transaction user names.
+pub use txn::{TxnKind, TxnTimeoutKind};
 // Pluggable body codec (msgpack default).
 pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.

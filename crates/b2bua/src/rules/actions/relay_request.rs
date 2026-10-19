@@ -4,13 +4,13 @@
 //! relay is [`super::relay_response`]'s.
 
 use call::helpers::{add_pending_request, bump_our_cseq, find_b_leg, leg_kind};
+use call::TxnKind;
 use call::{ByeDisposition, Call, DialogId, PendingRequest};
 use sip_message::generators::{
     self, CapabilitySet, GenerateInDialogRequestOpts, InDialogMethod, RelayScope, RelaySituation,
 };
 use sip_message::header::{HeaderName, RAck};
 use sip_message::{hops, Method, SipHeader, SipRequest};
-use sip_txn::TxnKind;
 
 use crate::config::B2buaConfig;
 use crate::effects::{

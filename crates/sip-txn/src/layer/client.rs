@@ -12,15 +12,15 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
+use call::{TxnKind, TxnTimeoutKind};
 use sip_clock::delay_queue;
 use sip_message::generators::generate_ack_for_non_2xx;
-use sip_message::header::ParamValue;
-use sip_message::param_codec::decode_param;
 use sip_message::serializer::{render, write_request_line};
+use sip_message::{header::ParamValue, param_codec::decode_param};
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
-use crate::event::{ClientTransactionHandle, TimeoutKind, TransactionEvent, TxnKind};
+use crate::event::{ClientTransactionHandle, TransactionEvent};
 use crate::metrics::method_slot;
 use crate::timers::{ms, TIMER_B, TIMER_F};
 use sip_retransmit::{Class, Ladder, Schedule};
@@ -291,7 +291,7 @@ impl Owner {
         buf: Bytes,
         dest: SocketAddr,
         max_ms: u64,
-        timeout_kind: TimeoutKind,
+        timeout_kind: TxnTimeoutKind,
     ) {
         let Some(class) = self.clients.get(branch).map(|t| match t.kind {
             TxnKind::Invite => Class::InviteClient,
@@ -665,7 +665,7 @@ impl Owner {
 }
 
 impl Owner {
-    /// RFC 3261 §17.1 client-transaction timeout plus the [`TimeoutKind`] its
+    /// RFC 3261 §17.1 client-transaction timeout plus the [`TxnTimeoutKind`] its
     /// expiry emits. EVERY client txn is armed with the §17.1 failure-detection
     /// timer — §17.1.1.2 scopes Timer B to Calling, so an INVITE drawing no
     /// response of any kind is an unanswered hop, not a responding peer, and
@@ -674,15 +674,15 @@ impl Owner {
     /// provisional, where [`Owner::rearm_invite_bound`] arms it — initial and
     /// in-dialog alike, since a peer that answered 1xx has left Calling; a
     /// non-INVITE never leaves Timer F.
-    fn client_timeout(&self, kind: TxnKind, req: &SipRequest) -> (u64, TimeoutKind) {
+    fn client_timeout(&self, kind: TxnKind, req: &SipRequest) -> (u64, TxnTimeoutKind) {
         match kind {
             // `min`: whichever bound is configured tighter is the deadline
             // and owns the give-up.
             TxnKind::Invite if req.to().tag().is_none() => {
-                (TIMER_B.min(self.invite_initial_timeout_ms), TimeoutKind::Response)
+                (TIMER_B.min(self.invite_initial_timeout_ms), TxnTimeoutKind::Response)
             }
-            TxnKind::Invite => (TIMER_B, TimeoutKind::Response),
-            TxnKind::NonInvite => (TIMER_F, TimeoutKind::Response),
+            TxnKind::Invite => (TIMER_B, TxnTimeoutKind::Response),
+            TxnKind::NonInvite => (TIMER_F, TxnTimeoutKind::Response),
         }
     }
 
@@ -704,7 +704,7 @@ impl Owner {
         let remaining = match self.clients.get(branch) {
             Some(t)
                 if t.kind == TxnKind::Invite
-                    && t.timeout_kind == TimeoutKind::Response
+                    && t.timeout_kind == TxnTimeoutKind::Response
                     && !t.lifetime.gave_up()
                     && !t.dead_hop_reported =>
             {
@@ -718,7 +718,7 @@ impl Owner {
         let key = self.arm(Timer::ClientTimeout(branch.to_string()), ms(remaining));
         if let Some(txn) = self.clients.get_mut(branch) {
             txn.timeout_key = Some(key);
-            txn.timeout_kind = TimeoutKind::Transaction;
+            txn.timeout_kind = TxnTimeoutKind::Transaction;
         }
     }
 }

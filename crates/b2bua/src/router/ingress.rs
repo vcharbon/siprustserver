@@ -44,10 +44,10 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // skipped rather than fabricated.
     if let CallEvent::Timeout { destination: Some(dest), timeout_kind, .. } = &event {
         let kind = match timeout_kind {
-            sip_txn::TimeoutKind::Response => {
+            call::TxnTimeoutKind::Response => {
                 crate::peer_failures::PeerFailureKind::ResponseTimeout
             }
-            sip_txn::TimeoutKind::Transaction => {
+            call::TxnTimeoutKind::Transaction => {
                 crate::peer_failures::PeerFailureKind::TransactionTimeout
             }
         };

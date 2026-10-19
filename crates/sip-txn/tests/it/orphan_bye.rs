@@ -2,9 +2,9 @@
 //! dialog nothing holds any more (ADR-0034).
 
 use crate::common;
+use call::TxnKind;
 use common::*;
 use sip_message::{SipMessage, SipRequest};
-use sip_txn::TxnKind;
 
 fn reqs(msgs: &[SipMessage], method: &str) -> Vec<SipRequest> {
     msgs.iter()

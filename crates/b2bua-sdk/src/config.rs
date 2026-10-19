@@ -211,7 +211,7 @@ pub struct B2buaConfig {
     /// **Initial-INVITE first-response deadline**, seconds — how long this TU
     /// waits for a response of ANY kind (not even a `100 Trying`) to a b-leg
     /// initial INVITE before it gives up on the hop (ADR-0044): the leg fails
-    /// with a `TimeoutKind::Response` and the `call_failure` consult carries
+    /// with a `TxnTimeoutKind::Response` and the `call_failure` consult carries
     /// `timeout_kind: "response"` — the "is this hop alive?" question, distinct
     /// from [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)'s "how
     /// long may it ring?". The client transaction keeps Timer A to Timer B.

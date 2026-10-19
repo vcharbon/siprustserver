@@ -16,7 +16,8 @@ use sip_message::param_codec::decode_param;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
-use crate::event::{TransactionEvent, TxnKind};
+use crate::event::TransactionEvent;
+use call::TxnKind;
 use sip_retransmit::{Class, Ladder, Schedule};
 
 use super::backlog::NewInvite;

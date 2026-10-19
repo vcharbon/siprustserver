@@ -58,7 +58,7 @@ pub use layer::{
 // The seeds a materialised call hands the layer, and a re-offer's disposition.
 pub use seed::{Reoffer, TxnSeed};
 // Upward events + the client-transaction handles `send_request` returns.
-pub use event::{ClientTransactionHandle, EventQueueClass, TimeoutKind, TransactionEvent, TxnKind};
+pub use event::{ClientTransactionHandle, EventQueueClass, TransactionEvent};
 // Observability read handle (shared atomics, readable off the actor thread).
 pub use metrics::{RetransmitRow, TransactionMetrics};
 // Identifier generation seam (Via branch / To-tag), and the request-derived

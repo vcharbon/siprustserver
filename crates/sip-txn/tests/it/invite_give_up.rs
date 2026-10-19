@@ -8,9 +8,10 @@
 use crate::common;
 use std::sync::Arc;
 
+use call::{TxnKind, TxnTimeoutKind};
 use common::*;
 use sip_message::SipMessage;
-use sip_txn::{IdGen, TimeoutKind, TransactionConfig, TransactionEvent, TxnKind};
+use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
 
 const BOUND_MS: u64 = 40_000;
 
@@ -29,7 +30,7 @@ async fn stack() -> Stack {
     .await
 }
 
-fn timeouts(events: &[TransactionEvent]) -> Vec<TimeoutKind> {
+fn timeouts(events: &[TransactionEvent]) -> Vec<TxnTimeoutKind> {
     events
         .iter()
         .filter_map(|e| match e {
@@ -68,7 +69,7 @@ async fn a_ringing_invite_that_gave_up_acks_the_487_its_cancel_provokes() {
         .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
         .await;
     elapse_ms(BOUND_MS + 100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Transaction]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Transaction]);
     let _ = stack.drain_peer();
 
     stack
@@ -109,7 +110,7 @@ async fn an_invite_reported_dead_never_times_out_again() {
         .await
         .unwrap();
     elapse_ms(5_100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Response]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Response]);
     let _ = stack.drain_peer();
 
     // The late provisional stops Timer A and starts no new bound: Timer B
@@ -168,7 +169,7 @@ async fn a_cancel_after_an_unanswered_give_up_never_reaches_the_wire() {
         .await
         .unwrap();
     elapse_ms(5_100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Response]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Response]);
     let _ = stack.drain_peer();
 
     stack
@@ -304,7 +305,7 @@ async fn a_provisional_after_the_dead_hop_report_keeps_timer_b() {
         .await
         .unwrap();
     elapse_ms(5_100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Response]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Response]);
     stack
         .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
         .await;

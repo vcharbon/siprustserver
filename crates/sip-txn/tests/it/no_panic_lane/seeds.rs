@@ -7,8 +7,8 @@
 
 use std::time::Duration;
 
+use call::TxnKind;
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
-use sip_txn::TxnKind;
 
 use super::drive::FINAL_DELAY;
 

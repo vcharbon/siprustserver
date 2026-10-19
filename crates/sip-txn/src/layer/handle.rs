@@ -11,11 +11,12 @@ use sip_message::{SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::event::{ClientTransactionHandle, TransactionEvent, TxnKind};
+use crate::event::{ClientTransactionHandle, TransactionEvent};
 use crate::metrics::{MetricsInner, TransactionMetrics};
 use crate::pulse::LoopPulse;
 use crate::rng::IdGen;
 use crate::seed::{Reoffer, TxnSeed};
+use call::TxnKind;
 
 use super::backlog::DeferredBound;
 use super::key::ServerTxnKey;
@@ -42,7 +43,7 @@ pub struct TransactionConfig {
     pub invite_initial_timeout_ms: u64,
     /// The TU's first-response deadline on an initial INVITE (no To-tag), ms
     /// (ADR-0044): with no response of any kind by then, the TU is told the
-    /// hop is dead (`TimeoutKind::Response`) while the transaction keeps Timer
+    /// hop is dead (`TxnTimeoutKind::Response`) while the transaction keeps Timer
     /// A to Timer B and reports nothing again. Armed only below Timer B;
     /// default [`TIMER_B`](crate::timers::TIMER_B), which arms nothing. An
     /// in-dialog INVITE and a non-INVITE never read it.

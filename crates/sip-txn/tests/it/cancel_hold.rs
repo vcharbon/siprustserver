@@ -7,8 +7,9 @@
 //! when it goes on the wire.
 
 use crate::common;
+use call::TxnKind;
 use common::*;
-use sip_txn::{TransactionEvent, TxnKind};
+use sip_txn::TransactionEvent;
 
 /// A CANCEL for the re-INVITE minted by [`outbound_reinvite`] (same branch /
 /// Call-ID / tags — RFC 3261 §9.1 identity).

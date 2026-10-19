@@ -5,10 +5,11 @@
 //! transaction past its window.
 
 use crate::common;
+use call::TxnKind;
 use common::*;
 use sip_message::{SipMessage, SipRequest};
 use sip_txn::timers::{TIMER_B, TIMER_D, TIMER_M};
-use sip_txn::{TransactionEvent, TxnKind};
+use sip_txn::TransactionEvent;
 
 /// The ACKs among `msgs`, in wire order.
 fn acks(msgs: Vec<SipMessage>) -> Vec<SipRequest> {

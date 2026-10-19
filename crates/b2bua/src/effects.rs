@@ -3,9 +3,9 @@
 //! `process_result` interpreter runs the five categories in a fixed order with
 //! different safety wraps (see ADR-0003 in the source / ADR-0010 here).
 
+use call::TxnKind;
 use call::{Call, RetainedEmission, TimerEntry, TimerKey};
 use sip_message::{SipRequest, SipResponse};
-use sip_txn::TxnKind;
 
 use b2bua_sdk::event::CallEvent;
 

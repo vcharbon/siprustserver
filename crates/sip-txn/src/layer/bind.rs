@@ -10,8 +10,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use sip_message::generators::response::{is_fallback_to_tag, retag_response};
 use sip_message::{Method, SipResponse};
 
-use crate::event::TxnKind;
 use crate::timers::{ms, TIMER_L};
+use call::TxnKind;
 
 use super::key::ServerTxnId;
 use super::owner::Owner;

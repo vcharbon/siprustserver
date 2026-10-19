@@ -4,11 +4,11 @@
 //! relaying an *inbound* request is [`super::relay_request`]'s.
 
 use call::helpers::bump_our_cseq;
+use call::TxnKind;
 use call::{Call, DialogId, HeldRequest};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{Event, HeaderValue, SubscriptionState};
 use sip_message::{Method, SipStr};
-use sip_txn::TxnKind;
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,

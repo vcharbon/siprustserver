@@ -8,11 +8,10 @@ use crate::common;
 use common::*;
 use std::sync::Arc;
 
+use call::TxnKind;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{serialize, CustomParser, SipMessage, SipParser, SipRequest, SipResponse};
-use sip_txn::{
-    IdGen, InviteRefusals, TransactionConfig, TransactionEvent, TxnKind, TxnSeed, Verdict,
-};
+use sip_txn::{IdGen, InviteRefusals, TransactionConfig, TransactionEvent, TxnSeed, Verdict};
 
 /// A stateless refusal under a request-derived To-tag.
 fn refuse_503(req: &SipRequest) -> Result<SipResponse, sip_message::generators::GenerateError> {

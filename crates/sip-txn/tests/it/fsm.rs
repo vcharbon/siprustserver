@@ -3,12 +3,12 @@
 //! Timer B timeout, CANCEL→200+487, ACK absorption, auto-ACK for non-2xx client
 //! finals, and cached-response retransmission.
 
-use crate::common;
-use common::*;
+use crate::common::{self, *};
+use call::TxnKind;
 use sip_message::SipMessage;
 use sip_retransmit::Class;
 use sip_txn::timers::{TIMER_B, TIMER_I};
-use sip_txn::{RetransmitRow, TransactionEvent, TxnKind};
+use sip_txn::{RetransmitRow, TransactionEvent};
 
 const TRANSIT: u64 = 5;
 
@@ -299,7 +299,7 @@ async fn timer_b_emits_timeout_event() {
     assert_eq!(destination, Some(addr(PEER)), "Timeout forwards the txn destination");
     assert_eq!(
         kind,
-        sip_txn::TimeoutKind::Response,
+        call::TxnTimeoutKind::Response,
         "an in-dialog re-INVITE Timer B is a Response timeout"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -353,7 +353,7 @@ async fn initial_invite_outlives_the_no_answer_window() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Transaction),
+        Some(call::TxnTimeoutKind::Transaction),
         "the initial-INVITE backstop fires below the 3-minute mark and is a Transaction timeout"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -401,7 +401,7 @@ async fn a_reinvite_that_drew_a_provisional_outlives_timer_b() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Transaction),
+        Some(call::TxnTimeoutKind::Transaction),
         "the INVITE backstop answers a silent renegotiation, not the peer-failure timer"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -439,7 +439,7 @@ async fn unanswered_initial_invite_times_out_on_timer_b() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Response),
+        Some(call::TxnTimeoutKind::Response),
         "an INVITE nothing answered times out on Timer B, not the 158 s bound"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -497,7 +497,7 @@ async fn configured_invite_bound_moves_the_initial_invite_expiry() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Transaction),
+        Some(call::TxnTimeoutKind::Transaction),
         "the configured bound fires as a Transaction timeout"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -517,7 +517,7 @@ async fn configured_invite_bound_moves_the_initial_invite_expiry() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Response),
+        Some(call::TxnTimeoutKind::Response),
         "an in-dialog re-INVITE still times out at Timer B with a Response timeout"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -532,7 +532,7 @@ fn first_response_bound_config(ms: u64) -> sip_txn::TransactionConfig {
     }
 }
 
-fn timeout_kind(events: Vec<TransactionEvent>) -> Option<sip_txn::TimeoutKind> {
+fn timeout_kind(events: Vec<TransactionEvent>) -> Option<call::TxnTimeoutKind> {
     events.into_iter().find_map(|e| match e {
         TransactionEvent::Timeout { kind, .. } => Some(kind),
         _ => None,
@@ -564,7 +564,7 @@ async fn the_first_response_deadline_tells_the_tu_while_timer_a_runs_to_timer_b(
     elapse_ms(1_100).await;
     assert_eq!(
         timeout_kind(stack.drain_events()),
-        Some(sip_txn::TimeoutKind::Response),
+        Some(call::TxnTimeoutKind::Response),
         "an INVITE nothing answered is reported at the first-response deadline as a dead hop"
     );
 
@@ -625,7 +625,7 @@ async fn the_first_response_deadline_leaves_in_dialog_and_non_invite_on_64_t1() 
         .collect();
     assert_eq!(kinds.len(), 2, "one Timeout per transaction: {kinds:?}");
     assert!(
-        kinds.iter().all(|(_, k)| *k == sip_txn::TimeoutKind::Response),
+        kinds.iter().all(|(_, k)| *k == call::TxnTimeoutKind::Response),
         "Timer B / Timer F are Response timeouts: {kinds:?}"
     );
     assert_eq!(
@@ -717,7 +717,7 @@ async fn a_provisional_before_the_first_response_bound_swaps_in_the_long_bound()
     elapse_ms(153_000).await;
     assert_eq!(
         timeout_kind(stack.drain_events()),
-        Some(sip_txn::TimeoutKind::Transaction),
+        Some(call::TxnTimeoutKind::Transaction),
         "the long INVITE bound answers a callee that rang and went silent"
     );
     given_up_invite_is_forgotten(&stack).await;

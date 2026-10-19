@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 
+use call::TxnTimeoutKind;
 use sip_message::{Method, SipHeader, SipMessage};
 
 /// A deduplicated/processed event for the upstream router. The peer address is
@@ -67,7 +68,7 @@ pub enum TransactionEvent {
         /// the configured out-of-dialog INVITE bound
         /// (`TransactionConfig::invite_initial_timeout_ms`, default 158 s). Lets
         /// consumers split `response_timeout` from `transaction_timeout`.
-        kind: TimeoutKind,
+        kind: TxnTimeoutKind,
     },
     /// **The last transaction for a *watched* call reached a terminal state** —
     /// every transaction attributed to `call_ref` has left the map (final response
@@ -137,26 +138,6 @@ impl EventQueueClass {
             Self::CallQuiesced => 5,
         }
     }
-}
-
-/// INVITE vs non-INVITE — the two transaction state machines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TxnKind {
-    Invite,
-    NonInvite,
-}
-
-/// Which client-transaction timeout fired, so a consumer can split the metric.
-/// `Response` is the RFC 3261 §17.1 failure-detection timer (Timer B for INVITE,
-/// Timer F for non-INVITE — both 64×T1 — or, for an initial INVITE, the TU's
-/// first-response deadline `TransactionConfig::invite_first_response_timeout_ms`): no
-/// response of any kind arrived, the hop is dead; `Transaction` is the configured
-/// out-of-dialog INVITE bound (`TransactionConfig::invite_initial_timeout_ms`,
-/// default 158 s — the call-setup ring window).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeoutKind {
-    Response,
-    Transaction,
 }
 
 use sip_message::SipRequest;

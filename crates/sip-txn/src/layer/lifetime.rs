@@ -9,11 +9,11 @@ use std::time::Duration;
 use sip_clock::{deadline, delay_queue};
 use tokio::time::Instant;
 
-use crate::event::TxnKind;
 use crate::timers::{
     ms, TIMER_B, TIMER_D, TIMER_H, TIMER_I, TIMER_J, TIMER_L, TIMER_M, TXN_MAX_AGE,
     TXN_SWEEP_INTERVAL,
 };
+use call::TxnKind;
 
 use super::events::SweptServer;
 use super::owner::Owner;

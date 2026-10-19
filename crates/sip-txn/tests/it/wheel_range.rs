@@ -4,9 +4,10 @@
 
 use std::sync::Arc;
 
+use call::TxnKind;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::SipMessage;
-use sip_txn::{IdGen, TransactionConfig, TransactionEvent, TxnKind};
+use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
 
 use crate::common;
 use common::*;

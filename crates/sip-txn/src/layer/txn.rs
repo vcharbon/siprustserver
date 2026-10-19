@@ -9,7 +9,7 @@ use bytes::Bytes;
 use sip_message::{Method, SipRequest};
 use tokio_util::time::delay_queue::Key;
 
-use crate::event::{TimeoutKind, TxnKind};
+use call::{TxnKind, TxnTimeoutKind};
 use sip_retransmit::Ladder;
 
 use super::key::{ServerTxnId, ServerTxnKey};
@@ -206,7 +206,7 @@ impl Transaction {
             retransmit_buf: None,
             seed_resend: None,
             ladder: None,
-            timeout_kind: TimeoutKind::Response,
+            timeout_kind: TxnTimeoutKind::Response,
             dead_hop_reported: false,
             dialog_cseq: 0,
             accepted_to_tag: None,
@@ -308,12 +308,12 @@ pub(super) struct Transaction {
     /// `None` until this txn starts retransmitting, and on a server txn until
     /// its non-2xx final arms Timer G.
     pub(super) ladder: Option<Ladder>,
-    /// Which [`TimeoutKind`] `fire_timeout` emits for this txn's give-up timer —
+    /// Which [`TxnTimeoutKind`] `fire_timeout` emits for this txn's give-up timer —
     /// stored explicitly wherever the timer is armed (`Response` for Timer B/F,
     /// `Transaction` once the first provisional swaps in the long out-of-dialog
     /// INVITE bound) so the discrimination never compares the armed window
     /// against a magic duration.
-    pub(super) timeout_kind: TimeoutKind,
+    pub(super) timeout_kind: TxnTimeoutKind,
     /// The TU was told at its first-response deadline that this initial
     /// INVITE's hop is dead (ADR-0044): no later timeout of the transaction is
     /// reported again.

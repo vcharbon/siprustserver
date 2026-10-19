@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use sip_message::{SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
-use crate::event::TxnKind;
+use call::TxnKind;
 
 use super::lifetime::Hold;
 use super::owner::Owner;

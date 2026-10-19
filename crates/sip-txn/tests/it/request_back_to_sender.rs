@@ -11,13 +11,14 @@
 
 use crate::common;
 
+use call::TxnKind;
 use common::*;
 use sip_message::generators::{
     generate_cancel, generate_response, GenerateResponseOpts, InviteClientTransactionHandle,
 };
 use sip_message::{SipMessage, SipRequest};
 use sip_txn::timers::{TIMER_H, TIMER_J};
-use sip_txn::{TransactionEvent, TxnKind};
+use sip_txn::TransactionEvent;
 
 const TRANSIT: u64 = 5;
 const CALLEE_TAG: &str = "loop-callee";

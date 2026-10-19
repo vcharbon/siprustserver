@@ -17,6 +17,8 @@ metric-catalogue = { path = "../metric-catalogue" }
 # the parsed message shares it rather than copying the datagram.
 bytes.workspace = true
 sip-message = { path = "../sip-message" }
+# The transaction kind the health prober opens its client transactions as.
+call = { path = "../call" }
 sip-net = { path = "../sip-net" }
 # Every std lock recovers from poison, counted per named lock (ADR-0051 §7).
 lock-poison = { path = "../lock-poison" }

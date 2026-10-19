@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use call::helpers::{seal_termination_seq, seal_turn};
 use call::CallModelState;
+use call::TxnKind;
 use sip_message::{Method, SipRequest};
-use sip_txn::TxnKind;
 
 use super::callouts;
 use super::release::{release_call, ReleaseKind};

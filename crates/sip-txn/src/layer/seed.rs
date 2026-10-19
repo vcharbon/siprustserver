@@ -8,9 +8,9 @@ use std::net::SocketAddr;
 use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
-use crate::event::{TimeoutKind, TxnKind};
 use crate::seed::{Reoffer, TxnSeed};
 use crate::timers::ms;
+use call::{TxnKind, TxnTimeoutKind};
 
 use super::client::{extract_via_custom_params, ViaMarks};
 use super::key::{ServerTxnId, ServerTxnKey};
@@ -210,7 +210,7 @@ impl Owner {
             destination: Some(dest),
         };
         self.open_txn_with(head, |txn| {
-            txn.timeout_kind = TimeoutKind::Transaction;
+            txn.timeout_kind = TxnTimeoutKind::Transaction;
             txn.timeout_key = Some(bound);
             txn.seed_resend = resend;
         });

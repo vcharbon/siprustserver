@@ -7,13 +7,13 @@
 //! [`super::compose`].
 
 use call::helpers::{PrackDisposition, RAckTokens};
+use call::TxnTimeoutKind;
 use call::{
     ByeDisposition, CSeq, CallModelState, CdrEventType, DialogState, Direction, LegDisposition,
     LegState, Obligation, RSeq, TerminationCause, TimeoutKind, TimerKey, TimerType,
 };
 use sip_message::header::RAck;
 use sip_message::{Method, SipRequest};
-use sip_txn::TimeoutKind as TxnTimeoutKind;
 
 use b2bua_sdk::provisional::{
     absorbed_provisional_actions, originator_final_sent, shown_to_no_one,

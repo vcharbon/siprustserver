@@ -4,6 +4,7 @@
 //! ext narrowing and rule composition are deferred with their consumers.
 
 use call::features::FeatureActivations;
+use call::TxnTimeoutKind;
 use call::{
     CallModelState, CdrEventType, Dialog, Direction, ExtMap, Leg, LegDisposition, LegKind,
     LegState, MachineId, Obligation, StateLabel, TerminationCause, TimerKey, TimerType,
@@ -11,7 +12,6 @@ use call::{
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
 use sip_message::{Method, SipRequest, SipResponse};
-use sip_txn::TimeoutKind;
 
 pub use crate::body::{Body, BodyAuthor};
 use crate::config::B2buaConfig;
@@ -1114,7 +1114,7 @@ impl<'a> RuleContext<'a> {
     /// `Response` (nothing at all answered: the hop is dead) or `Transaction`
     /// (it answered a provisional, then went silent past the INVITE bound).
     /// `None` for every other event kind.
-    pub fn timeout_kind(&self) -> Option<TimeoutKind> {
+    pub fn timeout_kind(&self) -> Option<TxnTimeoutKind> {
         match self.event {
             CallEvent::Timeout { timeout_kind, .. } => Some(*timeout_kind),
             _ => None,

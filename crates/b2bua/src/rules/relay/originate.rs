@@ -4,7 +4,7 @@
 //! (Call-ID, tags, CSeq space, Contact) is minted fresh — nothing
 //! dialog-identifying is copied from the a-leg.
 
-use call::{InviteTxnHandle, Leg, RemoteInfo};
+use call::{InviteTxnHandle, Leg, RemoteInfo, TxnKind};
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
 };
@@ -12,7 +12,7 @@ use sip_message::header::{
     self, ChargingVector, HeaderClass, HeaderName, HeaderValue, NameAddr, TokenListHeader,
 };
 use sip_message::{hops, SipHeader as MsgHeader, SipRequest, SipStr};
-use sip_txn::{IdGen, TxnKind};
+use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};

@@ -4,8 +4,9 @@
 use std::net::SocketAddr;
 
 use call::TimerKey;
+use call::TxnTimeoutKind;
 use sip_message::{SipHeader, SipMessage};
-use sip_txn::{TimeoutKind, TransactionEvent};
+use sip_txn::TransactionEvent;
 
 /// One thing that happens to a call: an inbound SIP message, a fired timer, a
 /// CANCEL the txn layer already answered, a client-transaction timeout, or a
@@ -66,7 +67,7 @@ pub enum CallEvent {
         /// silent). Drives the per-peer metric's `response_timeout` vs
         /// `transaction_timeout` split and the `call_failure` consult's
         /// `timeout_kind`.
-        timeout_kind: TimeoutKind,
+        timeout_kind: TxnTimeoutKind,
         /// The incarnation of the call that sent the request
         /// ([`Self::incarnation`]), from the mark on its Via.
         incarnation: Option<String>,
@@ -211,7 +212,7 @@ mod tests {
             incarnation_mark: mark.map(str::to_string),
             method: Some("INVITE".into()),
             destination: None,
-            kind: TimeoutKind::Response,
+            kind: TxnTimeoutKind::Response,
         })
     }
 

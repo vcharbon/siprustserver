@@ -22,7 +22,8 @@ use sip_message::{SipMessage, SipRequest, SipResponse};
 use sip_txn::timers::{TIMER_D, TIMER_I, TIMER_M, TXN_MAX_AGE, TXN_SWEEP_INTERVAL};
 use std::sync::Arc;
 
-use sip_txn::{IdGen, TransactionConfig, TransactionEvent, TxnKind};
+use call::TxnKind;
+use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
 
 const RING_MS: u64 = 60_000;
 /// A telephony ring (Timer C > 3 min), inside `TELEPHONY_BOUND_MS`.

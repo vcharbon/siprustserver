@@ -298,7 +298,7 @@ fn handle_timeout_result(call: &call::Call, leg_id: &str) -> Vec<RuleAction> {
         leg_id: Some(leg_id.into()),
         method: Some("INVITE".into()),
         destination: None,
-        timeout_kind: sip_txn::TimeoutKind::Transaction,
+        timeout_kind: call::TxnTimeoutKind::Transaction,
         incarnation: None,
     };
     let ctx = RuleContext {
@@ -349,7 +349,7 @@ fn a_leg_timeout_result(call: &call::Call, method: &str) -> Vec<RuleAction> {
         leg_id: Some("a".into()),
         method: Some(method.into()),
         destination: None,
-        timeout_kind: sip_txn::TimeoutKind::Transaction,
+        timeout_kind: call::TxnTimeoutKind::Transaction,
         incarnation: None,
     };
     let ctx = RuleContext {

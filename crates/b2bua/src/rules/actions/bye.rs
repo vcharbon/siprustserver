@@ -3,11 +3,11 @@
 //! the peer's it restates, and its order behind this stack's own NOTIFY there
 //! ([`super::own_notify`]).
 
+use call::TxnKind;
 use call::{Call, Dialog, DialogId, HeldRequest, Leg};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
 use sip_message::SipHeader;
-use sip_txn::TxnKind;
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,

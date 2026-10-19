@@ -63,6 +63,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use call::TxnKind;
 use sip_clock::Clock;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -74,7 +75,7 @@ use sip_message::worker_report::{self, NewCalls, Readiness};
 use sip_message::{SipMessage, SipRequest, SipStr};
 use sip_net::UdpEndpoint;
 use sip_txn::{
-    IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed, TxnKind,
+    IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed,
 };
 use tokio::sync::mpsc;
 

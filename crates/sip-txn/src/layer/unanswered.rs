@@ -9,7 +9,7 @@ use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::SipRequest;
 use sip_net::UdpEndpoint;
 
-use crate::event::TxnKind;
+use call::TxnKind;
 
 use super::key::ServerTxnKey;
 use super::owner::Owner;

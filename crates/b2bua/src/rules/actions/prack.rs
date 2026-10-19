@@ -6,6 +6,7 @@
 //! PRACK leaves ahead of what ends its dialog. No rule PRACKs.
 
 use call::helpers::bump_our_cseq;
+use call::TxnKind;
 use call::{
     Call, DialogState, EndingBy, LegDisposition, OwedAnswer, Provisional, ProvisionalId,
     ResponderAck,
@@ -13,7 +14,6 @@ use call::{
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::RAck;
 use sip_message::Method;
-use sip_txn::TxnKind;
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,

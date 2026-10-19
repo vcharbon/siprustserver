@@ -4580,6 +4580,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
+ "call",
  "hmac 0.13.0",
  "layer-harness",
  "load-shed",
@@ -4653,6 +4654,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "call",
  "getrandom 0.4.3",
  "hmac 0.13.0",
  "lock-poison",

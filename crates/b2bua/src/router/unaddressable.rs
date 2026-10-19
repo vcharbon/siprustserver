@@ -7,7 +7,7 @@
 //! has no transaction to fail and is counted.
 
 use b2bua_sdk::event::CallEvent;
-use sip_txn::TimeoutKind;
+use call::TxnTimeoutKind;
 
 use super::RouterCtx;
 use crate::effects::{HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode};
@@ -44,7 +44,7 @@ pub(super) fn fail_unaddressable(
         leg_id: eff.leg_id.clone(),
         method: Some(req.method().as_str().to_string()),
         destination: None,
-        timeout_kind: TimeoutKind::Response,
+        timeout_kind: TxnTimeoutKind::Response,
         incarnation: None,
     };
     let _ = ctx.reentry_tx.send(failed.stamped(result.call.incarnation()));

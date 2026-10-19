@@ -7,12 +7,13 @@
 //! arrived before them is re-offered against them.
 
 use crate::common;
+use call::TxnTimeoutKind;
 use common::*;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 use sip_retransmit::Class;
 use sip_txn::timers::TIMER_I;
-use sip_txn::{Reoffer, TimeoutKind, TransactionEvent, TxnSeed};
+use sip_txn::{Reoffer, TransactionEvent, TxnSeed};
 
 const TRANSIT: u64 = 5;
 const CALL_REF: &str = "w0|seeded-call@10.0.0.9|atag";
@@ -177,7 +178,7 @@ async fn a_seeded_client_invite_gives_up_on_the_invite_bound() {
             Some("b-1".to_string()),
             Some(INCARNATION_MARK.to_string()),
             Some("INVITE".to_string()),
-            TimeoutKind::Transaction
+            TxnTimeoutKind::Transaction
         )),
         "the bound fires as the configured INVITE bound, for the seed's call, incarnation and leg"
     );
@@ -613,7 +614,7 @@ async fn a_cancel_on_a_seed_with_no_provisional_waits_for_one() {
          CSeq: 1 CANCEL\n\
          Content-Length: 0\n\n"
     ));
-    stack.txn.send_request(cancel, addr(PEER), sip_txn::TxnKind::Invite).await.unwrap();
+    stack.txn.send_request(cancel, addr(PEER), call::TxnKind::Invite).await.unwrap();
     elapse_ms(5_000).await;
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "no CANCEL before a 1xx");
 
@@ -677,7 +678,7 @@ async fn a_held_cancel_on_a_seed_re_sends_its_invite_once() {
 
     stack
         .txn
-        .send_request(seed_cancel(later, "seed-later"), addr(PEER), sip_txn::TxnKind::Invite)
+        .send_request(seed_cancel(later, "seed-later"), addr(PEER), call::TxnKind::Invite)
         .await
         .unwrap();
     elapse_ms(20).await;

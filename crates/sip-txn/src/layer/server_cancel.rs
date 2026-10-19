@@ -11,7 +11,8 @@ use sip_message::header::Via;
 use sip_message::{SipMessage, SipRequest};
 use sip_net::UdpEndpoint;
 
-use crate::event::{TransactionEvent, TxnKind};
+use crate::event::TransactionEvent;
+use call::TxnKind;
 
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
