@@ -111,14 +111,11 @@ impl Repr {
     }
 }
 
-/// The text of a [`Repr::Span`].
-#[expect(
-    clippy::string_slice,
-    reason = "a span's range is checked a char-boundary range of its buffer where it is built"
-)]
+/// The text of a [`Repr::Span`]: a range its buffer holds on char boundaries,
+/// as every span is built, else the empty string.
 fn span_text(buf: &str, start: u32, len: u32) -> &str {
     let start = start as usize;
-    &buf[start..start + len as usize]
+    buf.get(start..start.saturating_add(len as usize)).unwrap_or("")
 }
 
 impl SipStr {
