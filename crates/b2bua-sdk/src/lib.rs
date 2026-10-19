@@ -61,6 +61,7 @@ pub mod release_reason;
 pub mod rule_call;
 pub mod sdp_form;
 pub mod service;
+pub mod service_params;
 pub mod timer_delay;
 
 /// The framework-type façade the [`define_service!`] / [`sm_rule!`] macros
@@ -96,3 +97,4 @@ pub mod rules {
 pub use config::B2buaConfig;
 pub use event::CallEvent;
 pub use sdp_form::{AsWritten, SdpCrossing, SdpForm, SdpFormPolicy};
+pub use service_params::ServiceParams;

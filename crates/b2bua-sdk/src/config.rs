@@ -3,6 +3,10 @@
 //! tokio analogue stay here as plain values.
 
 use crate::sdp_form::{AsWritten, SdpFormPolicy};
+use crate::service_params::ServiceParams;
+
+mod retry_after;
+pub use retry_after::RetryAfterRange;
 
 /// Tunables for a B2BUA worker. Cheap to clone (a handful of scalars + two
 /// short strings); share one instance across the stack.
@@ -371,6 +375,10 @@ pub struct B2buaConfig {
     /// ceilings above which a new call is refused, and the backup-copy
     /// ceilings. Every bound is off by default.
     pub capacity: CapacityConfig,
+    /// **Service parameters.** Product services carry their own parameters
+    /// here, one value per type; their rules read them through `ctx.config`.
+    /// Empty by default.
+    pub service_params: ServiceParams,
 }
 
 /// A pair of admission ceilings on one measured quantity. At or above
@@ -440,23 +448,6 @@ impl CapacityConfig {
             return Err("capacity: a backup ceiling of 0 stores no backup; unset it".to_string());
         }
         Ok(())
-    }
-}
-
-/// An inclusive range of `Retry-After` seconds (RFC 3261 §20.33), one value
-/// drawn uniformly per response.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RetryAfterRange {
-    pub min_sec: u32,
-    pub max_sec: u32,
-}
-
-impl RetryAfterRange {
-    /// The value `roll` (any `u64`) picks, uniform over `[min_sec, max_sec]`.
-    #[expect(clippy::cast_possible_truncation, reason = "the remainder is below span ≤ 2^32")]
-    pub fn pick(&self, roll: u64) -> u32 {
-        let span = u64::from(self.max_sec.saturating_sub(self.min_sec)) + 1;
-        self.min_sec.saturating_add((roll % span) as u32)
     }
 }
 
@@ -543,6 +534,7 @@ impl Default for B2buaConfig {
             minted_final_advertisement: sip_message::generators::CapabilitySet::silent(),
             cdr: CdrConfig::default(),
             capacity: CapacityConfig::default(),
+            service_params: ServiceParams::default(),
         }
     }
 }
