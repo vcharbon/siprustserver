@@ -63,6 +63,7 @@ pub mod security;
 pub mod self_gate;
 pub mod strategies;
 pub mod strategy;
+pub mod supervise;
 pub mod trace;
 
 pub use addr::ProxyAddr;

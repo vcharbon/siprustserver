@@ -53,7 +53,8 @@ pub fn validate_config(
     // survives a single dropped probe.
     let probe_cycle_ms = probe.interval_ms.saturating_add(probe.timeout_ms);
     let min_stale = 2u64.saturating_mul(probe_cycle_ms);
-    if observer.payload_stale_ms > 0 && (observer.payload_stale_ms as u64) < min_stale {
+    let stale_ms = u64::try_from(observer.payload_stale_ms).unwrap_or(0);
+    if stale_ms > 0 && stale_ms < min_stale {
         violations.push(format!(
             "worker_load_observer.payload_stale_ms ({} ms) must be at least 2× the \
              HealthProbe cycle (interval_ms + timeout_ms = {} + {} = {} ms; minimum \
@@ -105,12 +106,13 @@ pub fn validate_config(
     }
 }
 
-/// Panics with every violation on its own line after a fixed header: a
-/// misconfigured proxy exits (non-zero, `CrashLoopBackOff`) before it binds.
-pub fn refuse_to_start(violations: &[String]) -> ! {
+/// The boot refusal of `violations`: every one on its own line after a fixed
+/// header. A misconfigured proxy exits non-zero (`CrashLoopBackOff`) on it
+/// before it binds.
+pub fn refusal(violations: &[String]) -> String {
     let header = "sip-front-proxy: refusing to start — invalid configuration:";
     let bullets = violations.iter().map(|v| format!("  - {v}")).collect::<Vec<_>>().join("\n");
-    panic!("{header}\n{bullets}");
+    format!("{header}\n{bullets}")
 }
 
 #[cfg(test)]

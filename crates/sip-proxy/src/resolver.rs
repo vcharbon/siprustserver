@@ -325,23 +325,41 @@ impl Inner {
                 return;
             }
         }
-        let inner = self.clone();
-        let target = target.clone();
-        observe::spawn_keeping_node(async move {
-            tokio::time::sleep(Duration::from_millis(inner.cache.cfg.refresh_after_ms())).await;
-            locked(&inner.refresh_armed, RESOLVER_REFRESHES).remove(&key);
-            let pinned = locked(&inner.pinned, RESOLVER_PINS).contains(&key);
-            let used = inner.cache.take_used(&key).unwrap_or(false);
-            if !pinned && !used {
-                // One-shot name: stop refreshing; the entry (if still there)
-                // expires at its natural TTL — bounded churn.
-                inner.metrics.record_resolver_refresh(refresh_outcome::IDLE_STOPPED);
-                return;
-            }
-            inner
-                .resolve_off_path(&target, refresh_outcome::REFRESHED, refresh_outcome::FAILED)
-                .await;
+        let (inner, target) = (self.clone(), target.clone());
+        crate::supervise::spawn(crate::supervise::RESOLVER_LOOKUP, move || {
+            inner.clone().refresh_when_due(target.clone(), key.clone())
         });
+    }
+
+    /// The refresh [`arm_refresh`](Self::arm_refresh) schedules, run once due.
+    async fn refresh_when_due(self: Arc<Self>, target: ProxyAddr, key: String) {
+        tokio::time::sleep(Duration::from_millis(self.cache.cfg.refresh_after_ms())).await;
+        locked(&self.refresh_armed, RESOLVER_REFRESHES).remove(&key);
+        let pinned = locked(&self.pinned, RESOLVER_PINS).contains(&key);
+        let used = self.cache.take_used(&key).unwrap_or(false);
+        if !pinned && !used {
+            // One-shot name: stop refreshing; the entry (if still there)
+            // expires at its natural TTL — bounded churn.
+            self.metrics.record_resolver_refresh(refresh_outcome::IDLE_STOPPED);
+            return;
+        }
+        self.resolve_off_path(&target, refresh_outcome::REFRESHED, refresh_outcome::FAILED).await;
+    }
+
+    /// The lookup of a send that claimed the name's single flight: the
+    /// waiting sends are released to what it finds, or timed out with it.
+    async fn look_up_and_release(self: Arc<Self>, target: ProxyAddr, key: String) {
+        let deadline = self.lookup_deadline();
+        let mut lookup = self.resolver.resolve(&target.host, target.port, deadline);
+        let Ok(addrs) = tokio::time::timeout_at(deadline, &mut lookup).await else {
+            self.store_and_arm(&target, None);
+            self.time_out_waiting(&key);
+            lookup.await;
+            self.release(&target, None, false).await;
+            return;
+        };
+        let resolved = self.pick(addrs);
+        self.release(&target, resolved, true).await;
     }
 
     /// Off-path resolve for refresh/prewarm: claim the single-flight slot,
@@ -430,14 +448,10 @@ impl NamedForwarder {
         for target in targets {
             locked(&self.0.pinned, RESOLVER_PINS).insert(target.to_string());
             let inner = self.0.clone();
-            observe::spawn_keeping_node(async move {
-                inner
-                    .resolve_off_path(
-                        &target,
-                        refresh_outcome::PREWARMED,
-                        refresh_outcome::PREWARM_FAILED,
-                    )
-                    .await;
+            let (ok, fail) = (refresh_outcome::PREWARMED, refresh_outcome::PREWARM_FAILED);
+            crate::supervise::spawn(crate::supervise::RESOLVER_LOOKUP, move || {
+                let (inner, target) = (inner.clone(), target.clone());
+                async move { inner.resolve_off_path(&target, ok, fail).await }
             });
         }
     }
@@ -469,21 +483,9 @@ impl NamedForwarder {
                 Join::Negative => inner.metrics.record_named_send(outcome::DROPPED_NEGATIVE),
                 Join::Refused => inner.metrics.record_named_send(outcome::DROPPED_IN_FLIGHT),
                 Join::Claimed => {
-                    let inner = self.0.clone();
-                    let target = target.clone();
-                    observe::spawn_keeping_node(async move {
-                        let deadline = inner.lookup_deadline();
-                        let mut lookup =
-                            inner.resolver.resolve(&target.host, target.port, deadline);
-                        let Ok(addrs) = tokio::time::timeout_at(deadline, &mut lookup).await else {
-                            inner.store_and_arm(&target, None);
-                            inner.time_out_waiting(&key);
-                            lookup.await;
-                            inner.release(&target, None, false).await;
-                            return;
-                        };
-                        let resolved = inner.pick(addrs);
-                        inner.release(&target, resolved, true).await;
+                    let (inner, target) = (self.0.clone(), target.clone());
+                    crate::supervise::spawn(crate::supervise::RESOLVER_LOOKUP, move || {
+                        inner.clone().look_up_and_release(target.clone(), key.clone())
                     });
                 }
             },

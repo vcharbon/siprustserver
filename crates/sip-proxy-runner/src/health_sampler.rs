@@ -24,15 +24,24 @@ pub struct HealthSampler {
     pub stall_ms: u64,
 }
 
+/// How often the sampler publishes.
+const PERIOD: Duration = Duration::from_secs(2);
+
 impl HealthSampler {
-    /// Spawn the sampling loop; it runs for the life of the process.
+    /// Spawn the sampling loop; it runs for the life of the process, a run
+    /// that panics restarted and counted ([`sip_proxy::supervise`]).
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(2));
-            let mut stalled_before: Vec<usize> = Vec::new();
-            loop {
-                ticker.tick().await;
-                stalled_before = self.sample(stalled_before);
+        let sampler = Arc::new(self);
+        sip_proxy::supervise::spawn(sip_proxy::supervise::HEALTH_SAMPLER, move || {
+            let sampler = sampler.clone();
+            async move {
+                #[expect(clippy::disallowed_methods, reason = "PERIOD is not zero")]
+                let mut ticker = tokio::time::interval(PERIOD);
+                let mut stalled_before: Vec<usize> = Vec::new();
+                loop {
+                    ticker.tick().await;
+                    stalled_before = sampler.sample(stalled_before);
+                }
             }
         })
     }
@@ -41,7 +50,8 @@ impl HealthSampler {
     /// and the current ones are returned.
     fn sample(&self, stalled_before: Vec<usize>) -> Vec<usize> {
         let m = &self.metrics;
-        let stalled = self.pulse.stalled(self.clock.now_ms().max(0) as u64, self.stall_ms);
+        let now_ms = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+        let stalled = self.pulse.stalled(now_ms, self.stall_ms);
         m.set_recv_shards_stalled(stalled.len() as u64);
         if stalled != stalled_before {
             if stalled.is_empty() {

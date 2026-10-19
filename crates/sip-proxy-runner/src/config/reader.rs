@@ -87,6 +87,25 @@ impl<'a> EnvReader<'a> {
         }
     }
 
+    /// [`int`](Self::int) as a `u16`, within `min..=max`.
+    pub(super) fn int_u16(&mut self, key: &str, default: u16, min: u16, max: u16) -> u16 {
+        let n = self.int(key, u64::from(default), u64::from(min), u64::from(max));
+        u16::try_from(n).unwrap_or(default)
+    }
+
+    /// [`int`](Self::int) as a `u32`, within `min..=max`.
+    pub(super) fn int_u32(&mut self, key: &str, default: u32, min: u32, max: u32) -> u32 {
+        let n = self.int(key, u64::from(default), u64::from(min), u64::from(max));
+        u32::try_from(n).unwrap_or(default)
+    }
+
+    /// [`int`](Self::int) as a `usize`, within `min..=max` (a `u32` bound,
+    /// so every platform holds it).
+    pub(super) fn int_usize(&mut self, key: &str, default: u32, min: u32, max: u32) -> usize {
+        let n = self.int_u32(key, default, min, max);
+        usize::try_from(n).unwrap_or(usize::MAX)
+    }
+
     /// `key` as a number within `span`, `default` when unset.
     pub(super) fn real(&mut self, key: &str, default: f64, span: Span) -> f64 {
         let Some(value) = self.present(key) else { return default };

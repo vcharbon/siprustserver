@@ -192,23 +192,30 @@ impl CancelBranchLru {
     /// `sip_proxy_pending_invite_lru_size`) grows ≈ the cumulative-INVITE count
     /// for the life of the process. Sweeping every half-TTL physically reclaims
     /// expired slots and re-publishes the gauge, pinning the map at ~1× working
-    /// set. The task is detached (process-lifetime, like the LRU itself);
-    /// supervision exits the process if a core dies, so an orphaned sweeper
-    /// cannot outlive the data path in production.
+    /// set. The task is detached (process-lifetime, like the LRU itself) and
+    /// restarted when a sweep panics; supervision exits the process if a core
+    /// dies, so an orphaned sweeper cannot outlive the data path in production.
     pub fn ensure_sweeper(self: &Arc<Self>, metrics: Arc<ProxyMetrics>) {
         if self.sweeper_claimed.swap(true, Ordering::SeqCst) {
             return;
         }
         let lru = self.clone();
-        observe::spawn_keeping_node(async move {
-            #[expect(clippy::disallowed_methods, reason = "DEFAULT_SWEEP_INTERVAL_MS is not zero")]
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(DEFAULT_SWEEP_INTERVAL_MS));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                lru.sweep_expired();
-                metrics.set_pending_invite_lru_size(lru.size() as u64);
+        crate::supervise::spawn(crate::supervise::BRANCH_MEMO_SWEEP, move || {
+            let (lru, metrics) = (lru.clone(), metrics.clone());
+            async move {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "DEFAULT_SWEEP_INTERVAL_MS is not zero"
+                )]
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+                    DEFAULT_SWEEP_INTERVAL_MS,
+                ));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    lru.sweep_expired();
+                    metrics.set_pending_invite_lru_size(lru.size() as u64);
+                }
             }
         });
     }

@@ -11,12 +11,18 @@ use sip_proxy::ProxyMetrics;
 /// Every family of [`body`] with the allocator's exposition, in order.
 pub const CATALOGUE: Catalogue = Catalogue {
     binary: "sip-proxy-runner",
-    sections: &[PROXY, SELF_GATE, observe::counters::FAMILIES, jemalloc_stats::catalogue::FAMILIES],
+    sections: &[
+        PROXY,
+        SELF_GATE,
+        sip_proxy::supervise::FAMILIES,
+        observe::counters::FAMILIES,
+        jemalloc_stats::catalogue::FAMILIES,
+    ],
 };
 
 /// The `/metrics` body: the data path, the self gate (`None` for the
-/// always-admit gate), the dropped log lines and trace-admission denials
-/// (ADR-0026), then `allocator`.
+/// always-admit gate), the restarted tasks, the dropped log lines and
+/// trace-admission denials (ADR-0026), then `allocator`.
 pub fn body(
     metrics: &ProxyMetrics,
     gate: Option<&ProxySelfGateMetrics>,
@@ -24,6 +30,7 @@ pub fn body(
 ) -> String {
     let mut t = metrics.prometheus_text();
     t.push_str(&self_gate_text(gate));
+    t.push_str(&sip_proxy::supervise::prometheus_text());
     t.push_str(&observe::counters::prometheus_text());
     t.push_str(&allocator());
     t

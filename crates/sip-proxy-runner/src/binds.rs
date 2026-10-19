@@ -1,6 +1,6 @@
 //! Every socket the proxy serves on, bound in order before it serves. Every
 //! bind rides the same bounded EADDRINUSE retry, and ANY bind still failing
-//! at the deadline aborts the process — it never runs with a subset of its
+//! at the deadline refuses the boot — it never runs with a subset of its
 //! ports.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -38,7 +38,9 @@ pub struct Sockets {
 /// shard config, whereas the data sockets may carry SO_REUSEPORT
 /// (recv_shards > 1) and would silently overlap a predecessor. The accept
 /// loop starts later (ProbeServer::serve_on) — the bind is the lock.
-pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Sockets {
+///
+/// `Err` names the first socket that did not bind: the boot stops on it.
+pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Result<Sockets, String> {
     let net = RealSignalingNetwork::new();
     let (listen_sa, metrics_sa, queue_max) = (cfg.listen, cfg.metrics, cfg.queue_max);
     let (udp_sndbuf, udp_rcvbuf, recv_shards) = (cfg.udp_sndbuf, cfg.udp_rcvbuf, cfg.recv_shards);
@@ -51,8 +53,7 @@ pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Sockets {
         bind_with_retry("metrics", metrics_sa, bind_interval, bind_deadline, is_tcp_in_use, || {
             tokio::net::TcpListener::bind(metrics_sa)
         })
-        .await
-        .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
+        .await?;
 
     // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
     // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
@@ -90,8 +91,7 @@ pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Sockets {
                 async move { net.bind_udp(opts).await }
             },
         )
-        .await
-        .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
+        .await?;
         internal.push(ep);
     }
 
@@ -118,8 +118,7 @@ pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Sockets {
                     async move { net.bind_udp(opts).await }
                 },
             )
-            .await
-            .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
+            .await?;
             external.push(ep);
         }
     }
@@ -147,10 +146,9 @@ pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Sockets {
             async move { net.bind_udp(opts).await }
         },
     )
-    .await
-    .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
+    .await?;
 
-    Sockets { metrics, internal, external, probe }
+    Ok(Sockets { metrics, internal, external, probe })
 }
 
 /// Log the buffer sizes the kernel granted one face's signalling socket,
@@ -197,8 +195,8 @@ fn log_socket_buffers(
 /// the node, never overlap.
 ///
 /// Any other bind error, or addr-in-use past the deadline, returns a message
-/// naming the address. The caller MUST treat that as fatal (panic → non-zero
-/// exit): the process never runs with a subset of its ports.
+/// naming the address. The caller MUST treat that as fatal (a refused boot,
+/// non-zero exit): the process never runs with a subset of its ports.
 pub async fn bind_with_retry<T, E, Fut>(
     what: &str,
     addr: SocketAddr,

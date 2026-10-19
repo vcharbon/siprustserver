@@ -3,6 +3,7 @@
 //! and their ranges are listed in the `sip-proxy-runner` binary's module doc.
 
 mod preflight;
+mod process_env;
 mod reader;
 
 use std::net::SocketAddr;
@@ -14,7 +15,7 @@ use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::self_gate::ProxySelfGateConfig;
 use sip_proxy::{FaceCidrs, ProxyAddr};
 
-pub use preflight::{refuse_to_start, validate_config, ProbeTimingConfig};
+pub use preflight::{refusal, validate_config, ProbeTimingConfig};
 use reader::{EnvReader, Span};
 
 /// Where the worker pool comes from.
@@ -86,11 +87,11 @@ impl ProxyConfig {
         let metrics = env
             .bind_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)))
             .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 9090)));
-        let queue_max = env.int("PROXY_QUEUE", 8192, 1, u32::MAX as u64) as usize;
+        let queue_max = env.int_usize("PROXY_QUEUE", 8192, 1, u32::MAX);
         let udp_sndbuf = socket_buffer(&mut env, "PROXY_UDP_SNDBUF");
         let udp_rcvbuf = socket_buffer(&mut env, "PROXY_UDP_RCVBUF");
         let shard_stall_ms = env.int("PROXY_SHARD_STALL_MS", 2000, 1, MAX_MS);
-        let recv_shards = env.int("PROXY_RECV_SHARDS", 1, 1, 1024) as usize;
+        let recv_shards = env.int_usize("PROXY_RECV_SHARDS", 1, 1, 1024);
         let bind_retry_interval =
             Duration::from_millis(env.int("PROXY_BIND_RETRY_INTERVAL_MS", 200, 1, MAX_MS));
         let bind_retry_deadline =
@@ -100,12 +101,12 @@ impl ProxyConfig {
         let probe = HealthProbeConfig {
             interval_ms: env.int("HEALTH_INTERVAL_MS", 1000, 1, MAX_MS),
             timeout_ms: env.int("HEALTH_TIMEOUT_MS", 1500, 1, MAX_MS),
-            threshold: env.int("HEALTH_THRESHOLD", 2, 1, u32::MAX as u64) as u32,
+            threshold: env.int_u32("HEALTH_THRESHOLD", 2, 1, u32::MAX),
         };
         let observer = observer_overrides(&mut env, LoadObserverConfig::default());
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);
         let self_gate = self_gate(&mut env);
-        let retry_after_jitter_sec = env.int("PROXY_RETRY_AFTER_JITTER_SEC", 5, 0, 3600) as u32;
+        let retry_after_jitter_sec = env.int_u32("PROXY_RETRY_AFTER_JITTER_SEC", 5, 0, 3600);
         let resolver = resolver(&mut env);
         let prewarm = prewarm(&mut env);
         let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 5000, 1, MAX_MS));
@@ -243,7 +244,7 @@ pub fn parse_ext_face_cidrs(
 fn worker_source(env: &mut EnvReader, pod_namespace: &dyn Fn() -> Option<String>) -> WorkerSource {
     let list = env.present("PROXY_WORKERS");
     let service = env.text("PROXY_WORKER_SERVICE", "b2bua-worker");
-    let port = env.int("PROXY_WORKER_PORT", 5060, 1, u16::MAX as u64) as u16;
+    let port = env.int_u16("PROXY_WORKER_PORT", 5060, 1, u16::MAX);
     let named = match env.present("PROXY_NAMESPACE") {
         Some(ns) => Some(ns),
         None => env.present("POD_NAMESPACE"),
@@ -291,7 +292,7 @@ fn hmac_key(env: &mut EnvReader) -> String {
 fn socket_buffer(env: &mut EnvReader, key: &str) -> Option<usize> {
     match env.raw(key) {
         Some(v) if v.trim().is_empty() => None,
-        _ => Some(env.int(key, 4 * 1024 * 1024, 1, u32::MAX as u64) as usize),
+        _ => Some(env.int_usize(key, 4 * 1024 * 1024, 1, u32::MAX)),
     }
 }
 
@@ -315,18 +316,8 @@ fn self_gate(env: &mut EnvReader) -> Option<ProxySelfGateConfig> {
     let d = ProxySelfGateConfig::default();
     let cfg = ProxySelfGateConfig {
         elu_critical: env.real("PROXY_SELF_GATE_ELU_CRITICAL", d.elu_critical, Span::Fraction),
-        cps_bucket_size: env.int(
-            "PROXY_SELF_GATE_CPS_SIZE",
-            u64::from(d.cps_bucket_size),
-            1,
-            u32::MAX as u64,
-        ) as u32,
-        cps_bucket_rate: env.int(
-            "PROXY_SELF_GATE_CPS_RATE",
-            u64::from(d.cps_bucket_rate),
-            1,
-            u32::MAX as u64,
-        ) as u32,
+        cps_bucket_size: env.int_u32("PROXY_SELF_GATE_CPS_SIZE", d.cps_bucket_size, 1, u32::MAX),
+        cps_bucket_rate: env.int_u32("PROXY_SELF_GATE_CPS_RATE", d.cps_bucket_rate, 1, u32::MAX),
         ..d
     };
     on.then_some(cfg)

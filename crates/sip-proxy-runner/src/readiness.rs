@@ -57,7 +57,7 @@ pub fn probes(
     let stalled = {
         let pulse = pulse.clone();
         let clock = clock.clone();
-        move || !pulse.stalled(clock.now_ms().max(0) as u64, stall_ms).is_empty()
+        move || !pulse.stalled(u64::try_from(clock.now_ms()).unwrap_or(0), stall_ms).is_empty()
     };
     let ready_stalled = stalled.clone();
     let ready_view = first_view.clone();

@@ -106,6 +106,24 @@
 //!                    base, seconds 0..3600; every copy of one request draws
 //!                    the same value                           (default 5)
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 // Use jemalloc instead of glibc malloc (mirrors b2bua-runner). glibc retains
 // freed arena chunks and ratchets RSS under sustained churn; jemalloc's decay
 // purging returns pages to the OS and bounds steady-state RSS. The proxy is
@@ -118,14 +136,12 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod entropy;
-use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_proxy::health::FirstView;
-use sip_proxy::load_observer::{sweep_alive, WorkerLoadObserver};
+use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::WorkerRegistry;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
@@ -133,28 +149,12 @@ use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, Proxy
 use sip_proxy::strategies::LoadBalancerStrategy;
 use sip_proxy::{ExternalFaceParts, RoutingStrategy};
 use sip_proxy_runner::binds::{bind_sockets, Sockets};
-use sip_proxy_runner::config::{refuse_to_start, ProxyConfig, WorkerSource};
+use sip_proxy_runner::config::{refusal, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
 use sip_proxy_runner::health_sampler::HealthSampler;
 use sip_proxy_runner::shards::SharedRouting;
 use sip_proxy_runner::signal::sigterm;
-
-/// One boot variable, `None` when unset. A value that is not UTF-8 refuses
-/// the boot.
-fn env_value(key: &str) -> Option<String> {
-    match env::var(key) {
-        Ok(v) => Some(v),
-        Err(env::VarError::NotPresent) => None,
-        Err(env::VarError::NotUnicode(_)) => refuse_to_start(&[format!("{key} is not UTF-8")]),
-    }
-}
-
-/// The namespace of the pod this proxy runs in, from its service account.
-fn pod_namespace() -> Option<String> {
-    std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-        .ok()
-        .map(|ns| ns.trim().to_string())
-}
+use sip_proxy_runner::sweeps::{spawn_self_gate_sampler, spawn_stale_floor_sweep};
 
 /// The lifecycle line of a proxy about to serve: its faces, its workers and
 /// its socket settings.
@@ -190,11 +190,36 @@ fn main() -> std::process::ExitCode {
     sip_proxy_runner::runtime::block_on(serve())
 }
 
+/// The proxy from boot to exit. A refused boot is logged once while the log
+/// writer runs; a refused boot or a data-path task that ended exits
+/// non-zero, after the writer has drained.
 async fn serve() {
     // Subscriber first (ADR-0026): every line below it is a lifecycle log, and
     // the guard drains the writer + flushes spans at exit.
-    let observe_guard = sip_proxy_runner::signal::observe_or_exit();
+    let observe_guard = match observe::init_production("sip-proxy-runner") {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("sip-proxy-runner FATAL: {e}");
+            std::process::exit(1);
+        }
+    };
+    let exit_code = match run().await {
+        Ok(code) => code,
+        Err(refusal) => {
+            tracing::error!(error = %refusal, "refusing to start");
+            1
+        }
+    };
+    // `process::exit` runs no destructor: the writer drains first.
+    drop(observe_guard);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
 
+/// Boot and serve until a signal or a data-path task's end: the exit code,
+/// or the refusal of a boot that cannot serve.
+async fn run() -> Result<i32, String> {
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) parsed —
     // a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms gauges.
     #[cfg(not(target_env = "msvc"))]
@@ -202,9 +227,8 @@ async fn serve() {
 
     // Every variable is read and checked before the first bind: a value the
     // proxy cannot honour refuses the boot, naming every problem at once.
-    let cfg = ProxyConfig::from_lookup(&env_value, &pod_namespace)
-        .unwrap_or_else(|violations| refuse_to_start(&violations));
-    let sigterm = sigterm();
+    let cfg = ProxyConfig::from_env()?;
+    let sigterm = sigterm()?;
     let metrics_sa = cfg.metrics;
     let advertised = cfg.advertise.clone();
     let shard_stall_ms = cfg.shard_stall_ms;
@@ -216,24 +240,24 @@ async fn serve() {
     // stamps `UdpPacket::arrival_ms` on it and every `ProxyCore` ages dequeued
     // packets against it, so the self-gate's intake age is a difference of two
     // readings of a SINGLE monotonic-anchored timeline.
-    let clock = Clock::system();
+    let clock = Clock::checked_system().map_err(|e| e.to_string())?;
     let Sockets {
         metrics: metrics_listener,
         internal: endpoints,
         external: ext_endpoints,
         probe: probe_ep,
-    } = bind_sockets(&cfg, &clock).await;
+    } = bind_sockets(&cfg, &clock).await?;
 
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(
             HmacKey::new(cfg.hmac_kid.clone(), cfg.hmac_key.clone().into_bytes()),
             None,
         )
-        .unwrap_or_else(|e| panic!("bad PROXY_HMAC_KEY: {e}")),
+        .map_err(|e| format!("bad PROXY_HMAC_KEY: {e}"))?,
     );
     let observer = Arc::new(WorkerLoadObserver::new(cfg.observer));
     let metrics = Arc::new(ProxyMetrics::new());
-    let id_gen = Arc::new(entropy::keyed_id_gen());
+    let id_gen = Arc::new(entropy::keyed_id_gen()?);
 
     // Proxy-self ELU/CPS admission gate. On by default; the ELU
     // arm observes intake saturation — every recv shard records each packet's
@@ -259,7 +283,7 @@ async fn serve() {
     // (Dead/NotReady/Draining) and in-dialog requests fail over to the backup.
     let pool = match &cfg.workers {
         WorkerSource::Static(list) => {
-            static_pool(list, clock.clone()).unwrap_or_else(|e| refuse_to_start(&[e]))
+            static_pool(list, clock.clone()).map_err(|e| refusal(&[e]))?
         }
         WorkerSource::Discovered { service, namespace, port } => {
             discovered_pool(namespace.clone(), service.clone(), *port, clock.clone())
@@ -276,7 +300,7 @@ async fn serve() {
         clock.clone(),
     ));
 
-    // The stale-payload sweep task below shares the probe's observer.
+    // The stale-payload sweep shares the probe's observer.
     let sweep_observer = observer.clone();
 
     // The CANCEL/rtx LRU and the refusal memo are ONE instance across shards
@@ -326,7 +350,9 @@ async fn serve() {
         let mut builder = shared.shard(shard);
         if let Some(ext) = &ext_face {
             builder = builder.external_face(ExternalFaceParts {
-                endpoint: ext_endpoints.next().expect("one external endpoint per shard"),
+                endpoint: ext_endpoints
+                    .next()
+                    .ok_or_else(|| format!("no external endpoint bound for shard {shard}"))?,
                 advertised: ext.advertise.clone(),
                 int_cidrs: ext.int_cidrs.clone(),
             });
@@ -375,51 +401,11 @@ async fn serve() {
     }
     .spawn();
 
-    // Stale-payload sweep. A 1 s `tokio::time::interval` ticks the observer's
-    // `sweep_stale`: any Alive worker whose OPTIONS replies stop carrying a fresh
-    // `X-Overload` payload (or whose probe stalls) is conservatively
-    // decreased once `payload_stale_ms` (8000) is exceeded, instead of keeping its
-    // last AIMD cap forever while the LB admits at full rate into a worker it has
-    // lost telemetry on. Every 200 carries a payload, a refusing worker's
-    // included, and the probe cycle (interval 1000 + timeout 1500) is well inside
-    // the stale window, so a worker that answers is never floored (ADR-0050 §6).
-    // Shares the probe's observer `Arc`; owns no per-call state, so no release
-    // path. Each sweep's floored-worker count feeds the coarse `stale_decrease`
-    // aggregate counter so a silently floored cap is diagnosable in Prometheus
-    // (there is no per-worker `worker_id`-labelled surface).
-    {
-        let obs = sweep_observer;
-        let clk = clock.clone();
-        let m = metrics.clone();
-        let reg = registry.clone();
-        tokio::spawn(async move {
-            let mut t = tokio::time::interval(Duration::from_secs(1));
-            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            t.tick().await; // skip the immediate first tick — first sweep fires at +1s
-            loop {
-                t.tick().await;
-                let floored = sweep_alive(&obs, reg.as_ref(), clk.now_ms());
-                if floored > 0 {
-                    m.record_overload_stale_decrease(floored);
-                }
-            }
-        });
-    }
-
-    // Proxy-self gate sampler. Rides `tokio::time::interval` so behaviour stays
-    // on one clock; each tick drains the shared intake-age recorder's window max
-    // into the gate's EWMA. Only spawned when the real gate is enabled. Owns no
-    // per-call state, so it needs no release path.
-    if let Some(g) = self_gate.clone() {
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(g.sampler_interval());
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await; // skip the immediate first tick
-            loop {
-                tick.tick().await;
-                g.sample();
-            }
-        });
+    // The observer's stale-payload sweep, and the self-gate sampler when the
+    // real gate is on; each restarted and counted when a run panics.
+    spawn_stale_floor_sweep(sweep_observer, registry.clone(), clock.clone(), metrics.clone());
+    if let Some(gate) = self_gate.clone() {
+        spawn_self_gate_sampler(gate);
     }
 
     // Prometheus + readiness endpoint (shared `probe-http`). NOTE: `ProbeServer`
@@ -448,11 +434,7 @@ async fn serve() {
     // health endpoint gets liveness-killed 30 s later with a lying /readyz.
     let _metrics_server =
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "sip-proxy-runner FATAL: metrics server on {metrics_sa} failed to start: {e}"
-                )
-            });
+            .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
     tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, VRRP check /vrrp)");
 
     let probe_task = tokio::spawn(probe.run());
@@ -467,7 +449,8 @@ async fn serve() {
     // stops routing new datagrams here), then wait the grace so in-flight
     // transactions settle and the EndpointSlice withdrawal propagates before
     // exit. Ctrl-C (interactive) exits at once.
-    let drain_grace_ms = cfg.drain_grace.as_millis() as u64;
+    let drain_grace = cfg.drain_grace;
+    let drain_grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX);
 
     // Supervise every data-path task: a panicked/exited recv loop must not
     // leave the process alive with /healthz green — k8s would never restart the
@@ -476,7 +459,7 @@ async fn serve() {
     //
     // The select only DECIDES the exit code: `process::exit` runs no
     // destructor, so the fatal line would die queued on the log writer. It runs
-    // below, after the observe guard has drained.
+    // in `serve`, after the observe guard has drained.
     let exit_code = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!(signal = "SIGINT", "shutting down");
@@ -485,7 +468,7 @@ async fn serve() {
         _ = sigterm => {
             tracing::info!(signal = "SIGTERM", drain_grace_ms, "draining");
             draining.store(true, Ordering::Relaxed);
-            tokio::time::sleep(std::time::Duration::from_millis(drain_grace_ms)).await;
+            tokio::time::sleep(drain_grace).await;
             tracing::info!("drain grace elapsed — exiting");
             0
         }
@@ -499,8 +482,5 @@ async fn serve() {
         }
     };
     drop(_metrics_server);
-    drop(observe_guard);
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
+    Ok(exit_code)
 }

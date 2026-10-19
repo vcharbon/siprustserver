@@ -97,11 +97,3 @@ crates/load-shed/src/sampler.rs 5
 crates/load-shed/src/token_bucket.rs 2
 crates/metric-values/src/fixed.rs 6
 crates/metric-values/src/open.rs 14
-crates/sip-proxy-runner/src/binds.rs 4
-crates/sip-proxy-runner/src/config.rs 8
-crates/sip-proxy-runner/src/config/preflight.rs 2
-crates/sip-proxy-runner/src/health_sampler.rs 2
-crates/sip-proxy-runner/src/intake_shed.rs 1
-crates/sip-proxy-runner/src/main.rs 6
-crates/sip-proxy-runner/src/readiness.rs 1
-crates/sip-proxy-runner/src/signal.rs 1

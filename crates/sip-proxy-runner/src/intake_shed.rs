@@ -24,7 +24,8 @@ pub fn intake_shed_hook(watermark: usize) -> PreIngressHook {
 /// floored at 1 so `0%` sheds whenever anything is queued rather than on an
 /// idle socket; `100%` only sheds at a full queue.
 pub fn intake_shed_watermark(queue_max: usize, pct: u64) -> usize {
-    (queue_max.saturating_mul(pct as usize) / 100).max(1)
+    let pct = usize::try_from(pct).unwrap_or(usize::MAX);
+    (queue_max.saturating_mul(pct) / 100).max(1)
 }
 
 #[cfg(test)]

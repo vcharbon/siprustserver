@@ -203,10 +203,14 @@ fn invalid_probe_and_invalid_observer_both_surface() {
     assert!(violations.len() > 1, "expected >1 violation, got {violations:?}");
 }
 
-// ── refuse_to_start — the boot refusal ──────────────────────────────
+// ── refusal — the boot refusal ──────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "refusing to start")]
-fn refuse_to_start_panics_with_the_refuse_to_start_header() {
-    refuse_to_start(&msgs(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = 3000)));
+fn the_refusal_names_every_violation_under_its_header() {
+    let violations = msgs(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = 3000));
+    let text = refusal(&violations);
+    assert!(text.starts_with("sip-front-proxy: refusing to start"), "{text}");
+    for v in &violations {
+        assert!(text.contains(&format!("  - {v}")), "{text}");
+    }
 }

@@ -10,6 +10,7 @@ members = [
     "crates/alloc-counter",
     "crates/sip-clock",
     "crates/lock-poison",
+    "crates/task-restart",
     "crates/sip-retransmit",
     "crates/load-shed",
     "crates/metric-catalogue",

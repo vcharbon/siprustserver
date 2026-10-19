@@ -386,18 +386,22 @@ impl ProxyCore {
             let endpoint = self.endpoint.clone();
             let ext_endpoint = self.external.as_ref().map(|e| e.endpoint.clone());
             let shard = self.shard;
-            observe::spawn_keeping_node(async move {
-                #[expect(clippy::disallowed_methods, reason = "the sweep interval is not zero")]
-                let mut tick = tokio::time::interval(Duration::from_millis(
-                    crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS,
-                ));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tick.tick().await;
-                    metrics.set_udp_endpoint_stats(
-                        shard,
-                        UdpShardStats::of_faces(&*endpoint, ext_endpoint.as_deref()),
-                    );
+            crate::supervise::spawn(crate::supervise::SHARD_STATS, move || {
+                let (metrics, endpoint) = (metrics.clone(), endpoint.clone());
+                let ext_endpoint = ext_endpoint.clone();
+                async move {
+                    #[expect(clippy::disallowed_methods, reason = "the sweep interval is not zero")]
+                    let mut tick = tokio::time::interval(Duration::from_millis(
+                        crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS,
+                    ));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tick.tick().await;
+                        metrics.set_udp_endpoint_stats(
+                            shard,
+                            UdpShardStats::of_faces(&*endpoint, ext_endpoint.as_deref()),
+                        );
+                    }
                 }
             })
         };

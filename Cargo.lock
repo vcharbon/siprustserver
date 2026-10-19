@@ -4644,6 +4644,7 @@ dependencies = [
  "sip-net-testkit",
  "sip-txn",
  "subtle",
+ "task-restart",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -4674,6 +4675,7 @@ dependencies = [
  "sip-net-testkit",
  "sip-proxy",
  "sip-txn",
+ "task-restart",
  "tikv-jemallocator",
  "tokio",
  "topology",
@@ -4913,6 +4915,15 @@ name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
+
+[[package]]
+name = "task-restart"
+version = "0.1.0"
+dependencies = [
+ "observe",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "tcp-stream"

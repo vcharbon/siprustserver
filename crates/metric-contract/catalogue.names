@@ -265,6 +265,7 @@ sip-proxy-runner sip_proxy_self_external_invites_admitted_total counter fixed {}
 sip-proxy-runner sip_proxy_self_external_invites_rejected_total counter fixed {reason}
 sip-proxy-runner sip_proxy_self_emergency_bypassed_total counter fixed {}
 sip-proxy-runner sip_proxy_self_internal_bypassed_total counter fixed {}
+sip-proxy-runner sip_proxy_task_restarts_total counter fixed {task}
 sip-proxy-runner log_lines_dropped_total counter fixed {}
 sip-proxy-runner trace_dropped_no_exporter_total counter fixed {}
 sip-proxy-runner trace_denied_rate_total counter fixed {}
