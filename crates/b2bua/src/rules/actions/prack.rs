@@ -149,30 +149,32 @@ impl ActionExecutor<'_> {
         // Per-dialog CSeq (RFC 3261 §12.2.1.1): each forked early dialog has
         // its own sequence.
         let outbound_cseq = dialog.our_cseq + 1;
-        *call = bump_our_cseq(call.clone(), &id.leg, &t_id, 1);
         let branch = self.id_gen.new_branch();
-        call::helpers::note_responder_ack(
-            call,
-            id,
-            ResponderAck::OwnPrack { branch: branch.clone() },
-        );
-        clear_owed_offer(call, id);
         let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
+        let marks = relay::CallMarks::of(call);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), &id.leg, branch)),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), &id.leg)),
+            via: Some(relay::leg_via(self.config, marks, &id.leg, branch.clone())),
+            contact: Some(relay::leg_contact(self.config, marks, &id.leg)),
             rack: Some(RAck::new(id.rseq.0, id.invite_cseq.0, Method::Invite)),
             cseq: Some(outbound_cseq as u32),
             content_type: answer.is_some().then(relay::sdp),
             body: answer.unwrap_or_default(),
             ..Default::default()
         };
-        // A dialog whose state no request can be built from sends none.
-        let Ok(res) =
-            generators::generate_in_dialog_request(InDialogMethod::Prack, &gen_dialog, &opts)
-        else {
-            return;
-        };
+        // The call records the PRACK only once it is built.
+        let res =
+            match generators::generate_in_dialog_request(InDialogMethod::Prack, &gen_dialog, &opts)
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::warn!(call_ref = %call.call_ref, leg_id = %id.leg, error = %e,
+                    "PRACK not sent: the dialog's state makes no request");
+                    return;
+                }
+            };
+        *call = bump_our_cseq(call.clone(), &id.leg, &t_id, 1);
+        call::helpers::note_responder_ack(call, id, ResponderAck::OwnPrack { branch });
+        clear_owed_offer(call, id);
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,

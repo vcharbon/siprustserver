@@ -43,6 +43,9 @@ pub fn response_to_a_leg(
     provenance: Provenance,
     author: super::sdp_session::Author<'_>,
 ) -> Option<OutboundSipEffect> {
+    // The call as it stands before the response records anything: one that
+    // is not built leaves it so.
+    let unsent = call.clone();
     if status >= 200 {
         if let Some(carried) = call.a_leg.invite_final_sent {
             tracing::warn!(
@@ -88,7 +91,14 @@ pub fn response_to_a_leg(
         extra_headers,
         incoming_source,
     };
-    let resp = generators::generate_response(a_leg_invite, status, reason, &opts).ok()?;
+    let resp = match generators::generate_response(a_leg_invite, status, reason, &opts) {
+        Ok(resp) => resp,
+        Err(e) => {
+            *call = unsent;
+            super::unbuilt(&call.call_ref, &a_leg, "response", &e);
+            return None;
+        }
+    };
     // Routed by the txn layer to the a-leg server transaction; dest is alice
     // (top Via sent-by of her INVITE, RFC 3261 §18.2.2).
     let hop = a_leg_invite.top_via();

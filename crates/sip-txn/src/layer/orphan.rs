@@ -2,7 +2,9 @@
 //! detached from it, and the obligations they then close on their own — the
 //! ACK of a 2xx, the BYE of the dialog it created, the re-ACK of its repeats.
 
-use sip_message::generators::{generate_ack_for_2xx_from_invite, generate_bye_for_2xx_from_invite};
+use sip_message::generators::{
+    generate_ack_for_2xx_from_invite, generate_bye_for_2xx_from_invite, GenerateError,
+};
 use std::net::SocketAddr;
 
 use sip_message::{SipRequest, SipResponse};
@@ -30,8 +32,9 @@ impl Owner {
     ) {
         let built = self.clients.get(branch).and_then(|t| {
             let orig = t.original_request.as_ref()?;
-            let ack =
-                generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch()).ok()?;
+            let ack = generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch())
+                .inspect_err(|e| unbuilt(branch, "ACK", e))
+                .ok()?;
             Some((ack.image().clone(), t.destination?))
         });
         let Some((ack, dest)) = built else {
@@ -83,7 +86,7 @@ impl Owner {
             (_, Some(orig)) if forked => {
                 match generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch()) {
                     Ok(ack) => ack.image().clone(),
-                    Err(_) => return,
+                    Err(e) => return unbuilt(branch, "ACK", &e),
                 }
             }
             _ => return,
@@ -110,6 +113,7 @@ impl Owner {
             let orig = t.original_request.as_ref().filter(|o| o.to().tag().is_none())?;
             let cseq = orig.cseq().seq().max(t.dialog_cseq) + 1;
             let bye = generate_bye_for_2xx_from_invite(orig, resp, cseq, &self.id_gen.new_branch())
+                .inspect_err(|e| unbuilt(branch, "BYE", e))
                 .ok()?;
             let dest = first_route_address(&bye).or(t.destination)?;
             Some((bye, dest))
@@ -177,4 +181,10 @@ fn first_route_address(req: &SipRequest) -> Option<SocketAddr> {
     let route = routes.first()?.uri().clone();
     let host = route.host().parse::<std::net::IpAddr>().ok()?;
     Some(SocketAddr::new(host, route.port().unwrap_or(5060)))
+}
+
+/// Log that the `what` an orphaned transaction at `branch` owes was not sent:
+/// the lines it echoes make no message.
+fn unbuilt(branch: &str, what: &str, e: &GenerateError) {
+    tracing::warn!(%branch, %what, error = %e, "orphan obligation not sent: its lines make none");
 }

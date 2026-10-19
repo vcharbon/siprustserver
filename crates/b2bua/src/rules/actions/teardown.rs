@@ -394,15 +394,15 @@ impl ActionExecutor<'_> {
     ) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let handle = leg.outbound_invite.as_ref()?.txn.as_ref()?;
-        let parsed = CustomParser::new().parse(&handle.original_invite).ok()?;
-        let req = match parsed {
-            SipMessage::Request(r) => r,
-            _ => return None,
+        let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite)
+        else {
+            return None;
         };
         let cancel = generators::generate_cancel(
             &InviteClientTransactionHandle { original_invite: req },
             relayed,
         )
+        .inspect_err(|e| relay::unbuilt(&call.call_ref, leg_id, "CANCEL", e))
         .ok()?;
         // RFC 3261 §9.1: the CANCEL follows the INVITE's next hop, NOT `leg.source`
         // (the callee's advertised address). When the b-leg egresses through the

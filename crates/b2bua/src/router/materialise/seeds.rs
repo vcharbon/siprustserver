@@ -193,7 +193,13 @@ fn client_seed(
         generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &stated)
             .map(Box::new)
     });
-    let cancel = cancel.transpose().ok()?;
+    let cancel = cancel
+        .transpose()
+        .inspect_err(|e| {
+            tracing::warn!(call_id = %invite.call_id(), error = %e,
+                "client transaction not seeded: its CANCEL makes no message");
+        })
+        .ok()?;
     Some(TxnSeed::ClientInvite { invite, dest, provisional, cancel })
 }
 

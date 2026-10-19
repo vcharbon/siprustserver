@@ -21,6 +21,7 @@
 //! - `sdp_session` — each dialog's one session across description authors
 //! - `session_timer` — which minted requests carry the RFC 4028 negotiation
 //! - `provisional_withhold` — the call's own withhold on relayed provisionals
+//! - `unbuilt` — the record of a message this stack could not build
 //!
 //! Header/message *extraction* does NOT live here — see `sip-message`.
 
@@ -41,6 +42,7 @@ mod provisional_withhold;
 mod repeat;
 mod sdp_session;
 mod session_timer;
+mod unbuilt;
 
 #[cfg(test)]
 mod originate_tests;
@@ -58,6 +60,7 @@ pub(crate) use owed_answer::{
 };
 pub(crate) use repeat::retransmitted_2xx;
 pub(crate) use session_timer::{settle_session_timer, TIMER};
+pub(crate) use unbuilt::unbuilt;
 
 // One session per dialog, whoever authored the description (RFC 3264 §8).
 pub use sdp_session::{

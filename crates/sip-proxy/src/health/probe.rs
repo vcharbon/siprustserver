@@ -482,6 +482,9 @@ impl HealthProbe {
                 ..Default::default()
             },
         )
+        .inspect_err(|e| {
+            tracing::warn!(worker = %w.id, error = %e, "health probe not sent: its address makes no OPTIONS");
+        })
         .ok()
     }
 }

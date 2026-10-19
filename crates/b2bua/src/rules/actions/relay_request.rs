@@ -142,6 +142,9 @@ impl ActionExecutor<'_> {
             invite_cseq_from_handle(&target_dialog).unwrap_or(target_dialog.our_cseq);
         let outbound_cseq = target_dialog.our_cseq + 1;
         let t_id = target_dialog.id();
+        // The call as it stands before the relay records anything: a request
+        // that is not built leaves it so.
+        let unrelayed = call.clone();
         *call = bump_our_cseq(call.clone(), target_leg, &t_id, 1);
 
         // RFC 3262 §7.2: RAck names the reliable 1xx and the INVITE that drew it
@@ -215,9 +218,16 @@ impl ActionExecutor<'_> {
             capabilities: Some(advertised),
             ..Default::default()
         };
-        // A request whose relayed lines no request can carry is not relayed.
-        let Ok(res) = generators::generate_in_dialog_request(method, &gen_dialog, &opts) else {
-            return;
+        let res = match generators::generate_in_dialog_request(method, &gen_dialog, &opts) {
+            Ok(res) => res,
+            Err(e) => {
+                *call = unrelayed;
+                tracing::warn!(call_ref = %call.call_ref, leg_id = %target_leg,
+                    method = %req.method(), error = %e,
+                    "in-dialog request not relayed: its lines make no request toward the peer");
+                self.refuse_unrelayed(call, fx, ctx, Unrelayed::Unbuildable);
+                return;
+            }
         };
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(

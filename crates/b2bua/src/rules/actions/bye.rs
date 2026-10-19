@@ -135,8 +135,9 @@ impl ActionExecutor<'_> {
             max_forwards: hops,
             ..Default::default()
         };
-        let res =
-            generators::generate_in_dialog_request(InDialogMethod::Bye, &dialog, &opts).ok()?;
+        let res = generators::generate_in_dialog_request(InDialogMethod::Bye, &dialog, &opts)
+            .inspect_err(|e| relay::unbuilt(marks.call_ref, leg_id, "BYE", e))
+            .ok()?;
         let dest = relay::target_dest(&dialog.remote_target);
         let (req, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, res.request, dest);

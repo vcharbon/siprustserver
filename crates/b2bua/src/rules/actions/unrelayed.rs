@@ -23,6 +23,10 @@ pub(super) enum Unrelayed {
     /// `Retry-After` (RFC 3261 §14.2, RFC 3311 §5.2): the sender may retry,
     /// and its dialog stays — a 481 would end it (§12.2.1.2).
     NotNow,
+    /// The request's lines make no request toward the peer dialog: 500 with
+    /// no `Retry-After` (RFC 3261 §21.5.1), since a retry carries the same
+    /// lines.
+    Unbuildable,
     /// The request comes from a leg its service owns (ADR-0014), and no rule
     /// of that service took it: 403 (§21.4.4).
     ServiceOwned,
@@ -55,6 +59,9 @@ impl ActionExecutor<'_> {
                 };
                 let reason = "Server Internal Error";
                 self.respond(call, fx, ctx, 500, reason, &[], None, vec![retry_after]);
+            }
+            Unrelayed::Unbuildable => {
+                self.respond(call, fx, ctx, 500, "Server Internal Error", &[], None, vec![]);
             }
             Unrelayed::ServiceOwned => {
                 self.respond(call, fx, ctx, 403, "Forbidden", &[], None, vec![]);

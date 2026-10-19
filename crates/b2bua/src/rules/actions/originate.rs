@@ -75,8 +75,6 @@ impl ActionExecutor<'_> {
             return;
         };
         let outbound_cseq = dialog.our_cseq + 1;
-        *call = bump_our_cseq(call.clone(), leg_id, id, 1);
-
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let opts = GenerateInDialogRequestOpts {
@@ -97,12 +95,16 @@ impl ActionExecutor<'_> {
             ),
             ..Default::default()
         };
-        // A dialog whose state no request can be built from sends none.
-        let Ok(res) =
-            generators::generate_in_dialog_request(InDialogMethod::Notify, &gen_dialog, &opts)
-        else {
-            return;
+        // The dialog's number advances only for a NOTIFY that is built.
+        let res = match generators::generate_in_dialog_request(
+            InDialogMethod::Notify,
+            &gen_dialog,
+            &opts,
+        ) {
+            Ok(res) => res,
+            Err(e) => return relay::unbuilt(&call.call_ref, leg_id, "NOTIFY", &e),
         };
+        *call = bump_our_cseq(call.clone(), leg_id, id, 1);
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,
@@ -160,6 +162,9 @@ impl ActionExecutor<'_> {
             relay::dialling_invite(leg_at(call, idx))
         };
         let outbound_cseq = dialog.our_cseq + 1;
+        // The call as it stands before the re-INVITE records anything: one
+        // that is not built leaves it so.
+        let unsent = call.clone();
         *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
 
         let branch = self.id_gen.new_branch();
@@ -208,11 +213,16 @@ impl ActionExecutor<'_> {
             capabilities: Some(capabilities::for_reinvite(call, leg_id, creating.as_ref())),
             ..Default::default()
         };
-        // A dialog whose state no request can be built from sends none.
-        let Ok(res) =
-            generators::generate_in_dialog_request(InDialogMethod::Invite, &gen_dialog, &opts)
-        else {
-            return;
+        let res = match generators::generate_in_dialog_request(
+            InDialogMethod::Invite,
+            &gen_dialog,
+            &opts,
+        ) {
+            Ok(res) => res,
+            Err(e) => {
+                *call = unsent;
+                return relay::unbuilt(&call.call_ref, leg_id, "re-INVITE", &e);
+            }
         };
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
@@ -308,6 +318,9 @@ impl ActionExecutor<'_> {
         let reuse = m == InDialogMethod::Options
             && self.wire_faults.is_armed(crate::wire_faults::WireFaultPoint::KeepaliveCseqReuse);
         let outbound_cseq = if reuse { dialog.our_cseq } else { dialog.our_cseq + 1 };
+        // The call as it stands before the request records anything: one that
+        // is not built leaves it so.
+        let unsent = call.clone();
         if !reuse {
             *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
         }
@@ -355,9 +368,12 @@ impl ActionExecutor<'_> {
             extra_headers,
             ..Default::default()
         };
-        // A dialog whose state no request can be built from sends none.
-        let Ok(res) = generators::generate_in_dialog_request(m, &gen_dialog, &opts) else {
-            return;
+        let res = match generators::generate_in_dialog_request(m, &gen_dialog, &opts) {
+            Ok(res) => res,
+            Err(e) => {
+                *call = unsent;
+                return relay::unbuilt(&call.call_ref, leg_id, method, &e);
+            }
         };
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(

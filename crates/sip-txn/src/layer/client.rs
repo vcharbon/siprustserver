@@ -593,9 +593,9 @@ impl Owner {
                 } else if kind == TxnKind::Invite && resp.status() >= 300 {
                     // Non-2xx INVITE final: (re-)ACK hop-by-hop (RFC 3261 §17.1.1.2).
                     if let (Some(orig), Some(dest)) = (original_request, destination) {
-                        // The ACK's frozen image is its wire form; no ACK echoes a bad final.
-                        if let Ok(ack) = generate_ack_for_non_2xx(&orig, &resp, &[]) {
-                            self.send_buffer(endpoint, ack.image(), dest).await;
+                        match generate_ack_for_non_2xx(&orig, &resp, &[]) {
+                            Ok(ack) => self.send_buffer(endpoint, ack.image(), dest).await,
+                            Err(e) => tracing::warn!(%branch, %e, "ACK not sent: no ACK echoes it"),
                         }
                     }
                     if state == TxnState::Completed {

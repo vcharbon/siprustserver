@@ -63,7 +63,7 @@ impl ActionExecutor<'_> {
             return;
         }
         let Some(ack) = call::helpers::find_leg(call, leg_id)
-            .and_then(|leg| relay::ack_lost_non_2xx(leg, self.config, resp))
+            .and_then(|leg| relay::ack_lost_non_2xx(&call.call_ref, leg, self.config, resp))
         else {
             return;
         };

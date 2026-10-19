@@ -78,7 +78,9 @@ pub fn ack_b_leg(
         extra_headers,
         ..Default::default()
     };
-    let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts).ok()?;
+    let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts)
+        .inspect_err(|e| super::unbuilt(marks.call_ref, &leg.leg_id, "ACK", e))
+        .ok()?;
     let dest = target_dest(&dialog.remote_target);
     let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, &gen_dialog.route_set, ack, dest);
     Some((
@@ -109,13 +111,16 @@ pub(crate) fn acked_invite_cseq(dialog: &Dialog) -> Option<u32> {
 /// `leg`'s established dialog in a round the record never held (RFC 3261
 /// §17.1.1.3), sent raw where the INVITE went: the dialog's first hop.
 pub fn ack_lost_non_2xx(
+    call_ref: &str,
     leg: &Leg,
     config: &B2buaConfig,
     resp: &sip_message::SipResponse,
 ) -> Option<OutboundSipEffect> {
     let dialog = leg.dialogs.established()?;
     let gen_dialog = to_gen_dialog(leg, dialog);
-    let ack = generators::generate_ack_for_non_2xx_in_dialog(&gen_dialog, resp).ok()?;
+    let ack = generators::generate_ack_for_non_2xx_in_dialog(&gen_dialog, resp)
+        .inspect_err(|e| super::unbuilt(call_ref, &leg.leg_id, "ACK", e))
+        .ok()?;
     let dest = target_dest(&dialog.remote_target);
     let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, &gen_dialog.route_set, ack, dest);
     Some(OutboundSipEffect {

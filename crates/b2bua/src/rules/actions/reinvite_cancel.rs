@@ -169,6 +169,7 @@ fn pending_reinvite_cancel(
     }
     let cancel =
         generators::generate_cancel(&InviteClientTransactionHandle { original_invite: req }, &[])
+            .inspect_err(|e| crate::rules::relay::unbuilt(&call.call_ref, leg_id, "CANCEL", e))
             .ok()?;
     Some(PendingReinviteCancel {
         t_id,

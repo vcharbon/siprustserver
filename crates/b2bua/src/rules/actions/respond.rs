@@ -101,11 +101,11 @@ impl ActionExecutor<'_> {
                 extra_headers,
                 ..Default::default()
             };
-            let Ok(resp) = generators::generate_response(req, status, reason, &opts) else {
-                return;
+            let resp = match generators::generate_response(req, status, reason, &opts) {
+                Ok(resp) => resp,
+                Err(e) => return relay::unbuilt(&call.call_ref, ctx.source_leg_id, "response", &e),
             };
-            // RFC 3261 §18.2.2 — a response goes back to the request's top-Via
-            // sent-by.
+            // RFC 3261 §18.2.2: a response goes back to the request's top-Via sent-by.
             let (host, port) = req.top_via().sent_by().pair();
             fx.outbound.push(OutboundSipEffect {
                 body: OutboundBody::Response(resp),
