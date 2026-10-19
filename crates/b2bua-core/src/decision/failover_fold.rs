@@ -136,17 +136,15 @@ pub fn treatment(
         // The engine's own refusal: the final it stated; no answer: a bare
         // 503 (ADR-0043). Either is the stack's own, no decision and no mark.
         Err(CallDecisionError::Refused { code, reason, update_headers }) => {
-            crate::initial_invite::reject_call(
+            super::apply_reject::stated_refusal(
                 call,
-                a_invite,
                 code,
                 reason,
                 update_headers.as_ref(),
-                &[],
+                a_invite,
                 advertisement,
                 ids,
                 now_ms,
-                TerminationCause::Admission,
             )
         }
         Err(CallDecisionError::Unavailable(_)) => crate::initial_invite::reject_call(

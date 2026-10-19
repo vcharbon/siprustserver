@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use b2bua_sdk::header_update::SipHeaderUpdates;
 use call::helpers::{mark_decision, set_call_ext};
 use call::{Call, DecisionKind, TerminationCause};
 use sip_ids::TurnIds;
@@ -136,5 +137,40 @@ pub(crate) fn apply_redirect(
         ids,
         now_ms,
         TerminationCause::DecisionReject,
+    )
+}
+
+/// The stack's own refusal a decision engine stated
+/// (`CallDecisionError::Refused`): its final, or the plain server error for a
+/// code that is no non-2xx final ([`is_reject_code`]), its headers riding
+/// either. No decision is marked.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stated_refusal(
+    call: Call,
+    code: u16,
+    reason: Option<String>,
+    update_headers: Option<&SipHeaderUpdates>,
+    a_invite: &SipRequest,
+    advertisement: &CapabilitySet,
+    ids: &mut TurnIds,
+    now_ms: i64,
+) -> HandlerResult {
+    let (code, reason) = if is_reject_code(code) {
+        (code, reason)
+    } else {
+        tracing::warn!(call_ref = %call.call_ref, code, "refusal refused: not a non-2xx final");
+        (500, Some(REFUSED_DECISION_REASON.to_string()))
+    };
+    crate::initial_invite::reject_call(
+        call,
+        a_invite,
+        code,
+        reason,
+        update_headers,
+        &[],
+        advertisement,
+        ids,
+        now_ms,
+        TerminationCause::Admission,
     )
 }

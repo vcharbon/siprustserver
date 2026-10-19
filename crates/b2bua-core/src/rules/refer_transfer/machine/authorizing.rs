@@ -58,6 +58,8 @@ fn refuse_transfer(ctx: &RuleContext, field: &str, reason: &str) -> Option<RuleH
 }
 
 /// Read the `reject`/`error` reject code+reason from the internal-event payload.
+/// A stated code that is no non-2xx final rejects nothing: the referrer is
+/// told the plain server error, never a success.
 fn reject_code_reason(ctx: &RuleContext) -> (u16, String) {
     let (is_reject, payload) = match ctx.event {
         b2bua_sdk::event::CallEvent::InternalEvent { outcome, payload, .. } => {
@@ -66,9 +68,13 @@ fn reject_code_reason(ctx: &RuleContext) -> (u16, String) {
         _ => (false, &serde_json::Value::Null),
     };
     if is_reject {
-        let code =
-            payload.get("reject_code").and_then(|v| v.as_u64()).and_then(|c| u16::try_from(c).ok());
-        let code = code.unwrap_or(603);
+        let stated = payload.get("reject_code").and_then(|v| v.as_u64());
+        let code = stated.map_or(Some(603), |c| u16::try_from(c).ok());
+        let Some(code) = code.filter(|c| crate::decision::apply_reject::is_reject_code(*c)) else {
+            tracing::warn!(call_ref = %ctx.call_ref, code = ?stated, "refer reject refused: not a non-2xx final");
+            let reason = crate::decision::apply_reject::REFUSED_DECISION_REASON;
+            return (500, reason.to_string());
+        };
         let reason =
             payload.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("Declined").to_string();
         (code, reason)

@@ -220,18 +220,18 @@ pub fn treatment(
         }
         // No decision was returned: nothing to record, the stack's own final —
         // the one the engine stated, else 503.
-        Err(CallDecisionError::Refused { code, reason, update_headers }) => reject_call(
-            call,
-            a_invite,
-            code,
-            reason,
-            update_headers.as_ref(),
-            &[],
-            advertisement,
-            ids,
-            now_ms,
-            TerminationCause::Admission,
-        ),
+        Err(CallDecisionError::Refused { code, reason, update_headers }) => {
+            crate::decision::apply_reject::stated_refusal(
+                call,
+                code,
+                reason,
+                update_headers.as_ref(),
+                a_invite,
+                advertisement,
+                ids,
+                now_ms,
+            )
+        }
         Err(CallDecisionError::Unavailable(_)) => reject_call(
             call,
             a_invite,

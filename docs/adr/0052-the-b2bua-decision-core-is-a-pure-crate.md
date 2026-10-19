@@ -203,7 +203,10 @@ redirect that is not a 3xx or whose target does not read) draws the plain
 server error `500`. The refusal keeps the decision's headers, its updates and
 its adds, as its decided final would have, and carries none of the failing
 peer's lines; it is the same on the initial consult's path and the failover
-consult's.
+consult's. An engine's stated refusal (`CallDecisionError::Refused`) is held
+to the same guard at the seam: a code that is no non-2xx final draws the 500,
+its stated headers kept. A `/call/refer` reject or refusal stating such a code
+tells the referrer the plain server error, never a success.
 
 ### 8. The model invariant oracle
 
