@@ -20,6 +20,7 @@ use call::StateLabel;
 // [`RuleCall`](crate::model::RuleCall) view (ADR-0020 X8) and never see it.
 pub use call::Call;
 
+use crate::config::B2buaConfig;
 use crate::model::{RuleAction, RuleCall, RuleDefinition};
 
 /// The terminal-state marker for a `sm_rule!` transition (ADR-0016 X9). Writing
@@ -45,17 +46,34 @@ impl Terminal {
 /// - `data_write` — a one-shot mutation installing the service's data backing
 ///   (a typed slice in-tree, or `ext[id]` for an out-of-crate integrator);
 /// - `actions` — an initial [`RuleAction`] batch (e.g. the announcement service's
-///   `CreateLeg{kind:media}` toward the MRF, launched in parallel with routing).
+///   `CreateLeg{kind:media}` toward the MRF, launched in parallel with routing);
+/// - `configured` — the part of the data backing and of the batch stated from
+///   the worker's configuration (its service parameters), run after
+///   `data_write`, its actions after `actions`.
 pub struct ServiceSeed {
     pub initial_state: StateLabel,
     pub data_write: Box<dyn FnOnce(&mut Call)>,
     pub actions: Vec<RuleAction>,
+    pub configured: Option<ConfiguredSeed>,
 }
+
+/// A seed part stated from the worker's configuration: it may write the
+/// service's data backing and returns the actions to fold.
+pub type ConfiguredSeed = Box<dyn FnOnce(&B2buaConfig, &mut Call) -> Vec<RuleAction>>;
 
 impl ServiceSeed {
     /// A seed that only sets the initial cursor (no data backing, no actions).
     pub fn new(initial_state: StateLabel) -> Self {
-        Self { initial_state, data_write: Box::new(|_| {}), actions: Vec::new() }
+        Self { initial_state, data_write: Box::new(|_| {}), actions: Vec::new(), configured: None }
+    }
+    /// State a data backing and actions from the worker's configuration, as
+    /// `ctx.config` hands it to the service's rules.
+    pub fn with_configured(
+        mut self,
+        f: impl FnOnce(&B2buaConfig, &mut Call) -> Vec<RuleAction> + 'static,
+    ) -> Self {
+        self.configured = Some(Box::new(f));
+        self
     }
     /// Install the service's data backing (typed slice or `ext[id]`).
     pub fn with_data(mut self, f: impl FnOnce(&mut Call) + 'static) -> Self {

@@ -59,10 +59,14 @@ pub fn seed_services(
         };
         // 1) seed the cursor (the service id is its machine id),
         result.call.sm_cursors.insert(MachineId::new(def.id), seed.initial_state);
-        // 2) install the data backing,
+        // 2) install the data backing, then the part stated from the config,
         (seed.data_write)(&mut result.call);
+        let mut actions = seed.actions;
+        if let Some(configured) = seed.configured {
+            actions.extend(configured(exec.config, &mut result.call));
+        }
         // 3) fold the initial actions through the executor (no back-door write).
-        if !seed.actions.is_empty() {
+        if !actions.is_empty() {
             let sub = {
                 let ctx = RuleContext {
                     call: RuleCall::new(&result.call),
@@ -75,7 +79,7 @@ pub fn seed_services(
                     discharged: None,
                     resolved: &call::helpers::UNRESOLVED,
                 };
-                exec.execute(&seed.actions, &result.call, &ctx)
+                exec.execute(&actions, &result.call, &ctx)
             };
             result.call = sub.call;
             result.effects.extend(sub.effects);

@@ -223,3 +223,51 @@ fn dormant_service_leaves_call_untouched() {
     let composed = compose_rules(&[], default_rules());
     assert_eq!(composed.len(), default_rules().len());
 }
+
+/// A seed's configured part reads the worker's service parameters: its data
+/// write and its actions follow what the composition inserted.
+#[test]
+fn a_configured_seed_reads_the_service_parameters() {
+    use b2bua::rules::ServiceDef;
+
+    struct Marker(&'static str);
+
+    fn configured_init(_: &RuleCall) -> Option<ServiceSeed> {
+        Some(ServiceSeed::new(StateLabel::new("S0")).with_configured(|config, c| {
+            let Some(Marker(text)) = config.service_params.get::<Marker>() else {
+                return Vec::new();
+            };
+            c.callback_context = Some((*text).to_string());
+            vec![RuleAction::SetState {
+                machine: MachineId::new("configured"),
+                to: StateLabel::new("S1"),
+            }]
+        }))
+    }
+    let services = vec![ServiceDef { id: "configured", init: configured_init, rules: Vec::new }];
+
+    let mut config = B2buaConfig::default();
+    config.service_params.insert(Marker("from-config"));
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
+    let event = info_event();
+    let seeded = seed_services(
+        HandlerResult::new(test_call()),
+        &services,
+        &exec,
+        &event,
+        "a",
+        Direction::FromA,
+    );
+    assert_eq!(seeded.call.callback_context.as_deref(), Some("from-config"), "the data write");
+    assert_eq!(
+        seeded.call.sm_cursors.get(&MachineId::new("configured")).map(StateLabel::as_str),
+        Some("S1"),
+        "the configured action was folded"
+    );
+}
