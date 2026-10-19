@@ -1,5 +1,5 @@
 //! The crate's named locks (ADR-0051 §7): every std lock of `observe` outside
-//! the panic hook is taken through [`locked`] under one of these names, and a
+//! the panic hook is taken through `locked` under one of these names, and a
 //! poisoned one is recovered and counted under it
 //! (`observe_poisoned_lock_recoveries_total{lock}`). The panic hook's own lock
 //! recovers without counting: it runs inside a panic.

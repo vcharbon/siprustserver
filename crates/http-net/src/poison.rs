@@ -1,5 +1,5 @@
 //! The crate's named locks (ADR-0051 §7): every std lock of `http-net` is
-//! taken through [`locked`] under one of these names, and a poisoned one is
+//! taken through `locked` under one of these names, and a poisoned one is
 //! recovered and counted under it
 //! (`http_request_poisoned_lock_recoveries_total{lock}`).
 

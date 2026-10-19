@@ -1,5 +1,5 @@
 //! The kit's named locks (ADR-0051 §7): every std lock of the worker kit is
-//! taken through [`locked`] under one of these names, and a poisoned one is
+//! taken through `locked` under one of these names, and a poisoned one is
 //! recovered and counted under it
 //! (`b2bua_runner_poisoned_lock_recoveries_total{lock}`).
 

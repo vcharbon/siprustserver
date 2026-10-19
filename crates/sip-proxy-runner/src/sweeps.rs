@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 /// How often the stale-payload sweep runs.
 const STALE_SWEEP_PERIOD: Duration = Duration::from_secs(1);
 
-/// The stale-payload sweep: every [`STALE_SWEEP_PERIOD`] the observer's
+/// The stale-payload sweep: every `STALE_SWEEP_PERIOD` the observer's
 /// `sweep_stale` decreases, once `payload_stale_ms` has passed, any Alive
 /// worker whose OPTIONS replies stopped carrying a fresh `X-Overload` payload
 /// (or whose probe stalls), instead of keeping its last AIMD cap while the

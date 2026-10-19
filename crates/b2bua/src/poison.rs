@@ -1,6 +1,6 @@
 //! The worker's named locks outside the store (ADR-0051 §7; the store's are
 //! in [`crate::store`]): every other std lock of the crate is taken through
-//! [`locked`], [`read`] or [`write`] under one of these names, and a poisoned
+//! `locked`, `read` or `write` under one of these names, and a poisoned
 //! one is recovered and counted under it
 //! (`b2bua_poisoned_lock_recoveries_total{lock}`).
 
