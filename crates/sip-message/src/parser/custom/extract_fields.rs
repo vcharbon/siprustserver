@@ -1,5 +1,5 @@
-//! Mandatory-header extraction + the ADR-0007 strict-grammar gates
-//! (`Wire` vs `Hydrate` mode). Port of `src/sip/parsers/extract-fields.ts`.
+//! Mandatory-header extraction + the strict wire-grammar gates (`Wire` vs
+//! `Hydrate` mode; those beyond the RFC grammar are listed in ADR-0001). Port of `src/sip/parsers/extract-fields.ts`.
 //!
 //! Produces the typed [`CoreHeaders`] from the
 //! [`HeaderIndex`] of one dispatch pass — this module locates nothing itself,
@@ -17,15 +17,13 @@ use super::structured_headers::{
     parse_cseq, parse_name_addr, parse_via, top_level_comma_entries, validate_strict_host,
     validate_strict_sip_uri,
 };
+use super::top_via;
 use crate::error::SipParseError;
 use crate::header::{self, HostPort, NameAddr, Uri};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
 use crate::types::{ContactSet, CoreHeaders, NonEmpty};
-
-/// RFC 3261 §8.1.1.7 — top-Via branch MUST start with this magic cookie.
-const VIA_BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
 
 const INT_32_MAX: u64 = (1u64 << 31) - 1;
 
@@ -308,29 +306,16 @@ pub fn extract_common_fields(
         idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s)))
     {
         let v = parse_via(&value.reslice(raw));
-        if let Some(p) = v.port {
-            if !is_valid_port(p) {
-                return Err(SipParseError::new(format!("Via port out of range: {p}")));
-            }
+        let top = vias.is_empty();
+        if let Some(p) = v.port.filter(|&p| top_via::port_out_of_range(p, top)) {
+            return Err(SipParseError::new(format!("Via port out of range: {p}")));
         }
         if v.branch.as_deref() == Some("") {
             return Err(SipParseError::new("Empty Via branch parameter"));
         }
         if wire {
-            // Top-Via magic cookie (RFC 3261 §8.1.1.7) — topmost Via only.
-            if vias.is_empty() {
-                match &v.branch {
-                    Some(b) if b.starts_with(VIA_BRANCH_MAGIC_COOKIE) => {}
-                    other => {
-                        let shown = match other {
-                            None => "<no branch>".to_string(),
-                            Some(b) => format!("\"{b}\""),
-                        };
-                        return Err(SipParseError::new(format!(
-                            "Top Via branch missing magic cookie \"{VIA_BRANCH_MAGIC_COOKIE}\": {shown}"
-                        )));
-                    }
-                }
+            if let Some(refusal) = top.then(|| top_via::cookie_refusal(&v)).flatten() {
+                return Err(refusal);
             }
             if let Some(reason) = validate_strict_host(&v.host) {
                 return Err(SipParseError::new(format!(
@@ -343,13 +328,8 @@ pub fn extract_common_fields(
                     "Via sent-by has {colon_count} colons (must be ≤ 1): \"{raw}\""
                 )));
             }
-            // The allowlist is documented case-insensitive; probe without minting
-            // an uppercased String per Via (set is ≤6 entries — linear is fine).
-            if !limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(&v.transport)) {
-                return Err(SipParseError::new(format!(
-                    "Via transport \"{}\" not in allowed set",
-                    v.transport
-                )));
+            if let Some(refusal) = top.then(|| top_via::transport_refusal(&v, limits)).flatten() {
+                return Err(refusal);
             }
         }
         let port = v

@@ -50,9 +50,11 @@ pub struct SipParserLimits {
     pub max_header_length: usize,
     /// Max bytes of the Request-URI in the start line.
     pub max_uri_length: usize,
-    /// Case-insensitive Via transport allowlist. Fail-closed by default.
+    /// Case-insensitive transport allowlist of the topmost Via, the hop this
+    /// element answers. Fail-closed by default.
     pub allowed_transports: BTreeSet<String>,
-    /// When `true` (default) the ADR-0007 strict-grammar gates fire. Set
+    /// When `true` (default) the strict wire-grammar gates fire, those beyond
+    /// the RFC grammar listed in ADR-0001. Set
     /// `false` for harness/rule-validator scenarios that must inspect
     /// malformed-but-parseable messages without the parser pre-rejecting.
     pub wire_grammar: bool,

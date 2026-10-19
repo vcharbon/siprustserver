@@ -387,11 +387,11 @@ fn more_synthetic() -> Vec<(&'static str, Vec<u8>)> {
     seeds.push((
         "utf8-display",
         message(
-            "MESSAGE sip:zoë@example.com SIP/2.0",
+            "MESSAGE sip:zo%C3%AB@example.com SIP/2.0",
             &[
                 VIA,
                 "Max-Forwards: 70",
-                "From: \"Zoë Ünïcødé €\" <sip:zoë@example.com>;tag=u1",
+                "From: \"Zoë Ünïcødé €\" <sip:zo%C3%AB@example.com>;tag=u1",
                 "To: \"日本語\" <sip:jp@example.org>",
                 CALL_ID,
                 "CSeq: 1 MESSAGE",
@@ -399,6 +399,23 @@ fn more_synthetic() -> Vec<(&'static str, Vec<u8>)> {
                 "Content-Type: text/plain;charset=utf-8",
             ],
             "héllo wörld €",
+        ),
+    ));
+    // A user part in raw UTF-8, which RFC 3261 §25.1 admits only escaped.
+    seeds.push((
+        "utf8-raw-user",
+        message(
+            "MESSAGE sip:zoë@example.com SIP/2.0",
+            &[
+                VIA,
+                "Max-Forwards: 70",
+                "From: <sip:zoë@example.com>;tag=r1",
+                "To: <sip:jp@example.org>",
+                CALL_ID,
+                "CSeq: 1 MESSAGE",
+                "Content-Type: text/plain;charset=utf-8",
+            ],
+            "héllo",
         ),
     ));
     seeds

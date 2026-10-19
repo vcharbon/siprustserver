@@ -27,6 +27,7 @@ pub(crate) mod request_uri;
 pub mod scanner;
 pub mod start_line;
 pub mod structured_headers;
+mod top_via;
 
 use extract_fields::{extract_request_fields, extract_response_fields, ExtractMode, RequestEager};
 use header_index::HeaderIndex;
