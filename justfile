@@ -56,6 +56,12 @@ test-slow *filter:
 # Both lanes.
 test-all: test test-slow
 
+# The parity oracle (ADR-0001): sip-message's test targets built under its
+# `rvoip-oracle` feature, which no workspace build turns on, and its
+# differential tests run. A branch touching sip-message passes it.
+parity-oracle:
+    cargo nextest run -p sip-message --features rvoip-oracle --no-tests=fail -E 'test(/^rvoip_parity::/)'
+
 # The live ELU under a real one-core cgroup CPU quota (a transient systemd
 # user scope): the one `overload::quota_tests` case no other lane can run.
 test-cpu-quota:
