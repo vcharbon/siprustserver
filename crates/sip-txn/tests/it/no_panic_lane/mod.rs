@@ -3,13 +3,14 @@
 //! keeps turning and the parser it calls never panics.
 //!
 //! A case ([`drive::case`]) runs one layer over the simulated fabric, the
-//! B2BUA worker's configuration, on a paused clock: the lane opens an INVITE
-//! and a BYE client transaction toward the peer, the peer sends a seed's
-//! unmutated preamble, the mutated datagram twice (a copy and its
-//! retransmission) and the seed's follow-up, the lane's TU answers every
-//! request it is handed, and the clock runs past every timer a transaction
-//! can arm. A case fails when the owner task has ended or the parse guard
-//! counted a panic.
+//! B2BUA worker's configuration, on a paused clock: the lane opens two INVITE
+//! client transactions (one carrying no offer) and a BYE one toward the peer,
+//! the peer sends a seed's unmutated preamble, the lane releases the INVITEs'
+//! call when the seed says so (its 2xx then meets an orphan), the peer sends
+//! the mutated datagram twice (a copy and its retransmission) and the seed's
+//! follow-up, the lane's TU answers every request it is handed, and the clock
+//! runs past every timer a transaction can arm. A case fails when the owner
+//! task has ended or the parse guard counted a panic.
 //!
 //! Two slow-lane tests (`just test-slow` runs them in the test profile, so
 //! overflow checks and debug assertions are on), on threads with the lane's
@@ -49,6 +50,14 @@ fn every_seed_reaches_the_tu() {
             assert_eq!(outcome.failure, None, "{}", seed.name);
             if seed.name == "resp/100-invite" {
                 assert_eq!(outcome.invite_copies, 1, "the 100 stops Timer A: {outcome:?}");
+            } else if seed.release {
+                // An orphan's 2xx reaches no TU: the layer ACKs it itself.
+                assert_eq!(outcome.handed_up, 0, "{} reached a TU: {outcome:?}", seed.name);
+                assert!(outcome.acks > 0, "{} drew no ACK: {outcome:?}", seed.name);
+            } else if seed.name.starts_with("resp/200-invite-") {
+                // A 2xx after the first reaches the TU as a repeat.
+                assert!(outcome.handed_up > 0, "{} reached no TU: {outcome:?}", seed.name);
+                assert_eq!(outcome.matched, 0, "{} matched: {outcome:?}", seed.name);
             } else if seed.name.starts_with("resp/") {
                 assert!(outcome.matched > 0, "{} matched no client txn: {outcome:?}", seed.name);
             } else {
@@ -58,7 +67,14 @@ fn every_seed_reaches_the_tu() {
             // parser refuses in its place reaches nothing.
             let refused = drive::outcome(&seed, b"not a SIP message");
             assert_eq!((refused.handed_up, refused.matched), (0, 0), "{}", seed.name);
-            assert!(refused.invite_copies > 1, "{}: Timer A runs: {refused:?}", seed.name);
+            if seed.release {
+                assert_eq!(refused.acks, 0, "{}: nothing an orphan ACKs: {refused:?}", seed.name);
+            }
+            // A response preamble answered the client INVITE: Timer A stopped.
+            let answered = seed.name.starts_with("resp/") && !seed.before.is_empty();
+            if !answered {
+                assert!(refused.invite_copies > 1, "{}: Timer A runs: {refused:?}", seed.name);
+            }
         }
     });
 }

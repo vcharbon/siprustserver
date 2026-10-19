@@ -207,8 +207,9 @@ async fn a_late_487_is_re_acked_on_each_repeat_and_purged_at_timer_d() {
     settle_until(|| b2bua.active_calls() == 0).await;
     assert_eq!(
         b2bua.txn_metrics().orphaned_transactions(),
-        1,
-        "the pending relayed re-INVITE is orphaned, not cut short"
+        2,
+        "the pending relayed re-INVITE is orphaned, not cut short, beside the initial \
+         INVITE held Accepted to its Timer M"
     );
 
     // ── the 487 arrives well after the call is gone ──────────────────────────
@@ -223,8 +224,9 @@ async fn a_late_487_is_re_acked_on_each_repeat_and_purged_at_timer_d() {
     bob_reinv.expect_ack().await;
     assert_eq!(
         b2bua.txn_metrics().orphaned_transactions(),
-        1,
-        "the orphaned INVITE client transaction is held in Completed for Timer D"
+        2,
+        "the orphaned re-INVITE client transaction is held in Completed for Timer D, the \
+         initial INVITE's in Accepted to its Timer M"
     );
 
     // ── Timer D, from the first 487: the orphan is purged, and with it the
@@ -298,8 +300,9 @@ async fn a_late_2xx_is_re_acked_on_each_repeat_and_purged_at_timer_m() {
     bob.receive("ACK").await;
     assert_eq!(
         b2bua.txn_metrics().orphaned_transactions(),
-        1,
-        "the orphaned INVITE client transaction is held in Accepted for Timer M"
+        2,
+        "the orphaned re-INVITE client transaction is held in Accepted for Timer M, as is \
+         the initial INVITE's from its own 2xx"
     );
 
     // ── Timer M, from the first 2xx: purged ──────────────────────────────────
@@ -349,7 +352,11 @@ async fn a_relayed_reinvite_that_draws_nothing_is_purged_after_timer_b() {
     let mut bob_bye = bob.receive("BYE").await;
     bob_bye.respond(200, "OK").await;
     settle_until(|| b2bua.active_calls() == 0).await;
-    assert_eq!(b2bua.txn_metrics().orphaned_transactions(), 1, "the orphan is still resident");
+    assert_eq!(
+        b2bua.txn_metrics().orphaned_transactions(),
+        2,
+        "the orphan is still resident, beside the initial INVITE held Accepted to its Timer M"
+    );
 
     // ── Timer B, from the relayed INVITE, gives the orphan up; its 64·T1 hold
     //    purges it having ACKed nothing. The BYE's own Timer J ends first ─────

@@ -163,7 +163,8 @@ pub(super) enum Command {
     /// `Completed` or `Accepted` until its ACK, and shedding before the ACK
     /// would strand the ACK relay. A txn that lives on past its obligation (an
     /// INVITE server txn whose ACK it saw, in Confirmed for Timer I or
-    /// Accepted for Timer L) is detached and no longer counted.
+    /// Accepted for Timer L; an INVITE client txn Accepted for Timer M once
+    /// its 2xx is handed up) is no longer counted.
     ActiveTxnCount {
         call_ref: String,
         reply: oneshot::Sender<usize>,
@@ -287,7 +288,11 @@ impl TransactionLayer {
     }
 
     /// Send an outbound SIP request, allocating a client transaction and
-    /// returning its handle. `Err` if the owner task is gone (see `roundtrip`).
+    /// returning its handle. A CANCEL or an ACK allocates none (both reuse
+    /// their INVITE's identity); an ACK of a 2xx is kept by the Accepted INVITE
+    /// client transaction it acknowledges, which re-sends it to a repeat of
+    /// that 2xx once its call is released. `Err` if the owner task is gone
+    /// (see `roundtrip`).
     pub async fn send_request(
         &self,
         msg: SipRequest,
@@ -351,9 +356,9 @@ impl TransactionLayer {
         self.roundtrip(|reply| Command::Reoffer { message: Box::new(message), src, reply }).await
     }
 
-    /// Cancel every client transaction whose `call_ref` matches — the
-    /// call-eviction teardown (so Timer B/F can't fire against a vanished
-    /// call). Idempotent.
+    /// Release every client transaction of `call_ref`, Accepted ones included:
+    /// each is orphaned and closes its own obligations, the ACK of each later
+    /// 2xx among them, surfacing nothing (ADR-0034). Idempotent.
     pub async fn cancel_txns_for_call(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
         self.roundtrip(|reply| Command::CancelTxnsForCall { call_ref: call_ref.to_string(), reply })
             .await

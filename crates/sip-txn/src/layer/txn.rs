@@ -40,9 +40,10 @@ pub(super) enum TxnState {
     /// An INVITE server txn that sent a 2xx (§7.1, §8.7): held for Timer L,
     /// passing every ACK up and handing no copy of its INVITE up; this stack
     /// answers each copy with that 2xx where §8.7 sends nothing (`replay_cached`).
-    /// An orphaned INVITE client txn whose 2xx the layer ACKed itself
-    /// (§7.2): held for Timer M, re-passing that ACK to every repeat of the
-    /// 2xx (RFC 3261 §13.2.2.4).
+    /// An INVITE client txn that took a 2xx (§7.2): held for Timer M from
+    /// that 2xx. While its call holds it, every later 2xx reaches the TU,
+    /// which owns each ACK (RFC 3261 §13.2.2.4); once orphaned, the layer
+    /// sends each dialog's ACK itself (`layer::orphan`).
     Accepted,
 }
 
@@ -158,6 +159,23 @@ impl HeldCancel {
     }
 }
 
+/// The most dialogs, and reliably offered To-tags, an INVITE client txn
+/// remembers: one per fork (RFC 6026 §7.2), bounded against a peer that
+/// invents To-tags.
+pub(super) const MAX_DIALOGS: usize = 16;
+
+/// A dialog of an INVITE client txn, by its To-tag (one per fork, RFC 3261
+/// §12.1.2): the highest CSeq this layer sent on it, so a BYE it sends there
+/// numbers above it (§12.2.1.1), and the ACK of its 2xx once one left — the
+/// TU's, seen leaving through the layer, or the one the layer built for an
+/// orphan (§13.2.2.4). A dialog whose ACK left was held by the TU, or
+/// already released by the layer.
+pub(super) struct InviteDialog {
+    pub(super) to_tag: Option<String>,
+    pub(super) cseq: u32,
+    pub(super) ack: Option<Bytes>,
+}
+
 /// What distinguishes one fresh transaction from another: its identity, its
 /// attribution and the state it is born in. Everything else on a
 /// [`Transaction`] — cached responses, timer keys, the held CANCEL, the ladder
@@ -187,7 +205,7 @@ impl Transaction {
             method: head.method,
             call_id: head.call_id,
             from_tag: head.from_tag,
-            original_request: head.original_request,
+            original_request: head.original_request.map(Box::new),
             last_response: None,
             last_response_status: None,
             call_ref: head.call_ref,
@@ -204,12 +222,13 @@ impl Transaction {
             held_cancel: None,
             cancel_retransmit_key: None,
             retransmit_buf: None,
+            invite_cseq: 0,
             seed_resend: None,
             ladder: None,
             timeout_kind: TxnTimeoutKind::Response,
             dead_hop_reported: false,
-            dialog_cseq: 0,
-            accepted_to_tag: None,
+            dialogs: Vec::new(),
+            reliable_offers: Vec::new(),
             lifetime,
             orphaned: false,
             held: false,
@@ -226,6 +245,23 @@ impl Transaction {
 
     pub(super) fn role(&self) -> TxnRole {
         self.id.as_ref().role()
+    }
+
+    /// This INVITE's dialog under `to_tag`, recorded now when new; `None`
+    /// for a new one past [`MAX_DIALOGS`].
+    pub(super) fn dialog(&mut self, to_tag: Option<&str>) -> Option<&mut InviteDialog> {
+        if let Some(at) = self.dialogs.iter().position(|d| d.to_tag.as_deref() == to_tag) {
+            return self.dialogs.get_mut(at);
+        }
+        if self.dialogs.len() >= MAX_DIALOGS {
+            return None;
+        }
+        let to_tag = to_tag.map(str::to_string);
+        // One slot at a time: most INVITEs open one dialog, and a held txn's
+        // spare capacity is memory held 64·T1.
+        self.dialogs.reserve_exact(1);
+        self.dialogs.push(InviteDialog { to_tag, cseq: 0, ack: None });
+        self.dialogs.last_mut()
     }
 
     /// A server transaction's key, owned; `None` for a client one.
@@ -255,7 +291,10 @@ pub(super) struct Transaction {
     pub(super) method: Method,
     pub(super) call_id: String,
     pub(super) from_tag: String,
-    pub(super) original_request: Option<SipRequest>,
+    /// The INVITE an INVITE transaction is for; an Accepted client one keeps
+    /// its image instead ([`retransmit_buf`](Self::retransmit_buf)). Boxed: a
+    /// parsed request is most of a record's size, and a non-INVITE has none.
+    pub(super) original_request: Option<Box<SipRequest>>,
     /// The datagram replayed on a request retransmit. Refcounted, so caching a
     /// freshly built message keeps its rendered image instead of copying it, and
     /// a replay costs a refcount bump rather than a memcpy of the whole message.
@@ -298,9 +337,12 @@ pub(super) struct Transaction {
     pub(super) cancel_retransmit_key: Option<Key>,
     // Retransmit progression.
     /// The request datagram Timer A/E re-sends — refcounted for the same reason
-    /// as [`last_response`](Self::last_response). In `Accepted` it is the ACK
-    /// re-passed to every repeat of the 2xx.
+    /// as [`last_response`](Self::last_response). On an Accepted INVITE client
+    /// txn, the INVITE's image, which stands in for `original_request`.
     pub(super) retransmit_buf: Option<Bytes>,
+    /// On an Accepted INVITE client txn: its INVITE's CSeq number, which the
+    /// ACK of each of its 2xx repeats (RFC 3261 §13.2.2.4).
+    pub(super) invite_cseq: u32,
     /// On a client INVITE seeded `Trying` (ADR-0014): its INVITE, re-sent once
     /// when a CANCEL is first held on it (ADR-0043), taken at that send.
     pub(super) seed_resend: Option<Bytes>,
@@ -318,13 +360,15 @@ pub(super) struct Transaction {
     /// INVITE's hop is dead (ADR-0044): no later timeout of the transaction is
     /// reported again.
     pub(super) dead_hop_reported: bool,
-    /// On an INVITE client txn: the highest CSeq this layer sent on the
-    /// INVITE's Call-ID and From-tag inside a dialog it opened (a PRACK, an
-    /// UPDATE), so a BYE it sends on that dialog numbers above it (§12.2.1.1).
-    pub(super) dialog_cseq: u32,
-    /// On an orphaned INVITE client txn in Accepted: the To-tag of the 2xx it
-    /// ACKed — a 2xx under another tag is a forked dialog of its own.
-    pub(super) accepted_to_tag: Option<String>,
+    /// On an INVITE client txn: the dialogs it opened that a request this
+    /// layer sent (a PRACK, an UPDATE, a BYE) or a 2xx named, at most
+    /// [`MAX_DIALOGS`]; a 2xx under another To-tag is a forked dialog of its
+    /// own (RFC 6026 §7.2).
+    pub(super) dialogs: Vec<InviteDialog>,
+    /// On an INVITE client txn that carried no offer: the To-tags of the
+    /// reliable provisionals that carried one, at most [`MAX_DIALOGS`]. Their
+    /// PRACK answered it (RFC 3262 §5), so their 2xx's ACK owes no answer.
+    pub(super) reliable_offers: Vec<String>,
     /// When this transaction leaves the map, written only by
     /// `layer::lifetime`. An INVITE client txn that gave up is held
     /// [`Hold::GaveUp`](super::lifetime::Hold::GaveUp) in Trying/Proceeding:
@@ -333,10 +377,10 @@ pub(super) struct Transaction {
     /// provisional stays held.
     pub(super) lifetime: Lifetime,
     /// The call this transaction served has been released while it was still
-    /// open (`cancel_txns_for_call`). The layer then closes the transaction's
-    /// own obligations — the hop ACK of a non-2xx and Timer D, the bare ACK of a
-    /// 2xx and Timer M, the held CANCEL, Timer B — and surfaces nothing to the
-    /// consumer, which holds no state for it any more.
+    /// open or Accepted (`cancel_txns_for_call`). The layer then closes the
+    /// transaction's own obligations — the hop ACK of a non-2xx and Timer D,
+    /// the ACK of each 2xx and Timer M, the held CANCEL, Timer B — and
+    /// surfaces nothing to the consumer, which holds no state for it any more.
     pub(super) orphaned: bool,
     /// A server INVITE transaction — an admitted initial INVITE or a seed —
     /// whose identity the node's shared refusals hold while it lives, so no

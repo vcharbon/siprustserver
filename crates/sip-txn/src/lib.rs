@@ -3,9 +3,16 @@
 //! RFC 3261 §17 client/server transaction state machines: duplicate detection
 //! (§17.2.3: top-Via branch, sent-by and method), retransmission + timeout
 //! timers (A/B for INVITE, E/F for non-INVITE, G non-2xx-final retransmit,
-//! D/H/J holds), CANCEL→200+487, ACK absorption for non-2xx, and
-//! cached-final-response retransmission. In-memory only (≤ ~32 s txn
-//! lifetime).
+//! D/H/J holds, the RFC 6026 Accepted holds L and M), CANCEL→200+487, ACK
+//! absorption for non-2xx, and cached-final-response retransmission.
+//! In-memory only (≤ ~32 s txn lifetime past a final).
+//!
+//! ## Who ACKs a 2xx
+//!
+//! One owner per ACK (RFC 3261 §13.2.2.4, RFC 6026 §7.2): while a call holds
+//! its Accepted INVITE client transaction, the TU, every later 2xx reaching it
+//! as a repeat; once the call is released (`cancel_txns_for_call`), the layer,
+//! re-sending the TU's ACK or building one from the INVITE (ADR-0034).
 //!
 //! Sits on a [`sip_net::UdpEndpoint`] (it parses raw datagrams itself, via a
 //! [`sip_message::SipParser`]) and emits a stream of [`TransactionEvent`]s to

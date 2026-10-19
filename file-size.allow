@@ -117,6 +117,6 @@ crates/sip-pcap/src/flow.rs 820
 crates/sip-pcap/src/flow/tests.rs 1000
 crates/sip-proxy-runner/src/main.rs 506
 crates/sip-proxy/src/observability/metrics.rs 550
-crates/sip-txn/src/layer/client.rs 745
+crates/sip-txn/src/layer/client.rs 743
 crates/sip-txn/tests/it/bounded_queue.rs 803
 crates/sip-txn/tests/it/fsm.rs 1415

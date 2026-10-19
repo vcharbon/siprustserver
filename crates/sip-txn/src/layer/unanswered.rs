@@ -69,7 +69,7 @@ impl Owner {
         status: u16,
         reason: &str,
     ) -> usize {
-        let unanswered: Vec<(ServerTxnKey, SipRequest, Option<SocketAddr>)> = self
+        let unanswered: Vec<(ServerTxnKey, Box<SipRequest>, Option<SocketAddr>)> = self
             .txn_index
             .get(call_ref)
             .into_iter()

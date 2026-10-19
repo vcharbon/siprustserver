@@ -103,7 +103,7 @@ pub fn from_response(resp: &SipResponse, strict: bool, d: &mut Digest) {
         return;
     }
     if (200..300).contains(&resp.status()) {
-        let ack = generate_ack_for_2xx_from_invite(&invite, resp, "z9hG4bK-echo-ack");
+        let ack = generate_ack_for_2xx_from_invite(&invite, resp, "z9hG4bK-echo-ack", None);
         outcome("ack-2xx", ack, strict, d);
         let bye = generate_bye_for_2xx_from_invite(&invite, resp, 2, "z9hG4bK-echo-bye");
         outcome("bye-2xx", bye, strict, d);

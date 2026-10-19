@@ -12,11 +12,11 @@ use crate::seed::{Reoffer, TxnSeed};
 use crate::timers::ms;
 use call::{TxnKind, TxnTimeoutKind};
 
-use super::client::{extract_via_custom_params, ViaMarks};
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::lifetime::Hold;
 use super::owner::Owner;
 use super::txn::{CancelWire, HeldCancel, NewTransaction, Timer, TxnId, TxnRef, TxnState};
+use super::via_marks::{extract_via_custom_params, ViaMarks};
 
 impl Owner {
     /// Put every seed in the map of its role as an INVITE transaction, with the

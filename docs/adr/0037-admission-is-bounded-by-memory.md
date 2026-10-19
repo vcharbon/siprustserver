@@ -180,6 +180,7 @@ kills it, and a kill drops every call it serves.
   the startup line and `jemalloc_footprint_hazards` name; the ceilings assume
   none.
 - A transaction ceiling also counts the transactions of rejected and finished
-  INVITEs that linger for their timers, and of client INVITEs that gave up
+  INVITEs that linger for their timers, of answered client INVITEs (held
+  Accepted 64·T1 past their 2xx, ADR-0034), and of client INVITEs that gave up
   (held 64·T1 past their `Timeout`, ADR-0043), so it is sized from the
   offered rate, not from live calls alone.

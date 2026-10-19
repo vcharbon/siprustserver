@@ -17,12 +17,18 @@ pub const LAYER: &str = "192.0.2.10:5060";
 /// Where the peer the datagrams come from listens.
 pub const PEER: &str = "192.0.2.20:5060";
 
+/// The call the lane's client INVITEs are attributed to (their Via `cr`).
+pub const INVITE_CALL_REF: &str = "call-1";
+
 /// One seed: a stable name, the bytes the lane mutates, and the unmutated
 /// datagrams around them.
 pub struct Seed {
     pub name: &'static str,
     pub bytes: Vec<u8>,
     pub before: Vec<Vec<u8>>,
+    /// Whether the lane releases the client INVITEs' call after `before`, so
+    /// the mutated copy meets an orphan (`cancel_txns_for_call`).
+    pub release: bool,
     /// How long the case waits after `before`, so the mutated copy meets
     /// the state it belongs to (the ACK of a 2xx after the 2xx).
     pub settle: Duration,
@@ -148,8 +154,9 @@ fn out_of_dialog(method: &str, extra: &[&str], body: &str) -> Vec<u8> {
 const CLIENT_FROM: &str = "From: <sip:lane@192.0.2.10:5060>;tag=l1";
 const CLIENT_CALL_ID: &str = "Call-ID: lane-client-1@192.0.2.10";
 
-/// The requests the lane sends the peer before each case: an initial INVITE
-/// and a BYE, each a client transaction the response seeds answer.
+/// The requests the lane sends the peer before each case: an initial INVITE,
+/// one carrying no offer (RFC 3261 §13.2.1) and a BYE, each a client
+/// transaction the response seeds answer.
 pub fn client_requests() -> Vec<(SipRequest, TxnKind)> {
     let invite = message(
         "INVITE sip:carol@192.0.2.20:5060 SIP/2.0",
@@ -166,6 +173,19 @@ pub fn client_requests() -> Vec<(SipRequest, TxnKind)> {
         ],
         OFFER,
     );
+    let offerless = message(
+        "INVITE sip:erin@192.0.2.20:5060 SIP/2.0",
+        &[
+            "Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-lane-dly;cr=call-1;lg=c;ci=k3x9",
+            "Max-Forwards: 70",
+            CLIENT_FROM,
+            "To: <sip:erin@example.net>",
+            "Call-ID: lane-client-3@192.0.2.10",
+            "CSeq: 1 INVITE",
+            "Contact: <sip:lane@192.0.2.10:5060>",
+        ],
+        "",
+    );
     let bye = message(
         "BYE sip:dave@192.0.2.20:5060 SIP/2.0",
         &[
@@ -178,7 +198,11 @@ pub fn client_requests() -> Vec<(SipRequest, TxnKind)> {
         ],
         "",
     );
-    vec![(request_of(&invite), TxnKind::Invite), (request_of(&bye), TxnKind::NonInvite)]
+    vec![
+        (request_of(&invite), TxnKind::Invite),
+        (request_of(&offerless), TxnKind::Invite),
+        (request_of(&bye), TxnKind::NonInvite),
+    ]
 }
 
 fn request_of(raw: &[u8]) -> SipRequest {
@@ -201,6 +225,43 @@ fn invite_response(status: &str, extra: &[&str], body: &str) -> Vec<u8> {
     message(&format!("SIP/2.0 {status}"), &headers, body)
 }
 
+/// The 2xx the peer sends the client INVITE, under the To-tag `tag`.
+fn invite_2xx(tag: &str) -> Vec<u8> {
+    let to = format!("To: <sip:carol@example.net>;tag={tag}");
+    message(
+        "SIP/2.0 200 OK",
+        &[
+            "Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-lane-inv;cr=call-1;lg=b;ci=k3x9;received=192.0.2.10",
+            CLIENT_FROM,
+            to.as_str(),
+            CLIENT_CALL_ID,
+            "CSeq: 1 INVITE",
+            "Contact: <sip:carol@192.0.2.20:5060>",
+            "Record-Route: <sip:192.0.2.30;lr>, <sip:rr.example.com;lr>",
+            "Content-Type: application/sdp",
+        ],
+        ANSWER,
+    )
+}
+
+/// The 2xx the peer sends the offerless client INVITE, carrying the offer
+/// (RFC 3261 §13.2.1).
+fn delayed_offer_2xx() -> Vec<u8> {
+    message(
+        "SIP/2.0 200 OK",
+        &[
+            "Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-lane-dly;cr=call-1;lg=c;ci=k3x9",
+            CLIENT_FROM,
+            "To: <sip:erin@example.net>;tag=e5",
+            "Call-ID: lane-client-3@192.0.2.10",
+            "CSeq: 1 INVITE",
+            "Contact: <sip:erin@192.0.2.20:5060>",
+            "Content-Type: application/sdp",
+        ],
+        OFFER,
+    )
+}
+
 /// A response the peer sends to the client BYE.
 fn bye_response(status: &str, extra: &[&str]) -> Vec<u8> {
     let mut headers = vec![
@@ -215,7 +276,14 @@ fn bye_response(status: &str, extra: &[&str]) -> Vec<u8> {
 }
 
 fn seed(name: &'static str, bytes: Vec<u8>) -> Seed {
-    Seed { name, bytes, before: Vec::new(), settle: Duration::ZERO, after: Vec::new() }
+    Seed {
+        name,
+        bytes,
+        before: Vec::new(),
+        release: false,
+        settle: Duration::ZERO,
+        after: Vec::new(),
+    }
 }
 
 /// Every seed of the lane.
@@ -300,6 +368,22 @@ pub fn all() -> Vec<Seed> {
                 ANSWER,
             ),
         ),
+        // RFC 6026 §7.2 Accepted: a 2xx repeat and a fork's 2xx while the call
+        // holds the transaction, then the same once the call is released.
+        Seed { before: vec![invite_2xx("c3")], ..seed("resp/200-invite-repeat", invite_2xx("c3")) },
+        Seed { before: vec![invite_2xx("c3")], ..seed("resp/200-invite-fork", invite_2xx("c4")) },
+        Seed { release: true, ..seed("resp/200-invite-released", invite_2xx("c3")) },
+        Seed {
+            before: vec![invite_2xx("c3")],
+            release: true,
+            ..seed("resp/200-invite-released-repeat", invite_2xx("c3"))
+        },
+        Seed {
+            before: vec![invite_2xx("c3")],
+            release: true,
+            ..seed("resp/200-invite-released-fork", invite_2xx("c4"))
+        },
+        Seed { release: true, ..seed("resp/200-delayed-offer-released", delayed_offer_2xx()) },
         seed("resp/486-invite", invite_response("486 Busy Here", &["Retry-After: 30"], "")),
         seed(
             "resp/503-invite",

@@ -19,6 +19,7 @@ use crate::metrics::MetricsInner;
 use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
+use super::call_txns::CallTxns;
 use super::handle::{Command, TransactionConfig};
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
 use super::refusals::InviteRefusals;
@@ -99,23 +100,6 @@ pub(super) struct Owner {
     pub(super) strict_to_tag: bool,
     /// [`TransactionConfig::stateless_options`](crate::TransactionConfig).
     pub(super) stateless_options: bool,
-}
-
-/// The live transactions of one call, by role ([`Owner::txn_index`]).
-#[derive(Default)]
-pub(super) struct CallTxns {
-    pub(super) client: HashSet<String>,
-    pub(super) server: HashSet<ServerTxnKey>,
-}
-
-impl CallTxns {
-    pub(super) fn len(&self) -> usize {
-        self.client.len() + self.server.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.client.is_empty() && self.server.is_empty()
-    }
 }
 
 impl Owner {
@@ -241,10 +225,10 @@ impl Owner {
         let Some(cr) = call_ref else { return };
         let Some(txns) = self.txn_index.get_mut(cr) else { return };
         match id {
-            TxnRef::Client(branch) => txns.client.remove(branch),
+            TxnRef::Client(branch) => txns.client.remove(branch) | txns.accepted.remove(branch),
             TxnRef::Server(id) => txns.server.remove(&id as &dyn ServerTxnIdentity),
         };
-        if txns.is_empty() {
+        if txns.holds_none() {
             self.txn_index.remove(cr);
         }
     }
@@ -258,6 +242,27 @@ impl Owner {
             return;
         };
         self.untrack_call_ref(&Some(cr.clone()), id);
+        self.quiesce_if_last(cr);
+    }
+
+    /// Take the client txn at `branch`, Accepted after a 2xx, off its call's
+    /// books while the call keeps it: `has_txns_for` / `ActiveTxnCount` no
+    /// longer see it, as [`detach_from_call`](Self::detach_from_call), but
+    /// `cancel_txns_for_call` and `relinquish_call` still reach it.
+    pub(super) fn settle_accepted(&mut self, branch: &str) {
+        let Some(cr) = self.clients.get(branch).and_then(|t| t.call_ref.clone()) else {
+            return;
+        };
+        let Some(txns) = self.txn_index.get_mut(&cr) else { return };
+        if txns.client.remove(branch) {
+            txns.accepted.insert(branch.to_string());
+            self.quiesce_if_last(cr);
+        }
+    }
+
+    /// A watched call left with no transaction on its books hears
+    /// `CallQuiesced` at end of turn (ADR-0014).
+    fn quiesce_if_last(&mut self, cr: String) {
         if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
             self.pending_quiesce.push(cr);
         }
@@ -306,11 +311,10 @@ impl Owner {
                 // lingers in `Accepted` until Timer L — the ACK of a 2xx takes a
                 // new branch and matches no transaction — so this fires at Timer
                 // L, after the ACK relay. An INVITE server txn detached on an ACK
-                // it matched, `call_ref` already `None`, was accounted then.)
+                // it matched, `call_ref` already `None`, was accounted then, as
+                // was a client txn settled Accepted on its 2xx.)
                 if let Some(cr) = t.call_ref {
-                    if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
-                        self.pending_quiesce.push(cr);
-                    }
+                    self.quiesce_if_last(cr);
                 }
                 true
             }
@@ -335,10 +339,10 @@ impl Owner {
             .store(self.clients.len() + self.servers.len(), std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Any transaction (any role/state) still attributed to `call_ref`? O(1) via
-    /// the lockstep `txn_index` (an empty branch set has no entry).
+    /// Any transaction (any role/state) still on `call_ref`'s books? O(1) via
+    /// the lockstep `txn_index`; an Accepted client txn is not on them.
     pub(super) fn has_txns_for(&self, call_ref: &str) -> bool {
-        self.txn_index.contains_key(call_ref)
+        self.txn_index.get(call_ref).is_some_and(|t| t.on_books() > 0)
     }
 
     // ── output ──────────────────────────────────────────────────────────────
@@ -416,12 +420,16 @@ impl Owner {
             self.timers.shrink_to_fit();
         }
         // Census the retained retransmit-buffer bytes (same periodic pass) so a
-        // buffer-retention leak is visible vs flat txns.
+        // buffer-retention leak is visible vs flat txns: the request images
+        // and the ACKs an Accepted client txn keeps for its 2xx repeats.
         let buf_bytes: u64 = self
             .clients
             .values()
             .chain(self.servers.values())
-            .map(|t| t.retransmit_buf.as_ref().map_or(0, |b| b.len()) as u64)
+            .map(|t| {
+                let acks = t.dialogs.iter().filter_map(|d| d.ack.as_ref());
+                t.retransmit_buf.iter().chain(acks).map(|b| b.len() as u64).sum::<u64>()
+            })
             .sum();
         self.metrics.retransmit_buf_bytes.store(buf_bytes, std::sync::atomic::Ordering::Relaxed);
     }
@@ -466,7 +474,8 @@ impl Owner {
                 let _ = reply.send(answered);
             }
             Command::ActiveTxnCount { call_ref, reply } => {
-                let _ = reply.send(self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::len));
+                let on_books = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::on_books);
+                let _ = reply.send(on_books);
             }
             Command::WatchSelfRelease { call_ref, reply } => {
                 if self.has_txns_for(&call_ref) {

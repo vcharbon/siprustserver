@@ -41,6 +41,8 @@ pub struct Outcome {
     pub matched: usize,
     /// Copies of the client INVITE the peer received over the whole case.
     pub invite_copies: usize,
+    /// ACKs the peer received over the whole case.
+    pub acks: usize,
 }
 
 /// What the TU has been handed so far.
@@ -116,12 +118,15 @@ async fn drive(seed: &Seed, datagram: &[u8]) -> Outcome {
     for (request, kind) in seeds::client_requests() {
         if layer.send_request(request, addr(PEER), kind).await.is_err() {
             let failure = Some(Failure::OwnerEnded);
-            return Outcome { failure, handed_up: 0, matched: 0, invite_copies: 0 };
+            return Outcome { failure, handed_up: 0, matched: 0, invite_copies: 0, acks: 0 };
         }
     }
     for before in &seed.before {
         let _ = peer.send_to(before, addr(LAYER)).await;
         tokio::time::sleep(RETRANSMIT_GAP).await;
+    }
+    if seed.release {
+        let _ = layer.cancel_txns_for_call(seeds::INVITE_CALL_REF).await;
     }
     tokio::time::sleep(seed.settle).await;
     let (preamble_handed_up, preamble_matched) = seen.read();
@@ -144,14 +149,18 @@ async fn drive(seed: &Seed, datagram: &[u8]) -> Outcome {
         None
     };
     tu.abort();
-    let invite_copies = std::iter::from_fn(|| peer.try_recv())
-        .filter(|p| p.raw.starts_with(b"INVITE ") && contains(&p.raw, b"z9hG4bK-lane-inv"))
+    let received: Vec<Vec<u8>> = std::iter::from_fn(|| peer.try_recv()).map(|p| p.raw).collect();
+    let invite_copies = received
+        .iter()
+        .filter(|raw| raw.starts_with(b"INVITE ") && contains(raw, b"z9hG4bK-lane-inv"))
         .count();
+    let acks = received.iter().filter(|raw| raw.starts_with(b"ACK ")).count();
     Outcome {
         failure,
         handed_up: handed_up - preamble_handed_up,
         matched: matched - preamble_matched,
         invite_copies,
+        acks,
     }
 }
 

@@ -112,7 +112,7 @@ pub fn generate_ack_for_non_2xx_in_dialog(
     emit::request(with_routes(draft, &routes).push(ContentLength::new(0)))
 }
 
-/// Build the bare ACK for a 2xx from the INVITE transaction alone — no dialog
+/// Build the ACK for a 2xx from the INVITE transaction alone — no dialog
 /// record (RFC 3261 §13.2.2.4 for a UAC core that no longer holds one). Its
 /// own transaction: the INVITE's top Via on the fresh `branch`. From and
 /// Call-ID echo the INVITE, To echoes the 2xx (its tag), CSeq is the INVITE's
@@ -122,12 +122,14 @@ pub fn generate_ack_for_non_2xx_in_dialog(
 /// refreshes the target with a Contact and the set is loose (or empty), in
 /// which case the Contact is the Request-URI; a dialog-creating 2xx supplies
 /// the route set (its Record-Route reversed, §12.1.2) and the target (its
-/// Contact). No body: the round this ACK closes has no session left to
-/// describe (RFC 3264 §4 answers ride only where a session survives).
+/// Contact). `answer`, the session description answering an offer the 2xx
+/// carried (RFC 3264 §4), is the body as `application/sdp`; without one the
+/// ACK carries none.
 pub fn generate_ack_for_2xx_from_invite(
     original_invite: &SipRequest,
     final_response: &SipResponse,
     branch: &str,
+    answer: Option<Vec<u8>>,
 ) -> Result<SipRequest, GenerateError> {
     let contact = final_response.contacts().as_slice().first().map(|c| c.uri().clone());
     let invite_routes: Vec<String> =
@@ -167,5 +169,5 @@ pub fn generate_ack_for_2xx_from_invite(
         .push(CSeq::new(original_invite.cseq().seq(), Method::Ack));
     draft = with_routes(draft, &routes);
 
-    emit::request(draft.push(ContentLength::new(0)))
+    emit::request(emit::framed(draft, answer.unwrap_or_default(), None))
 }

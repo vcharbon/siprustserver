@@ -114,7 +114,7 @@ impl Held {
                 }
                 let bye_cseq = held_cseq + 1;
                 let (Ok(ack), Ok(bye)) = (
-                    generate_ack_for_2xx_from_invite(&invite, &resp, &branch()),
+                    generate_ack_for_2xx_from_invite(&invite, &resp, &branch(), None),
                     generate_bye_for_2xx_from_invite(&invite, &resp, bye_cseq, &branch()),
                 ) else {
                     return Reply::NotHeld;

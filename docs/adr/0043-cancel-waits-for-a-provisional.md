@@ -39,8 +39,8 @@ INVITE transaction:
   draws a provisional never sees it: the INVITE ends at Timer B, is held 64·T1
   past its `Timeout`, and the held CANCEL dies with it.
 - **in `Proceeding`** goes on the wire at once.
-- **in `Completed` or `Accepted`, or matching no transaction** (a 2xx deletes
-  it) is suppressed: the final already resolved the request (§9.2).
+- **in `Completed` or `Accepted`, or matching no transaction** is
+  suppressed: the final already resolved the request (§9.2).
 
 A newer CANCEL replaces a held one. Counters: `cancels_held`,
 `held_cancels_flushed`, `held_cancels_dropped` (never on the wire: a final came

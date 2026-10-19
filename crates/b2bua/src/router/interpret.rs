@@ -390,8 +390,10 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
                 // owns WHEN it may go on the wire (RFC 3261 §9.1: held until the
                 // branch's first provisional, dropped at Timer B) — so it goes
                 // through `send_request`, whose CANCEL path sends raw once the
-                // txn allows it. Other raw requests (ACK) bypass the txn map.
-                if req.method() == Method::Cancel {
+                // txn allows it. An ACK goes through it too, raw: the Accepted
+                // INVITE client txn of its 2xx keeps it, and replays it to a
+                // repeat of that 2xx once this call is released (RFC 6026 §7.2).
+                if matches!(req.method(), Method::Cancel | Method::Ack) {
                     let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
                 } else {
                     let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;

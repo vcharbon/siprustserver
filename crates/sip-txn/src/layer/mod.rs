@@ -19,7 +19,11 @@
 //!
 //! Module map: `handle` (public API + the command funnel) · `run` (the actor
 //! loop, one pulse-stamped turn per `select!`) · `owner` (map/wheel bookkeeping) ·
+//! `call_txns` (a call's transactions, as the per-call index files them) ·
+//! `via_marks` (the call attribution a sent request's Via carries) ·
 //! `ingress` (an inbound datagram parsed, a parser panic contained to it) · `client` (RFC 3261 §17.1 UAC FSM) ·
+//! `accepted` (RFC 6026 §7.2: a client INVITE after its 2xx, and who ACKs it) ·
+//! `orphan` (a released call's client transactions, ADR-0034) ·
 //! `server` (§17.2 UAS FSM) · `server_cancel` (§9.2: a CANCEL of a server
 //! INVITE) · `shrink` (a drained table's memory returned) · `lifetime` (when a transaction leaves the map:
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
@@ -31,8 +35,10 @@
 //! transactions the consumer will not answer) · `key` (a server transaction's
 //! §17.2.3 identity).
 
+mod accepted;
 mod backlog;
 mod bind;
+mod call_txns;
 mod client;
 mod events;
 mod handle;
@@ -50,6 +56,7 @@ mod server_cancel;
 mod shrink;
 mod txn;
 mod unanswered;
+mod via_marks;
 
 pub use backlog::{DeferredBound, InviteClass};
 pub use handle::{TransactionConfig, TransactionLayer, TransactionLayerClosed};

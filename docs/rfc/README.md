@@ -22,7 +22,7 @@ errata at snapshot time: 3263, 3311, 3326, 3551, 4412, 4475, 5009, 5407, 6665,
 - [rfc3262.txt](rfc3262.txt) — Reliability of Provisional Responses in SIP (PRACK)
 - [rfc3263.txt](rfc3263.txt) — Locating SIP Servers
 - [rfc3264.txt](rfc3264.txt) — An Offer/Answer Model with SDP
-- [rfc6026.txt](rfc6026.txt) — Correct Transaction Handling for 2xx Responses to INVITE (updates 3261's transaction layer, which `sip-txn` implements; not yet cited in-code)
+- [rfc6026.txt](rfc6026.txt) — Correct Transaction Handling for 2xx Responses to INVITE (updates 3261's transaction layer, which `sip-txn` implements: Accepted, Timers L and M)
 
 ## SIP methods & header extensions
 

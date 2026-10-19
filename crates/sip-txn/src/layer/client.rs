@@ -4,8 +4,9 @@
 //! once on the wire retransmits on its own Timer-E ladder as a sub-state of the INVITE
 //! txn, §17.1.2.2; an ACK goes raw and rides no timer, §13.2.2.4),
 //! Timer A/E retransmission, Timer B/F timeout, inbound-response matching
-//! (including the non-2xx auto-ACK + Timer D hold); the orphaning of a
-//! released call's transactions is `layer::orphan`'s (ADR-0034). The
+//! (including the non-2xx auto-ACK + Timer D hold); the RFC 6026 Accepted
+//! hold after a 2xx is `layer::accepted`'s, the orphaning of a released
+//! call's transactions `layer::orphan`'s (ADR-0034). The
 //! server (UAS) side does NOT live here — see `layer::server`; a client INVITE
 //! rebuilt from a record is `layer::seed`'s.
 
@@ -16,7 +17,6 @@ use call::{TxnKind, TxnTimeoutKind};
 use sip_clock::delay_queue;
 use sip_message::generators::generate_ack_for_non_2xx;
 use sip_message::serializer::{render, write_request_line};
-use sip_message::{header::ParamValue, param_codec::decode_param};
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
@@ -28,6 +28,7 @@ use sip_retransmit::{Class, Ladder, Schedule};
 use super::lifetime::Hold;
 use super::owner::Owner;
 use super::txn::{CancelWire, HeldCancel, NewTransaction, Timer, TxnId, TxnRef, TxnState};
+use super::via_marks::{extract_via_custom_params, ViaMarks};
 
 impl Owner {
     pub(super) async fn do_send_request(
@@ -55,8 +56,8 @@ impl Owner {
             // keeps ringing. A branch that never draws a provisional never sees
             // it: the INVITE ends at Timer B. A final taking the txn first clears
             // it unsent (§9.2). A CANCEL whose txn took its final (Completed,
-            // Accepted) or is gone (a 2xx deletes it) is suppressed outright: it
-            // has no effect on an answered request (§9.1/§9.2).
+            // Accepted) or is gone is suppressed outright: it has no effect on
+            // an answered request (§9.1/§9.2).
             #[derive(PartialEq)]
             enum CancelGate {
                 Hold,
@@ -130,6 +131,9 @@ impl Owner {
                         }
                     }
                     self.send_buffer(endpoint, &buf, dest).await;
+                    if msg.method() == Method::Ack {
+                        self.note_tu_ack(&msg, &buf);
+                    }
                     if let Some(branch) = arm {
                         self.arm_cancel_retransmit(&branch);
                         if first_on_given_up {
@@ -551,20 +555,24 @@ impl Owner {
 
             // Snapshot what we need before mutating. The branch and the CSeq
             // method match (RFC 3261 §17.1.3): the branch is unguessable, and
-            // the source goes unchecked (ADR-0007).
-            let client_match =
-                self.clients.get(branch).filter(|t| t.method == *resp.cseq().method()).map(|t| {
-                    (t.kind, t.state, t.original_request.clone(), t.destination, t.orphaned)
-                });
+            // the source goes unchecked (ADR-0007). An Accepted txn its call
+            // still holds takes nothing: what follows its 2xx reaches the TU
+            // as a repeat, matched to none, and the TU owns each ACK.
+            let client_match = self
+                .clients
+                .get(branch)
+                .filter(|t| t.method == *resp.cseq().method())
+                .filter(|t| t.state != TxnState::Accepted || t.orphaned)
+                .map(|t| (t.kind, t.state, t.original_request.clone(), t.destination, t.orphaned));
             matched_client_txn = client_match.is_some();
 
             if let Some((kind, state, original_request, destination, orphaned)) = client_match {
                 if state == TxnState::Accepted {
-                    // RFC 6026 §7.2 + RFC 3261 §13.2.2.4: a repeat of the 2xx
-                    // re-draws the ACK already sent; anything else on the
-                    // branch is absorbed until Timer M.
+                    // RFC 6026 §7.2 + RFC 3261 §13.2.2.4: the orphan's 2xx
+                    // draws its dialog's ACK from the layer; anything else on
+                    // the branch is absorbed until Timer M.
                     if (200..300).contains(&resp.status()) {
-                        self.on_accepted_2xx(endpoint, branch, &resp).await;
+                        self.release_2xx(endpoint, branch, &resp).await;
                     }
                     return true;
                 }
@@ -585,6 +593,9 @@ impl Owner {
                             None => None,
                         };
                         self.cancel_timer(key);
+                        if kind == TxnKind::Invite {
+                            self.note_reliable_offer(branch, &resp);
+                        }
                         self.rearm_invite_bound(branch);
                         self.flush_cancel_on_provisional(endpoint, branch).await;
                     }
@@ -623,17 +634,25 @@ impl Owner {
                         matched_client_txn: true,
                     });
                     return true;
-                } else if kind == TxnKind::Invite && orphaned {
-                    // A 2xx to an orphaned INVITE: the UAC core that owed its ACK
-                    // (§13.2.2.4) is gone, so the layer sends the bare ACK on a
-                    // fresh branch itself and holds the transaction in Accepted
-                    // for Timer M, then BYEs the dialog a 2xx to an initial
-                    // INVITE created.
-                    self.accept_orphaned_2xx(endpoint, branch, &resp).await;
+                } else if kind == TxnKind::Invite {
+                    // A 2xx INVITE final: Accepted until Timer M (RFC 6026
+                    // §7.2). The TU ACKs it end to end; to an orphaned INVITE,
+                    // whose UAC core is gone (§13.2.2.4), the layer does.
+                    if orphaned {
+                        self.accept_orphaned_2xx(endpoint, branch, &resp).await;
+                        return true;
+                    }
+                    self.accept_2xx(branch, &resp);
+                    // Critical: the transaction's only delivery of its final.
+                    self.emit_critical(TransactionEvent::Message {
+                        message: Box::new(SipMessage::Response(resp)),
+                        src,
+                        matched_client_txn: true,
+                    });
                     return true;
                 } else {
-                    // 2xx INVITE (the TU ACKs end-to-end) or any non-INVITE final:
-                    // terminate the client txn; an orphan's final has no consumer.
+                    // Any non-INVITE final: terminate the client txn; an
+                    // orphan's final has no consumer.
                     self.delete_txn(TxnRef::Client(branch));
                     if orphaned {
                         return true;
@@ -721,25 +740,4 @@ impl Owner {
             txn.timeout_kind = TxnTimeoutKind::Transaction;
         }
     }
-}
-
-/// The call attribution a request's top Via carries.
-pub(super) struct ViaMarks {
-    /// `cr`: the callRef.
-    pub(super) call_ref: Option<String>,
-    /// `lg`: the leg id.
-    pub(super) leg_id: Option<String>,
-    /// `ci`: the mark of the call incarnation that sent it.
-    pub(super) incarnation_mark: Option<String>,
-}
-
-/// The top Via's `cr` (callRef) / `lg` (legId) / `ci` (incarnation mark)
-/// custom params, URL-decoded. The B2BUA's `build_call_via` URL-encodes them
-/// (callRefs contain `|`/`@`) and a param value stays as written on the wire,
-/// so decoding here is what makes `cancel_txns_for_call` match the natural
-/// callRef the caller passes (see the cr/lg round-trip test).
-pub(super) fn extract_via_custom_params(req: &SipRequest) -> ViaMarks {
-    let top_via = req.top_via();
-    let read = |name: &str| top_via.param(name).and_then(ParamValue::as_str).map(decode_param);
-    ViaMarks { call_ref: read("cr"), leg_id: read("lg"), incarnation_mark: read("ci") }
 }
