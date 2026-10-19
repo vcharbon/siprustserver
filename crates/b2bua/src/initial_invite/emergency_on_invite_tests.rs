@@ -52,8 +52,13 @@ fn emergency_invite_sets_emergency_true() {
     // Each canonical emergency RPH token flags the new a-leg Call as emergency.
     for tok in ["esnet.0", "wps.0", "q735.0"] {
         let invite = invite_with_rph(Some(tok));
-        let call =
-            build_initial_call(&invite, src(), &config_for("w0"), &sip_txn::IdGen::seeded(1), 0);
+        let call = build_initial_call(
+            &invite,
+            src(),
+            &config_for("w0"),
+            &mut sip_ids::TurnIds::fixed(1),
+            0,
+        );
         assert_eq!(
             call.emergency,
             Some(true),
@@ -69,7 +74,7 @@ fn non_emergency_invite_leaves_emergency_unset() {
         &invite_with_rph(None),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     assert_eq!(call.emergency, None, "no RPH → emergency stays None");
@@ -79,7 +84,7 @@ fn non_emergency_invite_leaves_emergency_unset() {
         &invite_with_rph(Some("dsn.flash")),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     assert_eq!(call.emergency, None, "non-emergency RPH → emergency stays None");
@@ -93,7 +98,7 @@ fn emergency_is_derived_through_the_real_helper() {
         &invite_with_rph(Some("ESNET.0")),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     assert_eq!(call.emergency, Some(true), "r-value casing must not gate emergency");
@@ -103,7 +108,7 @@ fn emergency_is_derived_through_the_real_helper() {
         &invite_with_rph(Some("dsn.flash, q735.0")),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     assert_eq!(call.emergency, Some(true), "emergency r-value in a list flags emergency");
@@ -113,7 +118,7 @@ fn emergency_is_derived_through_the_real_helper() {
         &invite_with_rph(Some("esnet.01")),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     assert_eq!(call.emergency, None, "embedded token is not an emergency r-value");

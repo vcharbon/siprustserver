@@ -15,7 +15,7 @@ fn born() -> Call {
         &invite("w0", "w1", "undecided"),
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     )
 }

@@ -26,7 +26,7 @@ const BAK: PartitionRole = PartitionRole::Backup;
 /// A call `w0` owns and `w1` backs up, as its INVITE's turn created it.
 fn born(cid: &str) -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    build_initial_call(&invite("w0", "w1", cid), src(), &config, &sip_txn::IdGen::seeded(1), 0)
+    build_initial_call(&invite("w0", "w1", cid), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0)
 }
 
 /// A call whose caller was answered and that has nothing in flight.
@@ -184,7 +184,8 @@ async fn the_router_serves_its_own_calls_while_a_departed_partition_is_swept() {
     // A new call of this node's own reaches the router mid-sweep.
     let config = B2buaConfig { self_ordinal: "w1".into(), ..Default::default() };
     let own = invite("w1", "w0", "own");
-    let own_ref = build_initial_call(&own, src(), &config, &sip_txn::IdGen::seeded(1), 0).call_ref;
+    let own_ref =
+        build_initial_call(&own, src(), &config, &mut sip_ids::TurnIds::fixed(1), 0).call_ref;
     let event = CallEvent::Sip {
         message: Box::new(sip_message::SipMessage::Request(own)),
         src: src(),

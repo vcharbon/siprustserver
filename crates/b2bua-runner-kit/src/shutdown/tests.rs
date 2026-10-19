@@ -322,7 +322,7 @@ fn a_terminated_call(n: usize) -> Call {
         _ => panic!("expected a request"),
     };
     let cfg = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    build_initial_call(&req, CALLER, &cfg, &IdGen::seeded(n as u64), 1_000)
+    build_initial_call(&req, CALLER, &cfg, &mut sip_ids::TurnIds::fixed(n as u64), 1_000)
 }
 
 /// The CDRs queued when a SIGTERM drain ends are written before the worker

@@ -45,7 +45,7 @@ impl ActionExecutor<'_> {
     /// retire, give the caller the dialog that 2xx is relayed on, and arm the
     /// ACK the 2xx owes. Nothing happens without a response event.
     pub(super) fn confirm(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -70,7 +70,7 @@ impl ActionExecutor<'_> {
     /// reversed per recorded route). Its session becomes the leg's, and the
     /// 2xx the final of the leg's INVITE. `peer_cseq` stays as the callee's early
     /// requests left it: the 2xx echoes a number of our own sequence.
-    fn promote_winner(&self, call: &mut Call, resp: &SipResponse, leg_id: &str) -> Promoted {
+    fn promote_winner(&mut self, call: &mut Call, resp: &SipResponse, leg_id: &str) -> Promoted {
         let winner = resp.to().tag().unwrap_or_default().to_string();
         let crossed_cancel = call
             .b_legs
@@ -113,7 +113,7 @@ impl ActionExecutor<'_> {
     /// caller-facing dialog fronting the winner (or the one the relay will
     /// show it under) is confirmed, the others retiring. The answer body
     /// relayed toward her is kept as her dialog's cached SDP.
-    fn reidentify_caller_dialog(&self, call: &mut Call, resp: &SipResponse, retired: &Retired) {
+    fn reidentify_caller_dialog(&mut self, call: &mut Call, resp: &SipResponse, retired: &Retired) {
         let Retired { leg_id, winner, crossed_cancel } = retired;
         // The answer to her INVITE: relayed — a live call (a terminating
         // call's caller is owed her unanswered final, ADR-0022), an adopted

@@ -33,7 +33,7 @@ impl ActionExecutor<'_> {
     /// the PRACK `RAck` CSeq rewrite (RFC 3262 §7.2), and the pending-request
     /// snapshot used to correlate the eventual response (RFC 3261 §8.1.3.3).
     pub(super) fn relay_request(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -190,7 +190,7 @@ impl ActionExecutor<'_> {
             content_type.as_ref(),
             self.config.sdp_form.as_ref(),
         );
-        let branch = self.id_gen.new_branch();
+        let branch = self.turn.ids.new_branch();
         let gen_dialog = relay::to_gen_dialog(leg_at(call, t_idx), &target_dialog);
         let target_face = capabilities::Face::of_leg(target_leg);
         let (extra_headers, advertised) =
@@ -307,7 +307,7 @@ impl ActionExecutor<'_> {
     /// node's `Allow` (§8.2.1), the node's answer to a method it does not
     /// serve.
     pub(super) fn refuse_unrelayable(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,

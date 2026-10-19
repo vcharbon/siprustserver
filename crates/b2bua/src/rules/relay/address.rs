@@ -98,10 +98,10 @@ mod unreadable_address_tests {
     use crate::effects::{OutboundBody, OutboundSipEffect};
     use crate::rules::relay::{build_b_leg, CallMarks};
     use call::Leg;
+    use sip_ids::TurnIds;
     use sip_message::generators::CapabilitySet;
     use sip_message::parser::custom::CustomParser;
     use sip_message::{SipMessage, SipParser, SipRequest};
-    use sip_txn::IdGen;
 
     fn a_leg_invite() -> SipRequest {
         let raw = "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
@@ -133,7 +133,7 @@ Content-Length: 0\r\n\r\n";
             new_from,
             new_to,
             &B2buaConfig::default(),
-            &IdGen::seeded(0x055),
+            &mut TurnIds::fixed(0x055),
             None,
             &[],
             &CapabilitySet::default(),

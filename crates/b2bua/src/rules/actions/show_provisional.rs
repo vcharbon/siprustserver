@@ -25,7 +25,7 @@ impl ActionExecutor<'_> {
     /// face. Returns the number taken, so the emission arms its §3 ladder.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn own_relayed_rseq(
-        &self,
+        &mut self,
         call: &mut Call,
         admitted: bool,
         shown_tag: &str,
@@ -44,7 +44,7 @@ impl ActionExecutor<'_> {
             return None;
         };
         let initial = if call::helpers::starts_shown_sequence(call, shown_tag) {
-            RSeq(self.id_gen.new_sequence_number())
+            RSeq(self.turn.ids.new_sequence_number())
         } else {
             RSeq(0)
         };

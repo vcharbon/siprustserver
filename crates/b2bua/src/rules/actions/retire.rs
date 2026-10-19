@@ -16,7 +16,7 @@ impl ActionExecutor<'_> {
     /// Retire `scope`. Ladders are keyed by the books, so a 2xx's ladder that
     /// already ceased still loses the give-up it left armed; at
     /// [`Scope::Call`] a ladder timer the books no longer name goes too.
-    pub(super) fn retire(&self, call: &mut Call, fx: &mut HandlerEffects, scope: Scope<'_>) {
+    pub(super) fn retire(&mut self, call: &mut Call, fx: &mut HandlerEffects, scope: Scope<'_>) {
         let mut obligations = call::helpers::obligations_in(call, &scope);
         if scope == Scope::Call {
             for o in call.timers.iter().filter_map(|t| t.key.obligation_of()) {

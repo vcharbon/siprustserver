@@ -6,8 +6,8 @@ use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
 use call::helpers::{add_originated_b_leg, mark_decision};
 use call::{AttemptCause, Call, Deadline, DecisionKind, TerminationCause, TimerKey, TimerType};
 use sip_clock::Clock;
+use sip_ids::TurnIds;
 use sip_message::SipRequest;
-use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::decision::{header_lines, no_answer_deadline, CallDecisionEngine};
@@ -45,7 +45,7 @@ pub async fn apply_route(
     decision: &dyn CallDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     clock: &Clock,
     now_ms: i64,
     depth: u32,
@@ -64,7 +64,7 @@ pub async fn apply_route(
             None,
             &[],
             &config.minted_final_advertisement,
-            id_gen,
+            ids,
             now_ms,
             TerminationCause::Admission,
         );
@@ -124,7 +124,7 @@ pub async fn apply_route(
             None,
             &[],
             &config.minted_final_advertisement,
-            id_gen,
+            ids,
             now_ms,
             TerminationCause::Admission,
         );
@@ -141,7 +141,7 @@ pub async fn apply_route(
             decision,
             limiter,
             config,
-            id_gen,
+            ids,
             clock,
             now_ms,
             depth,
@@ -228,7 +228,7 @@ pub async fn apply_route(
         route.new_from.as_deref(),
         route.new_to.as_deref(),
         config,
-        id_gen,
+        ids,
         attached.as_ref(),
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
@@ -254,7 +254,7 @@ pub async fn apply_route(
                 None,
                 &[],
                 &config.minted_final_advertisement,
-                id_gen,
+                ids,
                 now_ms,
                 TerminationCause::Admission,
             );

@@ -15,6 +15,7 @@ use super::super::materialise::relayed_server_key;
 use super::super::RouterCtx;
 use crate::effects::HandlerResult;
 use crate::rules::{ActionExecutor, RuleCall, RuleContext};
+use crate::turn_scope::TurnScope;
 
 /// Discharge an already-`Terminated` body (a backup's deferred terminal, folded
 /// into our live map or reclaimed on reboot) through the ONE enforcement funnel.
@@ -50,7 +51,8 @@ pub(super) async fn discharge_folded_terminal(
         let _ = ctx.txn.relinquish_server(key).await;
     }
     let mut result = HandlerResult::new(raise_sequences(terminal, before));
-    answer_the_records_rounds(ctx, call_ref, before, ours, &mut result, now_ms);
+    let mut turn = TurnScope::of(ctx.id_gen.turn());
+    answer_the_records_rounds(ctx, call_ref, before, ours, &mut result, now_ms, &mut turn);
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
         before,
@@ -73,6 +75,7 @@ fn answer_the_records_rounds(
     rounds: Vec<(String, i64)>,
     result: &mut HandlerResult,
     now_ms: i64,
+    turn: &mut TurnScope,
 ) {
     let actions: Vec<RuleAction> = rounds
         .into_iter()
@@ -105,12 +108,8 @@ fn answer_the_records_rounds(
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let exec = ActionExecutor {
-        config: &ctx.config,
-        id_gen: &ctx.id_gen,
-        now_ms,
-        wire_faults: &ctx.wire_faults,
-    };
+    let mut exec =
+        ActionExecutor { config: &ctx.config, turn, now_ms, wire_faults: &ctx.wire_faults };
     let answered = exec.execute(&actions, record, &rule_ctx).effects;
     result.effects.critical.extend(answered.critical);
     result.effects.outbound.extend(answered.outbound);

@@ -82,8 +82,8 @@ fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
 /// path writes it.
 fn call_in(pri: &str, bak: &str, cid: &str, a_state: LegState, state: CallModelState) -> Call {
     let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
-    let mut call =
-        build_initial_call(&invite(pri, bak, cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let mut ids = sip_ids::TurnIds::fixed(1);
+    let mut call = build_initial_call(&invite(pri, bak, cid), src(), &config, &mut ids, 0);
     let answered = a_state == LegState::Confirmed;
     call.a_leg.invite_final_sent = match (answered, state) {
         (true, _) => Some(200),

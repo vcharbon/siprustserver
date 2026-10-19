@@ -51,7 +51,7 @@ fn call_for(invite: &SipRequest) -> call::Call {
         invite,
         SocketAddr::from(([10, 0, 0, 9], 5060)),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     )
 }

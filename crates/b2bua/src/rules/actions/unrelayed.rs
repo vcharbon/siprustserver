@@ -36,7 +36,7 @@ impl ActionExecutor<'_> {
     /// Answer the turn's request for `why`; an ACK is never answered
     /// (§17.1.1.3), and a response has no answer.
     pub(super) fn refuse_unrelayed(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,

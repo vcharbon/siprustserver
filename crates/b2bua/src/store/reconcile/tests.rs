@@ -28,7 +28,7 @@ fn call(call_ref: &str, call_id: &str) -> Call {
     };
     let cfg = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let src = SocketAddr::from(([192, 0, 2, 9], 5060));
-    let mut call = build_initial_call(&req, src, &cfg, &sip_txn::IdGen::seeded(1), 0);
+    let mut call = build_initial_call(&req, src, &cfg, &mut sip_ids::TurnIds::fixed(1), 0);
     call.call_ref = call_ref.into();
     call
 }

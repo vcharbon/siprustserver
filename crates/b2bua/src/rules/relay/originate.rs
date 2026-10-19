@@ -5,6 +5,7 @@
 //! dialog-identifying is copied from the a-leg.
 
 use call::{InviteTxnHandle, Leg, RemoteInfo, TxnKind};
+use sip_ids::TurnIds;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
 };
@@ -12,7 +13,6 @@ use sip_message::header::{
     self, ChargingVector, HeaderClass, HeaderName, HeaderValue, NameAddr, TokenListHeader,
 };
 use sip_message::{hops, SipHeader as MsgHeader, SipRequest, SipStr};
-use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
@@ -238,7 +238,7 @@ pub fn build_b_leg(
     new_from: Option<&str>,
     new_to: Option<&str>,
     config: &B2buaConfig,
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     // Body override: replaces the cloned a-leg body (held SDP, or empty =
     // drop), or attaches parts beside its session description
     // ([`Body::parts`]); `header_updates` set/remove extra headers on the
@@ -288,9 +288,9 @@ pub fn build_b_leg(
     }
     .with_identity(config.identity_privacy())
     .stamped(Some(&stamp));
-    let branch = id_gen.new_branch();
-    let from_tag = id_gen.new_tag();
-    let b_call_id = format!("{}-{}@{}", leg_id, id_gen.new_tag(), config.sip_local_ip);
+    let branch = ids.new_branch();
+    let from_tag = ids.new_tag();
+    let b_call_id = format!("{}-{}@{}", leg_id, ids.new_tag(), config.sip_local_ip);
     // Each rewrite is read here or the leg is not built. `None` keeps the
     // relayed a-leg value, which the parser already accepted.
     let request_uri = match new_ruri {
@@ -408,7 +408,7 @@ pub fn build_b_leg(
         let name = ChargingVector::header_name();
         if !extra_headers.iter().any(|h| name.matches(&h.name)) && !removed(header_updates, &name) {
             let host = charging.generated_at.clone().unwrap_or_else(|| config.sip_local_ip.clone());
-            let icid = format!("{}-{}", id_gen.new_tag(), leg_id);
+            let icid = format!("{}-{}", ids.new_tag(), leg_id);
             extra_headers.push(MsgHeader {
                 name: SipStr::owned(name.as_wire_str()),
                 value: SipStr::owned(&ChargingVector::new(icid, host).to_wire()),

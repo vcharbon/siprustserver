@@ -62,6 +62,7 @@ pub(crate) mod sweep;
 pub(crate) mod timer_arm;
 pub mod timers;
 pub mod trace;
+pub mod turn_scope;
 pub mod wire_faults;
 
 pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};
@@ -71,7 +72,8 @@ pub use b2bua_sdk::event::CallEvent;
 pub use config::B2buaConfig;
 pub use effects::{HandlerEffects, HandlerResult};
 pub use metrics::{B2buaMetrics, LiveGauge, RemovalClass, UdpTransportMetrics};
-/// The id generator the initial call mints its limiter key with.
+/// The process's identifier generator: the counter stream outside any call's
+/// turn, and the key every turn draws its own identifiers under.
 pub use sip_txn::IdGen;
 pub use wire_faults::{WireFaultPoint, WireFaults};
 // The callflow-service authoring macros live in the public Rule SDK (ADR-0016);

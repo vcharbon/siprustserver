@@ -73,8 +73,13 @@ fn call_with_b_leg(
 ) -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let src = SocketAddr::from(([10, 0, 0, 9], 5060));
-    let call =
-        build_initial_call(&invite(call_id, from_tag), src, &config, &sip_txn::IdGen::seeded(1), 0);
+    let call = build_initial_call(
+        &invite(call_id, from_tag),
+        src,
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    );
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = b_call_id.into();

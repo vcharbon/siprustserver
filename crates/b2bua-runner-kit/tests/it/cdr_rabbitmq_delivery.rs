@@ -42,7 +42,7 @@ pub(crate) fn a_call() -> Call {
         &req,
         SocketAddr::from(([10, 0, 0, 9], 5060)),
         &cfg,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         1_000,
     )
 }

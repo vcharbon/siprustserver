@@ -111,7 +111,7 @@ fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (Strin
         &invite(primary, backup, cid),
         src(),
         &config_for(primary),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     // +5 min: restored into the DelayQueue but never fires during the test.

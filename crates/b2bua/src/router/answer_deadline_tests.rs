@@ -9,8 +9,8 @@ use call::{
     TimerKey, TimerType,
 };
 
-use super::process::rule_chain_turn;
 use super::resolve::Resolution;
+use super::rule_chain::rule_chain_turn;
 use super::test_support::{invite, node_serving, src, Node};
 use crate::config::B2buaConfig;
 use crate::effects::CriticalStateEffect;
@@ -81,7 +81,7 @@ fn awaiting_call() -> Call {
         &invite("w0", "w1", "deadline-turn"),
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     call.sm_cursors.insert(probe::PROBE, StateLabel::new("Awaiting"));
@@ -160,7 +160,9 @@ fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::Handl
         indexed: None,
     };
     let call_ref = call.call_ref.clone();
-    rule_chain_turn(node.core.router_ctx(), call, event, &res, Default::default(), &call_ref, NOW)
+    let ctx = node.core.router_ctx();
+    let mut scope = super::test_support::turn(1);
+    rule_chain_turn(ctx, call, event, &res, Default::default(), &call_ref, NOW, &mut scope)
 }
 
 /// The outcome the probe's rules read, if any rule read an answer.

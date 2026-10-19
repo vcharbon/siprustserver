@@ -41,7 +41,7 @@ fn call() -> Call {
         &invite("w0", "w1", "sdp"),
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);

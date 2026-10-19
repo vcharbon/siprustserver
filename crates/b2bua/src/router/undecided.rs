@@ -42,6 +42,7 @@ pub(super) async fn settle_undecided(
     seeded: usize,
 ) {
     let now_ms = ctx.clock.now_ms();
+    let mut turn = crate::turn_scope::TurnScope::of(ctx.id_gen.turn());
     let before = call.clone();
     let advertisement = &ctx.config.minted_final_advertisement;
     let (handled, unanswered) = if seeded > 0 {
@@ -54,7 +55,7 @@ pub(super) async fn settle_undecided(
             None,
             &[],
             advertisement,
-            &ctx.id_gen,
+            &mut turn.ids,
             now_ms,
             TerminationCause::Admission,
         );

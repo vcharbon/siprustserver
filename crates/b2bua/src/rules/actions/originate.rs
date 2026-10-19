@@ -27,7 +27,7 @@ impl ActionExecutor<'_> {
     /// sequence.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_notify(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -59,7 +59,7 @@ impl ActionExecutor<'_> {
     /// CSeq: what this stack asks for there next waits for its final.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn notify_now(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -75,7 +75,7 @@ impl ActionExecutor<'_> {
             return;
         };
         let outbound_cseq = dialog.our_cseq + 1;
-        let branch = self.id_gen.new_branch();
+        let branch = self.turn.ids.new_branch();
         let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
@@ -135,7 +135,7 @@ impl ActionExecutor<'_> {
     /// `promote-resync-reinvite-response` rule.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_reinvite(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -167,7 +167,7 @@ impl ActionExecutor<'_> {
         let unsent = call.clone();
         *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
 
-        let branch = self.id_gen.new_branch();
+        let branch = self.turn.ids.new_branch();
         let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let mut extra: Vec<sip_message::SipHeader> = add_headers
             .iter()
@@ -264,7 +264,7 @@ impl ActionExecutor<'_> {
     /// OPTIONS, opaque-body INFO (MSCML), deferred-relay re-emission.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_request_to_leg(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -348,7 +348,7 @@ impl ActionExecutor<'_> {
             })
             .collect();
         relay::describe_body(&mut extra_headers, body, descriptors);
-        let branch = self.id_gen.new_branch();
+        let branch = self.turn.ids.new_branch();
         let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
@@ -400,7 +400,7 @@ impl ActionExecutor<'_> {
     /// The answer to `offer` rejecting every stream (RFC 3264 §6, port 0) —
     /// the least a dialog about to end, or a party that gave no answer, can
     /// commit to.
-    pub(super) fn rejecting_answer(&self, offer: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rejecting_answer(&mut self, offer: &[u8]) -> Option<Vec<u8>> {
         sip_message::sdp_answer::reject_offer(
             offer,
             &sip_message::BuildHeldSdpOptions {

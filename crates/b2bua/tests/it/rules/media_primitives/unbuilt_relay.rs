@@ -25,9 +25,9 @@ fn an_unbuildable_relay_answers_its_sender_and_records_nothing() {
         src: "127.0.0.1:5060".parse().unwrap(),
         matched_client_txn: false,
     };
-    let (config, id_gen) = (B2buaConfig::default(), IdGen::seeded(1));
+    let (config, mut id_gen) = (B2buaConfig::default(), scope(1));
     let relay = [RuleAction::RelayToPeer { transform: MessageTransform::default() }];
-    let result = exec_on(&call, &event, "a", &config, &id_gen, &relay);
+    let result = exec_on(&call, &event, "a", &config, &mut id_gen, &relay);
 
     assert_eq!(answered(&result), vec![500], "the sender is answered");
     assert_eq!(result.effects.outbound.len(), 1, "nothing is relayed toward the peer");

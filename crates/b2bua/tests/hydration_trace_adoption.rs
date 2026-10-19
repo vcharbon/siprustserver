@@ -68,7 +68,7 @@ fn replicated(call_id: &str, sampled: Option<bool>) -> call::Call {
         &invite(call_id),
         src,
         &B2buaConfig::default(),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     c.trace_id = Some(NOMINAL_TRACE.to_string());

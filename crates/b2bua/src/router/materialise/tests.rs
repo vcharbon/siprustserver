@@ -20,8 +20,13 @@ const BAK: PartitionRole = PartitionRole::Backup;
 /// keepalive so the timer re-arm does real work without firing.
 fn call_in(pri: &str, bak: &str, cid: &str, state: CallModelState, clock: &Clock) -> Call {
     let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
-    let mut call =
-        build_initial_call(&invite(pri, bak, cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let mut call = build_initial_call(
+        &invite(pri, bak, cid),
+        src(),
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    );
     call.state = state;
     if state != CallModelState::Active {
         // A synthetic terminal states its cause as every live path does.

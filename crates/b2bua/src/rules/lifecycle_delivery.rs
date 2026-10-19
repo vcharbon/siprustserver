@@ -62,7 +62,7 @@ pub fn close_turn(
     rules: &[RuleDefinition],
     start: &TurnStart,
     mut result: HandlerResult,
-    exec: &ActionExecutor,
+    exec: &mut ActionExecutor,
 ) -> HandlerResult {
     for (id, _) in call::helpers::settle_attempts(&mut result.call) {
         crate::attempts::retire(&mut result.call, &mut result.effects, id);
@@ -125,7 +125,7 @@ fn deliver(
     start: &TurnStart,
     event: LifecycleEvent,
     result: &mut HandlerResult,
-    exec: &ActionExecutor,
+    exec: &mut ActionExecutor,
 ) {
     let source_leg = match &event {
         LifecycleEvent::LegEnded { leg, .. } => leg.clone(),

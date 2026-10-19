@@ -12,8 +12,13 @@ use crate::router::test_support::{invite, src};
 
 fn call_with_keepalive_at(cid: &str, fire_at: i64) -> call::Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let mut call =
-        build_initial_call(&invite("w0", "w1", cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let mut call = build_initial_call(
+        &invite("w0", "w1", cid),
+        src(),
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    );
     call.timers.push(TimerEntry {
         key: TimerKey::call(TimerType::Keepalive),
         generation: 1,

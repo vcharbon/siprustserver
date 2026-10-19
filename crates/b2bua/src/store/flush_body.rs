@@ -48,8 +48,8 @@ mod tests {
         let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
         let invite = crate::router::test_support::invite("w0", "w1", "deep");
         let src = crate::router::test_support::src();
-        let ids = sip_txn::IdGen::seeded(1);
-        let base = crate::initial_invite::build_initial_call(&invite, src, &config, &ids, 0);
+        let mut ids = sip_ids::TurnIds::fixed(1);
+        let base = crate::initial_invite::build_initial_call(&invite, src, &config, &mut ids, 0);
         let deep = (0..200).fold(serde_json::Value::Null, |v, _| serde_json::json!([v]));
         let call = call::helpers::set_call_ext(base.clone(), "svc", Some(deep));
         assert_eq!(encode(&codec, &metrics, &call, &None), None);

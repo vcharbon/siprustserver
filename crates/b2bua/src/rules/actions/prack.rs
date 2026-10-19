@@ -57,7 +57,7 @@ impl ActionExecutor<'_> {
     /// (RFC 3262 §4) — or, where that dialog no longer carries one, is waived
     /// (RFC 3261 §15.1.2). A PRACK leaves at most once per provisional.
     pub fn settle_owed_pracks(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         scope: Owed<'_>,
@@ -92,7 +92,7 @@ impl ActionExecutor<'_> {
     /// `answer`, or rejects every stream where the ACK gives none (RFC 3262
     /// §5, RFC 3264 §6). Nothing when no offer waits for the ACK.
     pub(super) fn prack_deferred_offer(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -118,7 +118,7 @@ impl ActionExecutor<'_> {
     /// is then this stack's own, on the recorded client branch, and the offer
     /// its answer rode is no longer owed.
     fn send_prack_to_leg(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         id: &ProvisionalId,
@@ -149,7 +149,7 @@ impl ActionExecutor<'_> {
         // Per-dialog CSeq (RFC 3261 §12.2.1.1): each forked early dialog has
         // its own sequence.
         let outbound_cseq = dialog.our_cseq + 1;
-        let branch = self.id_gen.new_branch();
+        let branch = self.turn.ids.new_branch();
         let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let marks = relay::CallMarks::of(call);
         let opts = GenerateInDialogRequestOpts {

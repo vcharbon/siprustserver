@@ -20,7 +20,7 @@ impl ActionExecutor<'_> {
     /// its own account; `author` whose description `body` is.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn ack_leg(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -73,7 +73,7 @@ impl ActionExecutor<'_> {
                 relay::CallMarks::of(call),
                 leg,
                 self.config,
-                self.id_gen,
+                &mut self.turn.ids,
                 body,
                 content_type,
                 extra_headers,
@@ -120,7 +120,7 @@ impl ActionExecutor<'_> {
     /// (RFC 3261 §13.2.2.4): an offer of the dialog a reliable provisional
     /// carried is answered first, rejecting every stream, in the PRACK still
     /// owed (RFC 3262 §5), so the wire reads PRACK, ACK.
-    pub(super) fn ack_own_bare(&self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
+    pub(super) fn ack_own_bare(&mut self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
         self.prack_deferred_offer(call, fx, leg_id, None);
         self.ack_leg(
             call,
@@ -140,7 +140,7 @@ impl ActionExecutor<'_> {
     /// the 2xx answered on her face), else every stream rejected on this
     /// stack's account (RFC 3264 §6).
     pub(super) fn answer_owed(
-        &self,
+        &mut self,
         call: &Call,
         target_leg: &str,
         ack: &sip_message::SipRequest,

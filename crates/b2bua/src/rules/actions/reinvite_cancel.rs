@@ -28,7 +28,7 @@ impl ActionExecutor<'_> {
     /// pending-relay snapshot is marked `cancelled` so the target's eventual
     /// final (487, or a crossing 200) resolves locally instead of relaying.
     pub(super) fn cancel_pending_reinvite(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -46,7 +46,7 @@ impl ActionExecutor<'_> {
     /// transaction layer's 487 to a relayed CANCEL, or this stack's own
     /// reject (RFC 3262 §3).
     fn commit_pending_reinvite_cancel(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -83,7 +83,7 @@ impl ActionExecutor<'_> {
     /// §17.2.1). A snapshot already CANCELled has its originator's final from
     /// the transaction layer, so nothing is owed twice.
     pub(super) fn reject_pending_reinvite(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,

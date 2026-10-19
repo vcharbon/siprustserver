@@ -62,6 +62,7 @@ mod response_facts_tests;
 mod responses;
 mod restore_hygiene;
 mod route_payload;
+mod rule_chain;
 mod stand_down;
 mod store_fault_gate;
 mod stray_cancel;

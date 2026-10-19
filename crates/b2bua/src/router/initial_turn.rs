@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{Call, TerminationCause};
+use sip_ids::TurnIds;
 
 use super::admit::UnbornCall;
 use super::responses::{build_merged_482, build_retry_later_500, build_store_fault_500};
@@ -17,6 +18,7 @@ use crate::repl::ReadinessState;
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::ActionExecutor;
 use crate::store::StoreFaultPoint;
+use crate::turn_scope::TurnScope;
 
 /// Outcome of the initial-INVITE turn.
 pub(super) enum Turn {
@@ -36,6 +38,7 @@ pub(super) enum Turn {
 /// limiter admit. The probe's 500, the identity guard's 500, the cancelled
 /// setup, the cordon's 503 or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
+/// Every identifier the turn mints is drawn from `turn`.
 pub(super) async fn initial_invite_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -43,6 +46,7 @@ pub(super) async fn initial_invite_turn(
     src: SocketAddr,
     now_ms: i64,
     unborn: Option<UnbornCall>,
+    turn: &mut TurnScope,
 ) -> Turn {
     // ── Live-path store-fault probe (ADR-0023): initial INVITE ──────────────
     // The dialog-existence lookup (the `peek` identity guard below) is the
@@ -58,7 +62,8 @@ pub(super) async fn initial_invite_turn(
     // call (`super::admit`).
     let copy = unborn.is_none();
     if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
-        let resp = build_store_fault_500(&ctx.id_gen, req, &ctx.config.minted_final_advertisement);
+        let resp =
+            build_store_fault_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(resp) = resp {
             let _ = ctx.txn.send_response(resp, src).await;
         }
@@ -84,7 +89,7 @@ pub(super) async fn initial_invite_turn(
     // the admission ladder.
     let resident = ctx.state.peek(call_ref).is_some();
     if copy {
-        let merged = build_merged_482(&ctx.id_gen, req, &ctx.config.minted_final_advertisement);
+        let merged = build_merged_482(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(merged) = merged {
             let _ = ctx.txn.send_response(merged, src).await;
         }
@@ -95,7 +100,7 @@ pub(super) async fn initial_invite_turn(
     // identity, so the caller is told to retry once it is gone (§14.2).
     if resident {
         let retry_after = super::owed::OwedAnswer::of(ctx).jittered_retry_after();
-        let resp = build_retry_later_500(req, Some(ctx.id_gen.new_tag()), retry_after);
+        let resp = build_retry_later_500(req, Some(turn.ids.new_tag()), retry_after);
         if let Ok(resp) = resp {
             let _ = ctx.txn.send_response(resp, src).await;
         }
@@ -125,7 +130,7 @@ pub(super) async fn initial_invite_turn(
         }
     }
 
-    let mut call = build_initial_call(req, src, &ctx.config, &ctx.id_gen, now_ms);
+    let mut call = build_initial_call(req, src, &ctx.config, &mut turn.ids, now_ms);
     if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
         let a_leg = call.a_leg.leg_id.clone();
         call = ring.invite_received(call, &a_leg, req, now_ms);
@@ -150,7 +155,7 @@ pub(super) async fn initial_invite_turn(
     let mut handled = if cancelled {
         crate::initial_invite::cancelled_setup(call.clone(), req.image(), now_ms)
     } else if cordoned {
-        refused_unavailable(ctx, call.clone(), now_ms)
+        refused_unavailable(ctx, call.clone(), now_ms, &mut turn.ids)
     } else if call.a_leg_invite.from_tag.is_empty() {
         let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
         crate::initial_invite::reject_call(
@@ -161,7 +166,7 @@ pub(super) async fn initial_invite_turn(
             None,
             &[],
             &ctx.config.minted_final_advertisement,
-            &ctx.id_gen,
+            &mut turn.ids,
             now_ms,
             TerminationCause::Admission,
         )
@@ -174,7 +179,7 @@ pub(super) async fn initial_invite_turn(
             ctx.decision.as_ref(),
             &ctx.limiter,
             &ctx.config,
-            &ctx.id_gen,
+            turn,
             &ctx.wire_faults,
             &ctx.services,
             req.image(),
@@ -209,7 +214,7 @@ pub(super) async fn initial_invite_turn(
         // flight, so the decision is not applied: the callee is never dialled
         // for a call its backups took over (ADR-0047). The caller is refused
         // here whether or not a backup answered it too.
-        handled = refused_after_leaving_the_slice(ctx, &call, handled, now_ms);
+        handled = refused_after_leaving_the_slice(ctx, &call, handled, now_ms, &mut turn.ids);
     }
     let enforced = crate::rules::invariants::enforce(
         &ctx.obligations,
@@ -218,13 +223,9 @@ pub(super) async fn initial_invite_turn(
         now_ms,
         crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
     );
-    let exec = ActionExecutor {
-        config: &ctx.config,
-        id_gen: &ctx.id_gen,
-        now_ms,
-        wire_faults: &ctx.wire_faults,
-    };
-    Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &exec)))
+    let mut exec =
+        ActionExecutor { config: &ctx.config, turn, now_ms, wire_faults: &ctx.wire_faults };
+    Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)))
 }
 
 /// [`refused_unavailable`] from the pre-handler call ([`discarded_turn`]), so
@@ -234,13 +235,19 @@ fn refused_after_leaving_the_slice(
     pre: &Call,
     handled: HandlerResult,
     now_ms: i64,
+    ids: &mut TurnIds,
 ) -> HandlerResult {
-    refused_unavailable(ctx, discarded_turn(pre, handled), now_ms)
+    refused_unavailable(ctx, discarded_turn(pre, handled), now_ms, ids)
 }
 
 /// `call` refused 503 with no Retry-After, as for an unavailable decision
 /// (ADR-0022 X3): the record of a call no decision reached.
-fn refused_unavailable(ctx: &RouterCtx, call: Call, now_ms: i64) -> HandlerResult {
+fn refused_unavailable(
+    ctx: &RouterCtx,
+    call: Call,
+    now_ms: i64,
+    ids: &mut TurnIds,
+) -> HandlerResult {
     let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     crate::initial_invite::reject_call(
         call,
@@ -250,7 +257,7 @@ fn refused_unavailable(ctx: &RouterCtx, call: Call, now_ms: i64) -> HandlerResul
         None,
         &[],
         &ctx.config.minted_final_advertisement,
-        &ctx.id_gen,
+        ids,
         now_ms,
         TerminationCause::Admission,
     )

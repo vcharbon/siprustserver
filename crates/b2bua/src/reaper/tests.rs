@@ -3,7 +3,7 @@ use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::router::test_support;
 use crate::store::InMemoryCallStore;
-use sip_txn::IdGen;
+use sip_ids::TurnIds;
 
 /// The outcomes of the verdicts sent so far.
 fn outcomes(rx: &mut mpsc::UnboundedReceiver<CallEvent>) -> Vec<String> {
@@ -30,7 +30,7 @@ async fn an_overflowing_call_is_condemned_once_and_swept_until_gone() {
         &invite,
         src,
         &B2buaConfig::default(),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     ));
     let in_flight = InFlight::default();
@@ -89,7 +89,7 @@ fn condemned_rig(
                 &invite,
                 src,
                 &B2buaConfig::default(),
-                &IdGen::seeded(1),
+                &mut TurnIds::fixed(1),
                 0,
             ))
         })

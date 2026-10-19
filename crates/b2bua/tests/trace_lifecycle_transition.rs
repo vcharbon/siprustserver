@@ -21,12 +21,13 @@ use b2bua::rules::{
     RuleHandleResult, SERVICE_LAYER,
 };
 use b2bua::trace::{install_process_traces, traces, CallTraces};
+use b2bua::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 use call::{Direction, LegState, MachineId, StateLabel};
 use observe::{activation_bucket, RateDraw, SampleAdmission};
+use sip_ids::TurnIds;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-use sip_txn::IdGen;
 
 const MACHINE: &str = "listening-machine";
 
@@ -92,7 +93,8 @@ fn traced_call() -> call::Call {
         SipMessage::Response(_) => panic!("expected a request"),
     };
     let src: SocketAddr = "10.0.0.9:5060".parse().expect("fixture address");
-    let mut call = build_initial_call(&invite, src, &B2buaConfig::default(), &IdGen::seeded(1), 0);
+    let mut call =
+        build_initial_call(&invite, src, &B2buaConfig::default(), &mut TurnIds::fixed(1), 0);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Early);
     call.sm_cursors.insert(MachineId::new(MACHINE), StateLabel::new("S0"));
     traces()
@@ -120,10 +122,10 @@ fn a_lifecycle_handlers_cursor_move_is_on_the_trace() {
         incarnation: None,
     };
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = TurnScope::of(TurnIds::fixed(1));
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -140,8 +142,8 @@ fn a_lifecycle_handlers_cursor_move_is_on_the_trace() {
     };
     let rules = [listener(), ending_claimer()];
     let claimed =
-        execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
-    let result = close_turn(&rules, &TurnStart::of(&call), claimed, &exec);
+        execute_rules(&rules, &call, &ctx, &mut exec, &b2bua::obligations::ObligationSet::core());
+    let result = close_turn(&rules, &TurnStart::of(&call), claimed, &mut exec);
     assert_eq!(
         result.call.sm_cursors.get(&MachineId::new(MACHINE)).map(StateLabel::as_str),
         Some("S1"),

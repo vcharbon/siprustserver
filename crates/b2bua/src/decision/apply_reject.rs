@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 
 use call::helpers::{mark_decision, set_call_ext};
 use call::{Call, DecisionKind, TerminationCause};
+use sip_ids::TurnIds;
 use sip_message::generators::CapabilitySet;
 use sip_message::SipRequest;
-use sip_txn::IdGen;
 
 use super::schemas::{RedirectDecision, RejectDecision};
 use crate::effects::HandlerResult;
@@ -43,7 +43,7 @@ pub(crate) fn apply_reject(
     leg_id: Option<String>,
     a_invite: &SipRequest,
     advertisement: &CapabilitySet,
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     now_ms: i64,
 ) -> HandlerResult {
     let call = mark_decision(call, now_ms, kind, leg_id, reject.label);
@@ -58,7 +58,7 @@ pub(crate) fn apply_reject(
             reject.update_headers.as_ref(),
             &[],
             advertisement,
-            id_gen,
+            ids,
             now_ms,
             TerminationCause::Admission,
         );
@@ -71,7 +71,7 @@ pub(crate) fn apply_reject(
         reject.update_headers.as_ref(),
         &[],
         advertisement,
-        id_gen,
+        ids,
         now_ms,
         TerminationCause::DecisionReject,
     )
@@ -105,7 +105,7 @@ pub(crate) fn apply_redirect(
     leg_id: Option<String>,
     a_invite: &SipRequest,
     advertisement: &CapabilitySet,
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     now_ms: i64,
 ) -> HandlerResult {
     let call = mark_decision(call, now_ms, kind, leg_id, redirect.label);
@@ -120,7 +120,7 @@ pub(crate) fn apply_redirect(
             redirect.update_headers.as_ref(),
             &[],
             advertisement,
-            id_gen,
+            ids,
             now_ms,
             TerminationCause::Admission,
         );
@@ -133,7 +133,7 @@ pub(crate) fn apply_redirect(
         redirect.update_headers.as_ref(),
         &redirect.contacts,
         advertisement,
-        id_gen,
+        ids,
         now_ms,
         TerminationCause::DecisionReject,
     )

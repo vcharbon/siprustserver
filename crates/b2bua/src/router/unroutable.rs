@@ -20,6 +20,7 @@
 
 use std::net::SocketAddr;
 
+use sip_ids::TurnIds;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use super::responses::{build_405, build_481};
@@ -102,11 +103,13 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
 
 /// A request for a vanished call draws the 200 of a PRACK its released call
 /// still answers ([`super::late_prack::answer`]), else the answer a request
-/// naming no call is owed ([`refusal`]); an ACK or a response draws nothing.
-pub(super) async fn answer_vanished(ctx: &RouterCtx, event: &CallEvent) {
+/// naming no call is owed ([`refusal`]), its To-tag drawn from the turn's
+/// `ids`; an ACK or a response draws nothing.
+pub(super) async fn answer_vanished(ctx: &RouterCtx, event: &CallEvent, ids: &mut TurnIds) {
     if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
-            let answer = super::late_prack::answer(ctx, req).or_else(|| refusal(ctx, req));
+            let answer =
+                super::late_prack::answer(ctx, req).or_else(|| refusal(ctx, req, || ids.new_tag()));
             if let Some(answer) = answer {
                 let _ = ctx.txn.send_response(answer, *src).await;
             }
@@ -122,7 +125,7 @@ async fn on_request(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
     let method = req.method().as_str();
     let class = wave_label(req.method());
     let sample = format!("method={method} call_id={} src={src}", req.call_id().as_str());
-    match refusal(ctx, req) {
+    match refusal(ctx, req, || ctx.id_gen.new_tag()) {
         Some(answer) => {
             let code = answer.status();
             let _ = ctx.txn.send_response(answer, src).await;
@@ -159,8 +162,14 @@ fn wave_label(method: &Method) -> &str {
 ///   `unsupported-method-405-allow` rule holds). Methods compare
 ///   case-sensitively (§7.1).
 ///
-/// A request whose lines no response can echo draws none, as an ACK.
-pub(super) fn refusal(ctx: &RouterCtx, req: &SipRequest) -> Option<SipResponse> {
+/// A request whose lines no response can echo draws none, as an ACK. `mint`
+/// draws the minted To-tag: the turn's own source inside a call's turn, the
+/// process's counter stream outside one.
+pub(super) fn refusal(
+    ctx: &RouterCtx,
+    req: &SipRequest,
+    mint: impl FnOnce() -> String,
+) -> Option<SipResponse> {
     let method = req.method();
     if method == Method::Ack {
         return None;
@@ -168,7 +177,7 @@ pub(super) fn refusal(ctx: &RouterCtx, req: &SipRequest) -> Option<SipResponse> 
     if req.to().tag().is_some() || method == Method::Cancel {
         return build_481(req, None).ok();
     }
-    let minted = ctx.id_gen.new_tag();
+    let minted = mint();
     let caps = &ctx.config.node_capabilities;
     let allowed = caps.allow().map(|a| a.iter().any(|m| m == method.as_str()));
     match allowed {

@@ -58,7 +58,7 @@ fn call(call_id: &str, created_at: i64) -> call::Call {
         &invite(call_id),
         src,
         &B2buaConfig::default(),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         created_at,
     )
 }

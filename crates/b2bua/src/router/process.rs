@@ -2,14 +2,13 @@
 //! held — reaper verdict gate, the initial-INVITE turn, the incarnation gate,
 //! the in-dialog lookup (resident, or materialised as a takeover / on-demand
 //! reclaim), the re-offer of an unmatched datagram to the transactions the
-//! call seeded, the CANCEL the layer matched nothing for, the rule chain, and
-//! the message-cap defense.
+//! call seeded, the CANCEL the layer matched nothing for, then the rule chain
+//! ([`super::rule_chain`]).
 
 use std::sync::Arc;
 
-use call::helpers::Arrival;
-use call::{Call, CallModelState, Obligation, TimerType};
-use sip_message::{Method, SipMessage};
+use call::{Call, TimerType};
+use sip_message::SipMessage;
 
 use super::admit::UnbornCall;
 use super::incarnation_gate::of_another_incarnation;
@@ -21,16 +20,13 @@ use super::peer_metrics::record_keepalive_timeout_peer;
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
+use super::rule_chain::{enforced, fired, rule_chain_turn};
 use super::stray_cancel::reject_stray_cancel;
 use super::superseded_relay::drop_superseded_relay;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
-use crate::answer_deadline::Screened;
-use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
 use crate::limiter::refresh_batch::RefreshAnswered;
-use crate::rules::actions::{Owed, Settle};
-use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
-use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext};
+use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
 /// The per-call handler body: check the call out, run the handler, interpret.
@@ -49,6 +45,8 @@ pub(super) async fn process(
     };
     let _guard = ctx.state.lock(&call_ref).await;
     let now_ms = ctx.clock.now_ms();
+    // The turn opens before its gates: their refusals draw identifiers too.
+    let mut turn = TurnScope::of(ctx.id_gen.turn());
 
     match reaper_verdict_gate(ctx, &event, &call_ref, now_ms).await {
         Gate::Consumed => return,
@@ -68,9 +66,10 @@ pub(super) async fn process(
             },
             _ => return,
         };
-        match super::initial_turn::initial_invite_turn(ctx, &call_ref, &req, src, now_ms, unborn)
-            .await
-        {
+        let initial = super::initial_turn::initial_invite_turn(
+            ctx, &call_ref, &req, src, now_ms, unborn, &mut turn,
+        );
+        match initial.await {
             super::initial_turn::Turn::Consumed => return,
             // A final went on the wire with no call here, but this dispatch created a
             // per-call queue (one `bump_creation`) + lock entry for a brand-new
@@ -105,7 +104,7 @@ pub(super) async fn process(
         if of_another_incarnation(ctx, &event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
         }) {
-            answer_vanished(ctx, &event).await;
+            answer_vanished(ctx, &event, &mut turn.ids).await;
             return;
         }
         if super::store_fault_gate::in_dialog_store_fault_gate(ctx, &event, &call_ref, now_ms).await
@@ -113,7 +112,7 @@ pub(super) async fn process(
             return;
         }
         let Some(call) = resident_or_materialised(ctx, &call_ref).await else {
-            answer_vanished(ctx, &event).await;
+            answer_vanished(ctx, &event, &mut turn.ids).await;
             // An admit report for a vanished call (a route fold, a service's
             // admit result): no call is left to own the set its admit may
             // have counted.
@@ -136,7 +135,7 @@ pub(super) async fn process(
         res.bind_indexed_leg(&call, &event);
         // A copy this event materialised is checked as a resident one was.
         if of_another_incarnation(ctx, &event, &res, |stamp| call.incarnation() != stamp) {
-            answer_vanished(ctx, &event).await;
+            answer_vanished(ctx, &event, &mut turn.ids).await;
             return;
         }
         // A timer fire reaches the call only while its ledger holds the fired
@@ -204,7 +203,7 @@ pub(super) async fn process(
             // A relay no node can finish is gone before the rules read the
             // call, so its request is relayed afresh.
             let call = drop_superseded_relay(call, &event);
-            rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms)
+            rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms, &mut turn)
         }
     };
 
@@ -341,255 +340,4 @@ fn record_refusal(
         _ => return,
     };
     ctx.state.update(call);
-}
-
-/// The branch of a BYE client transaction `event` ends: a final to it, or a
-/// transaction timeout (whose branch names it alone).
-fn bye_transaction_end(event: &CallEvent) -> Option<&str> {
-    match event {
-        CallEvent::Sip { message, .. } => match message.as_ref() {
-            SipMessage::Response(r) if r.status() >= 200 && r.cseq().method() == Method::Bye => {
-                r.top_via().branch()
-            }
-            _ => None,
-        },
-        CallEvent::Timeout { branch, .. } => Some(branch.as_str()),
-        _ => None,
-    }
-}
-
-/// Run the synchronous rule chain for one in-dialog event, with the
-/// MAX_MESSAGES_PER_CALL cap-defense wrapped around it.
-///
-/// The count opens at 1 on the initial INVITE (`initial_invite`) and every
-/// in-dialog rule-chain event adds one, except a rung of this node's own
-/// ladder: a rung repeats retained bytes on this node's clock and is no
-/// message of the peer's, so a deaf peer under a lossy path is not a runaway
-/// dialog. A repeated inbound 2xx is the peer's message and counts. If the
-/// bump crosses `max_messages_per_call` and the handler did not itself
-/// terminate the call, append a begin-termination so a runaway dialog
-/// (re-INVITE/OPTIONS storm, glare loop, a peer that never stops) is torn down
-/// instead of processing unbounded in-dialog events forever — each of which
-/// allocates a txn (`set_txn`), a working `Call` clone, and a store body. The
-/// async limiter-refresh does not count. The bump rides the turn's own write;
-/// on a quiet turn (`QuietTurn`) it rides the next write. Order: bump +
-/// capture `cap_exceeded` BEFORE the handler runs, terminate AFTER, so the
-/// in-flight event (e.g. relaying this re-INVITE's response) is still serviced
-/// before teardown; a turn that trips the cap is the teardown, never quiet.
-pub(super) fn rule_chain_turn(
-    ctx: &Arc<RouterCtx>,
-    mut call: Call,
-    event: &CallEvent,
-    res: &Resolution,
-    resolved: call::helpers::Resolved,
-    call_ref: &str,
-    now_ms: i64,
-) -> HandlerResult {
-    // The cap budget is a PER-LIVENESS-INTERVAL rate, not a lifetime total: the
-    // keepalive tick RESETS the counter, opening a fresh window. A runaway
-    // dialog still lands >cap events inside one window and is torn down; a
-    // healthy long call — whose per-interval traffic is its own self-paced
-    // probes plus a bounded trickle — never consumes the defense meant for
-    // runaway peers. A lifetime reading tore down every hour-long keepalive
-    // call around message 200, BYEing a healthy dialog mid-call.
-    let bumped = if fired(event, &TimerType::Keepalive) {
-        0
-    } else if fired(event, &TimerType::Rung) || fired(event, &TimerType::NotifyAnswerCap) {
-        call.message_count.unwrap_or(0)
-    } else {
-        call.message_count.unwrap_or(0) + 1
-    };
-    call.message_count = Some(bumped);
-    let cap_exceeded = i64::try_from(ctx.config.max_messages_per_call)
-        .is_ok_and(|cap| bumped > cap)
-        && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    let exec = ActionExecutor {
-        config: &ctx.config,
-        id_gen: &ctx.id_gen,
-        now_ms,
-        wire_faults: &ctx.wire_faults,
-    };
-    // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
-    // repeated here and never reaches a rule; the discharging ACK or PRACK
-    // retires its ladder before the rules run and they read the fact; a
-    // give-up's timers are scrubbed before the CORE give-up rule decides, and
-    // its verdict is settled after (`settle_give_up`: an un-ACKed 2xx ends the
-    // session whatever the rules made of it).
-    let mut ladder_fx = HandlerEffects::new();
-    // A service request's answer, or its deadline, is screened against the
-    // call's pending deadlines before anything reads it (ADR-0039): an expired
-    // deadline is read as the request's lost answer, and an answer or a
-    // deadline no longer awaited reaches no rule.
-    let lost_answer;
-    let (event, rules_read) = match crate::answer_deadline::screen(&mut call, &mut ladder_fx, event)
-    {
-        Screened::Expired(lost) => {
-            lost_answer = lost;
-            (&lost_answer, true)
-        }
-        Screened::Unawaited => (event, false),
-        Screened::Awaited | Screened::Other => (event, true),
-    };
-    if let Some(obligation) = fired_obligation(event, &TimerType::Rung) {
-        let before = call.clone();
-        exec.repeat(&mut call, &mut ladder_fx, obligation);
-        ladder_fx.quiet = Some(QuietTurn::OwnRung);
-        let repeated = HandlerResult { call, effects: ladder_fx };
-        return enforced(ctx, &before, repeated, now_ms);
-    }
-    // The end of the wait behind this stack's own NOTIFY is the framework's:
-    // the requests held there leave, and no rule sees the fire.
-    if fired(event, &TimerType::NotifyAnswerCap) {
-        let before = call.clone();
-        exec.release_at_cap(&mut call, &mut ladder_fx);
-        let released = HandlerResult { call, effects: ladder_fx };
-        return enforced(ctx, &before, released, now_ms);
-    }
-    let start = TurnStart::of(&call);
-    // A reliable provisional is the engine's before it is any rule's (RFC
-    // 3262): recorded with its early dialog and offer, or — a repeat, or out
-    // of `RSeq` order — dropped unread, its turn a write of nothing else.
-    let arrival = exec.take_reliable_provisional(&mut call, event, &res.source_leg_id);
-    let screened = matches!(arrival, Some(Arrival::Repeat | Arrival::OutOfOrder));
-    let rules_read = rules_read && !screened;
-    let discharged = exec.discharge(&mut call, &mut ladder_fx, event, &res.source_leg_id);
-    if let CallEvent::Sip { message, .. } = event {
-        if let SipMessage::Response(resp) = message.as_ref() {
-            let leg = res.source_leg_id.as_str();
-            super::response_facts::record(&exec, &mut call, &mut ladder_fx, leg, resp, screened);
-            exec.release_answered_notify(&mut call, &mut ladder_fx, leg, resp);
-        }
-    }
-    // The end of a BYE that released a retired dialog, its final or its
-    // timeout, settles that release (§15.1.1) before the rules read it.
-    if let Some(branch) = bye_transaction_end(event) {
-        call = call::helpers::settle_straggler_release(call, branch);
-    }
-    // The transaction layer answered an out-of-dialog CANCEL itself — 200 to
-    // the CANCEL, 487 to the initial INVITE (RFC 3261 §9.2): the record
-    // carries that transaction's one final before the rules read it, over a
-    // 2xx this stack built too late for the completed transaction to send.
-    if let CallEvent::Cancelled { in_dialog: false, .. } = event {
-        call = call::helpers::record_cancelled_invite(call, &res.source_leg_id);
-    }
-    if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
-        ctx.metrics.record_repeat_give_up(obligation.kind());
-        exec.give_up(&mut call, &mut ladder_fx, obligation);
-    }
-    // The record names the message before the rules read it, so what the
-    // turn sends follows what it received.
-    if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
-        let dialog = resolved.dialog.as_ref();
-        let repeat = arrival == Some(Arrival::Repeat);
-        call = ring.received(
-            call,
-            &res.source_leg_id,
-            event,
-            repeat,
-            discharged.as_ref(),
-            dialog,
-            now_ms,
-        );
-    }
-    // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
-    // opens an exchange on that leg, counted once as it is received, before
-    // the rules read it.
-    if let CallEvent::Sip { message, .. } = event {
-        if let SipMessage::Request(req) = message.as_ref() {
-            let source = resolved.dialog.as_ref();
-            crate::rules::relay::note_request(&mut call, &res.source_leg_id, req, source);
-        }
-    }
-    // A decision folding back while its consult is awaited records the routes
-    // admission refused before it, then its mark, whichever rule claims it.
-    if rules_read {
-        crate::attempts::record_refused_routes(&mut call, &mut ladder_fx, event);
-        call = crate::decision_log::fold_decided(call, event, now_ms);
-    }
-    // An admit sent off the call's turn is applied before the rules read its
-    // event (an unawaited fold's route is not the call's); one of another key
-    // (an earlier call under this call_ref) releases that key when owed.
-    let fx = &mut ladder_fx;
-    if let Some(report) = crate::limiter::report::apply_to_call(&mut call, event, rules_read, fx) {
-        if crate::trace::sampled(&call) {
-            let what = format!("{:?} -> {:?}", report.entries, report.outcome);
-            crate::trace::emit::limiter(&call, now_ms, "admit", &what);
-        }
-    }
-    let rule_ctx = RuleContext {
-        call: RuleCall::new(&call),
-        call_ref,
-        event,
-        source_leg_id: &res.source_leg_id,
-        direction: res.direction,
-        now_ms,
-        config: &ctx.config,
-        discharged: discharged.as_ref(),
-        resolved: &resolved,
-    };
-    let mut result = if rules_read {
-        execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations)
-    } else {
-        HandlerResult { call: call.clone(), effects: HandlerEffects::new() }
-    };
-    // The final to the INVITE that dialled the leg is its outcome, recorded
-    // after the rules matched the leg as the response found it: a rule that
-    // acted on it already recorded it, the first final standing (§17.1.1.2).
-    if let CallEvent::Sip { message, .. } = event {
-        if let SipMessage::Response(resp) = message.as_ref() {
-            if resp.status() >= 200 && resp.cseq().method() == Method::Invite {
-                result.call = call::helpers::record_dialled_invite_final(
-                    result.call,
-                    &res.source_leg_id,
-                    i64::from(resp.cseq().seq()),
-                    resp.status(),
-                );
-            }
-        }
-    }
-    super::quiet_turn::name_candidate(&mut result, &call, event, discharged.as_ref());
-    // The ladder's own effects (its cancels) precede the rule's.
-    ladder_fx.extend(std::mem::take(&mut result.effects));
-    result.effects = ladder_fx;
-    if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
-        let before = result.call.clone();
-        let settled = exec.settle_give_up(result, obligation, &rule_ctx);
-        result = enforced(ctx, &before, settled, now_ms);
-    }
-    if cap_exceeded
-        && !matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated)
-    {
-        result = super::message_cap::tear_down_runaway(ctx, &exec, result, &rule_ctx);
-    }
-    // A reliable provisional shown to no one, or whose INVITE, leg or dialog
-    // the turn ended, is PRACKed by the engine whatever the rules made of it
-    // (RFC 3262 §4).
-    exec.settle_owed_pracks(&mut result.call, &mut result.effects, Owed::Call, Settle::TurnEnd);
-    // The turn's lifecycle closes over what every layer above made of it.
-    close_turn(&ctx.rules, &start, result, &exec)
-}
-
-/// `result`, the turn's outcome on `before`, finalized and held to the
-/// invariants the framework enforces.
-fn enforced(ctx: &RouterCtx, before: &Call, result: HandlerResult, now_ms: i64) -> HandlerResult {
-    crate::rules::invariants::enforce(
-        &ctx.obligations,
-        before,
-        crate::rules::invariants::finalize(result),
-        now_ms,
-        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
-    )
-}
-
-/// Whether `event` is a fire of a timer of type `timer_type`.
-fn fired(event: &CallEvent, timer_type: &TimerType) -> bool {
-    matches!(event, CallEvent::Timer { key, .. } if &key.timer_type == timer_type)
-}
-
-/// The obligation of a fired `timer_type` ladder timer.
-fn fired_obligation<'a>(event: &'a CallEvent, timer_type: &TimerType) -> Option<&'a Obligation> {
-    match event {
-        CallEvent::Timer { key, .. } if &key.timer_type == timer_type => key.obligation_of(),
-        _ => None,
-    }
 }

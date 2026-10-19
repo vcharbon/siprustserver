@@ -131,6 +131,11 @@ pub async fn node_on(
     }
 }
 
+/// A turn under the fixed test key, numbered `turn_seq`.
+pub fn turn(turn_seq: u64) -> crate::turn_scope::TurnScope {
+    crate::turn_scope::TurnScope::of(sip_ids::TurnIds::fixed(turn_seq))
+}
+
 /// The caller's source address on the simulated fabric.
 pub fn src() -> SocketAddr {
     SocketAddr::from(([10, 0, 0, 9], 5060))

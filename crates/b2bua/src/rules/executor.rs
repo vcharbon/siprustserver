@@ -101,7 +101,7 @@ pub fn execute_rules(
     rules: &[RuleDefinition],
     call: &Call,
     ctx: &RuleContext,
-    exec: &ActionExecutor,
+    exec: &mut ActionExecutor,
     obligations: &ObligationSet,
 ) -> HandlerResult {
     let selection = select(rules, call, ctx);

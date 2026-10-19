@@ -7,16 +7,19 @@ use std::net::SocketAddr;
 use b2bua::config::B2buaConfig;
 use b2bua::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerResult};
 use b2bua::initial_invite::build_initial_call;
+use b2bua::obligations::ObligationSet;
 use b2bua::rules::{
     default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Effect, Match,
     RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, SERVICE_LAYER,
 };
+use b2bua::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{Body, BodyAuthor, LegEnd};
 use call::{
     CallModelState, Dialog, DialogState, Direction, EndingBy, Leg, LegKind, LegState, MachineId,
     OutboundInvite, PeerDialog, RemoteInfo, StateLabel, TerminationCause, TimerKey, TimerType,
 };
+use sip_ids::TurnIds;
 use sip_message::generators::{
     generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
     OutOfDialogMethod,
@@ -25,7 +28,6 @@ use sip_message::header::{self, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipStr;
 use sip_message::{HeaderName, Method, SipMessage, SipParser, SipRequest};
-use sip_txn::IdGen;
 
 /// The URI a fixture names as text.
 fn uri_of(text: &str) -> Uri {
@@ -67,9 +69,14 @@ fn in_dialog_request(method: sip_message::Method) -> sip_message::SipRequest {
         .expect("an in-dialog request of the same dialog is complete")
 }
 
+/// A turn under the fixed test key, numbered `turn_seq`.
+fn scope(turn_seq: u64) -> TurnScope {
+    TurnScope::of(TurnIds::fixed(turn_seq))
+}
+
 fn test_call() -> call::Call {
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    build_initial_call(&invite(), src, &B2buaConfig::default(), &IdGen::seeded(1), 0)
+    build_initial_call(&invite(), src, &B2buaConfig::default(), &mut scope(1).ids, 0)
 }
 
 /// A call whose a-leg already carries the early dialog `a1` (the tag a relayed
@@ -254,10 +261,10 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -748,10 +755,10 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -1040,7 +1047,7 @@ fn invariants_append_cleanup_on_terminated() {
     // A synthetic terminal states its cause as every live path does.
     call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
     let result = invariants::enforce(
-        &b2bua::obligations::ObligationSet::core(),
+        &ObligationSet::core(),
         &before,
         HandlerResult::new(call),
         0,
@@ -1092,7 +1099,7 @@ fn the_unanswered_callers_503_carries_the_deployment_advertisement() {
         Some(vec![sip_message::header::AcceptRange::new("application/sdp")]),
     );
     let result = invariants::enforce(
-        &b2bua::obligations::ObligationSet::core(),
+        &ObligationSet::core(),
         &before,
         HandlerResult::new(call),
         0,
@@ -1143,7 +1150,7 @@ fn no_synthesized_final_when_the_turn_already_answered() {
     result.effects.outbound.push(effect);
     assert_eq!(result.call.a_leg.invite_final_sent, Some(486), "the final is recorded on the leg");
     let result = invariants::enforce(
-        &b2bua::obligations::ObligationSet::core(),
+        &ObligationSet::core(),
         &before,
         result,
         0,
@@ -1174,7 +1181,7 @@ fn no_synthesized_final_when_the_txn_layer_answered_the_cancel() {
     call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
     call = call::helpers::record_invite_final(call, "a", 487);
     let result = invariants::enforce(
-        &b2bua::obligations::ObligationSet::core(),
+        &ObligationSet::core(),
         &before,
         HandlerResult::new(call),
         0,
@@ -1222,10 +1229,10 @@ fn execute_with(config: &B2buaConfig, call: &call::Call, actions: &[RuleAction])
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -1475,10 +1482,10 @@ fn execute_from_b1(call: &call::Call, event: &CallEvent, actions: &[RuleAction])
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -1858,10 +1865,10 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -1869,7 +1876,7 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
 
     let result = {
         let ctx = ctx_for(&call, &event, &config);
-        execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core())
+        execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core())
     };
     assert_eq!(
         result.call.sm_cursors.get(&MachineId::new(TEST_MACHINE)).map(StateLabel::as_str),
@@ -1896,17 +1903,17 @@ fn undeclared_transition_trips_debug_assert() {
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let rules = vec![sm_rule(handle_to_s2_undeclared)];
 
     let ctx = ctx_for(&call, &event, &config);
-    let _ = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+    let _ = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
 }
 
 /// A tracked side effect the handler emits but the rule did not declare trips the
@@ -1919,10 +1926,10 @@ fn undeclared_effect_trips_debug_assert() {
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -1930,7 +1937,7 @@ fn undeclared_effect_trips_debug_assert() {
     let rules = vec![sm_rule(handle_emits_leg_message)];
 
     let ctx = ctx_for(&call, &event, &config);
-    let _ = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+    let _ = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
 }
 
 /// Declaring the matching `LegMessage` effect satisfies the drift-check — the
@@ -1941,10 +1948,10 @@ fn declared_effect_passes_the_drift_check() {
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -1952,7 +1959,7 @@ fn declared_effect_passes_the_drift_check() {
 
     let ctx = ctx_for(&call, &event, &config);
     // Must not panic: the emitted Respond is a declared LegMessage.
-    let _ = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+    let _ = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
 }
 
 /// `ClearState` (machine deactivation) removes the cursor, and with a declared
@@ -1963,17 +1970,17 @@ fn declared_terminal_clear_state_deactivates_machine() {
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let rules = vec![sm_rule_with_transitions(handle_clears_state, &SM_TRANSITIONS_TERMINAL)];
 
     let ctx = ctx_for(&call, &event, &config);
-    let r = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+    let r = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
     // The machine is deactivated: its cursor is gone.
     assert!(!r.call.sm_cursors.contains_key(&MachineId::new(TEST_MACHINE)));
 }
@@ -1988,17 +1995,17 @@ fn undeclared_terminal_clear_state_trips_debug_assert() {
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     let event = info_event();
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let rules = vec![sm_rule(handle_clears_state)]; // transitions: S0 => S1 only
 
     let ctx = ctx_for(&call, &event, &config);
-    let _ = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+    let _ = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());
 }
 
 // ── b-leg route-set capture (RFC 3261 §12.1.2) ──────────────────────────────
@@ -2077,10 +2084,10 @@ Content-Length: 0\r\n\r\n";
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -2146,10 +2153,10 @@ Content-Length: 0\r\n\r\n";
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -2202,10 +2209,10 @@ Content-Length: 0\r\n\r\n";
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -2244,7 +2251,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
 
     let call = test_call();
     let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
-    let id_gen = IdGen::seeded(7);
+    let mut id_gen = scope(7);
     // The callee's own address — what `leg.source` becomes; the CANCEL must NOT
     // go here (it must go to the proxy).
     let callee_dest = ("10.0.0.2".to_string(), 5070u16);
@@ -2257,7 +2264,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         None,
         None,
         &config,
-        &id_gen,
+        &mut id_gen.ids,
         None,
         &[],
         &CapabilitySet::default(),
@@ -2302,9 +2309,9 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let exec = ActionExecutor {
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -2394,12 +2401,12 @@ mod media_primitives {
         event: &'a CallEvent,
         source_leg_id: &'a str,
         config: &'a B2buaConfig,
-        id_gen: &'a IdGen,
+        id_gen: &'a mut TurnScope,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let exec = ActionExecutor {
+        let mut exec = ActionExecutor {
             config,
-            id_gen,
+            turn: id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -2445,7 +2452,7 @@ mod media_primitives {
         call = call::helpers::add_b_leg(call, b);
         call = call::helpers::merge_leg(call, "a", "b-1");
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         for (method, status) in
             [(sip_message::Method::Subscribe, 489), (sip_message::Method::Info, 500)]
         {
@@ -2459,7 +2466,7 @@ mod media_primitives {
                 &event,
                 "a",
                 &config,
-                &id_gen,
+                &mut id_gen,
                 &[RuleAction::RelayToPeer { transform: MessageTransform::default() }],
             );
             assert_eq!(answered(&result), vec![status], "{method:?}");
@@ -2479,13 +2486,13 @@ mod media_primitives {
             matched_client_txn: false,
         };
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::RelayToPeer { transform: MessageTransform::default() }],
         );
         let sent: Vec<Option<u16>> = result
@@ -2517,13 +2524,13 @@ mod media_primitives {
             matched_client_txn: false,
         };
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::RelayToPeer { transform: MessageTransform::default() }],
         );
         assert_eq!(result.effects.outbound.len(), 1, "adopted leg relays to its peer");
@@ -2546,14 +2553,14 @@ mod media_primitives {
             matched_client_txn: false,
         };
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let mscml = b"<MediaServerControl><request><play/></request></MediaServerControl>".to_vec();
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::SendRequestToLeg {
                 leg_id: "b-1".into(),
                 method: "INFO".into(),
@@ -2596,7 +2603,7 @@ mod media_primitives {
             matched_client_txn: false,
         };
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let uui = "3030373946313233;encoding=hex"; // RFC 7433 User-To-User
         let body = b"SUP:example-binary\x00\x01payload".to_vec();
         let result = exec_on(
@@ -2604,7 +2611,7 @@ mod media_primitives {
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::SendRequestToLeg {
                 leg_id: "b-1".into(),
                 method: "INFO".into(),
@@ -2656,14 +2663,14 @@ mod media_primitives {
             matched_client_txn: false,
         };
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let sdp = b"v=0\r\no=mrf 1 1 IN IP4 10.0.0.50\r\n".to_vec();
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::SendProvisionalToLeg {
                 leg_id: "a".into(),
                 status: 183,
@@ -2710,13 +2717,13 @@ mod media_primitives {
             matched_client_txn: false,
         };
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let result = exec_on(
             &call,
             &event,
             "a",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::SendProvisionalToLeg {
                 leg_id: "a".into(),
                 status: 200,
@@ -2758,12 +2765,12 @@ mod answer_a_leg_new_dialog {
         event: &'a CallEvent,
         source_leg_id: &'a str,
         config: &'a B2buaConfig,
-        id_gen: &'a IdGen,
+        id_gen: &'a mut TurnScope,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let exec = ActionExecutor {
+        let mut exec = ActionExecutor {
             config,
-            id_gen,
+            turn: id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -2789,14 +2796,14 @@ mod answer_a_leg_new_dialog {
         let call = call_with_early_a_dialog("A1early");
         let event = some_event();
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let sdp_b = b"v=0\r\no=callee 2 2 IN IP4 10.0.0.70\r\n".to_vec();
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
@@ -2898,13 +2905,13 @@ mod answer_a_leg_new_dialog {
 
         let event = some_event();
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
@@ -2965,13 +2972,13 @@ mod answer_a_leg_new_dialog {
         let call = call_with_early_a_dialog("A1early");
         let event = some_event();
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
@@ -3002,13 +3009,13 @@ mod answer_a_leg_new_dialog {
         let call = call_with_early_a_dialog("A1early");
         let event = some_event();
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::AnswerALegNewDialog {
                 status: 486,
                 reason: "Busy Here".into(),
@@ -3035,13 +3042,13 @@ mod answer_a_leg_new_dialog {
         let call = call_with_early_a_dialog("A1early");
         let event = some_event();
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
@@ -3074,13 +3081,13 @@ mod answer_a_leg_new_dialog {
         let call = call_with_early_a_dialog("A1early");
         let event = some_event();
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
@@ -3144,14 +3151,14 @@ Content-Length: 4\r\n\r\nv=0\n";
         let call = call_with_early_a_dialog("A1early");
         let event = some_event();
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let delivered = callee_final();
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
@@ -3206,14 +3213,14 @@ Content-Length: 4\r\n\r\nv=0\n";
         let call = call_with_early_a_dialog("A1early");
         let event = some_event();
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
+        let mut id_gen = scope(1);
         let delivered = callee_final();
         let result = exec_on(
             &call,
             &event,
             "b-1",
             &config,
-            &id_gen,
+            &mut id_gen,
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
@@ -3301,10 +3308,10 @@ mod ack_leg_body {
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
         };
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -3399,10 +3406,10 @@ mod ack_leg_body {
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
         };
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -3565,10 +3572,10 @@ mod default_sdp_create_leg {
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
         };
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -3655,7 +3662,7 @@ mod header_update_removal_withholds_a_relayed_name {
         let config = B2buaConfig::default();
         let a_invite = invite_with_vendor_header();
         let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-        let call = build_initial_call(&a_invite, src, &config, &sip_txn::IdGen::seeded(1), 0);
+        let call = build_initial_call(&a_invite, src, &config, &mut sip_ids::TurnIds::fixed(1), 0);
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(a_invite)),
             src,
@@ -3672,10 +3679,10 @@ mod header_update_removal_withholds_a_relayed_name {
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
         };
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -3991,10 +3998,10 @@ mod limiter_settle {
         let event = fold_event(call, "call-failure-result", "failover", route_fold_payload());
         let config = B2buaConfig::default();
         let ctx = ctx_for(call, &event, &config);
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -4149,10 +4156,10 @@ mod service_timers {
     #[test]
     fn distinct_keys_coexist_and_same_key_reschedule_supersedes() {
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 1_000,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -4311,7 +4318,7 @@ fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
         None,
         None,
         &B2buaConfig::default(),
-        &IdGen::seeded(11),
+        &mut scope(11).ids,
         None,
         &[],
         &b2bua::rules::capabilities::for_leg(&call, "b-1"),
@@ -4401,10 +4408,10 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
     actions
         .push(RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::secs(3600)));
 
-    let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(0x65);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -4466,10 +4473,10 @@ fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
         incarnation: None,
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
-    let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(0x65);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -4500,10 +4507,10 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
         incarnation: None,
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
-    let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(0x65);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -4582,10 +4589,10 @@ fn discharge_ack(
         matched_client_txn: false,
     };
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -4754,10 +4761,10 @@ mod ladder_give_up {
         rules: &[RuleDefinition],
     ) -> (HandlerResult, HandlerResult) {
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -4782,8 +4789,7 @@ mod ladder_give_up {
             Some("svc-parks-the-give-up"),
             "the service rule outranks CORE: {picked:?}"
         );
-        let ruled =
-            execute_rules(rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+        let ruled = execute_rules(rules, &call, &ctx, &mut exec, &ObligationSet::core());
         let settled = exec.settle_give_up(ruled.clone(), obligation, &ctx);
         (ruled, settled)
     }
@@ -4974,15 +4980,15 @@ mod going_away_gate {
 
     fn run(rules: &[RuleDefinition], call: &call::Call, event: &CallEvent) -> HandlerResult {
         let config = B2buaConfig::default();
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
         let ctx = ctx_for(call, event, &config);
-        execute_rules(rules, call, &ctx, &exec, &ObligationSet::core())
+        execute_rules(rules, call, &ctx, &mut exec, &ObligationSet::core())
     }
 
     fn absorbed_of(result: &HandlerResult) -> Vec<(&'static str, &'static str)> {
@@ -5090,10 +5096,10 @@ mod going_away_gate {
         };
         let config = B2buaConfig::default();
         let ctx = ctx_for(&call, &event, &config);
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -5258,15 +5264,15 @@ fn on_overflow_verdict(call: &call::Call) -> HandlerResult {
 fn on_verdict(call: &call::Call, outcome: &str) -> HandlerResult {
     let event = reaper_verdict(call, outcome);
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let ctx = ctx_for(call, &event, &config);
-    execute_rules(&default_rules(), call, &ctx, &exec, &b2bua::obligations::ObligationSet::core())
+    execute_rules(&default_rules(), call, &ctx, &mut exec, &ObligationSet::core())
 }
 
 /// A call whose b-leg rings on an INVITE its CANCEL can name.
@@ -5406,10 +5412,10 @@ mod sdp_body_author {
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
         };
-        let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor {
+        let mut id_gen = scope(1);
+        let mut exec = ActionExecutor {
             config: &config,
-            id_gen: &id_gen,
+            turn: &mut id_gen,
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
@@ -5513,170 +5519,6 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
     assert_eq!(refusal(&call), None, "b-2 answered reliably: the offer relays");
 }
 
-// ── The stack's own re-INVITEs and the leg's charging vector (RFC 7315 §5.6) ──
-//
-// With `ChargingVectorFeature::in_dialog_invites`, a re-INVITE the stack sends
-// on its own behalf carries the vector of the leg it travels: the one that
-// leg's dialog-creating INVITE carried, none where it carried none.
-mod charging_in_dialog {
-    use super::*;
-    use call::features::{
-        ChargingVectorFeature, FeatureActivations, KeepaliveActivation, PlatformActivations,
-    };
-    use call::{ActivePeer, HostPort, InviteTxnHandle};
-    use sip_message::draft::Entry;
-
-    const CALLER: &str = "icid-value=caller-0001;icid-generated-at=edge.example";
-    const B1: &str = "icid-value=dialled-0001;icid-generated-at=10.0.0.9";
-    const B2: &str = "icid-value=target-0002;icid-generated-at=10.0.0.9";
-    const M1: &str = "icid-value=media-0003;icid-generated-at=10.0.0.9";
-    const STATED: &str = "icid-value=stated-0004";
-
-    fn features(option: bool, uncharged: bool) -> FeatureActivations {
-        FeatureActivations {
-            platform: PlatformActivations {
-                max_duration_ms: 7_200_000,
-                max_duration_anchor: Default::default(),
-                keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 3 },
-            },
-            refer: None,
-            relay_first_18x_to_180: None,
-            no_answer_ms: None,
-            advertise_capabilities: None,
-            charging_vector: Some(ChargingVectorFeature {
-                generated_at: None,
-                in_dialog_invites: option,
-            }),
-            withhold_option_tags: None,
-            stated_headers: None,
-            uncharged_media_legs: uncharged,
-            withhold_on_relayed_provisionals: None,
-        }
-    }
-
-    /// A confirmed originated leg whose dialling INVITE carried `vector`.
-    fn confirmed(leg_id: &str, kind: LegKind, vector: &str) -> Leg {
-        let mut leg = super::b_leg_pending();
-        leg.leg_id = leg_id.into();
-        leg.call_id = format!("{leg_id}@x");
-        call::testkit::stage_leg(&mut leg, LegState::Confirmed);
-        leg.kind = Some(kind);
-        with_dialog(&mut leg, &format!("{leg_id}-tag")).peer_cseq = Some(1);
-        let dialled = super::invite()
-            .thaw()
-            .push_raw(HeaderName::from("P-Charging-Vector"), vector.to_string())
-            .freeze()
-            .expect("the dialling INVITE");
-        let dest = HostPort { host: "10.0.0.2".into(), port: 5070 };
-        let branch = format!("z9hG4bK{leg_id}");
-        let handle = InviteTxnHandle::new(&branch, 1, dialled.image().to_vec(), dest);
-        leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(handle);
-        leg
-    }
-
-    /// Alice ↔ b-1 bridged, the transfer target b-2 and the media leg m-1
-    /// confirmed beside them; alice's INVITE carried `caller` where given.
-    fn call(caller: Option<&str>, option: bool, uncharged: bool) -> call::Call {
-        let mut call = super::test_call();
-        if let Some(own) = caller {
-            call.a_leg_invite
-                .headers
-                .push(call::SipHeader { name: "P-Charging-Vector".into(), value: own.into() });
-        }
-        confirm_a(&mut call);
-        call.a_leg.dialogs = vec![super::a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
-        call.a_leg.own_tag = Some("a-svc".into());
-        call.b_legs = vec![
-            confirmed("b-1", LegKind::Destination, B1),
-            confirmed("b-2", LegKind::Destination, B2),
-            confirmed("m-1", LegKind::Media, M1),
-        ];
-        call.active_peer = Some(ActivePeer { leg_a: "a".into(), leg_b: "b-1".into() });
-        call.features = Some(features(option, uncharged));
-        call
-    }
-
-    /// The re-INVITE the stack sends on `leg`, its body written by `author`
-    /// (`None`: the stack's own), with `add` stated on it.
-    fn reinvite(
-        call: &call::Call,
-        leg: &str,
-        author: Option<&str>,
-        add: Vec<Entry>,
-    ) -> HandlerResult {
-        let body = match author {
-            Some(l) => Body::new(b"v=0\r\n".to_vec(), None, BodyAuthor::Leg(l.into())),
-            None => Body::own(b"v=0\r\n".to_vec(), None),
-        };
-        super::execute_on(
-            call,
-            &[RuleAction::SendReinvite { leg_id: leg.into(), body: Some(body), add_headers: add }],
-        )
-    }
-
-    fn vectors_sent(result: &HandlerResult, leg: &str) -> Vec<String> {
-        result
-            .effects
-            .outbound
-            .iter()
-            .filter(|e| e.leg_id.as_deref() == Some(leg))
-            .find_map(|e| match &e.body {
-                b2bua::effects::OutboundBody::Request(r) => {
-                    Some(r.raw(HeaderName::from("P-Charging-Vector")).map(str::to_string).collect())
-                }
-                _ => None,
-            })
-            .expect("a re-INVITE on the leg")
-    }
-
-    #[test]
-    fn toward_an_originated_leg_the_vector_its_invite_carried_and_the_retained_bytes_carry_it() {
-        let c = call(None, true, false);
-        let result = reinvite(&c, "b-2", Some("a"), vec![]);
-        assert_eq!(vectors_sent(&result, "b-2"), [B2]);
-        let held = result.call.b_legs[1]
-            .dialogs
-            .confirmed()
-            .expect("the confirmed dialog")
-            .pending_invite_txn
-            .as_ref()
-            .expect("the re-INVITE's client transaction is held");
-        let retained = String::from_utf8_lossy(&held.original_invite);
-        assert!(retained.contains(B2), "the held bytes are the request as it left: {retained}");
-    }
-
-    #[test]
-    fn toward_the_originator_its_own_vector_whatever_the_body_and_none_where_it_sent_none() {
-        for author in [Some("b-2"), Some("b-1"), Some("m-1"), None] {
-            let own = reinvite(&call(Some(CALLER), true, false), "a", author, vec![]);
-            assert_eq!(vectors_sent(&own, "a"), [CALLER], "{author:?}");
-            let none = reinvite(&call(None, true, false), "a", author, vec![]);
-            assert!(vectors_sent(&none, "a").is_empty(), "{author:?}: no vector is minted for it");
-        }
-    }
-
-    #[test]
-    fn an_uncharged_media_leg_takes_none() {
-        assert!(
-            vectors_sent(&reinvite(&call(None, true, true), "m-1", None, vec![]), "m-1").is_empty()
-        );
-        assert_eq!(
-            vectors_sent(&reinvite(&call(None, true, false), "m-1", None, vec![]), "m-1"),
-            [M1]
-        );
-    }
-
-    #[test]
-    fn a_vector_the_action_states_stands_and_the_option_off_stamps_none() {
-        let stated = Entry::raw(HeaderName::from("P-Charging-Vector"), STATED.to_string());
-        let result = reinvite(&call(None, true, false), "b-2", Some("a"), vec![stated]);
-        assert_eq!(vectors_sent(&result, "b-2"), [STATED]);
-        assert!(vectors_sent(
-            &reinvite(&call(Some(CALLER), false, false), "a", Some("b-2"), vec![]),
-            "a"
-        )
-        .is_empty());
-    }
-}
+mod charging_in_dialog;
 
 mod body_descriptors;

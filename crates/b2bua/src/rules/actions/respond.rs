@@ -38,7 +38,7 @@ impl ActionExecutor<'_> {
     /// they leave unnamed.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn respond(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -125,7 +125,7 @@ impl ActionExecutor<'_> {
     /// [`glare_retry_after`](crate::config::B2buaConfig::glare_retry_after)
     /// only when that INVITE's 2xx awaits its ACK.
     pub(super) fn refuse_glare(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -139,7 +139,7 @@ impl ActionExecutor<'_> {
         let extra = range
             .map(|range| SipHeader {
                 name: SipStr::owned(HeaderName::RetryAfter.as_wire_str()),
-                value: SipStr::owned(&range.pick(self.id_gen.draw()).to_string()),
+                value: SipStr::owned(&range.pick(self.turn.ids.draw()).to_string()),
             })
             .into_iter()
             .collect();
@@ -157,7 +157,7 @@ impl ActionExecutor<'_> {
     /// reaches the caller; a final answering anything else speaks only for
     /// itself, under the deployment's advertisement for a minted final.
     pub(super) fn relay_failure_to_a_leg(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -219,7 +219,7 @@ impl ActionExecutor<'_> {
     /// no peer's carries the deployment's advertisement for a minted final,
     /// under the decision's statements.
     pub(super) fn respond_to_a_leg(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -305,7 +305,7 @@ impl ActionExecutor<'_> {
     /// (`retain_a_leg_answer`) — every path that answers the caller owes that,
     /// so no rule arms it.
     pub(super) fn send_a_leg_answer(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         mut effect: OutboundSipEffect,
@@ -337,7 +337,7 @@ impl ActionExecutor<'_> {
     /// ([`Self::answer_a_leg_new_dialog`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_provisional_to_leg(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -447,7 +447,7 @@ impl ActionExecutor<'_> {
     /// under A1 by the layer; after it, 200 under A2 and no 487 (RFC 3261 §9.2).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn answer_a_leg_new_dialog(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         status: u16,
@@ -468,7 +468,7 @@ impl ActionExecutor<'_> {
         // A2: the caller-supplied tag verbatim, else a freshly minted one.
         // Minting via the IdGen guarantees A2 ≠ A1 (distinct from the pinned
         // early-media tag), the RFC 3264 §5.1 requirement.
-        let a2 = to_tag.map(str::to_string).unwrap_or_else(|| self.id_gen.new_tag());
+        let a2 = to_tag.map(str::to_string).unwrap_or_else(|| self.turn.ids.new_tag());
         // SDP answer defaults to application/sdp (mirrors the provisional path).
         let content_type = content_type
             .and_then(relay::media_type)

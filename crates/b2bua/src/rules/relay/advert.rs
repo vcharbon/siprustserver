@@ -79,11 +79,11 @@ pub(crate) mod advertisement_tests {
     use crate::config::B2buaConfig;
     use crate::effects::OutboundBody;
     use crate::rules::relay::{build_b_leg, CallMarks};
+    use sip_ids::TurnIds;
     use sip_message::generators;
     use sip_message::header::{self, Allow, HeaderValue, Supported, Via};
     use sip_message::parser::custom::CustomParser;
     use sip_message::{SipMessage, SipParser, SipRequest};
-    use sip_txn::IdGen;
 
     fn a_leg_invite() -> SipRequest {
         a_leg_invite_carrying(&[])
@@ -132,7 +132,7 @@ CSeq: 314 INVITE\r\n"
             None,
             None,
             &B2buaConfig::default(),
-            &IdGen::seeded(0xCAB),
+            &mut TurnIds::fixed(0xCAB),
             None,
             header_updates,
             capabilities,
@@ -379,7 +379,7 @@ Content-Length: 0\r\n\r\n";
             None,
             None,
             &B2buaConfig::default(),
-            &IdGen::seeded(0xCAB),
+            &mut TurnIds::fixed(0xCAB),
             None,
             &[],
             &caps,
@@ -411,7 +411,7 @@ Content-Length: 0\r\n\r\n";
             None,
             None,
             &B2buaConfig::default(),
-            &IdGen::seeded(0xCAB),
+            &mut TurnIds::fixed(0xCAB),
             None,
             &[],
             &caps,

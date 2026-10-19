@@ -29,7 +29,7 @@ impl ActionExecutor<'_> {
     /// dialog carried the offer, its PRACK answered it and the ACK is bare
     /// (RFC 3262 §5).
     pub(super) fn release_straggler(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -81,7 +81,7 @@ impl ActionExecutor<'_> {
         let ack_branch = released
             .as_ref()
             .map(|r| r.ack_branch.clone())
-            .unwrap_or_else(|| self.id_gen.new_branch());
+            .unwrap_or_else(|| self.turn.ids.new_branch());
         let dialog = relay::to_gen_dialog(leg, &straggler);
         let opts = GenerateAckFor2xxOpts {
             via: Some(relay::leg_via(self.config, marks, leg_id, ack_branch.clone())),

@@ -24,7 +24,7 @@ impl ActionExecutor<'_> {
     /// Apply one action; `Break` ends the rule's list (a `CreateLeg` whose
     /// leg is refused).
     pub(super) fn step(
-        &self,
+        &mut self,
         action: &RuleAction,
         ctx: &RuleContext,
         call: &mut Call,
@@ -65,7 +65,7 @@ impl ActionExecutor<'_> {
     }
 
     pub(super) fn apply(
-        &self,
+        &mut self,
         action: &RuleAction,
         ctx: &RuleContext,
         call: &mut Call,
@@ -438,7 +438,7 @@ impl ActionExecutor<'_> {
     /// a-leg; ACK → ack the target leg; other in-dialog request → regenerate on
     /// `target_dialog`, the dialog of the target leg it rides).
     pub(super) fn relay_to(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,

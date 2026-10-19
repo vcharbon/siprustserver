@@ -130,7 +130,7 @@ async fn mark_takeover_flags_the_copy_for_self_release() {
         &invite("w0", "w1", "cid-a"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r0 = c0.call_ref.clone();
@@ -156,7 +156,7 @@ async fn a_takeover_copy_running_on_an_unheld_set_counts_as_uncounted() {
         &invite("w0", "w1", "cid-runs-on"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let entry = |id: &str| call::LimiterEntry { id: id.into(), limit: 1 };
@@ -192,7 +192,7 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
         &invite("w0", "w1", "cid-h"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -265,7 +265,7 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         &invite("w0", "w1", "cid-skew"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -296,7 +296,7 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         &invite("w0", "w1", "cid-skew-b"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let rb = call_b.call_ref.clone();
@@ -310,7 +310,7 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         &invite("w0", "w1", "cid-local"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     put(&repl_local, PRI, "w0", &call_l).await;
@@ -340,7 +340,7 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
         &invite("w0", "w1", "cid-ended"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     ended.state = CallModelState::Terminated;
@@ -364,7 +364,7 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
         &invite("w1", "w0", "cid-own"),
         src(),
         &config_for("w1"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     assert_eq!(state.peek_replica(&own.call_ref).await.err(), Some(ReplicaMiss::WrongRole));
@@ -384,7 +384,7 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
         &invite("w0", "w1", "cid-r"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -455,7 +455,7 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
         &invite("w0", "w1", "cid-long"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -523,7 +523,7 @@ async fn reboot_primary_481s_bye_when_pri_body_was_never_pulled() {
         &invite("w0", "w1", "cid-long2"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -572,7 +572,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
         &invite("w0", "w1", "cid-bak"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -637,7 +637,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
             &invite("w0", "w1", &format!("rec-{i}")),
             src(),
             &config_for("w0"),
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         put(&repl, PRI, "w0", &call).await;
@@ -669,7 +669,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
                     &invite("w0", "w1", &format!("churn-{w}-{j}")),
                     src(),
                     &config_for("w0"),
-                    &sip_txn::IdGen::seeded(1),
+                    &mut sip_ids::TurnIds::fixed(1),
                     0,
                 );
                 let cr = call.call_ref.clone();
@@ -728,7 +728,7 @@ async fn a_scan_beats_once_per_body_read() {
             &invite("w0", "w1", &format!("beat-{i}")),
             src(),
             &config_for("w0"),
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         put(&repl, PRI, "w0", &call).await;

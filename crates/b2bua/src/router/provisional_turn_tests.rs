@@ -10,14 +10,15 @@ use call::{
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
-use super::process::rule_chain_turn;
 use super::resolve::Resolution;
+use super::rule_chain::rule_chain_turn;
 use super::test_support::{invite, node, src};
 use crate::config::B2buaConfig;
 use crate::effects::{HandlerResult, OutboundBody};
 use crate::initial_invite::build_initial_call;
 use crate::rules::actions::{Owed, Settle};
 use crate::rules::ActionExecutor;
+use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
 /// A call whose caller is `answered` or still ringing, with a callee leg `b-1`
@@ -28,7 +29,7 @@ fn call_with_a_ringing_callee(answered: bool) -> Call {
         &invite("w0", "w1", "provisional-turn"),
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     if answered {
@@ -80,7 +81,9 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         indexed: None,
     };
     let call_ref = call.call_ref.clone();
-    rule_chain_turn(node.core.router_ctx(), call, event, &res, Default::default(), &call_ref, 1_000)
+    let mut scope = super::test_support::turn(1);
+    let ctx = node.core.router_ctx();
+    rule_chain_turn(ctx, call, event, &res, Default::default(), &call_ref, 1_000, &mut scope)
 }
 
 /// The PRACKs `result` sends toward `b-1`, as their `RAck`.
@@ -150,10 +153,10 @@ fn an_owed_prack_on_a_dialog_the_leg_lacks_is_a_defect() {
     owed.responder = ResponderAck::Pending;
     call.provisionals.push(owed);
     let config = B2buaConfig::default();
-    let id_gen = sip_txn::IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut scope = TurnScope::of(sip_ids::TurnIds::fixed(1));
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut scope,
         now_ms: 0,
         wire_faults: &crate::wire_faults::WireFaults::none(),
     };
@@ -174,10 +177,10 @@ fn an_unbuilt_prack_records_nothing() {
     owed.responder = ResponderAck::Pending;
     call.provisionals.push(owed);
     let config = B2buaConfig::default();
-    let id_gen = sip_txn::IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut scope = TurnScope::of(sip_ids::TurnIds::fixed(1));
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut scope,
         now_ms: 0,
         wire_faults: &crate::wire_faults::WireFaults::none(),
     };

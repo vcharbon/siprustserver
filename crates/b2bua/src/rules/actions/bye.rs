@@ -24,7 +24,7 @@ impl ActionExecutor<'_> {
     /// 2xx still unACKed is ACKed bare (§13.2.2.4), then the BYE — held while
     /// this stack's NOTIFY on the dialog awaits its final.
     pub(super) fn send_bye(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -54,7 +54,7 @@ impl ActionExecutor<'_> {
     /// Send `bye`, a BYE held behind this stack's NOTIFY on `leg_id`'s dialog
     /// `id`, composed now.
     pub(super) fn send_held_bye(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -77,7 +77,7 @@ impl ActionExecutor<'_> {
     /// dialog's next CSeq (§12.2.1.1).
     #[allow(clippy::too_many_arguments)]
     fn bye_now(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -96,7 +96,7 @@ impl ActionExecutor<'_> {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn bye_on_dialog(
-        &self,
+        &mut self,
         marks: relay::CallMarks,
         leg: &Leg,
         d: &Dialog,
@@ -106,7 +106,7 @@ impl ActionExecutor<'_> {
     ) -> Option<OutboundSipEffect> {
         let leg_id = leg.leg_id.as_str();
         let dialog = relay::to_gen_dialog(leg, d);
-        let branch = self.id_gen.new_branch();
+        let branch = self.turn.ids.new_branch();
         let mut extra_headers: Vec<SipHeader> = reason
             .map(|r| {
                 vec![SipHeader { name: "Reason".to_string().into(), value: r.to_string().into() }]

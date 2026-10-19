@@ -61,7 +61,8 @@ fn invite(cid: &str) -> SipRequest {
 /// one limiter entry under it. `Terminated` is a call ended unanswered.
 fn nth(cid: &str, n: u32, state: CallModelState) -> Call {
     let config = B2buaConfig { self_ordinal: "A".into(), ..Default::default() };
-    let mut call = build_initial_call(&invite(cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let mut call =
+        build_initial_call(&invite(cid), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0);
     let key = format!("{}#n{n}", call.call_ref);
     call.limiter =
         CallLimiterState::admitted(key, 1, vec![LimiterEntry { id: "x".into(), limit: 10 }]);

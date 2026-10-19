@@ -24,7 +24,7 @@ fn base(p: i64, b: i64) -> Call {
         &invite("w0", "w1", "fold"),
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     call.topology = Some(CallTopology::new("w0", "w1", p, b));

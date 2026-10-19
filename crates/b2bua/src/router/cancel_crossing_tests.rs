@@ -13,8 +13,8 @@ use call::{
 };
 use sip_retransmit::Class;
 
-use super::process::rule_chain_turn;
 use super::resolve::Resolution;
+use super::rule_chain::rule_chain_turn;
 use super::test_support::{invite, node, src};
 use crate::config::B2buaConfig;
 use crate::effects::OutboundBody;
@@ -31,7 +31,7 @@ fn relayed_answer_call() -> Call {
         &invite("w0", "w1", "cancel-crossing"),
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let mut a1 = Dialog::new("a1", call.a_leg_invite.from_tag.clone(), DialogState::Confirmed, 1);
@@ -93,6 +93,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         Default::default(),
         &call_ref,
         1_000,
+        &mut super::test_support::turn(1),
     );
 
     let requests_to = |leg: &str| -> Vec<String> {

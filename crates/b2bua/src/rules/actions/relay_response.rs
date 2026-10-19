@@ -35,7 +35,7 @@ impl ActionExecutor<'_> {
     ///     transaction, establishing the b-leg early dialog + the caller-facing
     ///     dialog fronting it on a reliable 1xx so a later PRACK can target the callee.
     pub(super) fn relay_response(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -525,7 +525,7 @@ impl ActionExecutor<'_> {
     /// relay path resolves the a-facing tag from the fronting dialog
     /// (`fronting_dialog`).
     pub(super) fn relay_first_bare_180(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,

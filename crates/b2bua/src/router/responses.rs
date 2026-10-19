@@ -5,6 +5,7 @@
 //! ladder's ([`crate::admission::Refusals`]). A request whose lines no
 //! response can echo draws none: each builder returns why.
 
+use sip_ids::TurnIds;
 use sip_message::generators::{
     generate_response, CapabilitySet, GenerateError, GenerateResponseOpts,
 };
@@ -13,7 +14,7 @@ use sip_message::worker_report::{
     incarnation_value, Readiness as WorkerReadiness, X_INCARNATION, X_READINESS,
 };
 use sip_message::{SipRequest, SipResponse};
-use sip_txn::{IdGen, StatelessTagger};
+use sip_txn::StatelessTagger;
 
 use crate::overload::OverloadSignal;
 use crate::repl::{OptionsReport, Readiness};
@@ -91,12 +92,12 @@ pub(super) fn build_retry_later_500(
 /// §8.2.2.2), under a fresh To-tag (§8.2.6.2), carrying the deployment's
 /// `advertisement` for a minted final.
 pub(super) fn build_merged_482(
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     req: &SipRequest,
     advertisement: &CapabilitySet,
 ) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts {
-        to_tag: Some(id_gen.new_tag()),
+        to_tag: Some(ids.new_tag()),
         extra_headers: minted_final_lines(advertisement),
         ..Default::default()
     };
@@ -194,7 +195,7 @@ pub(crate) fn build_options_health_response(
 /// the fault is observable via `b2bua_store_fault_rejected_total`. The
 /// deployment's `advertisement` for a minted final rides.
 pub(super) fn build_store_fault_500(
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     req: &sip_message::SipRequest,
     advertisement: &CapabilitySet,
 ) -> Result<SipResponse, GenerateError> {
@@ -203,7 +204,7 @@ pub(super) fn build_store_fault_500(
         500,
         "Server Internal Error",
         &GenerateResponseOpts {
-            to_tag: Some(id_gen.new_tag()),
+            to_tag: Some(ids.new_tag()),
             extra_headers: minted_final_lines(advertisement),
             ..Default::default()
         },
@@ -239,10 +240,10 @@ Content-Length: 0\r\n\r\n";
     /// worker's own name: each carries the deployment's advertisement.
     #[test]
     fn the_stateless_minted_finals_carry_the_advertisement() {
-        let id_gen = IdGen::seeded(1);
+        let mut ids = TurnIds::new(&sip_ids::IdKey::new(&[1u8; 32]), 0);
         for resp in [
-            build_merged_482(&id_gen, &invite(), &policy()).unwrap(),
-            build_store_fault_500(&id_gen, &invite(), &policy()).unwrap(),
+            build_merged_482(&mut ids, &invite(), &policy()).unwrap(),
+            build_store_fault_500(&mut ids, &invite(), &policy()).unwrap(),
         ] {
             let accept: Vec<&str> = resp.raw(HeaderName::Accept).collect();
             assert_eq!(accept, ["application/sdp"], "{}", resp.status());

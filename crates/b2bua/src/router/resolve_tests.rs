@@ -29,8 +29,13 @@ const BOB_TAG: &str = "bob-tag";
 /// with bob.
 fn answered_call(pri: &str, bak: &str, cid: &str) -> Call {
     let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
-    let call =
-        build_initial_call(&invite(pri, bak, cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let call = build_initial_call(
+        &invite(pri, bak, cid),
+        src(),
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    );
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = B_CALL_ID.into();

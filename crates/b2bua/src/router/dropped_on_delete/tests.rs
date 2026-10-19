@@ -15,7 +15,13 @@ use crate::store::{CallStore, PartitionRole, PutOpts};
 /// A ringing call `primary` owns and `backup` backs up.
 fn ringing(primary: &str, backup: &str, cid: &str) -> Call {
     let config = B2buaConfig { self_ordinal: primary.into(), ..Default::default() };
-    build_initial_call(&invite(primary, backup, cid), src(), &config, &sip_txn::IdGen::seeded(1), 0)
+    build_initial_call(
+        &invite(primary, backup, cid),
+        src(),
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    )
 }
 
 /// `call`, stored in `role` of `primary`'s partition and materialised from

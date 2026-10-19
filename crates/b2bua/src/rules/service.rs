@@ -45,7 +45,7 @@ pub fn compose_rules(services: &[ServiceDef], core: Vec<RuleDefinition>) -> Vec<
 pub fn seed_services(
     mut result: HandlerResult,
     services: &[ServiceDef],
-    exec: &ActionExecutor,
+    exec: &mut ActionExecutor,
     setup_event: &CallEvent,
     source_leg_id: &str,
     direction: call::Direction,

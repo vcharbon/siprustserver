@@ -116,7 +116,7 @@ fn call_with_caller_dialog(shown: bool) -> Call {
         &invite("w0", "w1", "gate"),
         src(),
         &B2buaConfig::default(),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let mut d = dialog(DialogState::Early);

@@ -41,7 +41,7 @@ impl ActionExecutor<'_> {
     /// txn layer neither retransmits the 2xx nor reports the missing ACK: this
     /// ladder is the one that does.
     pub(super) fn retain_a_leg_answer(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         effect: &mut OutboundSipEffect,
@@ -64,7 +64,7 @@ impl ActionExecutor<'_> {
     /// *Accepted* for `reinvite-glare`, for exactly as long as the ladder's
     /// give-up stands.
     pub(super) fn retain_reinvite_2xx(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         resp: &mut SipResponse,
@@ -88,7 +88,7 @@ impl ActionExecutor<'_> {
     /// leaves un-ACKed is repeated, and the deadline that ends its session is
     /// in the ledger for as long as the retained marker is.
     fn arm_ack_ladder(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         obligation: Obligation,
@@ -118,7 +118,7 @@ impl ActionExecutor<'_> {
     /// responder's, and reaches the PRACKing party as the INVITE's final.
     /// Idempotent: a recalled number keeps the ladder it already anchors.
     pub(super) fn arm_reliable_provisional_ladder(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         effect: &mut OutboundSipEffect,
@@ -160,7 +160,7 @@ impl ActionExecutor<'_> {
     /// ([`QuietTurn::OwnRung`](crate::effects::QuietTurn::OwnRung)); a cease or
     /// a spent fire cancels a ledger entry, and the router reads that as the
     /// write it is.
-    pub fn repeat(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
+    pub fn repeat(&mut self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
         let rung = TimerKey::obligation(TimerType::Rung, obligation.clone());
         let effect = (call.state == CallModelState::Active)
             .then(|| repeat_toward(call, obligation))
@@ -197,7 +197,7 @@ impl ActionExecutor<'_> {
     /// retained until the rules have read it
     /// ([`settle_give_up`](Self::settle_give_up)) — it is also what tells the
     /// call's own answer from a re-INVITE's.
-    pub fn give_up(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
+    pub fn give_up(&mut self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
         self.scrub_timers(call, fx, obligation);
     }
 
@@ -208,7 +208,7 @@ impl ActionExecutor<'_> {
     /// here with the CORE verdict, and the retained 2xx leaves the body either
     /// way (its RFC 6026 *Accepted* interval ended with the ladder).
     pub fn settle_give_up(
-        &self,
+        &mut self,
         result: HandlerResult,
         obligation: &Obligation,
         turn: &RuleContext,
@@ -249,7 +249,7 @@ impl ActionExecutor<'_> {
     /// nothing awaited was named — a retransmitted ACK, a PRACK of an
     /// acknowledged provisional, any other request.
     pub fn discharge(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         event: &CallEvent,
@@ -289,7 +289,7 @@ impl ActionExecutor<'_> {
     /// a retirement never leaves the bound running under a ladder that is
     /// gone.
     pub(super) fn scrub_timers(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         obligation: &Obligation,
@@ -301,7 +301,7 @@ impl ActionExecutor<'_> {
     /// Timer L (64·T1), where RFC 3261 ceases whatever local policy says, or
     /// the deployment's ACK deadline where that comes sooner (a rung after the
     /// teardown would repeat into a dead call). Protocol, not policy.
-    fn ack_ladder_bound(&self) -> Duration {
+    fn ack_ladder_bound(&mut self) -> Duration {
         self.ack_give_up_deadline().min(Schedule::rfc(Class::Final2xx).give_up_after())
     }
 

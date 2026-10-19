@@ -21,7 +21,7 @@ fn call(ring: Deadline, state: LegState) -> Call {
         &invite,
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let mut leg = dialled_leg("b-1", "own");

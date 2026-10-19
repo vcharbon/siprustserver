@@ -65,8 +65,13 @@ fn relay(method: &str, outbound_cseq: i64) -> PendingRequest {
 fn call_holding(relays: Vec<PendingRequest>) -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let invite = test_support::invite("w0", "w1", "acid@alice");
-    let call =
-        build_initial_call(&invite, test_support::src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let call = build_initial_call(
+        &invite,
+        test_support::src(),
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    );
     let mut leg = call::testkit::dialled_leg("b-1", "svc");
     call::testkit::stage_leg(&mut leg, LegState::Confirmed);
     leg.dialogs.confirmed_mut().expect("confirmed").inbound_pending_requests = relays;

@@ -21,7 +21,7 @@ impl ActionExecutor<'_> {
     /// (§13.2.2.4); a non-2xx is ACKed hop by hop on its own branch, the ACK
     /// retained for a repeat as well (§17.1.1.2, §17.1.1.3).
     pub(super) fn ack_lost_round(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,

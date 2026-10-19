@@ -9,14 +9,16 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sip_ids::{render, IdKey};
+use sip_ids::{render, IdKey, TurnIds};
 
 /// A keyed identifier generator. Cheap to share behind an `Arc`; the counter
-/// advances atomically so concurrent callers never draw the same value.
+/// advances atomically so concurrent callers never draw the same value, and
+/// the turn counter hands each turn its own number under the same key.
 #[derive(Debug)]
 pub struct IdGen {
     key: IdKey,
     counter: AtomicU64,
+    turns: AtomicU64,
 }
 
 impl IdGen {
@@ -38,7 +40,16 @@ impl IdGen {
     }
 
     fn keyed(key: IdKey) -> Self {
-        Self { key, counter: AtomicU64::new(0) }
+        Self { key, counter: AtomicU64::new(0), turns: AtomicU64::new(0) }
+    }
+
+    /// The draws of the next turn under this generator's key: a number no
+    /// other turn of the process holds, so no two turns, and no turn and the
+    /// counter stream, draw the same identifier. A number per call would not
+    /// do: a call reclaimed or materialised again under the same key restarts
+    /// it.
+    pub fn turn(&self) -> TurnIds {
+        TurnIds::new(&self.key, self.turns.fetch_add(1, Ordering::Relaxed))
     }
 
     /// The next draw of the key's counter stream.
@@ -190,5 +201,16 @@ mod tests {
         let t = IdGen::seeded(1).new_tag();
         assert_eq!(t.len(), 8);
         assert!(t.bytes().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    /// Each turn of a process draws under its own number, so two turns never
+    /// mint the same identifier, and neither repeats the counter stream's.
+    #[test]
+    fn two_turns_draw_apart_from_each_other_and_the_counter() {
+        let g = IdGen::seeded(1);
+        let (mut first, mut second) = (g.turn(), g.turn());
+        assert_eq!((first.turn_seq(), second.turn_seq()), (0, 1));
+        let tags = [first.new_tag(), second.new_tag(), g.new_tag()];
+        assert!(tags[0] != tags[1] && tags[1] != tags[2] && tags[0] != tags[2], "{tags:?}");
     }
 }

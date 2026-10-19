@@ -160,7 +160,7 @@ fn call_with(a_state: LegState, b: Leg) -> Call {
         &a_invite(),
         "10.0.0.1:5060".parse().unwrap(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     call.a_leg.invite_final_sent = match a_state {

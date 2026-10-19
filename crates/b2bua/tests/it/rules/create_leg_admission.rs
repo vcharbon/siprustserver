@@ -46,10 +46,10 @@ fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult 
         src: "127.0.0.1:5060".parse().unwrap(),
         matched_client_txn: false,
     };
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = scope(1);
+    let mut exec = ActionExecutor {
         config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 1_700_000_000_000,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };

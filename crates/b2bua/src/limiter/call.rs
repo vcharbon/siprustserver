@@ -147,7 +147,7 @@ mod tests {
             &invite("w0", "w1", "refresh"),
             src(),
             &config,
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         call.state = CallModelState::Active;

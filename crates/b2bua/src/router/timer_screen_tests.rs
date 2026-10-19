@@ -14,7 +14,7 @@ fn call() -> Call {
         &invite,
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     )
 }

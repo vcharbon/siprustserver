@@ -14,11 +14,11 @@ use call::{
     DecisionKind, Leg, LegKind, RemoteInfo, TerminationCause,
 };
 use sip_clock::Clock;
+use sip_ids::TurnIds;
 use sip_message::emergency::is_emergency_request;
 use sip_message::generators::CapabilitySet;
 use sip_message::header::{HeaderClass, HeaderName};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
-use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use b2bua_sdk::reason_phrase::default_reason;
@@ -33,6 +33,7 @@ use crate::effects::{HandlerEffects, HandlerResult};
 use crate::limiter::LimiterWorker;
 use crate::rules::{relay, seed_services, ActionExecutor, ServiceDef};
 use crate::trace;
+use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
 /// Headers sent as top-level decision-request fields (excluded from
@@ -54,12 +55,13 @@ pub(crate) const STANDARD_HEADERS: &[HeaderName] = &[
     HeaderName::ContentLength,
 ];
 
-/// Build the initial [`Call`] (a-leg only) from an inbound INVITE. Pure.
+/// Build the initial [`Call`] (a-leg only) from an inbound INVITE, its
+/// incarnation mark drawn from `ids`. Pure.
 pub fn build_initial_call(
     invite: &SipRequest,
     src: SocketAddr,
     config: &B2buaConfig,
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     now_ms: i64,
 ) -> Call {
     let call_ref = call::derive_call_ref(
@@ -70,8 +72,7 @@ pub fn build_initial_call(
     // The limiter key is the call's incarnation: the call_ref plus a mark,
     // unique over time where the call_ref is not (a retried INVITE reuses its
     // Call-ID and From tag).
-    let limiter =
-        CallLimiterState::uncounted(call::derive_incarnation(&call_ref, &id_gen.new_tag()));
+    let limiter = CallLimiterState::uncounted(call::derive_incarnation(&call_ref, &ids.new_tag()));
     let (local_addr, remote_addr) = relay::uas_addresses(invite);
     let a_leg = Leg {
         leg_id: "a".to_string(),
@@ -186,7 +187,7 @@ pub async fn handle_initial_invite(
     decision: &dyn CallDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
-    id_gen: &IdGen,
+    turn: &mut TurnScope,
     wire_faults: &crate::wire_faults::WireFaults,
     services: &[ServiceDef],
     invite_wire: &[u8],
@@ -232,15 +233,15 @@ pub async fn handle_initial_invite(
                 decision,
                 limiter,
                 config,
-                id_gen,
+                &mut turn.ids,
                 clock,
                 now_ms,
                 0,
             )
             .await;
-            let exec = ActionExecutor { config, id_gen, now_ms, wire_faults };
+            let mut exec = ActionExecutor { config, turn, now_ms, wire_faults };
             let setup_event = setup_event(&result.call, &a_invite);
-            seed_services(result, services, &exec, &setup_event, "a", call::Direction::FromA)
+            seed_services(result, services, &mut exec, &setup_event, "a", call::Direction::FromA)
         }
         Ok(NewCallResponse::Reject(reject)) => apply_reject(
             call,
@@ -249,7 +250,7 @@ pub async fn handle_initial_invite(
             Some("a".into()),
             &a_invite,
             &config.minted_final_advertisement,
-            id_gen,
+            &mut turn.ids,
             now_ms,
         ),
         Ok(NewCallResponse::Redirect(rd)) => apply_redirect(
@@ -259,7 +260,7 @@ pub async fn handle_initial_invite(
             Some("a".into()),
             &a_invite,
             &config.minted_final_advertisement,
-            id_gen,
+            &mut turn.ids,
             now_ms,
         ),
         // `Relay` is a failover-only treatment; with no captured downstream
@@ -274,7 +275,7 @@ pub async fn handle_initial_invite(
                 None,
                 &[],
                 &config.minted_final_advertisement,
-                id_gen,
+                &mut turn.ids,
                 now_ms,
                 TerminationCause::DecisionReject,
             )
@@ -289,7 +290,7 @@ pub async fn handle_initial_invite(
             update_headers.as_ref(),
             &[],
             &config.minted_final_advertisement,
-            id_gen,
+            &mut turn.ids,
             now_ms,
             TerminationCause::Admission,
         ),
@@ -301,7 +302,7 @@ pub async fn handle_initial_invite(
             None,
             &[],
             &config.minted_final_advertisement,
-            id_gen,
+            &mut turn.ids,
             now_ms,
             TerminationCause::Admission,
         ),
@@ -342,7 +343,7 @@ pub(crate) fn reject_call(
     update_headers: Option<&SipHeaderUpdates>,
     contacts: &[RedirectContact],
     advertisement: &CapabilitySet,
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
@@ -367,7 +368,7 @@ pub(crate) fn reject_call(
                 update_headers,
                 &[],
                 advertisement,
-                id_gen,
+                ids,
                 now_ms,
                 TerminationCause::Admission,
             );
@@ -390,7 +391,7 @@ pub(crate) fn reject_call(
         a_invite,
         status,
         &reason,
-        Some(id_gen.new_tag()),
+        Some(ids.new_tag()),
         None,
         vec![],
         None,

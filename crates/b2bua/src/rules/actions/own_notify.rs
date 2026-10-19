@@ -50,14 +50,14 @@ impl ActionExecutor<'_> {
     /// Whether a NOTIFY or BYE of this stack asked for now on `leg_id`'s
     /// dialog `id` waits: a NOTIFY of this stack there awaits its final, its
     /// wait not ended, or requests already wait behind it.
-    pub(super) fn held_behind_notify(&self, call: &Call, leg_id: &str, id: &DialogId) -> bool {
+    pub(super) fn held_behind_notify(&mut self, call: &Call, leg_id: &str, id: &DialogId) -> bool {
         own_notify(call, leg_id, id)
             .is_some_and(|n| !n.held.is_empty() || self.now_ms < n.cap_at_ms())
     }
 
     /// Hold `request` behind the NOTIFY on `leg_id`'s dialog `id`.
     pub(super) fn hold(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -72,7 +72,7 @@ impl ActionExecutor<'_> {
 
     /// The NOTIFY numbered `cseq` left on `leg_id`'s dialog `id`: what this
     /// stack asks for there next waits for its final.
-    pub(super) fn notify_left(&self, call: &mut Call, leg_id: &str, id: &DialogId, cseq: i64) {
+    pub(super) fn notify_left(&mut self, call: &mut Call, leg_id: &str, id: &DialogId, cseq: i64) {
         let left = OwnNotify { cseq, sent_at_ms: self.now_ms, held: Vec::new() };
         set_own_notify(call, leg_id, id, Some(left));
     }
@@ -80,7 +80,7 @@ impl ActionExecutor<'_> {
     /// `resp`, received from `leg_id`, is the final to this stack's NOTIFY
     /// awaiting one there: the requests held behind it leave.
     pub(crate) fn release_answered_notify(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
@@ -101,7 +101,7 @@ impl ActionExecutor<'_> {
 
     /// The [`TimerType::NotifyAnswerCap`] fired: the requests whose wait ended
     /// leave as if the NOTIFY ahead of them had been answered.
-    pub(crate) fn release_at_cap(&self, call: &mut Call, fx: &mut HandlerEffects) {
+    pub(crate) fn release_at_cap(&mut self, call: &mut Call, fx: &mut HandlerEffects) {
         for (leg_id, id, cap_at) in waits(call) {
             if cap_at <= self.now_ms {
                 self.release_held(call, fx, &leg_id, &id);
@@ -112,7 +112,7 @@ impl ActionExecutor<'_> {
 
     /// The cap stands at the earliest end of a wait, and is off while nothing
     /// is held.
-    fn arm_answer_cap(&self, call: &mut Call, fx: &mut HandlerEffects) {
+    fn arm_answer_cap(&mut self, call: &mut Call, fx: &mut HandlerEffects) {
         match waits(call).into_iter().map(|(_, _, cap_at)| cap_at).min() {
             Some(cap_at) => self.schedule(call, fx, cap_key(), (cap_at - self.now_ms).max(0)),
             None => self.disarm(call, fx, &cap_key()),
@@ -124,7 +124,13 @@ impl ActionExecutor<'_> {
     /// final with the rest held behind it. A BYE held on a dialog that ended is
     /// dropped; a NOTIFY still leaves, its subscription outliving the dialog's
     /// INVITE usage (RFC 5057 §5.2).
-    fn release_held(&self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str, id: &DialogId) {
+    fn release_held(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        id: &DialogId,
+    ) {
         let Some(done) = own_notify(call, leg_id, id).cloned() else { return };
         set_own_notify(call, leg_id, id, None);
         let ended = find_leg(call, leg_id)

@@ -118,7 +118,7 @@ mod tests {
             &invite("w0", "w1", "sweep"),
             src(),
             &config,
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         terminal.state = CallModelState::Terminated;
@@ -251,7 +251,7 @@ mod tests {
             &invite("w0", "w1", cid),
             src(),
             &config,
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         terminal.state = CallModelState::Terminated;

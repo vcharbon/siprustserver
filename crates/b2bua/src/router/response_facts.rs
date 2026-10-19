@@ -19,7 +19,7 @@ use crate::rules::ActionExecutor;
 /// it created (§12.1), the PRACKs its responders are owed leaving first (RFC
 /// 3262 §4).
 pub(super) fn record(
-    exec: &ActionExecutor,
+    exec: &mut ActionExecutor,
     call: &mut Call,
     fx: &mut HandlerEffects,
     leg: &str,

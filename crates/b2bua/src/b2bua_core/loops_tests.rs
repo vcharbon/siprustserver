@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use call::{CallBodyCodec, MsgpackCodec};
-use sip_txn::IdGen;
+use sip_ids::TurnIds;
 
 use super::unwired_tests::unwired_core;
 use crate::config::B2buaConfig;
@@ -40,7 +40,8 @@ async fn a_crashed_cores_loops_read_ended_within_one_poll() {
 /// what a reboot reclaims.
 async fn seeded(n: &Node, cid: &str) -> String {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let call = build_initial_call(&invite("w0", "w1", cid), src(), &config, &IdGen::seeded(1), 0);
+    let call =
+        build_initial_call(&invite("w0", "w1", cid), src(), &config, &mut TurnIds::fixed(1), 0);
     let body = MsgpackCodec::new().encode(&call).unwrap();
     n.store
         .put_call(

@@ -50,6 +50,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 b2bua = { path = "../b2bua", features = ["testkit"] }
+# The fixed-key turn a test call is built under.
+sip-ids = { path = "../sip-ids", features = ["testkit"] }
 sip-message = { path = "../sip-message" }
 sip-net-testkit = { path = "../sip-net-testkit" }
 http-net-testkit = { path = "../http-net-testkit" }

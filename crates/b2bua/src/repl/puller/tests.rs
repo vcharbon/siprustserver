@@ -734,9 +734,9 @@ fn body_at(final_sent: Option<u16>, state: call::CallModelState) -> Arc<[u8]> {
     use call::CallBodyCodec;
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let invite = crate::router::test_support::invite("w0", "w1", "split");
-    let id_gen = sip_txn::IdGen::seeded(1);
+    let mut ids = sip_ids::TurnIds::fixed(1);
     let src = crate::router::test_support::src();
-    let mut call = crate::initial_invite::build_initial_call(&invite, src, &config, &id_gen, 0);
+    let mut call = crate::initial_invite::build_initial_call(&invite, src, &config, &mut ids, 0);
     call.a_leg.invite_final_sent = final_sent;
     call.state = state;
     Arc::from(call::MsgpackCodec::new().encode(&call).unwrap())

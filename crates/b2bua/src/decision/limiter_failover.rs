@@ -5,8 +5,8 @@
 use call::helpers::mark_decision;
 use call::{Call, DecisionKind, TerminationCause};
 use sip_clock::Clock;
+use sip_ids::TurnIds;
 use sip_message::SipRequest;
-use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::decision::{
@@ -31,7 +31,7 @@ pub(super) async fn limiter_reject_failover(
     decision: &dyn CallDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     clock: &Clock,
     now_ms: i64,
     depth: u32,
@@ -45,7 +45,7 @@ pub(super) async fn limiter_reject_failover(
             None,
             &[],
             &config.minted_final_advertisement,
-            id_gen,
+            ids,
             now_ms,
             TerminationCause::Admission,
         );
@@ -79,7 +79,7 @@ pub(super) async fn limiter_reject_failover(
                 decision,
                 limiter,
                 config,
-                id_gen,
+                ids,
                 clock,
                 now_ms,
                 depth + 1,
@@ -94,7 +94,7 @@ pub(super) async fn limiter_reject_failover(
             None,
             a_invite,
             &config.minted_final_advertisement,
-            id_gen,
+            ids,
             now_ms,
         ),
         Ok(CallTreatment::Redirect(rd)) => super::apply_reject::apply_redirect(
@@ -104,7 +104,7 @@ pub(super) async fn limiter_reject_failover(
             None,
             a_invite,
             &config.minted_final_advertisement,
-            id_gen,
+            ids,
             now_ms,
         ),
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
@@ -119,7 +119,7 @@ pub(super) async fn limiter_reject_failover(
                 None,
                 &[],
                 &config.minted_final_advertisement,
-                id_gen,
+                ids,
                 now_ms,
                 TerminationCause::DecisionReject,
             )
@@ -135,7 +135,7 @@ pub(super) async fn limiter_reject_failover(
                 update_headers.as_ref(),
                 &[],
                 &config.minted_final_advertisement,
-                id_gen,
+                ids,
                 now_ms,
                 TerminationCause::Admission,
             )
@@ -148,7 +148,7 @@ pub(super) async fn limiter_reject_failover(
             None,
             &[],
             &config.minted_final_advertisement,
-            id_gen,
+            ids,
             now_ms,
             TerminationCause::Admission,
         ),

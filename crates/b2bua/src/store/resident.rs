@@ -74,7 +74,7 @@ mod tests {
         };
         let cfg = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
         let src = SocketAddr::from(([10, 0, 0, 9], 5060));
-        let mut call = build_initial_call(&req, src, &cfg, &sip_txn::IdGen::seeded(1), 0);
+        let mut call = build_initial_call(&req, src, &cfg, &mut sip_ids::TurnIds::fixed(1), 0);
         call.call_ref = call_ref.into();
         call.topology = topology.map(|(pri, bak)| CallTopology::new(pri, bak, 0, 0));
         call

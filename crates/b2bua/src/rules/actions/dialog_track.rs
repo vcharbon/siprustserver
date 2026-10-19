@@ -26,7 +26,7 @@ impl ActionExecutor<'_> {
     /// already be tracked. Idempotent (`track_b_early_dialog` skips a known
     /// tag).
     pub(super) fn ensure_b_early_dialog(
-        &self,
+        &mut self,
         call: &mut Call,
         ctx: &RuleContext,
         leg_id: &str,
@@ -48,7 +48,7 @@ impl ActionExecutor<'_> {
     /// RFC 3262 §7.2). Idempotent per tag; a leg this stack did not dial has
     /// none.
     pub(super) fn track_b_early_dialog(
-        &self,
+        &mut self,
         call: &mut Call,
         source_leg_id: &str,
         resp: &sip_message::SipResponse,
@@ -91,11 +91,11 @@ impl ActionExecutor<'_> {
     /// relay reads the tag off the fronting dialog, `confirm` adopts it.
     /// A dialog already fronted keeps the tag it was shown under; a tagless one
     /// names no dialog (§12.1.2 requires the tag) and is left to the primary.
-    pub(super) fn map_unshown_dialog(&self, call: &mut Call, b_leg_id: &str, b_tag: &str) {
+    pub(super) fn map_unshown_dialog(&mut self, call: &mut Call, b_leg_id: &str, b_tag: &str) {
         if b_tag.is_empty() || fronting_dialog(call, b_leg_id, b_tag).is_some() {
             return;
         }
-        let a_tag = self.id_gen.new_tag();
+        let a_tag = self.turn.ids.new_tag();
         self.map_a_face(call, &a_tag, b_leg_id, b_tag);
     }
 
@@ -107,7 +107,7 @@ impl ActionExecutor<'_> {
     /// response (a 2xx toward her) mints only for a second dialog of the same
     /// leg and gives a fresh leg the primary.
     pub(super) fn a_face_tag(
-        &self,
+        &mut self,
         call: &mut Call,
         b_leg_id: &str,
         b_tag: &str,
@@ -132,7 +132,7 @@ impl ActionExecutor<'_> {
                 fronts.any(|f| f.leg_id == b_leg_id)
             }
         };
-        let a_face = if already_published { self.id_gen.new_tag() } else { primary };
+        let a_face = if already_published { self.turn.ids.new_tag() } else { primary };
         self.map_a_face(call, &a_face, b_leg_id, b_tag);
         a_face
     }
@@ -140,7 +140,7 @@ impl ActionExecutor<'_> {
     /// Ensure the a-leg has a dialog of its own with a stable B2BUA-minted tag
     /// ([`call::Leg::own_tag`]); return that tag (the To-tag presented to alice
     /// on every a-facing response no callee dialog names).
-    pub(super) fn ensure_a_dialog(&self, call: &mut Call) -> String {
+    pub(super) fn ensure_a_dialog(&mut self, call: &mut Call) -> String {
         self.ensure_a_dialog_with(call, None)
     }
 
@@ -150,7 +150,7 @@ impl ActionExecutor<'_> {
     /// whose INVITE took a non-2xx final holds no dialog of it (RFC 3261
     /// §12.1): none is opened then, and the tag returned names none.
     pub(super) fn ensure_a_dialog_with(
-        &self,
+        &mut self,
         call: &mut Call,
         preferred: Option<String>,
     ) -> String {
@@ -162,7 +162,7 @@ impl ActionExecutor<'_> {
         if call.a_leg.invite_final_sent.is_some_and(|status| !(200..300).contains(&status)) {
             return call.a_leg.own_tag.clone().or(preferred).unwrap_or_default();
         }
-        let tag = preferred.unwrap_or_else(|| self.id_gen.new_tag());
+        let tag = preferred.unwrap_or_else(|| self.turn.ids.new_tag());
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let from = a_invite.from();
         let a_leg_id = call.a_leg.leg_id.clone();
@@ -188,7 +188,7 @@ impl ActionExecutor<'_> {
     /// ([`open_early_a_dialog`]), or as the a-leg's own dialog when it holds
     /// none. Nothing is shown once the caller's INVITE has its final, nor for
     /// a callee dialog already fronted.
-    pub(super) fn map_a_face(&self, call: &mut Call, a_tag: &str, b_leg_id: &str, b_tag: &str) {
+    pub(super) fn map_a_face(&mut self, call: &mut Call, a_tag: &str, b_leg_id: &str, b_tag: &str) {
         if call.a_leg.invite_final_sent.is_some()
             || a_tag.is_empty()
             || fronting_dialog(call, b_leg_id, b_tag).is_some()
@@ -214,7 +214,7 @@ impl ActionExecutor<'_> {
     /// one route and names the call on stderr; with no proxy configured
     /// (local/dev, where the transport IS peer-direct) the set stays empty.
     pub(super) fn dialog_route_set(
-        &self,
+        &mut self,
         read: Result<Vec<String>, SipParseError>,
         call_ref: &str,
         leg_id: &str,

@@ -111,12 +111,12 @@ fn the_wider_set_applies_first_and_the_narrower_against_its_result() {
 #[test]
 fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let ids = sip_txn::IdGen::seeded(1);
+    let mut ids = sip_ids::TurnIds::fixed(1);
     let mut call = crate::initial_invite::build_initial_call(
         &invite("w0", "w1", "stamp"),
         src(),
         &config,
-        &ids,
+        &mut ids,
         0,
     );
     let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
@@ -169,12 +169,12 @@ fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
 #[test]
 fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let ids = sip_txn::IdGen::seeded(1);
+    let mut ids = sip_ids::TurnIds::fixed(1);
     let mut call = crate::initial_invite::build_initial_call(
         &invite("w0", "w1", "handle"),
         src(),
         &config,
-        &ids,
+        &mut ids,
         0,
     );
     let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
@@ -187,7 +187,7 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
         None,
         None,
         &config,
-        &ids,
+        &mut ids,
         None,
         &[],
         &sip_message::generators::CapabilitySet::default(),
@@ -226,12 +226,12 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
 #[test]
 fn an_ended_legs_own_set_stays_with_the_call() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let ids = sip_txn::IdGen::seeded(1);
+    let mut ids = sip_ids::TurnIds::fixed(1);
     let mut call = crate::initial_invite::build_initial_call(
         &invite("w0", "w1", "prune"),
         src(),
         &config,
-        &ids,
+        &mut ids,
         0,
     );
     let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
@@ -244,7 +244,7 @@ fn an_ended_legs_own_set_stays_with_the_call() {
         None,
         None,
         &config,
-        &ids,
+        &mut ids,
         None,
         &[],
         &sip_message::generators::CapabilitySet::default(),
@@ -282,12 +282,12 @@ fn an_ended_legs_own_set_stays_with_the_call() {
 #[test]
 fn the_charging_arm_reads_the_legs_own_set() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let ids = sip_txn::IdGen::seeded(1);
+    let mut ids = sip_ids::TurnIds::fixed(1);
     let mut call = crate::initial_invite::build_initial_call(
         &invite("w0", "w1", "arm"),
         src(),
         &config,
-        &ids,
+        &mut ids,
         0,
     );
     let mut stated = StatedHeaders::default();

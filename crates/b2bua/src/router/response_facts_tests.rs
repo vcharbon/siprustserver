@@ -9,8 +9,8 @@ use call::{AttemptCause, Call, Deadline, Direction, Ring, TimerKey, TimerType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
-use super::process::rule_chain_turn;
 use super::resolve::Resolution;
+use super::rule_chain::rule_chain_turn;
 use super::test_support::{invite, node, src};
 use crate::config::B2buaConfig;
 use crate::effects::HandlerResult;
@@ -29,7 +29,7 @@ fn ringing_call() -> Call {
         &invite("w0", "w1", "response-facts"),
         src(),
         &config,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let mut b = call::testkit::dialled_leg("b-1", "svc");
@@ -83,6 +83,7 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         Default::default(),
         &call_ref,
         NOW_MS,
+        &mut super::test_support::turn(1),
     )
 }
 

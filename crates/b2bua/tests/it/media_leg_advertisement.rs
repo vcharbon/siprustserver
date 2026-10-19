@@ -8,15 +8,16 @@ use b2bua::config::B2buaConfig;
 use b2bua::effects::{HandlerResult, OutboundBody};
 use b2bua::initial_invite::build_initial_call;
 use b2bua::rules::{ActionExecutor, RuleAction, RuleCall, RuleContext};
+use b2bua::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 use call::features::{RelayFirst18xStrategy, RelayFirst18xTo180Feature};
 use call::{Direction, LegKind};
+use sip_ids::TurnIds;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
 use sip_message::header::{self, Uri, Via};
 use sip_message::{HeaderName, SipHeader, SipMessage, SipRequest, SipStr};
-use sip_txn::IdGen;
 
 fn uri_of(text: &str) -> Uri {
     Uri::parse(&SipStr::owned(text)).expect("readable URI")
@@ -56,7 +57,7 @@ fn originate(
     strategy: Option<RelayFirst18xStrategy>,
 ) -> HandlerResult {
     let src = "127.0.0.1:5060".parse().unwrap();
-    let mut call = build_initial_call(&invite(), src, config, &IdGen::seeded(1), 0);
+    let mut call = build_initial_call(&invite(), src, config, &mut TurnIds::fixed(1), 0);
     if let Some(strategy) = strategy {
         let features = call.features.get_or_insert_with(b2bua::decision::default_platform_features);
         features.relay_first_18x_to_180 =
@@ -67,10 +68,10 @@ fn originate(
         src,
         matched_client_txn: false,
     };
-    let id_gen = IdGen::seeded(2);
-    let exec = ActionExecutor {
+    let mut id_gen = TurnScope::of(TurnIds::fixed(2));
+    let mut exec = ActionExecutor {
         config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };

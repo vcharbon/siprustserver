@@ -43,7 +43,7 @@ fn call() -> Call {
         &invite,
         "10.0.0.1:5060".parse().unwrap(),
         &B2buaConfig::default(),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let mut a1 = dialog("a1", "atag");

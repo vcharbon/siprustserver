@@ -13,11 +13,11 @@
 //! transaction can be rebuilt for: that ACK is built from the dialog here.
 
 use call::{Dialog, Leg, LegState};
+use sip_ids::TurnIds;
 use sip_message::generators;
 use sip_message::generators::GenerateAckFor2xxOpts;
 use sip_message::header::MediaType;
 use sip_message::SipHeader;
-use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
@@ -41,7 +41,7 @@ pub fn ack_b_leg(
     marks: CallMarks,
     leg: &Leg,
     config: &B2buaConfig,
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     body: Vec<u8>,
     content_type: Option<MediaType>,
     extra_headers: Vec<SipHeader>,
@@ -64,7 +64,7 @@ pub fn ack_b_leg(
     // armed (`confirm_dialog`), else mint one here. `ack_branch` is reset wherever
     // a new INVITE transaction is cached on the dialog, so a `Some(_)` here always
     // belongs to the CSeq echoed just below.
-    let branch = dialog.ack_branch.clone().unwrap_or_else(|| id_gen.new_branch());
+    let branch = dialog.ack_branch.clone().unwrap_or_else(|| ids.new_branch());
     // The ACK reuses the CSeq of the INVITE it acknowledges — not the dialog's
     // running `our_cseq`, which an intervening early PRACK/UPDATE (or a later
     // in-dialog request) has advanced past the INVITE. Recover it from the cached

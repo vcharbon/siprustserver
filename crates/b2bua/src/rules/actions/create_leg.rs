@@ -28,7 +28,7 @@ impl ActionExecutor<'_> {
     /// dialled for an attempt opens it and joins it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn create_leg(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
@@ -88,7 +88,7 @@ impl ActionExecutor<'_> {
             new_from,
             new_to,
             self.config,
-            self.id_gen,
+            &mut self.turn.ids,
             body_override,
             header_updates,
             &advertised,
@@ -150,7 +150,7 @@ impl ActionExecutor<'_> {
 
     /// End the call whose rule asked for a leg that is not created.
     fn refuse_leg(
-        &self,
+        &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,

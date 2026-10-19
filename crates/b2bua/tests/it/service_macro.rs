@@ -15,16 +15,17 @@ use b2bua::rules::{
     execute_rules, pick_ranked, seed_services, ActionExecutor, Match, RuleAction, RuleCall,
     RuleContext, RuleDefinition, RuleHandleResult, ServiceSeed,
 };
+use b2bua::turn_scope::TurnScope;
 use b2bua::{define_service, sm_rule};
 use b2bua_sdk::event::CallEvent;
 use call::{Call, Direction, MachineId, StateLabel};
+use sip_ids::TurnIds;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
 use sip_message::header::{self, Uri, Via};
 use sip_message::SipStr;
 use sip_message::{SipMessage, SipRequest};
-use sip_txn::IdGen;
 
 /// The test-only stub service.
 mod stub {
@@ -108,7 +109,7 @@ fn in_dialog_request(method: sip_message::Method) -> sip_message::SipRequest {
 
 fn test_call() -> Call {
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    build_initial_call(&invite(), src, &B2buaConfig::default(), &sip_txn::IdGen::seeded(1), 0)
+    build_initial_call(&invite(), src, &B2buaConfig::default(), &mut sip_ids::TurnIds::fixed(1), 0)
 }
 
 fn info_event() -> CallEvent {
@@ -140,10 +141,10 @@ fn stub_service_init_seeds_then_rule_advances_then_declines() {
     let cursor = |c: &Call| c.sm_cursors.get(&machine).map(StateLabel::as_str).map(str::to_string);
 
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = TurnScope::of(TurnIds::fixed(1));
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -154,7 +155,7 @@ fn stub_service_init_seeds_then_rule_advances_then_declines() {
     let seeded = seed_services(
         HandlerResult::new(test_call()),
         &services,
-        &exec,
+        &mut exec,
         &event,
         "a",
         Direction::FromA,
@@ -175,7 +176,13 @@ fn stub_service_init_seeds_then_rule_advances_then_declines() {
             Some("stub-advance"),
             "candidate in S0"
         );
-        execute_rules(&rules, &seeded.call, &ctx, &exec, &b2bua::obligations::ObligationSet::core())
+        execute_rules(
+            &rules,
+            &seeded.call,
+            &ctx,
+            &mut exec,
+            &b2bua::obligations::ObligationSet::core(),
+        )
     };
     assert_eq!(cursor(&advanced.call).as_deref(), Some("S1"), "SetState moved cursor to S1");
 
@@ -193,10 +200,10 @@ fn dormant_service_leaves_call_untouched() {
     use b2bua::rules::{compose_rules, default_rules, ServiceDef};
 
     let config = B2buaConfig::default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = TurnScope::of(TurnIds::fixed(1));
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -212,7 +219,7 @@ fn dormant_service_leaves_call_untouched() {
     let after = seed_services(
         HandlerResult::new(before.clone()),
         &services,
-        &exec,
+        &mut exec,
         &event,
         "a",
         Direction::FromA,
@@ -248,10 +255,10 @@ fn a_configured_seed_reads_the_service_parameters() {
 
     let mut config = B2buaConfig::default();
     config.service_params.insert(Marker("from-config"));
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = TurnScope::of(TurnIds::fixed(1));
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
@@ -259,7 +266,7 @@ fn a_configured_seed_reads_the_service_parameters() {
     let seeded = seed_services(
         HandlerResult::new(test_call()),
         &services,
-        &exec,
+        &mut exec,
         &event,
         "a",
         Direction::FromA,

@@ -14,8 +14,8 @@ fn call() -> Call {
     use crate::router::test_support::{invite, src};
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let invite = invite("w0", "w1", "deadline");
-    let ids = sip_txn::IdGen::seeded(1);
-    let mut call = crate::initial_invite::build_initial_call(&invite, src(), &config, &ids, 0);
+    let mut ids = sip_ids::TurnIds::fixed(1);
+    let mut call = crate::initial_invite::build_initial_call(&invite, src(), &config, &mut ids, 0);
     call.limiter = CallLimiterState::admitted("c#k".into(), 1, vec![entry("x")]);
     call
 }

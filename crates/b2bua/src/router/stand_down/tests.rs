@@ -28,7 +28,7 @@ fn covers(primary: &Call, copy: &Call) -> bool {
 /// A ringing call `w0` owns and `w1` backs up: live, its caller unanswered.
 fn ringing(cid: &str) -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    build_initial_call(&invite("w0", "w1", cid), src(), &config, &sip_txn::IdGen::seeded(1), 0)
+    build_initial_call(&invite("w0", "w1", cid), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0)
 }
 
 /// `call` at backup counter `b`.

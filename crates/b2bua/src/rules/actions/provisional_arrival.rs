@@ -22,7 +22,7 @@ impl ActionExecutor<'_> {
     /// in order answering an INVITE still open on that leg is recorded. `None`
     /// for every other event, which the rules read as before.
     pub fn take_reliable_provisional(
-        &self,
+        &mut self,
         call: &mut Call,
         event: &CallEvent,
         source_leg_id: &str,

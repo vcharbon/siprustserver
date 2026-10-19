@@ -18,7 +18,7 @@ use crate::rules::{ActionExecutor, RuleCall, RuleContext};
 /// reason (it must start with "SIP").
 pub(super) fn tear_down_runaway(
     ctx: &RouterCtx,
-    exec: &ActionExecutor,
+    exec: &mut ActionExecutor,
     mut result: HandlerResult,
     turn: &RuleContext<'_>,
 ) -> HandlerResult {

@@ -2,10 +2,10 @@
 //! (ID-1/2/3, HDR-2), the §16.6 relay onto the originated leg, and RFC 7315
 //! charging correlation — every assertion reads the serialized INVITE.
 
+use sip_ids::TurnIds;
 use sip_message::generators::CapabilitySet;
 use sip_message::header::{ChargingVector, HeaderValue};
 use sip_message::{SipHeader as MsgHeader, SipRequest, SipStr};
-use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::effects::OutboundBody;
@@ -57,7 +57,7 @@ Content-Length: 0\r\n\r\n",
     fn b_leg_identity_is_independent_of_a_leg() {
         let a = a_leg_invite();
         let config = B2buaConfig::default(); // sip_local_ip = 127.0.0.1
-        let id_gen = IdGen::seeded(0xB2B);
+        let mut ids = TurnIds::fixed(0xB2B);
 
         let (leg, effect) = build_b_leg(
             CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
@@ -68,7 +68,7 @@ Content-Length: 0\r\n\r\n",
             None, // From URI relayed from a-leg
             None, // To URI relayed from a-leg
             &config,
-            &id_gen,
+            &mut ids,
             None,                      // no body override
             &[],                       // no header updates
             &CapabilitySet::default(), // the stack's own set, stated in full
@@ -145,7 +145,7 @@ Content-Length: 0\r\n\r\n",
             None,
             None,
             &B2buaConfig::default(),
-            &IdGen::seeded(0xE3E),
+            &mut TurnIds::fixed(0xE3E),
             None,
             &[],
             &CapabilitySet::default(),
@@ -236,7 +236,7 @@ Content-Length: 0\r\n\r\n",
             None,
             None,
             &config,
-            &IdGen::seeded(0x4747),
+            &mut TurnIds::fixed(0x4747),
             None,
             &[],
             &CapabilitySet::default(),
@@ -337,7 +337,7 @@ Content-Length: 0\r\n\r\n",
             None,
             None,
             &B2buaConfig::default(),
-            &IdGen::seeded(0x4747),
+            &mut TurnIds::fixed(0x4747),
             None,
             &updates,
             &CapabilitySet::default(),
@@ -375,23 +375,23 @@ mod charging_tests {
         a_leg_invite: &SipRequest,
         charging: Option<&ChargingVectorFeature>,
     ) -> Option<String> {
-        b_leg_vector_from(a_leg_invite, charging, &IdGen::seeded(0xCAB))
+        b_leg_vector_from(a_leg_invite, charging, &mut TurnIds::fixed(0xCAB))
     }
 
     /// The same, on a stated generator — one worker's identifier stream.
     fn b_leg_vector_from(
         a_leg_invite: &SipRequest,
         charging: Option<&ChargingVectorFeature>,
-        id_gen: &IdGen,
+        ids: &mut TurnIds,
     ) -> Option<String> {
-        b_leg_vector_stating(a_leg_invite, charging, id_gen, &[])
+        b_leg_vector_stating(a_leg_invite, charging, ids, &[])
     }
 
     /// The same, the decision stating `header_updates` on the INVITE.
     fn b_leg_vector_stating(
         a_leg_invite: &SipRequest,
         charging: Option<&ChargingVectorFeature>,
-        id_gen: &IdGen,
+        ids: &mut TurnIds,
         header_updates: &[(String, Option<String>)],
     ) -> Option<String> {
         let (_leg, effect) = build_b_leg(
@@ -403,7 +403,7 @@ mod charging_tests {
             None,
             None,
             &B2buaConfig::default(),
-            id_gen,
+            ids,
             None,
             header_updates,
             &CapabilitySet::default(),
@@ -446,9 +446,9 @@ mod charging_tests {
     #[test]
     fn each_originated_leg_generates_its_own_identifier() {
         let arm = ChargingVectorFeature::default();
-        let id_gen = IdGen::seeded(0xCAB);
-        let first = b_leg_vector_from(&a_leg_invite_carrying(&[]), Some(&arm), &id_gen);
-        let second = b_leg_vector_from(&a_leg_invite_carrying(&[]), Some(&arm), &id_gen);
+        let mut ids = TurnIds::fixed(0xCAB);
+        let first = b_leg_vector_from(&a_leg_invite_carrying(&[]), Some(&arm), &mut ids);
+        let second = b_leg_vector_from(&a_leg_invite_carrying(&[]), Some(&arm), &mut ids);
         assert_ne!(first, second);
     }
 
@@ -470,11 +470,11 @@ mod charging_tests {
     fn a_stated_removal_outranks_the_arm() {
         let removal = [("P-Charging-Vector".to_string(), None)];
         let arm = ChargingVectorFeature::default();
-        let id_gen = IdGen::seeded(0xCAB);
+        let mut ids = TurnIds::fixed(0xCAB);
         let bare = a_leg_invite_carrying(&[]);
-        assert_eq!(b_leg_vector_stating(&bare, Some(&arm), &id_gen, &removal), None);
+        assert_eq!(b_leg_vector_stating(&bare, Some(&arm), &mut ids, &removal), None);
         let carrying = a_leg_invite_carrying(&[("P-Charging-Vector", "icid-value=abc")]);
-        assert_eq!(b_leg_vector_stating(&carrying, Some(&arm), &id_gen, &removal), None);
+        assert_eq!(b_leg_vector_stating(&carrying, Some(&arm), &mut ids, &removal), None);
     }
 
     /// Unarmed: the stack generates none, and a received one still relays.
@@ -530,7 +530,7 @@ mod withhold_tests {
             None,
             None,
             &B2buaConfig::default(),
-            &IdGen::seeded(0x100),
+            &mut TurnIds::fixed(0x100),
             None,
             &[],
             &crate::rules::capabilities::relaying_in(
@@ -671,7 +671,7 @@ Content-Length: {}\r\n\r\n{body}",
             None,
             None,
             &B2buaConfig::default(),
-            &IdGen::seeded(0x0FF),
+            &mut TurnIds::fixed(0x0FF),
             Some(body),
             &[],
             &CapabilitySet::default(),
@@ -762,7 +762,7 @@ Content-Length: {}\r\n\r\n{CALLER_SDP}",
             None,
             None,
             &B2buaConfig::default(),
-            &IdGen::seeded(0x0FE),
+            &mut TurnIds::fixed(0x0FE),
             Some(body),
             &[],
             &CapabilitySet::default(),

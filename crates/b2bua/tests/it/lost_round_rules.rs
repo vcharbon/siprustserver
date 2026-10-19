@@ -12,16 +12,17 @@ use b2bua::config::B2buaConfig;
 use b2bua::effects::{HandlerResult, OutboundBody};
 use b2bua::initial_invite::build_initial_call;
 use b2bua::rules::{default_rules, pick_ranked, ActionExecutor, RuleAction, RuleCall, RuleContext};
+use b2bua::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 use call::{
     Dialog, DialogId, DialogState, Direction, Leg, LegKind, LegState, OutboundInvite, RemoteInfo,
 };
+use sip_ids::TurnIds;
 use sip_message::generators::OutOfDialogMethod;
 use sip_message::generators::{generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts};
 use sip_message::header::{self, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipStr};
-use sip_txn::IdGen;
 
 /// The CSeq the record last sent on the callee's dialog.
 const RECORDED: u32 = 3;
@@ -54,7 +55,8 @@ fn bridged() -> call::Call {
     )
     .expect("the caller's INVITE");
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    let mut call = build_initial_call(&invite, src, &B2buaConfig::default(), &IdGen::seeded(1), 0);
+    let mut call =
+        build_initial_call(&invite, src, &B2buaConfig::default(), &mut TurnIds::fixed(1), 0);
     let mut a = Dialog::new("b2bua-a", "atag", DialogState::Confirmed, 1);
     a.peer_cseq = Some(1);
     a.remote_target = "sip:alice@127.0.0.1:5060".into();
@@ -146,10 +148,10 @@ fn turn(call: &call::Call, event: &CallEvent) -> (Option<&'static str>, Option<H
         return (None, None);
     };
     let actions: Vec<RuleAction> = (rule.handle)(&ctx).map(|r| r.actions).unwrap_or_default();
-    let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor {
+    let mut id_gen = TurnScope::of(TurnIds::fixed(1));
+    let mut exec = ActionExecutor {
         config: &config,
-        id_gen: &id_gen,
+        turn: &mut id_gen,
         now_ms: 0,
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
