@@ -15,13 +15,15 @@ pub const CATALOGUE: Catalogue = Catalogue {
         PROXY,
         SELF_GATE,
         sip_proxy::supervise::FAMILIES,
+        metric_values::poison::FAMILIES,
         observe::counters::FAMILIES,
         jemalloc_stats::catalogue::FAMILIES,
     ],
 };
 
 /// The `/metrics` body: the data path, the self gate (`None` for the
-/// always-admit gate), the restarted tasks, the dropped log lines and
+/// always-admit gate), the restarted tasks, the metric rows' lock
+/// recoveries, the dropped log lines and
 /// trace-admission denials (ADR-0026), then `allocator`.
 pub fn body(
     metrics: &ProxyMetrics,
@@ -31,6 +33,7 @@ pub fn body(
     let mut t = metrics.prometheus_text();
     t.push_str(&self_gate_text(gate));
     t.push_str(&sip_proxy::supervise::prometheus_text());
+    t.push_str(&metric_values::poison::prometheus_text());
     t.push_str(&observe::counters::prometheus_text());
     t.push_str(&allocator());
     t

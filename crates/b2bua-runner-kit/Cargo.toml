@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 lock-poison = { path = "../lock-poison" }
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 jemalloc-stats = { path = "../jemalloc-stats" }
 b2bua = { path = "../b2bua" }
 call = { path = "../call" }

@@ -33,4 +33,4 @@ crates/load-shed/src/retry_after.rs 1
 crates/load-shed/src/sampler.rs 5
 crates/load-shed/src/token_bucket.rs 2
 crates/metric-values/src/fixed.rs 6
-crates/metric-values/src/open.rs 14
+crates/metric-values/src/open.rs 7

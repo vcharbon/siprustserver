@@ -6,9 +6,11 @@
 //!   declared label set, keyed by label values.
 //! - [`OpenRows`] — a semi-open family's rows: the declared ones, then any
 //!   label set observed, under the family's cap.
+//! - [`poison`] — the crate's one named lock, recovered and counted.
 
 mod fixed;
 mod open;
+pub mod poison;
 
 pub use fixed::FixedCounts;
 pub use open::OpenRows;

@@ -592,6 +592,7 @@ dependencies = [
  "load-shed",
  "lock-poison",
  "metric-catalogue",
+ "metric-values",
  "observe",
  "probe-http",
  "repl-net",
@@ -2860,6 +2861,7 @@ dependencies = [
 name = "metric-values"
 version = "0.1.0"
 dependencies = [
+ "lock-poison",
  "metric-catalogue",
 ]
 
@@ -4668,6 +4670,7 @@ dependencies = [
  "jemalloc-stats",
  "kube",
  "metric-catalogue",
+ "metric-values",
  "observe",
  "probe-http",
  "rustls",

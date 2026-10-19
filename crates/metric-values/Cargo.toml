@@ -13,4 +13,5 @@ tier = "shell"
 workspace = true
 
 [dependencies]
+lock-poison = { path = "../lock-poison" }
 metric-catalogue = { path = "../metric-catalogue" }

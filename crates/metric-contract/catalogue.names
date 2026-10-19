@@ -183,6 +183,7 @@ b2bua-runner observe_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner http_request_failures_total counter capped:256 {peer,cause}
 b2bua-runner http_request_failures_overflow_total counter fixed {}
 b2bua-runner http_request_poisoned_lock_recoveries_total counter fixed {lock}
+b2bua-runner metric_values_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner b2bua_runner_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner jemalloc_allocated_bytes gauge fixed {}
 b2bua-runner jemalloc_active_bytes gauge fixed {}
@@ -273,6 +274,7 @@ sip-proxy-runner sip_proxy_self_external_invites_rejected_total counter fixed {r
 sip-proxy-runner sip_proxy_self_emergency_bypassed_total counter fixed {}
 sip-proxy-runner sip_proxy_self_internal_bypassed_total counter fixed {}
 sip-proxy-runner sip_proxy_task_restarts_total counter fixed {task}
+sip-proxy-runner metric_values_poisoned_lock_recoveries_total counter fixed {lock}
 sip-proxy-runner log_lines_dropped_total counter fixed {}
 sip-proxy-runner trace_dropped_no_exporter_total counter fixed {}
 sip-proxy-runner trace_denied_rate_total counter fixed {}

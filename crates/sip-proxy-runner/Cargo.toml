@@ -22,6 +22,7 @@ path = "src/main.rs"
 [dependencies]
 sip-proxy = { path = "../sip-proxy" }
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 # The allocator families of the /metrics catalogue (the reads are the
 # target-gated half below).
 jemalloc-stats = { path = "../jemalloc-stats" }

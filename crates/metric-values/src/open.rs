@@ -61,7 +61,7 @@ impl OpenRows {
     /// the family carries no cap.
     pub fn replace<'a>(&self, rows: impl IntoIterator<Item = (Vec<&'a str>, u64)>) {
         assert!(self.family.cap().is_none(), "{} is capped: no census", self.family.name);
-        let mut g = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = crate::poison::locked(&self.rows);
         g.values.clear();
         g.undeclared = 0;
         g.overflowed = 0;
@@ -71,7 +71,7 @@ impl OpenRows {
     }
 
     fn update(&self, values: &[&str], capped: bool, apply: impl FnOnce(&mut u64), n: u64) {
-        let mut g = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = crate::poison::locked(&self.rows);
         self.update_locked(&mut g, values, capped, apply, n);
     }
 
@@ -132,30 +132,30 @@ impl OpenRows {
 
     /// The value of the row `values`, 0 when not observed.
     pub fn get(&self, values: &[&str]) -> u64 {
-        let g = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let g = crate::poison::locked(&self.rows);
         with_key(values, |k| g.values.get(k).copied()).unwrap_or(0)
     }
 
     /// The sum of every row.
     pub fn sum(&self) -> u64 {
-        self.rows.lock().unwrap_or_else(|e| e.into_inner()).values.values().sum()
+        crate::poison::locked(&self.rows).values.values().sum()
     }
 
     /// Every observed row, ordered by its label values.
     pub fn rows(&self) -> Vec<(Vec<String>, u64)> {
-        let g = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let g = crate::poison::locked(&self.rows);
         g.values.iter().map(|(k, v)| (k.split(SEP).map(str::to_owned).collect(), *v)).collect()
     }
 
     /// Observations that landed on the overflow row.
     pub fn overflowed(&self) -> u64 {
-        self.rows.lock().unwrap_or_else(|e| e.into_inner()).overflowed
+        crate::poison::locked(&self.rows).overflowed
     }
 
     /// Append the family, then its cap's overflow family when it has one.
     pub fn render(&self, out: &mut String) {
         let (rows, overflowed) = {
-            let g = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            let g = crate::poison::locked(&self.rows);
             let rows: Vec<(Vec<String>, u64)> = g
                 .values
                 .iter()
