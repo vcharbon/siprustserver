@@ -125,6 +125,8 @@ in its own workspace as discovery only; each crash becomes a committed regressio
 
 - The B2BUA's decision core becomes a pure crate split from its effectful shell; the seam has
   its own ADR.
-- Test-support code compiled into production crates moves into crates of its own.
+- Test-support code compiled into production crates moves into crates of its own, or behind
+  a `testkit` feature of its crate when that crate's own unit tests use it; the closure check
+  refuses the feature in every production binary.
 - Rare failure outcomes change where a panic becomes an error: a parse failure drops one
   packet, a call whose handler failed is torn down on the wire.
