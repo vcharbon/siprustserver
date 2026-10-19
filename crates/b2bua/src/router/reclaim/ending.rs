@@ -53,6 +53,7 @@ pub(super) async fn discharge_folded_terminal(
     let mut result = HandlerResult::new(raise_sequences(terminal, before));
     let mut turn = TurnScope::of(ctx.id_gen.turn());
     answer_the_records_rounds(ctx, call_ref, before, ours, &mut result, now_ms, &mut turn);
+    super::super::notes::drain(ctx, call_ref, &mut turn);
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
         before,

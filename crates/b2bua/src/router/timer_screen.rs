@@ -7,6 +7,7 @@
 
 use call::Call;
 
+use crate::turn_notes::TurnNotes;
 use b2bua_sdk::event::CallEvent;
 
 /// Why a fire reached no rule.
@@ -30,17 +31,23 @@ impl Dropped {
 
 /// Screen `event` against `call`'s ledger: `Ok` for any event but a timer
 /// fire, and for a fire the ledger holds, whose entry leaves the ledger;
-/// `Err` for a stale fire, the call untouched.
-pub(crate) fn screen(call: &mut Call, event: &CallEvent, now_ms: i64) -> Result<(), Dropped> {
+/// `Err` for a stale fire, the call untouched. The fire's trace fact goes to
+/// `notes`.
+pub(crate) fn screen(
+    call: &mut Call,
+    event: &CallEvent,
+    now_ms: i64,
+    notes: &mut TurnNotes,
+) -> Result<(), Dropped> {
     let CallEvent::Timer { key, generation, .. } = event else {
         return Ok(());
     };
     let Some(at) = call.timers.iter().position(|t| &t.key == key) else {
-        trace_drop(call, now_ms, event, Dropped::Disarmed);
+        trace_drop(call, now_ms, event, Dropped::Disarmed, notes);
         return Err(Dropped::Disarmed);
     };
     if call.timers.get(at).is_some_and(|t| t.generation != *generation) {
-        trace_drop(call, now_ms, event, Dropped::Superseded);
+        trace_drop(call, now_ms, event, Dropped::Superseded, notes);
         return Err(Dropped::Superseded);
     }
     #[expect(clippy::disallowed_methods, reason = "at is the position just found")]
@@ -48,14 +55,23 @@ pub(crate) fn screen(call: &mut Call, event: &CallEvent, now_ms: i64) -> Result<
     if crate::trace::sampled(call) {
         crate::trace::emit::timer_fire(call, now_ms, key, *generation);
     }
+    notes.trace(call, "timer.fire", now_ms, || format!("{key:?} gen {generation}"));
     Ok(())
 }
 
-fn trace_drop(call: &Call, now_ms: i64, event: &CallEvent, dropped: Dropped) {
+fn trace_drop(
+    call: &Call,
+    now_ms: i64,
+    event: &CallEvent,
+    dropped: Dropped,
+    notes: &mut TurnNotes,
+) {
     let CallEvent::Timer { key, generation, .. } = event else { return };
     if crate::trace::sampled(call) {
         crate::trace::emit::timer_drop(call, now_ms, key, *generation, dropped.reason());
     }
+    let reason = dropped.reason();
+    notes.trace(call, "timer.drop", now_ms, || format!("{key:?} gen {generation}: {reason}"));
     tracing::debug!(
         call_ref = %call.call_ref,
         timer = ?key,

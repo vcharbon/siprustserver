@@ -15,6 +15,7 @@ use call::{Call, CallModelState, TimerKey};
 
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
 use crate::obligations::ObligationSet;
+use crate::turn_notes::TurnNotes;
 
 use super::actions::ActionExecutor;
 use super::invariants;
@@ -135,7 +136,7 @@ pub fn execute_rules(
         // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
         // otherwise shows on a traced call as a `sip.out` with no matching
         // `call.transition`.
-        record_transitions(rule, &before, &enforced.call, exec.now_ms);
+        record_transitions(rule, &before, &enforced.call, exec.now_ms, &mut exec.turn.notes);
         note_absorbed(&mut enforced.effects, call, ctx, &selection.absorbed);
         return enforced;
     }
@@ -185,48 +186,55 @@ fn report_diagnostics(rule: &RuleDefinition, call: &Call, outcome: &RuleHandleRe
 /// layers synthesize reaches the trace attributed to the turn that caused it.
 /// Guarded — an unsampled call reads one `Option<bool>` and returns, evaluating
 /// no format argument.
-fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
+fn record_transitions(
+    rule: &RuleDefinition,
+    before: &Call,
+    after: &Call,
+    now_ms: i64,
+    notes: &mut TurnNotes,
+) {
     if !crate::trace::sampled(after) {
         return;
     }
     crate::trace::emit::rule_fired(after, now_ms, rule.id);
-    record_cursor_moves(rule, before, after, now_ms);
+    notes.trace(after, "rule.fired", now_ms, || rule.id.to_string());
+    record_cursor_moves(rule, before, after, now_ms, notes);
     if before.state != after.state {
         crate::trace::emit::context_transition(after, now_ms, before.state, after.state);
+        let (from, to) = (before.state, after.state);
+        notes.trace(after, "call.transition", now_ms, || format!("{from:?} -> {to:?}"));
     }
 }
 
 /// Record on a traced call every state-machine cursor `rule`'s turn moved
 /// between `before` and `after`, a claim's or a lifecycle delivery's alike
 /// (ADR-0026). Guarded like [`record_transitions`].
-pub(super) fn record_cursor_moves(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
+pub(super) fn record_cursor_moves(
+    rule: &RuleDefinition,
+    before: &Call,
+    after: &Call,
+    now_ms: i64,
+    notes: &mut TurnNotes,
+) {
     if !crate::trace::sampled(after) {
         return;
     }
+    let mut moved = |machine: &call::MachineId, from: &str, to: &str| {
+        crate::trace::emit::rule_transition(after, now_ms, rule.id, machine.as_str(), from, to);
+        notes.trace(after, "rule.transition", now_ms, || {
+            format!("{} {}: {from} -> {to}", rule.id, machine.as_str())
+        });
+    };
     for (machine, to) in &after.sm_cursors {
         if before.sm_cursors.get(machine) != Some(to) {
             let from = before.sm_cursors.get(machine).map(call::StateLabel::as_str).unwrap_or("");
-            crate::trace::emit::rule_transition(
-                after,
-                now_ms,
-                rule.id,
-                machine.as_str(),
-                from,
-                to.as_str(),
-            );
+            moved(machine, from, to.as_str());
         }
     }
     // A removed cursor is machine deactivation (`ClearState`, ADR-0016 X9).
     for (machine, from) in &before.sm_cursors {
         if !after.sm_cursors.contains_key(machine) {
-            crate::trace::emit::rule_transition(
-                after,
-                now_ms,
-                rule.id,
-                machine.as_str(),
-                from.as_str(),
-                "terminal",
-            );
+            moved(machine, from.as_str(), "terminal");
         }
     }
 }

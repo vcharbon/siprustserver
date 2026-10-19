@@ -42,6 +42,7 @@ mod interpret;
 pub(crate) mod late_prack;
 mod materialise;
 mod message_cap;
+mod notes;
 mod owed;
 mod peer_metrics;
 pub(crate) use peer_metrics::outbound_proxy_target;

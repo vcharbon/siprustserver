@@ -175,10 +175,12 @@ fn deliver(
             check_declared_transition(rule, &before, &sub.call.sm_cursors, false);
         }
         crate::trace::emit::lifecycle_delivered(&sub.call, exec.now_ms, rule.id, kind);
+        let fact = || format!("{} {kind}", rule.id);
+        exec.turn.notes.trace(&sub.call, "rule.lifecycle", exec.now_ms, fact);
         let moved_from = result.call.clone();
         result.call = sub.call;
         result.effects.extend(sub.effects);
-        record_cursor_moves(rule, &moved_from, &result.call, exec.now_ms);
+        record_cursor_moves(rule, &moved_from, &result.call, exec.now_ms, &mut exec.turn.notes);
     }
 }
 

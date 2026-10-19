@@ -148,7 +148,7 @@ fn fired(call: &Call, timer_type: TimerType) -> CallEvent {
 /// then the rule chain: the handler result (the call it leaves and the
 /// effects).
 fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::HandlerResult {
-    if super::timer_screen::screen(&mut call, event, NOW).is_err() {
+    if super::timer_screen::screen(&mut call, event, NOW, &mut Default::default()).is_err() {
         return crate::effects::HandlerResult::new(call);
     }
     let res = Resolution {

@@ -19,7 +19,7 @@ use super::registry::{traces, RoundTripSide};
 /// Whether this call is traced. The ONE guard every emission site uses.
 #[inline]
 pub fn sampled(call: &Call) -> bool {
-    call.sampled == Some(true)
+    cfg!(feature = "turn-notes-shadow") || call.sampled == Some(true)
 }
 
 /// A SIP message received for the call, with its raw wire bytes.
@@ -191,5 +191,6 @@ fn record(call: &Call, kind: &'static str, at_ms: i64, detail: &str, body: &[u8]
     if !sampled(call) {
         return;
     }
+    crate::turn_notes_shadow::trace(kind, at_ms, detail);
     traces().record(&call.call_ref, TraceEvent::new(kind, at_ms, detail).with_body(body));
 }

@@ -1,25 +1,26 @@
 //! [`TurnScope`]: what one turn on a call carries from its first gate to its
-//! landing, beside the call itself: the identifiers it draws (ADR-0052 §3).
+//! landing, beside the call itself: the identifiers it draws (ADR-0052 §3)
+//! and what it reports (ADR-0052 §4).
 
-use sip_ids::{IdKey, TurnIds};
+use sip_ids::TurnIds;
+
+use crate::turn_notes::TurnNotes;
 
 /// One turn's own state. Every identifier the turn mints is a draw of
 /// [`ids`](Self::ids), so the turn's identifiers are a function of the
-/// process's key and the turn's sequence number.
+/// process's key and the turn's sequence number; what the turn has to report
+/// collects in [`notes`](Self::notes) until the shell drains it.
 #[derive(Debug)]
 pub struct TurnScope {
     /// The turn's identifier source.
     pub ids: TurnIds,
+    /// What the turn reports, not yet drained.
+    pub notes: TurnNotes,
 }
 
 impl TurnScope {
-    /// The scope of turn `turn_seq` under `key`, nothing drawn yet.
-    pub fn new(key: &IdKey, turn_seq: u64) -> Self {
-        Self::of(TurnIds::new(key, turn_seq))
-    }
-
-    /// The scope of the turn `ids` draws for.
+    /// The scope of the turn `ids` draws for, nothing reported yet.
     pub fn of(ids: TurnIds) -> Self {
-        Self { ids }
+        Self { ids, notes: TurnNotes::default() }
     }
 }

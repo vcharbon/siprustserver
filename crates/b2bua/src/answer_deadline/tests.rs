@@ -95,7 +95,7 @@ fn deliver(
     let generation = armed(call, id).map_or(0, |t| t.generation);
     let key = armed(call, id).map_or(TimerKey::call(timer_type), |t| t.key);
     let event = CallEvent::Timer { key, generation, call_ref: "c".into(), incarnation: None };
-    crate::router::timer_screen::screen(call, &event, NOW).ok()?;
+    crate::router::timer_screen::screen(call, &event, NOW, &mut Default::default()).ok()?;
     Some(screen(call, fx, &event))
 }
 

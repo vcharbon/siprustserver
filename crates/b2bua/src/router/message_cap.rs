@@ -66,6 +66,8 @@ pub(super) fn tear_down_runaway(
     result.effects.buffered.extend(cap.effects.buffered);
     result.effects.fire_and_forget.extend(cap.effects.fire_and_forget);
     ctx.metrics.bump_message_cap_terminated();
+    crate::turn_notes_shadow::metric("message_cap", "");
+    exec.turn.notes.message_cap_terminated();
     result = crate::rules::invariants::enforce(
         &ctx.obligations,
         &before,
