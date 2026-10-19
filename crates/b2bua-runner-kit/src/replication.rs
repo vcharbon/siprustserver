@@ -183,7 +183,7 @@ impl MembershipSource {
     /// `connect` builds, built again with backoff until it is.
     pub(crate) fn into_membership_with<F, Fut>(self, connect: F) -> Arc<dyn Membership>
     where
-        F: Fn() -> Fut + Send + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<kube::Client, String>> + Send,
     {
         match self {
@@ -206,7 +206,11 @@ impl MembershipSource {
                     %namespace,
                     "replication membership"
                 );
-                Arc::new(topology::K8sMembership::spawn_connecting(connect, namespace, service))
+                let (restarts, task) =
+                    (&b2bua::supervise::RESTARTS, b2bua::supervise::K8S_MEMBERSHIP);
+                Arc::new(topology::K8sMembership::spawn_connecting(
+                    connect, namespace, service, restarts, task,
+                ))
             }
         }
     }

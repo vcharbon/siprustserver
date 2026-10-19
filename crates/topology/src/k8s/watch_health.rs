@@ -25,6 +25,9 @@ pub struct WatchHealth {
     /// Unix time (ms) the watch broke, `None` while it delivers. The last
     /// listed members stay meanwhile.
     pub broken_since_unix_ms: Option<u64>,
+    /// The informer task ended: nothing watches any more, and the last
+    /// listed members stay.
+    pub ended: bool,
 }
 
 /// Written by the informer task, read through [`K8sMembership::watch_health`](super::K8sMembership::watch_health).
@@ -37,13 +40,15 @@ pub(super) struct WatchHealthState {
 }
 
 impl WatchHealthState {
-    pub(super) fn read(&self) -> WatchHealth {
+    /// The health as the task wrote it, its task `ended` or not.
+    pub(super) fn read(&self, ended: bool) -> WatchHealth {
         let since = self.broken_since_unix_ms.load(Ordering::Relaxed);
         let client_built = self.client_built.load(Ordering::Relaxed);
         WatchHealth {
             client_built,
             client_failing: !client_built && self.client_failed.load(Ordering::Relaxed),
             broken_since_unix_ms: (since != 0).then_some(since),
+            ended,
         }
     }
 }

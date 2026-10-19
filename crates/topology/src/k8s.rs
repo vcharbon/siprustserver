@@ -33,6 +33,7 @@ use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::runtime::{reflector, watcher, WatchStreamExt};
 use kube::{Api, Client};
+use task_restart::Restarts;
 use tokio::sync::broadcast;
 
 use crate::{reconcile_to_desired, MemberDelta, Membership, MembershipState, Peer};
@@ -70,27 +71,33 @@ impl K8sMembership {
     /// in. **Best-effort**: a watch error is logged and retried by the kube
     /// runtime — it never tears the process down (liveness over completeness,
     /// ADR-0011 X5), matching the b2bua's "boot and serve even if peers are
-    /// unreachable" stance.
-    pub fn spawn(
+    /// unreachable" stance. The informer is the consumer's supervised task
+    /// `task_name` of `restarts`: a run that panics is counted there and made
+    /// again, connecting afresh and relisting.
+    pub fn spawn<const N: usize>(
         client: Client,
         namespace: impl Into<String>,
         service_name: impl Into<String>,
+        restarts: &'static Restarts<N>,
+        task_name: &'static str,
     ) -> Self {
         let connect = move || std::future::ready(Ok::<_, String>(client.clone()));
-        Self::spawn_connecting(connect, namespace, service_name)
+        Self::spawn_connecting(connect, namespace, service_name, restarts, task_name)
     }
 
     /// [`spawn`](Self::spawn) over the client `connect` builds: a client that
     /// fails to build is built again after a backoff (1 s doubling to 30 s),
     /// for as long as the membership lives. The view stays empty and unsynced
     /// until a client is built and its first listing completes.
-    pub fn spawn_connecting<F, Fut>(
+    pub fn spawn_connecting<F, Fut, const N: usize>(
         connect: F,
         namespace: impl Into<String>,
         service_name: impl Into<String>,
+        restarts: &'static Restarts<N>,
+        task_name: &'static str,
     ) -> Self
     where
-        F: Fn() -> Fut + Send + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Client, String>> + Send,
     {
         let namespace = namespace.into();
@@ -103,48 +110,55 @@ impl K8sMembership {
         let st = state.clone();
         let synced_flag = synced.clone();
         let watch_health = health.clone();
-        let task = tokio::spawn(async move {
-            let client = connect_with_backoff(connect, &watch_health).await;
-            let api: Api<EndpointSlice> = Api::namespaced(client, &namespace);
-            let cfg =
-                watcher::Config::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
-            let (reader, writer) = reflector::store();
-            // `reflector` keeps `reader` an up-to-date cache of the whole slice
-            // set; we recompute the desired peer set from that full cache on
-            // every event, so partial/restart watches converge rather than
-            // emit spurious churn. `default_backoff` makes the watch self-heal.
-            let stream = reflector(writer, watcher(api, cfg)).default_backoff();
-            futures::pin_mut!(stream);
-            let mut episode = WatchEpisode::default();
-            loop {
-                let next = match episode.quiet_deadline() {
-                    None => stream.next().await,
-                    Some(deadline) => {
-                        match tokio::time::timeout_at(deadline, stream.next()).await {
-                            Ok(next) => next,
-                            Err(_quiet) => {
-                                episode.delivered(&watch_health);
-                                continue;
+        let connect = Arc::new(connect);
+        let task = task_restart::spawn_restarting(restarts, task_name, move || {
+            let (connect, namespace, service_name) =
+                (connect.clone(), namespace.clone(), service_name.clone());
+            let (st, synced_flag, watch_health) =
+                (st.clone(), synced_flag.clone(), watch_health.clone());
+            async move {
+                let client = connect_with_backoff(connect.as_ref(), &watch_health).await;
+                let api: Api<EndpointSlice> = Api::namespaced(client, &namespace);
+                let cfg = watcher::Config::default()
+                    .labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
+                let (reader, writer) = reflector::store();
+                // `reflector` keeps `reader` an up-to-date cache of the whole slice
+                // set; we recompute the desired peer set from that full cache on
+                // every event, so partial/restart watches converge rather than
+                // emit spurious churn. `default_backoff` makes the watch self-heal.
+                let stream = reflector(writer, watcher(api, cfg)).default_backoff();
+                futures::pin_mut!(stream);
+                let mut episode = WatchEpisode::default();
+                loop {
+                    let next = match episode.quiet_deadline() {
+                        None => stream.next().await,
+                        Some(deadline) => {
+                            match tokio::time::timeout_at(deadline, stream.next()).await {
+                                Ok(next) => next,
+                                Err(_quiet) => {
+                                    episode.delivered(&watch_health);
+                                    continue;
+                                }
                             }
                         }
-                    }
-                };
-                match next {
-                    Some(Ok(event)) => {
-                        episode.delivered(&watch_health);
-                        let slices = reader.state();
-                        let desired = peers_from_slices(slices.iter().map(|s| s.as_ref()));
-                        reconcile_to_desired(&st, desired);
-                        // Initial LIST complete: the snapshot is now authoritative
-                        // (an empty set really means a peerless pool). Sticky —
-                        // re-list churn after a watch error never un-syncs.
-                        if matches!(event, watcher::Event::InitDone) {
-                            synced_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    };
+                    match next {
+                        Some(Ok(event)) => {
+                            episode.delivered(&watch_health);
+                            let slices = reader.state();
+                            let desired = peers_from_slices(slices.iter().map(|s| s.as_ref()));
+                            reconcile_to_desired(&st, desired);
+                            // Initial LIST complete: the snapshot is now authoritative
+                            // (an empty set really means a peerless pool). Sticky —
+                            // re-list churn after a watch error never un-syncs.
+                            if matches!(event, watcher::Event::InitDone) {
+                                synced_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
                         }
+                        Some(Err(e)) => episode.error(&watch_health, &e.to_string()),
+                        // The watcher stream is infinite; `None` only on shutdown.
+                        None => break,
                     }
-                    Some(Err(e)) => episode.error(&watch_health, &e.to_string()),
-                    // The watcher stream is infinite; `None` only on shutdown.
-                    None => break,
                 }
             }
         });
@@ -152,9 +166,10 @@ impl K8sMembership {
         Self { state, synced, health, task }
     }
 
-    /// Whether the watch has its kube client and is delivering.
+    /// Whether the watch has its kube client and is delivering, and whether
+    /// its task ended.
     pub fn watch_health(&self) -> WatchHealth {
-        self.health.read()
+        self.health.read(self.task.is_finished())
     }
 }
 

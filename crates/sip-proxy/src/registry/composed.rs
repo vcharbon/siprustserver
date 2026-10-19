@@ -1,6 +1,7 @@
 //! `ComposedWorkerRegistry` — the production [`WorkerRegistry`]: a `WorkerSet`
 //! (shared `topology::Membership` ⊕ health projection) driven by a live membership
-//! source via the shared `topology::spawn_membership_reconcile` self-heal loop.
+//! source via the shared `topology::follow_membership` self-heal loop, run as
+//! the proxy's supervised task `registry_membership`.
 //!
 //! In production the source is the `topology::K8sMembership` EndpointSlice informer
 //! — the same watch the b2bua replication supervisor consumes (ADR-0011 X7 /
@@ -35,22 +36,38 @@ pub struct ComposedWorkerRegistry {
 }
 
 impl ComposedWorkerRegistry {
-    /// Build over `membership` with a fresh, empty health overlay, then spawn the
-    /// shared membership-reconcile loop. The driver's synchronous initial reconcile
-    /// recomposes the projection before this returns, so the registry is current
-    /// the moment it is handed out. `sip_port` is the cluster-wide SIP port appended
-    /// to each peer's Pod IP (membership is port-agnostic).
+    /// Build over `membership` with a fresh, empty health overlay, recompose
+    /// the projection under a subscription taken first, so the registry is
+    /// current the moment it is handed out, then spawn the follower of that
+    /// subscription. A run of the follower that panics is restarted and
+    /// counted; the restarted run subscribes and recomposes before it follows.
+    /// `sip_port` is the cluster-wide SIP port appended to each peer's Pod IP
+    /// (membership is port-agnostic).
     pub fn spawn(membership: Arc<dyn Membership>, sip_port: u16, clock: Clock) -> Self {
         let set = Arc::new(WorkerSet::new(membership.clone(), sip_port, clock));
+        let mut boot = Some(membership.changes());
+        set.recompose();
         let s = set.clone();
         // The shared self-heal loop (ADR-0012 D1/D2), identical to the one the
-        // b2bua repl supervisor consumes. Every wakeup just recomposes from the
-        // authoritative snapshot, as the node that spawned the registry.
-        let node = observe::NodeScope::current();
-        let task =
-            topology::spawn_membership_reconcile(membership, RECONCILE_PERIOD, move |_snapshot| {
-                node.enter(|| s.recompose())
-            });
+        // b2bua repl supervisor consumes: every wakeup recomposes from the
+        // authoritative snapshot.
+        let task = crate::supervise::spawn(crate::supervise::REGISTRY_MEMBERSHIP, move || {
+            let (s, membership, boot) = (s.clone(), membership.clone(), boot.take());
+            async move {
+                let changes = match boot {
+                    Some(changes) => changes,
+                    None => {
+                        let changes = membership.changes();
+                        s.recompose();
+                        changes
+                    }
+                };
+                topology::follow_membership(membership, changes, RECONCILE_PERIOD, move |_| {
+                    s.recompose()
+                })
+                .await;
+            }
+        });
         Self { set, task }
     }
 
@@ -121,5 +138,49 @@ mod tests {
         // w0's probe-written health survived the membership change (separation holds).
         assert_eq!(reg.resolve("w0").unwrap().health, WorkerHealth::Alive);
         assert_eq!(reg.lookup_by_address(&ProxyAddr::new("10.0.0.2", 5060)).unwrap().id, "w1");
+    }
+
+    /// A membership whose snapshot panics once `broken` is set.
+    struct Breaks {
+        inner: SimulatedMembership,
+        broken: std::sync::atomic::AtomicBool,
+    }
+
+    impl Membership for Breaks {
+        fn snapshot(&self) -> Vec<Peer> {
+            let broken = self.broken.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(!broken, "the snapshot source is broken");
+            self.inner.snapshot()
+        }
+        fn changes(&self) -> tokio::sync::broadcast::Receiver<topology::MemberDelta> {
+            self.inner.changes()
+        }
+    }
+
+    /// A follower whose recompose panics on every pass is restarted and
+    /// counted every time: the registry's supervisor outlives the panics.
+    #[tokio::test(start_paused = true)]
+    async fn a_follower_that_panics_on_every_pass_is_restarted_every_time() {
+        use crate::supervise::{REGISTRY_MEMBERSHIP, RESTARTS};
+        let source = Arc::new(Breaks {
+            inner: SimulatedMembership::with_clock(
+                vec![Peer::new("w0", "10.0.0.1")],
+                Clock::test_at(0),
+            ),
+            broken: std::sync::atomic::AtomicBool::new(false),
+        });
+        let reg = ComposedWorkerRegistry::spawn(source.clone(), 5060, Clock::test_at(0));
+        assert!(reg.resolve("w0").is_some(), "the boot recompose ran");
+        let before = RESTARTS.count(REGISTRY_MEMBERSHIP);
+        source.broken.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(RECONCILE_PERIOD + Duration::from_secs(3)).await;
+        let counted = RESTARTS.count(REGISTRY_MEMBERSHIP) - before;
+        assert!(counted >= 2, "each panicking run is restarted and counted, got {counted}");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            RESTARTS.count(REGISTRY_MEMBERSHIP) - before > counted,
+            "the supervisor still runs after {counted} panics"
+        );
+        assert!(!reg.task.is_finished(), "the follower's supervisor is alive");
     }
 }

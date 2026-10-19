@@ -22,15 +22,21 @@ pub const STALE_FLOOR_SWEEP: &str = "stale_floor_sweep";
 pub const SELF_GATE_SAMPLER: &str = "self_gate_sampler";
 /// The runner's health gauges sampler.
 pub const HEALTH_SAMPLER: &str = "health_sampler";
+/// The EndpointSlice informer feeding the worker pool.
+pub const K8S_MEMBERSHIP: &str = "k8s_membership";
+/// The worker registry's follower of membership changes.
+pub const REGISTRY_MEMBERSHIP: &str = "registry_membership";
 
 /// Every task name, in counter order: the `task` label's values.
-pub const TASKS: [&str; 6] = [
+pub const TASKS: [&str; 8] = [
     BRANCH_MEMO_SWEEP,
     SHARD_STATS,
     RESOLVER_LOOKUP,
     STALE_FLOOR_SWEEP,
     SELF_GATE_SAMPLER,
     HEALTH_SAMPLER,
+    K8S_MEMBERSHIP,
+    REGISTRY_MEMBERSHIP,
 ];
 
 /// The restarts of the proxy's tasks in this process.

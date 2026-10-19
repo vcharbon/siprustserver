@@ -30,11 +30,13 @@ kube = { version = "4.2.0", default-features = false, features = ["client", "run
 k8s-openapi = { version = "0.28.0", default-features = false, features = ["latest"], optional = true }
 futures = { version = "0.3", optional = true }
 tracing = { version = "0.1", optional = true }
+# The informer runs as the consumer's supervised task.
+task-restart = { path = "../task-restart", optional = true }
 
 [features]
 # Pull in the real Kubernetes EndpointSlice informer (K8sMembership). Default
 # builds stay kube-free; the runner opts in.
-kube = ["dep:kube", "dep:k8s-openapi", "dep:futures", "dep:tracing"]
+kube = ["dep:kube", "dep:k8s-openapi", "dep:futures", "dep:tracing", "dep:task-restart"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

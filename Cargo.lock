@@ -5196,6 +5196,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "sip-clock",
+ "task-restart",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

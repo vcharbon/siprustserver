@@ -164,3 +164,31 @@ async fn a_watch_that_restarts_quietly_ends_its_broken_episode() {
         "the re-started watch has been quiet past the quiet period"
     );
 }
+
+/// An informer run that panics is restarted and counted: the restarted run
+/// builds its client again and lists the worker.
+#[tokio::test(start_paused = true)]
+async fn an_informer_that_panics_is_restarted_and_lists_the_pool() {
+    use sip_proxy::supervise::{K8S_MEMBERSHIP, RESTARTS};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = attempts.clone();
+    let client = stand_in_client();
+    let connect = move || {
+        let attempt = counted.fetch_add(1, Ordering::SeqCst);
+        assert!(attempt > 0, "the first informer run panics");
+        let client = client.clone();
+        async move { Ok(client) }
+    };
+    let before = RESTARTS.count(K8S_MEMBERSHIP);
+    let pool =
+        discovered_pool_with(connect, "lab".into(), "workers".into(), 5060, Clock::test_at(0));
+    let watch = pool.discovery.as_ref().expect("a discovered pool");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(RESTARTS.count(K8S_MEMBERSHIP), before + 1, "the panicked run is counted");
+    assert!(!watch.watch_health().ended, "the informer still runs");
+    assert!(watch.watch_health().client_built, "the restarted run built its client");
+    let listed: Vec<String> =
+        pool.registry.snapshot().iter().map(|w| format!("{}@{}", w.id, w.address)).collect();
+    assert_eq!(listed, ["worker-0@10.0.0.7:5060"]);
+}

@@ -2,9 +2,8 @@
 //! new run cannot rebuild, so a run that panics is counted under its name
 //! (`b2bua_task_restarts_total{task}`) and made again. A task whose state a
 //! new run cannot rebuild (the transaction owner, the router, the timer
-//! driver, the dispatch workers, the CDR and terminate writers, the
-//! replication server) joins the worker's loops instead, whose end exits the
-//! process ([`crate::loops`]).
+//! driver, the CDR and terminate writers, the replication server) joins the
+//! worker's loops instead, whose end exits the process ([`crate::loops`]).
 
 use std::future::Future;
 
@@ -25,9 +24,11 @@ pub const BACKUP_GATE: &str = "backup_gate";
 pub const MEMBERSHIP_RECONCILE: &str = "membership_reconcile";
 /// A replication puller, respawned by the supervisor's next reconcile.
 pub const REPL_PULLER: &str = "repl_puller";
+/// The EndpointSlice informer feeding the replication membership.
+pub const K8S_MEMBERSHIP: &str = "k8s_membership";
 
 /// Every task name, in counter order: the `task` label's values.
-pub const TASKS: [&str; 7] = [
+pub const TASKS: [&str; 8] = [
     GAUGE_SAMPLER,
     OVERLOAD_SAMPLER,
     CLOCK_DIVERGENCE,
@@ -35,6 +36,7 @@ pub const TASKS: [&str; 7] = [
     BACKUP_GATE,
     MEMBERSHIP_RECONCILE,
     REPL_PULLER,
+    K8S_MEMBERSHIP,
 ];
 
 /// The restarts of the worker's tasks in this process.

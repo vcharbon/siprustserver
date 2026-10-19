@@ -58,13 +58,15 @@ pub fn discovered_pool_with<F, Fut>(
     clock: Clock,
 ) -> WorkerPool
 where
-    F: Fn() -> Fut + Send + 'static,
+    F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<kube::Client, String>> + Send,
 {
     // Installing the provider a second time returns Err; ignored.
     let _ = rustls::crypto::ring::default_provider().install_default();
     tracing::info!(source = "k8s-endpointslice", %service, %namespace, port, "worker pool");
-    let watch = Arc::new(K8sMembership::spawn_connecting(connect, namespace, service));
+    let (restarts, task) = (&sip_proxy::supervise::RESTARTS, sip_proxy::supervise::K8S_MEMBERSHIP);
+    let watch =
+        Arc::new(K8sMembership::spawn_connecting(connect, namespace, service, restarts, task));
     let membership: Arc<dyn Membership> = watch.clone();
     let reg = ComposedWorkerRegistry::spawn(membership, port, clock);
     let control = reg.control();
