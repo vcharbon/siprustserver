@@ -146,6 +146,11 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
+    /// Delete the Accepted client transactions of `call_ref`; replies how many.
+    RelinquishAccepted {
+        call_ref: String,
+        reply: oneshot::Sender<usize>,
+    },
     /// Delete the server transaction `key` with nothing sent; replies whether
     /// it was there.
     RelinquishServer {
@@ -287,12 +292,10 @@ impl TransactionLayer {
         rx.await.map_err(|_| TransactionLayerClosed)
     }
 
-    /// Send an outbound SIP request, allocating a client transaction and
-    /// returning its handle. A CANCEL or an ACK allocates none (both reuse
-    /// their INVITE's identity); an ACK of a 2xx is kept by the Accepted INVITE
-    /// client transaction it acknowledges, which re-sends it to a repeat of
-    /// that 2xx once its call is released. `Err` if the owner task is gone
-    /// (see `roundtrip`).
+    /// Send an outbound SIP request, allocating a client transaction (none
+    /// for a CANCEL or an ACK) and returning its handle. An ACK of a 2xx is
+    /// kept by its Accepted INVITE client transaction, which re-sends it to a
+    /// repeat once the call is released. `Err` if the owner task is gone.
     pub async fn send_request(
         &self,
         msg: SipRequest,
@@ -372,6 +375,21 @@ impl TransactionLayer {
     pub async fn relinquish_call(&self, call_ref: &str) -> Result<usize, TransactionLayerClosed> {
         self.roundtrip(|reply| Command::RelinquishCall { call_ref: call_ref.to_string(), reply })
             .await
+    }
+
+    /// Delete the Accepted INVITE client transactions of `call_ref` with
+    /// nothing sent, ahead of a release that does not end the call: no later
+    /// 2xx draws this layer's ACK or BYE on a dialog the call keeps, and a
+    /// repeat is a new arrival. Returns how many went. Idempotent.
+    pub async fn relinquish_accepted_of_call(
+        &self,
+        call_ref: &str,
+    ) -> Result<usize, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::RelinquishAccepted {
+            call_ref: call_ref.to_string(),
+            reply,
+        })
+        .await
     }
 
     /// Relinquish the one server transaction `key` to the node that answered
