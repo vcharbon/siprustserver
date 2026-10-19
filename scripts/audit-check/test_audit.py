@@ -18,13 +18,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "audit.py")
 
 STUB = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 args = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as f:
     f.write(" ".join(args) + "\n")
 if args[:1] == ["audit"]:
+    if "--no-fetch" not in args and os.environ.get("STUB_FETCH_SLEEPS"):
+        time.sleep(float(os.environ["STUB_FETCH_SLEEPS"]))
     if "--no-fetch" not in args and os.environ.get("STUB_FETCH_FAILS"):
-        print("error: couldn't fetch advisory database: offline", file=sys.stderr)
+        print(os.environ["STUB_FETCH_FAILS"], file=sys.stderr)
         sys.exit(1)
     with open(os.environ["STUB_REPORT"]) as f:
         report = json.load(f)
@@ -44,15 +46,17 @@ checksum = "7f50b1c63b38611e7d4d7f68b82d3ad0cc71a2ad2e7f61fc10f1328d917c93cd"
 """
 
 
-def report(vulns=(), unmaintained=()):
+def report(vulns=(), unmaintained=(), notice=()):
+    def warnings(kind, rows):
+        return [{"kind": kind, "advisory": {"id": i},
+                 "package": {"name": name, "version": "0.1.0"}} for name, i in rows]
     return {
         "vulnerabilities": {"found": bool(vulns), "count": len(vulns), "list": [
             {"advisory": {"id": i, "title": f"{name} is broken"},
              "versions": {"patched": [">=9.0.0"]},
              "package": {"name": name, "version": "1.0.0"}} for name, i in vulns]},
-        "warnings": {"unmaintained": [
-            {"kind": "unmaintained", "advisory": {"id": i},
-             "package": {"name": name, "version": "0.1.0"}} for name, i in unmaintained]},
+        "warnings": {"unmaintained": warnings("unmaintained", unmaintained),
+                     "notice": warnings("notice", notice)},
     }
 
 
@@ -162,6 +166,25 @@ class Gate(Case):
         self.assertEqual(r.run("--db", r.db)[0], 1)
         self.assertEqual(r.run("--db", r.db, "--base", "HEAD")[0], 0)
 
+    def test_without_a_local_develop_the_base_is_origin_develop(self):
+        r = self.repo()
+        r.git("update-ref", "refs/remotes/origin/develop", "HEAD")
+        r.git("branch", "-m", "develop", "topic")
+        r.write("Cargo.lock", EMPTY_LOCK + "# changed\n")
+        r.commit()
+        r.answer(report(vulns=[("rustls", "RUSTSEC-2026-0001")]))
+        rc, out = r.run("--db", r.db)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("the branch touches Cargo.lock", out)
+
+    def test_a_notice_is_counted_and_listed(self):
+        r = self.repo()
+        r.answer(report(notice=[("old-crate", "RUSTSEC-2026-0002")]))
+        rc, out = r.run("--db", r.db)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("audit: ok: 0 vulnerabilities, 1 warning(s)", out)
+        self.assertIn("audit: notice old-crate 0.1.0 RUSTSEC-2026-0002", out)
+
     def test_a_touched_lockfile_without_vulnerabilities_passes_and_lists_warnings(self):
         r = self.repo()
         r.write("Cargo.lock", EMPTY_LOCK + "# changed\n")
@@ -204,11 +227,28 @@ class Database(Case):
         r.fetched(hours_ago=24 * 30)
         r.write("Cargo.lock", EMPTY_LOCK + "# changed\n")
         r.answer(report(vulns=[("rustls", "RUSTSEC-2026-0001")]))
-        rc, out = r.run("--db", r.db, env={"STUB_FETCH_FAILS": "1"})
+        for error in ("error: couldn't fetch advisory database: offline",
+                      "error: git operation failed: the lock is held by another process"):
+            with self.subTest(error):
+                if os.path.exists(r.log):
+                    os.remove(r.log)
+                rc, out = r.run("--db", r.db, env={"STUB_FETCH_FAILS": error})
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(len(r.calls()), 2, r.calls())
+                self.assertIn("--no-fetch --stale", r.calls()[1])
+                self.assertIn("fetched 30 d ago, fetch failed, local copy used", out)
+
+    def test_a_fetch_that_hangs_is_cut_off_and_the_local_copy_audited(self):
+        r = self.repo()
+        r.fetched(hours_ago=25)
+        r.write("Cargo.lock", EMPTY_LOCK + "# changed\n")
+        r.answer(report(vulns=[("rustls", "RUSTSEC-2026-0001")]))
+        started = time.monotonic()
+        rc, out = r.run("--db", r.db, "--fetch-timeout", "1", env={"STUB_FETCH_SLEEPS": "30"})
+        self.assertLess(time.monotonic() - started, 20, out)
         self.assertEqual(rc, 1, out)
-        self.assertEqual(len(r.calls()), 2, r.calls())
-        self.assertIn("--no-fetch --stale", r.calls()[1])
-        self.assertIn("fetched 30 d ago, fetch failed, local copy used", out)
+        self.assertIn("--no-fetch --stale", r.calls()[-1])
+        self.assertIn("fetch timed out after 1 s, local copy used", out)
 
 
 class Report(Case):

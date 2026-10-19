@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """RustSec audit of a workspace's Cargo.lock: a gate on the branches that change it.
 
-  audit.py [-C DIR] [--base REV] [--db PATH] [--report [--outdated TOOL]]
+  audit.py [-C DIR] [--base REV] [--db PATH] [--fetch-timeout S] [--report [--outdated TOOL]]
 
 `cargo audit` reads the lockfile at the root of DIR's repository and its
 configuration `.cargo/audit.toml` there, whose `[advisories] ignore` lists the
 accepted advisories, each with its reason.
 
   (no flag)  one summary line, then one line per vulnerability and per
-             warning (unmaintained, unsound, yanked). When the branch touches
-             `Cargo.lock` or `.cargo/audit.toml` against a base (REV, by
-             default the merge-base of HEAD and `develop`, else HEAD; the
-             worktree counts, untracked files included), a vulnerability not
+             warning (unmaintained, unsound, yanked, notice). When the branch
+             touches `Cargo.lock` or `.cargo/audit.toml` against a base (REV,
+             by default the merge-base of HEAD and `develop`, else of HEAD and
+             `origin/develop`, else HEAD; the worktree counts, untracked files
+             included), a vulnerability not
              ignored fails. Otherwise the summary is a warning and nothing
              fails, an absent cargo-audit included.
   --report   `cargo audit` in its own format, then the outdated report of the
@@ -23,8 +24,10 @@ accepted advisories, each with its reason.
              whatever it found.
 
 The advisory database (PATH, by default `$CARGO_HOME/advisory-db`) is fetched
-at most once a day: younger than that, or when the fetch fails (an offline
-box), the audit runs on the local copy, however old (`--no-fetch --stale`).
+at most once a day: younger than that, or when the fetching run gives no report
+within S seconds (default 120) whatever the reason (an offline box, another
+checkout fetching the same database), the audit runs on the local copy, however
+old (`--no-fetch --stale`).
 
 Exit 1 on a failing gate, 2 on a usage or setup error (a gated run without
 cargo-audit included).
@@ -39,7 +42,8 @@ import time
 
 GATED = ("Cargo.lock", ".cargo/audit.toml")
 FETCH_EVERY_S = 24 * 3600
-WARNING_KINDS = ("unmaintained", "unsound", "yanked")
+FETCH_TIMEOUT_S = 120
+WARNING_KINDS = ("unmaintained", "unsound", "yanked", "notice")
 OUTDATED = {
     "cargo-outdated": ["cargo", "outdated", "--workspace", "--root-deps-only"],
     "cargo-upgrade": ["cargo", "upgrade", "--dry-run", "--incompatible", "allow"],
@@ -68,8 +72,9 @@ def rev_exists(root, rev):
 def default_base(root):
     if not rev_exists(root, "HEAD"):
         return None
-    if rev_exists(root, "develop"):
-        return git(root, "merge-base", "HEAD", "develop").strip()
+    for integration in ("develop", "origin/develop"):
+        if rev_exists(root, integration):
+            return git(root, "merge-base", "HEAD", integration).strip()
     return "HEAD"
 
 
@@ -102,26 +107,38 @@ def age_text(seconds):
     return f"fetched {hours // 24} d ago" if hours >= 48 else f"fetched {hours} h ago"
 
 
-def run_audit(root, db, extra):
-    """`cargo audit` with `extra`, fetching the database when it is a day old or more.
+def parsed(out):
+    """The JSON report of a `cargo audit --json` run, None when it gave none."""
+    try:
+        report = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return None
+    return report if isinstance(report, dict) else None
 
-    Returns the completed process and the database's age line."""
-    base = ["cargo", "audit", "--db", db, *extra]
+
+def run_audit(root, db, fetch_timeout_s):
+    """`cargo audit --json`, fetching the database when it is a day old or more.
+
+    A fetching run that gives no report within `fetch_timeout_s`, whatever its
+    error, is followed by one on the local copy. Returns the completed process
+    of the run that counts, its report (None when it gave none), and the
+    database's age line."""
+    base = ["cargo", "audit", "--json", "--db", db]
     age = db_age_s(db)
     if age is None or age >= FETCH_EVERY_S:
-        out = subprocess.run(base, cwd=root, capture_output=True, text=True)
-        if fetched(out):
-            return out, age_text(db_age_s(db))
-        note = "fetch failed, local copy used"
+        try:
+            out = subprocess.run(base, cwd=root, capture_output=True, text=True,
+                                 timeout=fetch_timeout_s)
+            report = parsed(out)
+            if report is not None:
+                return out, report, age_text(db_age_s(db))
+            note = "fetch failed, local copy used"
+        except subprocess.TimeoutExpired:
+            note = f"fetch timed out after {fetch_timeout_s} s, local copy used"
     else:
         note = "local copy"
     out = subprocess.run([*base, "--no-fetch", "--stale"], cwd=root, capture_output=True, text=True)
-    return out, f"{age_text(age)}, {note}"
-
-
-def fetched(out):
-    """Whether a run that fetched reached the audit: exit 0 or 1 is a report."""
-    return out.returncode in (0, 1) and "error: couldn't fetch" not in out.stderr
+    return out, parsed(out), f"{age_text(age)}, {note}"
 
 
 def summarize(report):
@@ -140,7 +157,7 @@ def summarize(report):
     return vulns, warns
 
 
-def cmd_gate(root, base, db):
+def cmd_gate(root, base, db, fetch_timeout_s):
     changed = touched(root, base)
     gated = bool(changed)
     if shutil.which("cargo-audit") is None:
@@ -148,10 +165,8 @@ def cmd_gate(root, base, db):
             fail_setup(f"{INSTALL}; the branch touches {', '.join(changed)}")
         print(f"audit: warning: {INSTALL}; nothing audited")
         return 0
-    out, age = run_audit(root, db, ["--json"])
-    try:
-        report = json.loads(out.stdout)
-    except json.JSONDecodeError:
+    out, report, age = run_audit(root, db, fetch_timeout_s)
+    if report is None:
         last = (out.stderr.strip().splitlines() or ["no output"])[0]
         if gated:
             fail_setup(f"cargo audit gave no report (exit {out.returncode}): {last}")
@@ -179,11 +194,13 @@ def cmd_gate(root, base, db):
     return 1 if failing else 0
 
 
-def cmd_report(root, db, outdated):
+def cmd_report(root, db, outdated, fetch_timeout_s):
     if shutil.which("cargo-audit") is None:
         print(f"audit: {INSTALL}")
     else:
-        out, age = run_audit(root, db, [])
+        _, _, age = run_audit(root, db, fetch_timeout_s)
+        out = subprocess.run(["cargo", "audit", "--db", db, "--no-fetch", "--stale"], cwd=root,
+                             capture_output=True, text=True)
         print(f"== cargo audit (advisory db {age})")
         sys.stdout.write(out.stdout)
         sys.stdout.write(out.stderr)
@@ -204,15 +221,17 @@ def main():
     p.add_argument("--db", default=default_db(), help="the advisory database")
     p.add_argument("--report", action="store_true")
     p.add_argument("--outdated", choices=sorted(OUTDATED), default="cargo-upgrade")
+    p.add_argument("--fetch-timeout", type=int, default=FETCH_TIMEOUT_S, metavar="S",
+                   help="seconds a fetching run may take before the local copy is used")
     a = p.parse_args()
     root = git(a.root, "rev-parse", "--show-toplevel").strip()
     if not os.path.isfile(os.path.join(root, "Cargo.lock")):
         fail_setup(f"no Cargo.lock at {root}")
     if a.report:
-        return cmd_report(root, a.db, a.outdated)
+        return cmd_report(root, a.db, a.outdated, a.fetch_timeout)
     if a.base and not rev_exists(root, a.base):
         fail_setup(f"--base {a.base} is no commit")
-    return cmd_gate(root, a.base or default_base(root), a.db)
+    return cmd_gate(root, a.base or default_base(root), a.db, a.fetch_timeout)
 
 
 if __name__ == "__main__":
