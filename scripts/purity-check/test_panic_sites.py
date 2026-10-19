@@ -239,8 +239,7 @@ class Zero(Case):
         a = ws.ids()["a"]
         rc, out = self.check(ws, [message(a, "clippy::panic", "crates/a/src/lib.rs", 4)])
         self.assertEqual(rc, 1)
-        self.assertIn("a has allowlist entries: crates/a/src/lib.rs carries the zero attribute",
-                      out)
+        self.assertIn("a has sites the zero attribute denies: crates/a/src/lib.rs carries it", out)
 
 
 class Classification(Case):
@@ -660,6 +659,127 @@ class Lists(Case):
         rc, out = ws.run(SCRIPT, "--staged")
         self.assertEqual(rc, 1)
         self.assertIn("narrows `std::vec::Vec::remove`", out)
+
+
+LOCK = '  { path = "std::sync::Mutex::lock", reason = "a poisoned lock stops the caller" },\n'
+LOCKED = LISTS.replace("]\n", LOCK + "]\n")
+BASE_LINTS = ('DENIED = ("unwrap_used",)\nPURE_DENIED = ()\n'
+              'LISTS = ("disallowed_macros", "disallowed_methods", "disallowed_types")\n')
+
+
+def lock_site(pkg, file, line):
+    return message(pkg, "clippy::disallowed_methods", file, line,
+                   text="use of a disallowed method `std::sync::Mutex::lock`")
+
+
+class Revealed(Case):
+    """Sites a rule the base did not count reveals raise and add entries,
+    as moved sites do; a hand raise past them, or one on a touched line,
+    still fails."""
+
+    def tightened(self, crates=(("a", "shell"),), lib=LIB):
+        ws = self.workspace(HEADER + "crates/a/src/lib.rs 1\n", crates=crates)
+        ws.write("clippy.toml", LISTS)
+        ws.write("crates/a/src/lib.rs", lib)
+        ws.commit()
+        ws.write("clippy.toml", LOCKED)
+        a = ws.ids()["a"]
+        sites = [message(a, "clippy::panic", "crates/a/src/lib.rs", 2),
+                 lock_site(a, "crates/a/src/lib.rs", 5), lock_site(a, "crates/a/src/lib.rs", 6),
+                 lock_site(a, "crates/a/src/b.rs", 3)]
+        return ws, sites
+
+    def test_a_new_list_entry_s_sites_pass_after_update(self):
+        ws, sites = self.tightened()
+        rc, out = self.check(ws, sites)
+        self.assertEqual(rc, 1)
+        self.assertIn("crates/a/src/lib.rs has 3 panic-class sites, budget 1", out)
+        rc, out = self.check(ws, sites, "--update")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("raised crates/a/src/lib.rs 1 -> 3", out)
+        self.assertIn("added crates/a/src/b.rs 0 -> 1", out)
+        self.assertEqual(ws.read("panic-sites.allow"),
+                         HEADER + "crates/a/src/b.rs 1\ncrates/a/src/lib.rs 3\n")
+        rc, out = self.check(ws, sites)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_raise_past_the_revealed_sites_fails(self):
+        ws, sites = self.tightened()
+        ws.write("panic-sites.allow", HEADER + "crates/a/src/b.rs 1\ncrates/a/src/lib.rs 4\n")
+        rc, out = self.check(ws, sites + [message(ws.ids()["a"], "clippy::panic",
+                                                  "crates/a/src/lib.rs", 9)])
+        self.assertEqual(rc, 1)
+        self.assertIn("the allowlist total rises from 1 to 5", out)
+
+    def test_an_old_entry_s_sites_reveal_nothing(self):
+        ws, sites = self.tightened()
+        ws.write("clippy.toml", LISTS)
+        old = [message(ws.ids()["a"], "clippy::disallowed_methods", "crates/a/src/lib.rs", n,
+                       text="use of a disallowed method `std::vec::Vec::remove`") for n in (5, 6)]
+        rc, out = self.check(ws, sites[:1] + old, "--update")
+        self.assertEqual(rc, 1)
+        self.assertEqual(ws.read("panic-sites.allow"), HEADER + "crates/a/src/lib.rs 1\n")
+
+    def test_a_revealed_site_on_a_touched_line_fails(self):
+        ws, sites = self.tightened()
+        lines = LIB.splitlines(keepends=True)
+        lines[4] = "pub fn touched() {}\n"
+        ws.write("crates/a/src/lib.rs", "".join(lines))
+        self.check(ws, sites, "--update")
+        rc, out = self.check(ws, sites)
+        self.assertEqual(rc, 1)
+        self.assertIn("new site in a touched hunk", out)
+        self.assertIn("crates/a/src/lib.rs:5", out)
+
+    def test_a_lint_the_base_did_not_count_reveals_its_sites(self):
+        ws = self.workspace(HEADER + "crates/a/src/lib.rs 1\n")
+        ws.write("scripts/panic_sites_lints.py", BASE_LINTS)
+        ws.commit()
+        a = ws.ids()["a"]
+        sites = [message(a, "clippy::unwrap_used", "crates/a/src/lib.rs", 2),
+                 message(a, "clippy::panic", "crates/a/src/lib.rs", 5)]
+        rc, out = self.check(ws, sites, "--update")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(ws.read("panic-sites.allow"), HEADER + "crates/a/src/lib.rs 2\n")
+        self.assertEqual(self.check(ws, sites)[0], 0)
+
+    def test_a_pure_entry_widened_reveals_its_shell_sites(self):
+        ws = self.workspace(HEADER + "crates/a/src/lib.rs 1\n")
+        ws.write("clippy.toml", LISTS)
+        ws.commit()
+        ws.write("clippy.toml", LISTS.replace('"pure tier: reads the environment"', '"env"'))
+        a = ws.ids()["a"]
+        sites = [message(a, "clippy::panic", "crates/a/src/lib.rs", 2),
+                 message(a, "clippy::disallowed_methods", "crates/a/src/lib.rs", 5,
+                         text="use of a disallowed method `std::env::var`")]
+        rc, out = self.check(ws, sites, "--update")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(ws.read("panic-sites.allow"), HEADER + "crates/a/src/lib.rs 2\n")
+
+    def test_a_crate_whose_sites_are_all_listed_keeps_its_zero_attribute(self):
+        ws = self.workspace(crates=(("a", "shell"),))
+        ws.write("clippy.toml", LISTS)
+        ws.write("crates/a/src/lib.rs", ZERO + LIB)
+        ws.commit()
+        ws.write("clippy.toml", LOCKED)
+        sites = [lock_site(ws.ids()["a"], "crates/a/src/lib.rs", 5)]
+        rc, out = self.check(ws, sites, "--update")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(ws.read("panic-sites.allow"), HEADER + "crates/a/src/lib.rs 1\n")
+        rc, out = self.check(ws, sites)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_staged_tightening_lets_the_total_rise(self):
+        ws, _ = self.tightened()
+        ws.write("panic-sites.allow", HEADER + "crates/a/src/b.rs 1\ncrates/a/src/lib.rs 3\n")
+        ws.git("add", "panic-sites.allow", "clippy.toml")
+        rc, out = ws.run(SCRIPT, "--staged")
+        self.assertEqual(rc, 0, out)
+        ws.write("clippy.toml", LISTS)
+        ws.git("add", "clippy.toml")
+        rc, out = ws.run(SCRIPT, "--staged")
+        self.assertEqual(rc, 1)
+        self.assertIn("the allowlist total rises from 1 to 4", out)
 
 
 class Report(Case):

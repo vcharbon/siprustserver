@@ -29,18 +29,24 @@ none. Against its version at a base (REV, by default the merge-base of HEAD
 and `develop`, else HEAD; the same under --staged) the allowlist only
 tightens. An entry above its base count (0 when the base does not list it;
 a file git sees renamed keeps its old entry's count) passes only when the
-allowlist's total does not rise and the excess is at most the file's sites
-on lines git sees moved (panic_sites_diff). Moved sites carry budget only as
-far as the files they moved out of were counted at the base and have fallen
-since; past that every moved line counts as touched. The root clippy.toml's
-lists only tighten too (panic_sites_lists).
+allowlist's total rises by no more than the revealed sites and the excess is
+at most the file's sites on lines git sees moved (panic_sites_diff) and its
+revealed sites. A site is revealed when the base did not count its rule: a
+lint its lints module did not count, a list entry its clippy.toml did not
+hold or held for the pure tier only (panic_sites_base). Moved sites carry
+budget only as far as the files they moved out of were counted at the base
+and have fallen since; past that every moved line counts as touched. A
+revealed site on a touched line is refused like any other. The root
+clippy.toml's lists only tighten too (panic_sites_lists).
 
 A crate with no entry is at zero: each of its lib and bin roots carries
 
   #![cfg_attr(not(test), deny(<the eleven lints above>))]
 
 (a pure crate's with iter_over_hash_type too), which exempts all test code.
-The three disallowed lints stay with this pass,
+A crate with a site of a lint its attribute denies carries none; one whose
+sites are all of the disallowed lists may keep it. The three disallowed
+lints stay with this pass,
 whose tier split no crate attribute can state. Attributes that would hide a
 site from a plain clippy run, and `cfg` predicates that keep code out of the
 pass, are refused in a tiered crate (panic_sites_attrs).
@@ -55,11 +61,13 @@ pass, are refused in a tiered crate (panic_sites_attrs).
              skipped; entries of the other crates are left alone
   --json F   reads the pass's clippy JSON from F instead of running it
   --staged   the staged allowlist and clippy.toml against the base only (a
-             pre-commit hook; moved sites are not known there, so a raised
-             entry passes when the total does not rise)
+             pre-commit hook; moved and revealed sites are not known there,
+             so a raised entry passes when the total does not rise, or by
+             any amount when the staged rules count more than the base's)
   --update   lowers each entry to its file's count, moves the entry of a
              renamed file, removes the entries at zero or gone, and raises
-             or adds an entry by the file's sites on moved lines
+             or adds an entry by the file's sites on moved lines and its
+             revealed sites
   --report   the counts per crate, then one `path count` line per file with a
              site, in allowlist form; exits 0
 
@@ -74,6 +82,7 @@ import sys
 sys.dont_write_bytecode = True  # the helper modules beside it leave no __pycache__
 
 from panic_sites_attrs import expects, refusals, zero_lints, zero_of, zero_text
+from panic_sites_base import Base as BaseRules, revealed
 from panic_sites_diff import lines as diff_lines, renames
 from panic_sites_lints import COUNTED, PURE_COUNTED
 from panic_sites_lists import entries as list_entries, loosened
@@ -159,22 +168,27 @@ def base_count(rel, allow, base, renamed):
     return 0
 
 
-def against_base(allow, base, renamed, moved_sites=None):
+def against_base(allow, base, renamed, moved_sites=None, revealed=None, tightened=False):
     """What `allow` loosens against its `base` version. An entry above its
-    base count passes when the total does not rise and, with `moved_sites`
-    known, the excess is at most the file's sites on moved lines."""
+    base count passes when the total rises by no more than the `revealed`
+    sites (`tightened`: by any amount, the sites being unknown) and, with
+    `moved_sites` known, the excess is at most the file's sites on moved
+    lines and revealed ones."""
     if base is None:
         return []
-    bad, rises = [], allow.total() > base.total()
+    revealed = revealed or {}
+    ceiling = base.total() + sum(revealed.values())
+    bad, rises = [], allow.total() > ceiling and not tightened
     for rel, n in sorted(allow.entries.items()):
         old = base_count(rel, allow, base, renamed)
         if n <= old:
             continue
         moved = None if moved_sites is None else moved_sites.get(rel, 0)
-        if not rises and (moved is None or n - old <= moved):
+        shown = revealed.get(rel, 0)
+        if not rises and (moved is None or n - old <= moved + shown):
             continue
         why = (f"the allowlist total rises from {base.total()} to {allow.total()}" if rises
-               else f"{n - old} above it, {moved} on moved lines")
+               else f"{n - old} above it, {moved} on moved lines, {shown} revealed")
         verb = f"lists {rel} at {n}, above its {old} at" if old else f"adds {rel} at {n}, which"
         tail = "" if old else " does not list"
         bad.append(f"{allow.path} {verb} {base.path}{tail} ({why})")
@@ -405,9 +419,10 @@ def read(root, rel):
         return f.read()
 
 
-def zero_attrs(root, crates, allow, counts):
+def zero_attrs(root, crates, allow, counts, found):
     """A crate with no entry and no site carries the zero attribute at each
-    root; a crate with entries carries none."""
+    root; a crate with a site of a lint the attribute denies carries none.
+    A crate whose sites are all of the disallowed lists may carry it."""
     bad = []
     for c in crates:
         listed = any(c.owns(rel) for rel in allow.entries)
@@ -417,8 +432,8 @@ def zero_attrs(root, crates, allow, counts):
             if at_zero and (have is None or not want <= have):
                 miss = "" if have is None else f" (missing {', '.join(sorted(want - have))})"
                 bad.append(f"{c.name} is at zero: {rel} carries `{zero_text(c.tier)}`{miss}")
-            elif listed and have is not None:
-                bad.append(f"{c.name} has allowlist entries: {rel} carries the zero attribute")
+            elif have is not None and any(c.owns(f.file) and f.code in have for f in found):
+                bad.append(f"{c.name} has sites the zero attribute denies: {rel} carries it")
     return bad
 
 
@@ -471,7 +486,8 @@ def report(violations, hint=None):
 
 GROW_HINT = ("a panic-class site is rewritten (checked access, an error returned), never "
              "listed; a count never goes up (ADR-0051)")
-BASE_HINT = "the allowlist only tightens: an entry rises only by the sites moved into its file"
+BASE_HINT = ("the allowlist only tightens: an entry rises only by the sites moved into its file "
+             "and the sites a rule the base did not count reveals")
 LIST_HINT = "the lists only tighten: a pass that sees fewer sites lowers every count"
 
 
@@ -503,28 +519,49 @@ def diff_of(root, base):
         fail_setup(str(e))
 
 
+def clippy_toml(root):
+    path = os.path.join(root, "clippy.toml")
+    return read(root, "clippy.toml") if os.path.isfile(path) else None
+
+
+def revealed_of(root, base, found, moved_sites, moved):
+    """`{file: sites}` of the sites a rule the base did not count reveals,
+    those already carried as moved aside (panic_sites_base)."""
+    rules = BaseRules.at(root, base, clippy_toml(root))
+    fresh = [f for f in found
+             if not (moved_sites.get(f.file) and f.lines() <= moved.get(f.file, set()))]
+    return revealed(fresh, rules)
+
+
+def now_lints():
+    return set(COUNTED) - set(PURE_COUNTED), set(PURE_COUNTED)
+
+
 def cmd_check(root, allow, base, crates, every, json_file):
     found, ok = run_pass(root, crates, json_file)
     counts = counts_of(found)
     (touched, moved, moved_from), renamed = diff_of(root, base)
     base_list = base_allow(root, base, allow.path)
     touched, moved_sites = carried(found, counts, base_list, touched, moved, moved_from)
+    shown = revealed_of(root, base, found, moved_sites, moved)
     rc = 0 if ok else 1
     rc = report(over_budget(found, counts, allow), GROW_HINT) or rc
     rc = report(in_hunks(found, touched), GROW_HINT) or rc
-    rc = report(against_base(allow, base_list, renamed, moved_sites), BASE_HINT) or rc
+    rc = report(against_base(allow, base_list, renamed, moved_sites, shown), BASE_HINT) or rc
     rc = report(lists_against_base(root, base, False), LIST_HINT) or rc
     rc = report(lint_attrs(root, crates)) or rc
     if not ok:
         return rc
-    rc = report(zero_attrs(root, crates, allow, counts)) or rc
+    rc = report(zero_attrs(root, crates, allow, counts, found)) or rc
     old = stale(counts, allow, crates) + unowned(allow, every)
     return report(old, "run `panic-sites.py --update` and commit the allowlist") or rc
 
 
 def cmd_staged(root, rel):
     """The staged allowlist and lists against the base verify holds them to,
-    so a move committed in steps passes each one."""
+    so a move committed in steps passes each one. With the staged rules
+    tighter than the base's, the total may rise: the sites they reveal are
+    known to the full check only."""
     text = show(root, f":{rel}")
     allow = Allow(text, rel) if text is not None else load_allow(root, rel)
     base = default_base(root)
@@ -532,14 +569,17 @@ def cmd_staged(root, rel):
         renamed = renames(root, base, True)
     except RuntimeError as e:
         fail_setup(str(e))
-    rc = report(against_base(allow, base_allow(root, base, rel), renamed), BASE_HINT)
+    staged = show(root, ":clippy.toml") or clippy_toml(root)
+    tightened = BaseRules.at(root, base, staged).tightened(now_lints())
+    rc = report(against_base(allow, base_allow(root, base, rel), renamed, tightened=tightened),
+                BASE_HINT)
     return report(lists_against_base(root, base, True), LIST_HINT) or rc
 
 
-def updated(allow, counts, moved_sites, base, renamed, crates):
+def updated(allow, counts, moved_sites, base, renamed, crates, shown):
     """`(entries, changes)`: each entry lowered to its file's count or
     removed at zero, a renamed file's moved, and raised or added by the
-    file's sites on moved lines."""
+    file's sites on moved lines and the sites a tightened rule reveals."""
     moved_to = {old: new for new, old in renamed.items()}
     entries, notes, changes = {}, {}, []
     for raw in allow.lines:
@@ -559,7 +599,7 @@ def updated(allow, counts, moved_sites, base, renamed, crates):
             continue
         n, budget = counts.get(rel, 0), entries.get(rel, 0)
         old = 0 if base is None else base_count(rel, allow, base, renamed)
-        ceiling = max(budget, old + moved_sites.get(rel, 0))
+        ceiling = max(budget, old + moved_sites.get(rel, 0) + shown.get(rel, 0))
         want = min(n, ceiling)
         if want == budget:
             continue
@@ -581,7 +621,9 @@ def cmd_update(root, allow, allow_file, base, crates, json_file):
     (touched, moved, moved_from), renamed = diff_of(root, base)
     base_list = base_allow(root, base, allow.path)
     _, moved_sites = carried(found, counts, base_list, touched, moved, moved_from)
-    entries, notes, changes = updated(allow, counts, moved_sites, base_list, renamed, crates)
+    shown = revealed_of(root, base, found, moved_sites, moved)
+    entries, notes, changes = updated(allow, counts, moved_sites, base_list, renamed, crates,
+                                      shown)
     if changes:
         first = next((i for i, raw in enumerate(allow.lines)
                       if len(raw.split("#", 1)[0].split()) == 2), len(allow.lines))
@@ -593,7 +635,7 @@ def cmd_update(root, allow, allow_file, base, crates, json_file):
         print(f"panic-sites: {c}")
     allow = load_allow(root, allow.path)
     rc = report(over_budget(found, counts, allow), GROW_HINT)
-    return report(against_base(allow, base_list, renamed, moved_sites), BASE_HINT) or rc
+    return report(against_base(allow, base_list, renamed, moved_sites, shown), BASE_HINT) or rc
 
 
 def cmd_report(root, allow, crates, json_file):

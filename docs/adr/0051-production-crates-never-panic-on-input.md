@@ -72,11 +72,14 @@ table with `unsafe_code = "deny"` as its one difference, which the tier check ve
 ratchet pass runs clippy with the set force-warned on `--lib --bins` of every tiered crate and
 holds per-file counts in `panic-sites.allow`, so no workspace `-D warnings` gate sees the set
 early and no source attribute hides a site from it. An entry goes down, or up only by sites
-git sees moved into its file from a counted site elsewhere; the total never rises. At zero
+git sees moved into its file from a counted site elsewhere and by sites a rule the base did
+not count reveals (a lint or list entry the change adds); the total rises by the revealed
+sites alone. At zero
 the crate carries `#![cfg_attr(not(test), deny(…))]` with the eleven lints at its roots
 (a pure crate adds `iter_over_hash_type`, which the pass counts in pure crates only),
 which exempts all test code; the disallowed lists stay with the pass for every tiered crate,
-since one list holds both tiers' entries.
+since one list holds both tiers' entries, and a crate whose remaining sites are all of the
+lists keeps its attribute.
 
 ### 4. Abort-class failures
 

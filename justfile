@@ -127,8 +127,9 @@ purity:
 panic-sites:
     scripts/panic-sites.py
 
-# Lowers each entry to its file's count and removes the entries at zero; never
-# raises nor adds one.
+# Lowers each entry to its file's count and removes the entries at zero; raises
+# or adds one only by the sites moved into its file or revealed by a rule the
+# base did not count.
 panic-sites-update:
     scripts/panic-sites.py --update
 
