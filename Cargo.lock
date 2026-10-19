@@ -4577,6 +4577,7 @@ dependencies = [
  "load-shed",
  "metric-catalogue",
  "observe",
+ "proptest",
  "scenario-harness",
  "sha1 0.11.0",
  "sha2 0.11.1",
@@ -4591,6 +4592,7 @@ dependencies = [
  "tokio-util",
  "topology",
  "tracing",
+ "wire-mutations",
 ]
 
 [[package]]

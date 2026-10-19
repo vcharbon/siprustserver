@@ -13,6 +13,7 @@ mod health_probe_late_reply;
 mod ingress_trust;
 mod load_balancer;
 mod load_balancer_routing;
+mod no_panic_lane;
 mod options_e2e;
 mod per_call_trace;
 mod refused_invite_copies;

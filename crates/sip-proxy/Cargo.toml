@@ -46,3 +46,6 @@ scenario-harness = { path = "../scenario-harness" }
 layer-harness = { path = "../layer-harness" }
 # The per-packet trace-tier budget: an untraced proxy allocates nothing.
 alloc-counter = { path = "../alloc-counter" }
+# The no-panic property lane: its runner and the shared structured mutations.
+proptest.workspace = true
+wire-mutations = { path = "../wire-mutations" }
