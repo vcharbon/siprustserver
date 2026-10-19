@@ -245,6 +245,7 @@ pub fn invite_with_cr_lg(call_ref: &str, call_id: &str, branch: &str, leg_id: &s
 }
 
 /// A response from the peer toward the b2bua (absorb / bounded-queue tests).
+/// Its Contact is the peer, so the in-dialog requests a 2xx draws reach it.
 pub fn response_bytes(
     status: u16,
     reason: &str,
@@ -265,6 +266,7 @@ pub fn response_bytes(
          To: {to}\r\n\
          Call-ID: {call_id}\r\n\
          CSeq: 1 {cseq_method}\r\n\
+         Contact: <sip:peer@{PEER}>\r\n\
          Content-Length: 0\r\n\r\n"
     )
     .into_bytes()

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Agent, Harness};
+use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20001 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
@@ -56,6 +57,43 @@ async fn a_2xx_repeated_after_release_draws_the_calls_own_ack_and_no_bye() {
         relayed.request().image(),
         "with the ACK the call relayed, byte for byte"
     );
+    bob_hears_nothing_more(&h, &bob).await;
+
+    b2bua.assert_fully_reaped();
+    assert_eq!(b2bua.cdr_records().len(), 1, "one CDR for the one call");
+    alice.drain().await;
+    let _report = h.finish().await;
+}
+
+/// A delayed offer: bob's 200 carries the offer, so its ACK owes the answer
+/// alice's ACK would carry. alice hangs up on the 200 before she ACKs it (her
+/// declared fault), so the BYE reaches bob with no ACK of his 2xx; he answers
+/// it and the call is reaped. His next repeat of the 2xx (RFC 3261 §13.3.1.4)
+/// draws one ACK and no second BYE: the call already ended that dialog.
+#[tokio::test(start_paused = true)]
+async fn a_2xx_repeated_after_a_bye_that_beat_its_ack_draws_an_ack_and_no_bye() {
+    let h = Harness::new("b2bua-2xx-after-release-byed-unacked");
+    let alice = h.agent("alice", "127.0.0.1:6131").await;
+    let bob = h.agent("bob", "127.0.0.1:6132").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 6132).start(&h, "b2bua", "127.0.0.1:6133").await;
+    h.allow_violation(
+        "no-ack-to-dialog-creating-2xx",
+        "alice hangs up on the 200 without ACKing it: the peer fault under test",
+    );
+
+    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await;
+    let mut bye = call.send_request(InDialogMethod::Bye).send().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    let ack = bob.try_receive("ACK").await.expect("the repeat after release is ACKed");
+    assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq());
     bob_hears_nothing_more(&h, &bob).await;
 
     b2bua.assert_fully_reaped();

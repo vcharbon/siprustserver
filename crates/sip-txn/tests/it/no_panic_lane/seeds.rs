@@ -237,7 +237,9 @@ fn invite_2xx(tag: &str) -> Vec<u8> {
             CLIENT_CALL_ID,
             "CSeq: 1 INVITE",
             "Contact: <sip:carol@192.0.2.20:5060>",
-            "Record-Route: <sip:192.0.2.30;lr>, <sip:rr.example.com;lr>",
+            // Reversed, the route set's first hop is the peer: the orphan's
+            // ACK and BYE reach it.
+            "Record-Route: <sip:192.0.2.30;lr>, <sip:192.0.2.20:5060;lr>",
             "Content-Type: application/sdp",
         ],
         ANSWER,

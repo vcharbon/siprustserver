@@ -23,7 +23,7 @@ fn ok_tagged(cseq_method: &str, cseq: u32, branch: &str, call_id: &str, tag: &st
          To: <sip:bob@192.0.2.20:5060>;tag={tag}\r\n\
          Call-ID: {call_id}\r\n\
          CSeq: {cseq} {cseq_method}\r\n\
-         Contact: <sip:bob@192.0.2.20:5060>\r\n\
+         Contact: <sip:bob@{PEER}>\r\n\
          Content-Length: 0\r\n\r\n"
     )
     .into_bytes()

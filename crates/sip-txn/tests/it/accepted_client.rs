@@ -12,8 +12,13 @@ use sip_message::{SipMessage, SipRequest};
 use sip_txn::timers::TIMER_M;
 use sip_txn::TransactionEvent;
 
-/// Where every INVITE goes: the peer the tests read the wire at.
+/// Where an INVITE goes: the peer the tests read the wire at, which is also
+/// the Contact every 2xx names.
 const CALLEE: &str = PEER;
+
+/// A next hop no endpoint listens on: an INVITE sent there leaves nothing on
+/// the wire the tests read.
+const ELSEWHERE: &str = "10.0.0.9:5060";
 
 fn reqs(msgs: &[SipMessage], method: &str) -> Vec<SipRequest> {
     msgs.iter()
@@ -61,7 +66,7 @@ fn provisional_or_final(
          To: <sip:bob@192.0.2.20:5060>;tag={tag}\r\n\
          Call-ID: {call_id}\r\n\
          CSeq: {cseq} INVITE\r\n\
-         Contact: <sip:bob@192.0.2.20:5060>\r\n"
+         Contact: <sip:bob@{PEER}>\r\n"
     );
     for line in extra {
         out.push_str(line);
@@ -205,15 +210,16 @@ async fn after_release_an_unacked_initial_2xx_draws_an_ack_and_a_bye_once() {
 }
 
 /// After its call is released, a 2xx to a re-INVITE the TU never ACKed is
-/// ACKed from the INVITE, through the INVITE's route set, and draws no BYE:
-/// the dialog was the call's, which ended it.
+/// ACKed from the INVITE, through the INVITE's route set and to its first hop
+/// (RFC 3261 §12.2.1.1), and draws no BYE: the dialog was the call's, which
+/// ended it.
 #[tokio::test(start_paused = true)]
 async fn after_release_an_unacked_reinvite_2xx_is_acked_through_its_route_set_and_draws_no_bye() {
     let mut stack = Stack::build(5, 64, 64).await;
     let (call_ref, call_id, branch) = ("self|call-A4", "callid-A4", "z9hG4bK-A4");
-    let route = "<sip:192.0.2.30:5060;lr>";
-    let invite = reinvite(call_ref, call_id, branch, "t4", route);
-    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    let route = format!("<sip:{PEER};lr>");
+    let invite = reinvite(call_ref, call_id, branch, "t4", &route);
+    stack.txn.send_request(invite, addr(ELSEWHERE), TxnKind::Invite).await.unwrap();
     stack.inject(&ok(2, branch, call_id, "t4", &[], "")).await;
     elapse_ms(20).await;
     stack.drain_peer();
@@ -224,7 +230,8 @@ async fn after_release_an_unacked_reinvite_2xx_is_acked_through_its_route_set_an
     elapse_ms(20).await;
     let out = stack.drain_peer();
     let ack = reqs(&out, "ACK").pop().expect("the repeat is ACKed");
-    assert_eq!(ack.raw(sip_message::header::HeaderName::Route).collect::<Vec<_>>(), vec![route]);
+    let routes = ack.raw(sip_message::header::HeaderName::Route).collect::<Vec<_>>();
+    assert_eq!(routes, vec![route.as_str()]);
     assert_eq!(ack.cseq().seq(), 2);
     assert!(reqs(&out, "BYE").is_empty(), "a re-INVITE's dialog draws no BYE");
 }
@@ -350,4 +357,103 @@ async fn relinquishing_a_call_deletes_its_accepted_transactions() {
     elapse_ms(20).await;
     assert_eq!(responses(&stack.drain_events()), vec![(200, false)]);
     assert!(stack.drain_peer().is_empty());
+}
+
+/// Relinquishing only a call's Accepted transactions, as a release that does
+/// not end the call does, deletes them with nothing sent and leaves its other
+/// transactions to the release: a later repeat of the 2xx reaches the
+/// consumer as a new arrival, never an ACK and BYE from the layer.
+#[tokio::test(start_paused = true)]
+async fn relinquishing_a_calls_accepted_transactions_leaves_the_others() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id) = ("self|call-A10", "callid-A10");
+    let (answered, ringing) = ("z9hG4bK-A10a", "z9hG4bK-A10b");
+    let invite = offerless_invite(call_ref, call_id, answered);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    let other = invite_with_cr_lg(call_ref, "callid-A10b", ringing, "b-2");
+    stack.txn.send_request(other, addr(ELSEWHERE), TxnKind::Invite).await.unwrap();
+    stack.inject(&ok(1, answered, call_id, "t10", &[], "")).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    assert_eq!(stack.txn.relinquish_accepted_of_call(call_ref).await.unwrap(), 1);
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    assert_eq!(stack.txn.metrics().orphaned_transactions(), 1, "the ringing INVITE is orphaned");
+    stack.inject(&ok(1, answered, call_id, "t10", &[], "")).await;
+    elapse_ms(20).await;
+    assert_eq!(responses(&stack.drain_events()), vec![(200, false)], "a new arrival");
+    assert!(stack.drain_peer().is_empty(), "no ACK, no BYE from the layer");
+}
+
+/// RFC 6026 §8.4: an Accepted transaction passes only 2xx up. A provisional
+/// or a non-2xx on its branch is absorbed: nothing reaches the TU and nothing
+/// is sent.
+#[tokio::test(start_paused = true)]
+async fn an_accepted_transaction_hands_only_2xx_up() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id, branch) = ("self|call-A11", "callid-A11", "z9hG4bK-A11");
+    let invite = offerless_invite(call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t11", &[], "")).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    stack.inject(&provisional_or_final("180 Ringing", 1, branch, call_id, "t11", &[], "")).await;
+    stack.inject(&provisional_or_final("486 Busy Here", 1, branch, call_id, "t12", &[], "")).await;
+    elapse_ms(20).await;
+    assert!(responses(&stack.drain_events()).is_empty(), "a 1xx and a non-2xx are absorbed");
+    assert!(stack.drain_peer().is_empty(), "and draw nothing");
+    stack.inject(&ok(1, branch, call_id, "t11", &[], "")).await;
+    elapse_ms(20).await;
+    assert_eq!(responses(&stack.drain_events()), vec![(200, false)], "a 2xx still goes up");
+}
+
+/// After its call is released, a repeat of a 2xx whose ACK the TU sent draws
+/// that ACK at the address the TU sent it to, not where the INVITE went.
+#[tokio::test(start_paused = true)]
+async fn after_release_the_tus_ack_is_replayed_where_it_went() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id, branch) = ("self|call-A12", "callid-A12", "z9hG4bK-A12");
+    let invite = offerless_invite(call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(ELSEWHERE), TxnKind::Invite).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t12", &[], "")).await;
+    elapse_ms(20).await;
+    let ack = tu_ack(call_ref, call_id, 1, "t12");
+    stack.txn.send_request(ack, addr(PEER), TxnKind::Invite).await.unwrap();
+    elapse_ms(20).await;
+    let sent = reqs(&stack.drain_peer(), "ACK").pop().expect("the TU's ACK reached the Contact");
+    let _ = stack.drain_events();
+
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t12", &[], "")).await;
+    elapse_ms(20).await;
+    let again = reqs(&stack.drain_peer(), "ACK").pop().expect("the replay reaches the Contact");
+    assert_eq!(again.image(), sent.image());
+}
+
+/// After its call is released, a fork's 2xx with no Record-Route draws its
+/// ACK and BYE at its Contact, the dialog's remote target (RFC 3261 §8.1.2,
+/// §12.2.1.1), not where the INVITE went.
+#[tokio::test(start_paused = true)]
+async fn after_release_a_forked_2xx_is_acked_and_byed_at_its_contact() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (call_ref, call_id, branch) = ("self|call-A13", "callid-A13", "z9hG4bK-A13");
+    let invite = offerless_invite(call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(ELSEWHERE), TxnKind::Invite).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "won", &[], "")).await;
+    elapse_ms(20).await;
+    let ack = tu_ack(call_ref, call_id, 1, "won");
+    stack.txn.send_request(ack, addr(PEER), TxnKind::Invite).await.unwrap();
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "fork", &[], "")).await;
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    assert_eq!(reqs(&out, "ACK").len(), 1, "the fork's ACK reaches its Contact: {out:?}");
+    assert_eq!(reqs(&out, "BYE").len(), 1, "so does its BYE");
 }
