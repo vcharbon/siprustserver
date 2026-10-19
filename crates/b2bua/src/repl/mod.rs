@@ -20,6 +20,7 @@ mod backend_gate;
 mod changelog;
 mod departed;
 mod incarnation;
+mod peer_body;
 mod peer_resolver;
 mod puller;
 mod readiness;
@@ -36,6 +37,7 @@ pub use changelog::{
     BodySource, Changelog, RefMeta, DEFAULT_DEAD_PEER_TTL_MS, DEFAULT_TOMBSTONE_TTL_MS,
 };
 pub use departed::{departed_probe, DepartedProbe};
+pub(crate) use peer_body::decode_peer_body;
 pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
 pub use puller::{Puller, PullerConfig, PullerStatus};
 pub use readiness::{

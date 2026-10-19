@@ -6,14 +6,20 @@
 //! buys — field order is the contract — is acceptable because the project
 //! redeploys from scratch each release (ADR-0008).
 
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use crate::model::Call;
 
-/// The deepest nesting of arrays and maps a body may hold: the call tree's
-/// own, with room for the JSON of the per-service `ext` slices. A peer's body
-/// nested deeper is refused before its recursion can exhaust the stack.
+/// The nesting of arrays and maps a body stays under, on both sides: the call
+/// tree's own, with room for [`EXT_JSON_DEPTH`] levels of per-service JSON. A
+/// peer's body nested deeper is refused before its recursion can exhaust the
+/// stack, and this node never encodes one a peer would refuse.
 pub const MAX_DEPTH: usize = 64;
+
+/// How deep the JSON of an `ext` slice may nest: the call tree takes the rest
+/// of [`MAX_DEPTH`].
+pub const EXT_JSON_DEPTH: usize = 48;
 
 /// Failure decoding a call body.
 #[derive(Debug, thiserror::Error)]
@@ -29,8 +35,14 @@ pub enum CallDecodeError {
 
 /// Failure encoding a call body.
 #[derive(Debug, thiserror::Error)]
-#[error("msgpack encode failed: {0}")]
-pub struct CallEncodeError(String);
+pub enum CallEncodeError {
+    /// The serializer refused the call.
+    #[error("msgpack encode failed: {0}")]
+    Encode(String),
+    /// The body nests past [`MAX_DEPTH`]: no peer would decode it.
+    #[error("the body nests past {MAX_DEPTH} levels")]
+    TooDeep,
+}
 
 /// Encode/decode a [`Call`] to/from a self-contained body. The DI seam: a later
 /// protobuf impl slots in behind the same trait.
@@ -54,15 +66,23 @@ impl MsgpackCodec {
 
 impl CallBodyCodec for MsgpackCodec {
     fn encode(&self, call: &Call) -> Result<Vec<u8>, CallEncodeError> {
-        rmp_serde::to_vec(call).map_err(|e| CallEncodeError(e.to_string()))
+        let bytes = rmp_serde::to_vec(call).map_err(|e| CallEncodeError::Encode(e.to_string()))?;
+        // The decoder's own bound, walked over the body without building it.
+        IgnoredAny::deserialize(&mut bounded(&bytes)).map_err(|_| CallEncodeError::TooDeep)?;
+        Ok(bytes)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Call, CallDecodeError> {
         if bytes.is_empty() {
             return Err(CallDecodeError::Empty);
         }
-        let mut de = rmp_serde::Deserializer::from_read_ref(bytes);
-        de.set_max_depth(MAX_DEPTH);
-        Call::deserialize(&mut de).map_err(|e| CallDecodeError::Decode(e.to_string()))
+        Call::deserialize(&mut bounded(bytes)).map_err(|e| CallDecodeError::Decode(e.to_string()))
     }
+}
+
+/// A decoder over `bytes` that refuses nesting past [`MAX_DEPTH`].
+fn bounded(bytes: &[u8]) -> rmp_serde::Deserializer<rmp_serde::decode::ReadRefReader<'_, [u8]>> {
+    let mut de = rmp_serde::Deserializer::from_read_ref(bytes);
+    de.set_max_depth(MAX_DEPTH);
+    de
 }

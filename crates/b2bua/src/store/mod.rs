@@ -655,7 +655,7 @@ impl CallState {
     /// Decode a replica body this node did not store (a reverse flush the
     /// `(p,b)` gate refused), so the router can read the call it carries.
     pub fn decode_body(&self, body: &[u8]) -> Option<Call> {
-        self.codec.decode(body).ok()
+        crate::repl::decode_peer_body(&self.codec, &self.metrics, body)
     }
 
     /// Like [`peek_reclaimable`](Self::peek_reclaimable) but it reads an expired
@@ -815,7 +815,7 @@ impl CallState {
         }
         .or_else(|| call.topology.clone());
         let (call_gen, call_bgen) = stored.as_ref().map(|t| (t.gen, t.bak_gen)).unwrap_or((0, 0));
-        let Some(body) = flush_body::encode(&self.codec, call, stored.as_ref()) else {
+        let Some(body) = flush_body::encode(&self.codec, &self.metrics, call, &stored) else {
             return;
         };
         let (role, primary, mut opts) = self.store_target(&call.call_ref);

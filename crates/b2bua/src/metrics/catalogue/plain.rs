@@ -218,6 +218,16 @@ plain_counters! {
         "b2bua_repl_flush_propagated_total",
         "primary flushes that propagated to a backup peer (topology.bak set)",
     ) => repl_flush_propagated, bump_repl_flush_propagated, repl_flush_propagated_total;
+    // A body is refused on either side of the codec's nesting bound
+    // (`call::codec::MAX_DEPTH`): the call it carries has no replica.
+    REPL_FLUSH_UNENCODABLE = (
+        "b2bua_repl_flush_unencodable_total",
+        "flushes skipped because the call body did not encode or nests past the codec's bound: the call has no replica (ALARM: expected 0)",
+    ) => repl_flush_unencodable, bump_repl_flush_unencodable, repl_flush_unencodable_total;
+    REPL_BODY_UNDECODABLE = (
+        "b2bua_repl_body_undecodable_total",
+        "replicated call bodies refused at decode: malformed or nested past the codec's bound (ALARM: expected 0)",
+    ) => repl_body_undecodable, bump_repl_body_undecodable, repl_body_undecodable_total;
     REPL_TAKEOVER_RESOLVED = (
         "b2bua_repl_takeover_resolved_total",
         "in-dialog requests whose callRef was recovered from the replica index (acting-backup)",

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use call::helpers::lifecycle_behind;
-use call::{CallBodyCodec, CallModelState};
+use call::CallModelState;
 use repl_net::frame::{Op, Partition};
 
 use super::super::incarnation::is_another_call;
@@ -127,7 +127,7 @@ impl Puller {
                 // and the Reverse direction once, for an adopted `p`; it is
                 // decoded once, here.
                 let incoming = matches!(mode, ApplyMode::Forward | ApplyMode::Reverse)
-                    .then(|| body.as_deref().and_then(|b| self.codec.decode(b).ok()))
+                    .then(|| body.as_deref().and_then(|b| self.decode_counted(b)))
                     .flatten();
                 // Stored `(sp,sb)` DOMINATES incoming `(p,b)` ⇒ skip (idempotent /
                 // reordered re-delivery). The dominance gate is the ONLY
@@ -334,7 +334,12 @@ impl Puller {
             return None;
         }
         let raw = self.store.peek_body_raw(role, primary, call_ref).await?;
-        self.codec.decode(&raw).ok()
+        self.decode_counted(&raw)
+    }
+
+    /// A stored or incoming body decoded, its refusal counted and logged.
+    fn decode_counted(&self, body: &[u8]) -> Option<call::Call> {
+        crate::repl::decode_peer_body(&self.codec, &self.metrics, body)
     }
 
     /// Whether the stored Element records a call this `Delete` must not end: an
@@ -379,7 +384,7 @@ impl Puller {
         let Some(raw) = self.store.peek_body_raw(role, primary, call_ref).await else {
             return false;
         };
-        self.codec.decode(&raw).is_ok_and(|call| {
+        self.decode_counted(&raw).is_some_and(|call| {
             call.state == CallModelState::Active && call::helpers::caller_answered(&call)
         })
     }
