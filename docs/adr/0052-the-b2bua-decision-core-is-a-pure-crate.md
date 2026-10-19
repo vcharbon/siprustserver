@@ -157,8 +157,7 @@ and writes `TurnNotes`, the data that were side effects inside the turn:
 
 The shell drains the notes as each core call returns, before it records or
 sends anything else of the turn: trace facts go into the registry, counts onto
-the metrics. A defect fails the test that meets it, through the oracle (§8); in
-a production build it is logged and the turn lands. Trace facts of an unsampled
+the metrics, defects to the oracle (§8), and the turn lands. Trace facts of an unsampled
 call are never built: the core reads the call's sampled flag first, so an
 unsampled call allocates nothing for them.
 
@@ -202,12 +201,17 @@ re-entering the call is not part of this decision.
 
 ### 8. The model invariant oracle
 
-The model invariant check stays in the shell as a test oracle, with its
-process record and its debug panics; the core reports a defect as a note (§4)
-and goes on.
+The model invariant check and the defect report stay in the shell, in every
+build, behind the `model_invariants` configuration flag (on by default in debug
+builds). Neither panics. Each violation, an invariant the landing record breaks
+or a defect note the core returned, is kept in the process's record (the first
+since the last mark with the call's dump, later ones one line each), logs one
+error line, and counts in `b2bua_model_defects_total{invariant}`. The record's
+lock is a named lock that recovers from poison (ADR-0051 §7). The turn lands.
 
-**Open:** how the oracle is built into the shell, and so how a defect note fails
-a test, is not settled here.
+A harness that runs the B2BUA with the flag on reads the record at the end of
+every run and fails the run on a violation; a test that provokes one on purpose
+says so and reads it itself.
 
 ### 9. What moves out of the shell crates the core needs
 
@@ -270,8 +274,9 @@ takes the deny in the same flip.
     not again after the hop-budget check;
   - a repeat give-up is counted when the turn returns, so a turn that panics
     after its give-up step does not count it;
-  - a defect in a debug build fails when the turn returns, through the oracle,
-    not at the step that met it; nothing of that turn lands either way;
+  - a violation in a debug build no longer panics its turn or tears its call
+    down: the turn lands, and the test fails at its end from the record;
+  - production may turn the oracle on and read defects as a metric;
   - the failover consult's reject is held to the initial path's guard: a code
     that is no non-2xx final draws the plain server error;
   - a copy whose INVITE snapshot does not rebuild is discharged instead of
@@ -289,7 +294,9 @@ takes the deny in the same flip.
 
 Each step is one commit and keeps the suites green.
 
-1. In the shell, one step each, with no move: the turn's identifiers (§3); the
+1. In the shell, one step each, with no move: the oracle that records instead
+   of panicking (§8), with a scenario whose violation fails its run from the
+   record; the turn's identifiers (§3); the
    notes (§4), checked by running the old emission and the drained notes side
    by side over the scenario harness corpus and comparing the registry's and
    the metrics' contents; the fault snapshot (§5); the INVITE rebuilt at the
