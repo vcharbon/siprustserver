@@ -1,5 +1,5 @@
-//! `b2bua` — the B2BUA core: per-call dispatch, the rule engine, and the call
-//! router.
+//! `b2bua` — the B2BUA's shell: per-call dispatch, the call router and every
+//! effect a turn of the decision core (`b2bua-core`, ADR-0052) returns.
 //!
 //! Layers, bottom-up:
 //! - [`store`] — the in-memory call map + per-call serialization over a
@@ -9,70 +9,77 @@
 //!   globally, each event treated by its dispatch class's row (ADR-0010 X2).
 //! - [`timers`] — one `DelayQueue` driver firing [`CallEvent::Timer`].
 //! - [`decision`] — the call-decision adapter seam + a scripted test impl.
-//! - [`rules`] — first-match, layer-ranked rule engine + invariant enforcement.
+//! - [`rules`] — the core's first-match, layer-ranked rule engine + invariant
+//!   enforcement, re-exported.
 //! - [`router`] — consumes the transaction-layer event stream, resolves the
-//!   `callRef`, runs the handler, interprets the typed [`effects`].
+//!   `callRef`, runs the core's turn, interprets the typed [`effects`].
 //! - [`admission`] — the ordered ladder of rungs that may refuse a new
 //!   INVITE, and the one answer a refusal draws (ADR-0037).
 //! - [`lifecycle`] — the aggregated lifecycle-log vocabulary (ADR-0026).
 //! - [`trace`] — the per-call trace gate, root spans and guarded emission
 //!   vocabulary (ADR-0026).
+//! - [`model_invariants`] — the model invariant oracle (ADR-0052 §8).
 //! - [`node`] — wires it all together.
 //!
+//! The core's public modules are re-exported under the paths this crate
+//! exposed, so its dependents keep their imports.
+//!
 //! Builds on the `call` data model (ADR-0010).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 
 pub(crate) mod abort_on_drop;
 pub mod admission;
-pub mod answer_deadline;
-pub(crate) mod attempts;
 pub mod capacity;
 pub mod cdr;
-pub mod config;
 pub mod decision;
-pub(crate) mod decision_log;
-pub mod destination_allowlist;
 pub mod dispatch;
 pub mod drain;
-pub mod effects;
-pub(crate) mod failure_terminate;
-pub(crate) mod failure_unavailable;
 pub mod ingress_brake;
 pub mod initial_consult;
-pub mod initial_invite;
-pub mod landing;
 pub mod lifecycle;
 pub mod limiter;
 pub mod loops;
-pub(crate) mod message_ring;
 pub mod metrics;
 pub mod model_invariants;
 pub mod new_calls;
 pub mod node;
-pub mod obligations;
 pub mod overload;
 pub mod peer_failures;
 pub mod poison;
 pub mod reaper;
-pub mod reaper_verdict;
 pub mod release_all;
 pub mod repl;
-pub(crate) mod ring_deadline;
 pub mod router;
-pub mod rule_chain;
-pub mod rules;
-pub mod stack_identity;
 pub mod store;
 pub mod supervise;
 pub(crate) mod sweep;
-#[cfg(test)]
-pub(crate) mod test_call;
-pub(crate) mod timer_arm;
 pub mod timers;
 pub mod trace;
-pub mod turn_notes;
-pub mod turn_scope;
-pub mod wire_fault_set;
 pub mod wire_faults;
+
+#[cfg(test)]
+pub(crate) use ::b2bua_core::test_call;
+pub use ::b2bua_core::{
+    answer_deadline, attempts, config, decision_log, destination_allowlist, effects,
+    failure_terminate, failure_unavailable, initial_invite, landing, message_ring, obligations,
+    reaper_verdict, ring_deadline, rule_chain, rules, stack_identity, timer_arm, turn_notes,
+    turn_scope, wire_fault_set,
+};
 
 pub use node::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use router::AdaptationHttpPort;

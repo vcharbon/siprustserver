@@ -1,0 +1,44 @@
+//! `b2bua-core` — the B2BUA's decision core (ADR-0052): what a call's turn
+//! decides, as a function of its inputs. The shell (`b2bua`) owns every
+//! effect: the router, the store, replication, the timers, the limiter
+//! worker, the decision engines, the CDR writer, the metrics and the trace
+//! registry. It hands each turn the per-process values, the call, the event
+//! as it resolved it, the caller's INVITE, the turn's clock reading, the wire
+//! faults armed at its start and the turn's identifier source, and drains
+//! what the turn notes.
+//!
+//! - [`rules`] — the rule engine and every rule family, the action executor
+//!   and vocabulary, the invariants, relay construction;
+//! - [`rule_chain`] — the per-turn framework around the rules;
+//! - [`landing`] — the pass a turn's result takes before the shell persists it;
+//! - [`initial_invite`], [`decision`] — the initial INVITE's folds and the
+//!   decision DTOs;
+//! - [`effects`] — the effect vocabulary a turn returns;
+//! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`] — a turn's inputs and
+//!   what it reports.
+
+pub mod answer_deadline;
+pub mod attempts;
+pub mod config;
+pub mod decision;
+pub mod decision_log;
+pub mod destination_allowlist;
+pub mod effects;
+pub mod failure_terminate;
+pub mod failure_unavailable;
+pub mod initial_invite;
+pub mod landing;
+pub mod limiter;
+pub mod message_ring;
+pub mod obligations;
+pub mod reaper_verdict;
+pub mod ring_deadline;
+pub mod rule_chain;
+pub mod rules;
+pub mod stack_identity;
+#[cfg(any(test, feature = "testkit"))]
+pub mod test_call;
+pub mod timer_arm;
+pub mod turn_notes;
+pub mod turn_scope;
+pub mod wire_fault_set;

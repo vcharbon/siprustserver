@@ -10,11 +10,11 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use call::LimiterEntry;
 
-use super::schemas::{
+use super::SipHeaderUpdates;
+use super::{
     default_platform_features, BodyUpdate, CallTreatment, NewCallRequest, NewCallResponse,
     RedirectContact, RedirectDecision, RejectDecision, RouteDecision, SipDestination,
 };
-use super::SipHeaderUpdates;
 use super::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
@@ -266,12 +266,19 @@ fn parse_contacts(v: Option<&serde_json::Value>) -> Vec<RedirectContact> {
                 .filter_map(|c| {
                     Some(RedirectContact {
                         uri: c.get("uri")?.as_str()?.to_string(),
-                        q: c.get("q").and_then(|q| q.as_f64()).map(|q| q as f32),
+                        q: c.get("q")
+                            .filter(|q| q.is_number())
+                            .and_then(|q| q.to_string().parse().ok()),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A plan's status code or port, when it is a `u16`.
+fn status_code(v: &serde_json::Value) -> Option<u16> {
+    v.as_u64().and_then(|n| u16::try_from(n).ok())
 }
 
 /// Build a [`RouteDecision`] from one plan route object (destination + identity
@@ -323,14 +330,14 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
 fn treatment_from_obj(obj: &serde_json::Value) -> Option<CallTreatment> {
     match obj.get("action").and_then(|v| v.as_str()).unwrap_or("route") {
         "reject" => Some(CallTreatment::Reject(RejectDecision {
-            reject_code: obj.get("code").and_then(|v| v.as_u64()).unwrap_or(603) as u16,
+            reject_code: obj.get("code").and_then(status_code).unwrap_or(603),
             reject_reason: obj.get("reason").and_then(|v| v.as_str()).map(str::to_string),
             update_headers: parse_update_headers(obj.get("update_headers")),
             service_ext: parse_service_ext(obj),
             label: parse_label(obj),
         })),
         "redirect" => Some(CallTreatment::Redirect(RedirectDecision {
-            code: obj.get("code").and_then(|v| v.as_u64()).unwrap_or(302) as u16,
+            code: obj.get("code").and_then(status_code).unwrap_or(302),
             reason: obj.get("reason").and_then(|v| v.as_str()).map(str::to_string),
             contacts: parse_contacts(obj.get("contacts")),
             update_headers: parse_update_headers(obj.get("update_headers")),
@@ -382,7 +389,7 @@ fn new_call_from_plan(req: &NewCallRequest) -> NewCallResponse {
     // and terminates on failure.
     let mut r = first;
     if routes.len() > 1 || plan.get("on_exhausted").is_some() {
-        r.callback_context = Some(remainder_context(&routes[1..], &on_exhausted));
+        r.callback_context = Some(remainder_context(routes.get(1..).unwrap_or(&[]), &on_exhausted));
     }
     NewCallResponse::Route(r)
 }
@@ -405,7 +412,8 @@ fn failure_from_context(req: &CallFailureRequest) -> CallFailureResponse {
         .unwrap_or_else(|| serde_json::json!({ "action": "relay" }));
     if let Some(next) = routes.first() {
         if let Some(mut r) = route_from_obj(next) {
-            r.callback_context = Some(remainder_context(&routes[1..], &on_exhausted));
+            let rest = routes.get(1..).unwrap_or(&[]);
+            r.callback_context = Some(remainder_context(rest, &on_exhausted));
             return CallTreatment::Route(r);
         }
     }
@@ -443,11 +451,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
     let key = instruction.get("refer_key").and_then(|v| v.as_str()).unwrap_or("");
     match key {
         "refer-reject-403" => ReferOutcome::Allow(CallReferResponse::Reject {
-            code: instruction
-                .get("reject_code")
-                .and_then(|v| v.as_u64())
-                .map(|c| c as u16)
-                .unwrap_or(403),
+            code: instruction.get("reject_code").and_then(status_code).unwrap_or(403),
             reason: Some(
                 instruction
                     .get("reject_reason")
@@ -466,11 +470,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
                 .and_then(|v| v.as_str())
                 .unwrap_or("127.0.0.1")
                 .to_string();
-            let port = dest
-                .and_then(|d| d.get("port"))
-                .and_then(|v| v.as_u64())
-                .map(|p| p as u16)
-                .unwrap_or(5667);
+            let port = dest.and_then(|d| d.get("port")).and_then(status_code).unwrap_or(5667);
             let new_refer_to =
                 instruction.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
             let no_answer_ms = instruction.get("no_answer_ms").and_then(|v| v.as_i64());
@@ -562,7 +562,7 @@ pub fn route_dest_from_api_call(req: &NewCallRequest) -> Option<(String, u16)> {
     if host.is_empty() {
         return None;
     }
-    let port = dest.get("port").and_then(|p| p.as_u64()).map(|p| p as u16).unwrap_or(5060);
+    let port = dest.get("port").and_then(status_code).unwrap_or(5060);
     Some((host, port))
 }
 

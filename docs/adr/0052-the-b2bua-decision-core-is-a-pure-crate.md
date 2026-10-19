@@ -264,7 +264,8 @@ the same takes the same discharge.
 
 The core's panic set reaches `deny` in a step of its own after the move. Every
 panic site of `b2bua` is in the code that moves, so `b2bua`'s own crate root
-takes the deny in the same flip.
+takes the deny with the move itself: the panic-sites ratchet holds a crate at
+zero to its zero attribute.
 
 ## Consequences
 

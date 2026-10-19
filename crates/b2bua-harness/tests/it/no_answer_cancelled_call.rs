@@ -15,7 +15,7 @@
 //! service watchdog at the source; the executor absorbs a fire that still
 //! reaches a going-away call unless the rule is a teardown rule; and the
 //! `no-answer` spent-check (a teardown rule) absorbs the reclaim-restored
-//! shape — pinned at the rule seam in `b2bua/tests/it/rules.rs`. The second test
+//! shape — pinned at the rule seam in `b2bua-core/tests/it/rules.rs`. The second test
 //! pins the source scrub for a service watchdog; the third pins the
 //! `handle-timeout` sibling: the b-leg INVITE transaction backstop firing on
 //! a caller-CANCELed leg resolves it locally.

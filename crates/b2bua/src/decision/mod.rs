@@ -1,32 +1,16 @@
-//! The call-decision adapter seam — port of `CallDecisionEngine`. The B2BUA
-//! core depends only on this trait; the production HTTP adapter and the
+//! The call-decision adapter seam — port of `CallDecisionEngine`. The router
+//! depends only on this trait; the production HTTP adapter and the
 //! deterministic `ScriptedDecisionEngine` (feature `testkit`) both implement
-//! it. `apply_route` /
-//! `handle_initial_invite` (the response→call-state translation) live in
-//! [`apply_route`] / [`crate::initial_invite`].
+//! it. The decision DTOs and folds are the core's, re-exported here; the
+//! consults that await an engine live in [`apply_route`] and
+//! [`crate::initial_consult`].
 
-pub mod apply_reject;
 pub mod apply_route;
-mod error;
-pub mod failover_fold;
 mod limiter_failover;
-mod no_answer;
-pub mod route_fold;
-mod schemas;
 #[cfg(any(test, feature = "testkit"))]
 pub mod test_adapter;
 
-pub use b2bua_sdk::header_update::{header_lines, payload_lines, HeaderUpdate, SipHeaderUpdates};
-pub use error::CallDecisionError;
-pub use no_answer::no_answer_deadline;
-pub use route_fold::MAX_LIMITER_FAILOVER;
-pub use schemas::{
-    default_platform_features, read_stated_port, BodyUpdate, CallFailureRequest,
-    CallFailureResponse, CallReferRequest, CallReferResponse, CallReleaseRequest,
-    CallReleaseResponse, CallSnapshot, CallTreatment, FailureInfo, FeatureActivations, LegSnapshot,
-    NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision, RejectDecision,
-    RouteDecision, SipDestination,
-};
+pub use b2bua_core::decision::*;
 #[cfg(any(test, feature = "testkit"))]
 pub use test_adapter::{default_call_refer, ReferOutcome, ReleaseOutcome, ScriptedDecisionEngine};
 

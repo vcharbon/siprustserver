@@ -32,6 +32,8 @@ tracing = { workspace = true }
 # Lifecycle aggregation helpers only (default features: no OTLP export tree).
 observe = { path = "../observe", default-features = false }
 b2bua-sdk = { path = "../b2bua-sdk" }
+# The decision core every turn runs (ADR-0052).
+b2bua-core = { path = "../b2bua-core" }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
@@ -43,8 +45,6 @@ lock-poison = { path = "../lock-poison" }
 task-restart = { path = "../task-restart" }
 # The class a retained emission's ladder paces by (ADR-0032 X3).
 sip-retransmit = { path = "../sip-retransmit" }
-# The rule engine's lookups (ADR-0051: no iteration in hash-seed order).
-lookup-map = { path = "../lookup-map" }
 sip-clock = { path = "../sip-clock" }
 # The token bucket, EWMA, load-sampler seam and Retry-After policy the
 # admission ladder sheds with.
@@ -78,6 +78,8 @@ sip-net-testkit = { path = "../sip-net-testkit" }
 repl-net-testkit = { path = "../repl-net-testkit" }
 # The fixed-key turns the rule-engine `ActionExecutor` draws from in tests.
 sip-ids = { path = "../sip-ids", features = ["testkit"] }
+# The test caller the shell's tests build their calls from.
+b2bua-core = { path = "../b2bua-core", features = ["testkit"] }
 # ADR-0020 X7 refactor gate: the obligation extraction must be effect-multiset
 # equivalent to the pre-extraction `enforce` over arbitrary snapshots.
 proptest = { workspace = true }

@@ -15,7 +15,7 @@ use crate::effects::HandlerResult;
 use crate::limiter::{LimiterEntry, LimiterWorker};
 use crate::metrics::AdmitSite;
 
-use super::schemas::RouteDecision;
+use crate::decision::RouteDecision;
 
 pub use super::route_fold::MAX_LIMITER_FAILOVER;
 

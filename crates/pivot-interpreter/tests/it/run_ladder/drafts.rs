@@ -166,10 +166,10 @@ async fn rung_three_a_re_invite_draft_crosses_a_bye_and_takes_the_487_order_free
 ///
 /// The draft's transferor asks for the transfer with an in-dialog INFO
 /// (its step `s8`). This system has no INFO intake: `relay-info`
-/// (`b2bua/src/rules/defaults/core_rules.rs`) forwards an in-dialog INFO to the
+/// (`b2bua-core/src/rules/defaults/core_rules.rs`) forwards an in-dialog INFO to the
 /// peer leg like any other transparent method, so the caller's leg receives it
 /// and no transferee is ever dialled. The demo's only transfer intake is REFER
-/// (`b2bua/src/rules/refer_transfer/`), and its failure treatment is the
+/// (`b2bua-core/src/rules/refer_transfer/`), and its failure treatment is the
 /// release reroute, not a transfer-failure reroute.
 ///
 /// The rung pins that outcome by NAME rather than skipping the case: the

@@ -492,6 +492,7 @@ version = "0.1.0"
 dependencies = [
  "alloc-counter",
  "async-trait",
+ "b2bua-core",
  "b2bua-sdk",
  "call",
  "call-limiter",
@@ -500,7 +501,6 @@ dependencies = [
  "http-net-testkit",
  "load-shed",
  "lock-poison",
- "lookup-map",
  "metric-catalogue",
  "metric-values",
  "observe",
@@ -522,6 +522,23 @@ dependencies = [
  "tokio",
  "tokio-util",
  "topology",
+ "tracing",
+]
+
+[[package]]
+name = "b2bua-core"
+version = "0.1.0"
+dependencies = [
+ "b2bua-sdk",
+ "call",
+ "lookup-map",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sip-ids",
+ "sip-message",
+ "sip-retransmit",
+ "thiserror 2.0.21",
  "tracing",
 ]
 

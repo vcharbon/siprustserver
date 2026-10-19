@@ -35,8 +35,15 @@ pure-deps = [
   "hmac",
   "hybrid-array",
   "itoa",
+  # `tracing`'s fallback to the `log` facade where the workspace turns it on:
+  # a log line cannot change an outcome.
+  "log",
   "memchr",
   "num-traits",
+  # `tracing`'s callsite cache; a turn's output does not depend on it
+  # (ADR-0052 §10).
+  "once_cell",
+  "pin-project-lite",
   "ref-cast",
   "rmp",
   "rmp-serde",
@@ -48,6 +55,10 @@ pure-deps = [
   "sha2",
   "smallvec",
   "thiserror",
+  # The decision core's warnings go to whatever subscriber the shell
+  # installed; none reaches the core's output (ADR-0052 §10).
+  "tracing",
+  "tracing-core",
   "typenum",
   "zmij",
 ]

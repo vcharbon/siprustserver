@@ -104,7 +104,7 @@ Severity = operational risk if the behaviour is wrong.
 | BYE-2 | 15.1.2 | BYE unknown dialog | 481 | high | ✅ | orphan_reject_no_leak; rfc-audit `unknown-dialog-481` |
 | BYE-3 | 15 | BYE on early dialog | Use CANCEL not BYE | med | ✅ | rfc-audit `no-bye-outside-or-early-dialog` |
 | BYE-4 | 12.2 | Simultaneous double BYE | Idempotent teardown | high | 🟡 | reaper covers wedge; add `simultaneous_double_bye_idempotent` |
-| BYE-5 | 12.2 | In-dialog request per-leg routing | Uses leg's remote target + route set | high | ✅ | b2bua `confirm_dialog_captures_b_leg_route_set...`, relay tests |
+| BYE-5 | 12.2 | In-dialog request per-leg routing | Uses leg's remote target + route set | high | ✅ | b2bua-core `confirm_dialog_captures_b_leg_route_set...`, relay tests |
 | BYE-6 | 12.2.1.1 | Per-leg CSeq monotonic | Each leg own CSeq counter | med | ✅ | rfc-audit `cseq` rules, generators |
 | BYE-6a | 12.2.1.1 | Callee's requests on its early dialog, then after the 2xx (forked callee included) | Relayed contiguously: confirmation keeps the callee's own sequence, per fork | high | ✅ | b2bua-harness `peer_cseq_across_confirmation::callee_requests_after_the_answer_continue_its_early_sequence`, `the_callee_sequence_is_its_own_across_a_reinvite_answer`, `the_confirmed_fork_keeps_its_own_early_sequence`; the caller direction is guarded by `caller_requests_after_the_answer_continue_its_early_sequence` |
 | BYE-6b | 12.2.2 | In-dialog request with a CSeq below its dialog's last | 500, not relayed; measured per callee fork and per caller-facing early dialog | med | ✅ | b2bua-harness `peer_cseq_across_confirmation::*_out_of_order`, `*_measured_against_*`; `caller_facing_early_dialogs::the_caller_is_measured_per_caller_facing_dialog`, `an_out_of_order_caller_request_is_answered_500`, `a_service_tag_beside_a_shown_one_moves_no_other_sequence`; a confirmed callee leg's request from a fork the answer abandoned draws 481 (`a_losing_fork_request_after_the_answer_names_no_dialog`) |
@@ -123,7 +123,7 @@ Severity = operational risk if the behaviour is wrong.
 | VIA-1 | 8.1.1.7 | Own Via/branch per leg | Fresh z9hG4bK per outgoing request | high | ✅ | sip-txn `branch_has_magic_cookie_and_is_unique`, stack_identity |
 | VIA-3 | 8.1.1.5 | Max-Forwards reset to 70 | B2BUA originates, not decrements | med | 🟡 | proxy decrements; add B2BUA `bleg_maxforwards_reset_70` |
 | HDR-2 | 20.5 | **Contact rewritten to B2BUA per leg** | Far-end Contact never passed through | high | 🟡 | implicit (in-dialog returns to B2BUA works); add explicit `contact_rewritten_to_b2bua_per_leg` |
-| HDR-5 | 12.1.1 | Record-Route not cross-leg leaked | Each leg's RR is leg-local | high | ✅ | b2bua `confirm_dialog_*record_route*` |
+| HDR-5 | 12.1.1 | Record-Route not cross-leg leaked | Each leg's RR is leg-local | high | ✅ | b2bua-core `confirm_dialog_*record_route*` |
 | HDR-7 | 8.1.1.8 | Contact on all dialog-forming msgs | INVITE/2xx carry B2BUA Contact | high | ✅ | rfc-audit `contact-presence`, proxy_b2bua |
 
 ### Routing edge cases, redirects, header policy, auth
