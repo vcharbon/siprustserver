@@ -105,7 +105,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | `parsers/extract-fields.ts` (ADR-0007 gates) | `parser/custom/extract_fields.rs` | ✅ ported (wire+hydrate; finalize/hydrate wrappers fold into `CustomParser`) |
 | `parsers/custom/lazy-parsers.ts` | `parser/custom/optional_headers.rs` | ✅ ported as **eager + non-fatal** (`OptionalHeaders`) + `SipMessage::validate_strict()` ([ADR-0003 amendment](docs/adr/0003-typed-header-model.md)) |
 | `parsers/custom/index.ts` | `parser/custom/mod.rs` (`CustomParser`) | ✅ ported (full parse pipeline) |
-| `parsers/native-adapter.ts` (role) | `parser/rvoip.rs` (`RvoipParser`, feature-gated) | ✅ ported — wraps `rvoip-sip-core` 0.1.26 behind `rvoip-oracle`; thin accept/reject parity shell (matrix never reads its fields) |
+| `parsers/native-adapter.ts` (role) | `parser/rvoip.rs` (feature-gated) | ✅ ported — reads `rvoip-sip-core` 0.4 behind `rvoip-oracle` into the fields the differential test (`tests/it/rvoip_parity.rs`, `just parity-oracle`) compares |
 | `Serializer.ts` | `serializer.rs` | ✅ ported (`serialize`/`sip_summary`/`message_summary`, Content-Length safety net) |
 | `SdpUtils.ts` + `SdpAnswerFromOffer.ts` | `sdp.rs` | ✅ ported (codec-profile extract, held-SDP, answer-from-offer, strict `validate_sdp_body`) |
 | `generators.ts` | `generators.rs` | ✅ ported (all 8 generators; `StackDialog`/`InviteClientTransactionHandle` are minimal local input shapes pending slice-2 `Dialog`/`TransactionLayer`) |
@@ -136,8 +136,8 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 
 ### Un-ported with justification
 - `parsers/jssip-adapter.ts` (`jssipParser`) — JsSIP JS-library adapter; no
-  Rust equivalent. Its role in the compliance matrix is taken by the
-  `rvoip` oracle.
+  Rust equivalent. Its role as a second parser is taken by the `rvoip`
+  oracle.
 - `parsers/sip-parser-adapter.ts` (`sipParserNpm`) — the `sip` npm package
   adapter; same reasoning.
 - (none for the parser layer — `lazy-parsers.ts` is now ported as
@@ -174,8 +174,8 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 - The `parser-extraction.test.ts` "custom vs JsSIP" cross-parser equivalence
   block and the `jssip`/`native` oracle columns in `parser-*.test.ts` — there
   is no JsSIP in the Rust stack ([ADR-0001](docs/adr/0001-port-custom-parser-rvoip-as-parity-oracle.md));
-  the `rvoip` oracle (compliance matrix, `--features rvoip-oracle`) is the
-  surviving second column.
+  the `rvoip` oracle (its differential test, `just parity-oracle`) is the
+  surviving second parser.
 - Memoization assertions in `lazy-headers.test.ts` / `header-registry-extension.test.ts`
   ("parse called once", "same Result reference") — not applicable to the eager
   model (the value is parsed once at parse time and stored; `typed::<H>()` is a

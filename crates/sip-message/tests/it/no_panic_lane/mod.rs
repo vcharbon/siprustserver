@@ -31,7 +31,7 @@ mod echo;
 mod mutate;
 mod probe;
 mod regressions;
-mod seeds;
+pub(crate) mod seeds;
 
 use mutate::Mutation;
 use probe::Digest;

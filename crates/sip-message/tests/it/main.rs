@@ -25,6 +25,8 @@ mod parser_line_folding;
 mod parser_response_totag;
 mod parser_smoke;
 mod recorded_routes;
+#[cfg(feature = "rvoip-oracle")]
+mod rvoip_parity;
 mod sdp_answer;
 mod sdp_form;
 mod sdp_offer_answer_grammar;

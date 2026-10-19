@@ -1,6 +1,7 @@
 //! The synthetic seeds the lane mutates: the committed RFC 4475 and grammar
 //! fixtures, and hand-written messages and descriptions covering every header
-//! family and body the read surface types. Addresses are documentation ranges
+//! family and body the read surface types. The parity oracle's differential
+//! test reads the message seeds unmutated. Addresses are documentation ranges
 //! (RFC 5737, RFC 3849) and `example.*` names.
 
 use std::fs;

@@ -37,15 +37,17 @@ _Avoid_: "service" (Effect term), "interface" unqualified.
 **Parity oracle**:
 A second, independent implementation of a **layer interface** kept *only* for
 tests, to cross-check the production impl. For the message layer the oracle is
-`rvoip-sip-core`, checked against the ported `CustomParser`.
+`rvoip-sip-core`, read into the same fields as a `CustomParser` message and
+compared seed by seed by a differential test that lists every expected
+difference with its RFC section.
 _Avoid_: "reference parser" (the production custom parser is the reference for
 behaviour; the oracle is the looser cross-check).
 
 **Compliance matrix**:
-The test that runs every parser impl over a shared fixture corpus (RFC 4475
-torture, CVE regressions, RFC 5118 IPv6, param-grammar gaps) and asserts each
-impl's expected accept/reject. The Rust port of `parser-compliance.test.ts`;
-it is how the **parity oracle** is exercised.
+The test that runs the production parser over a shared fixture corpus (RFC
+4475 torture, CVE regressions, RFC 5118 IPv6, param-grammar gaps) and asserts
+its expected accept/reject. The Rust port of `parser-compliance.test.ts`; the
+**parity oracle**'s differential test reads the same fixtures.
 _Avoid_: "parity test" (the source's `parity` wrapper is a distinct
 SignalingNetwork construct, deferred to a later layer).
 

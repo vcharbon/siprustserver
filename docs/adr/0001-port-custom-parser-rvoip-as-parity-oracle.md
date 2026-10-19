@@ -26,10 +26,12 @@ matrix as a looser lexical cross-check.
 - The custom parser is significant porting work (scanner, start-line, headers,
   structured-headers, extract-fields), but each Rust module is a direct port
   of a named source file.
-- The compliance matrix must encode where `CustomParser` is intentionally
-  *stricter* than the rvoip oracle (ADR-0007): a custom rejection where rvoip
-  accepts is only valid if it maps to a documented policy rule — reusing the
-  source driver's policy-vs-buggy classification. The oracle never silently
-  accepts something the custom parser must reject.
-- `rvoip-sip-core` is never linked into production builds (feature-gated,
-  dev-dependency only).
+- The differential test must encode every place `CustomParser` and the rvoip
+  oracle part, each with its RFC section: a custom rejection where rvoip
+  accepts is only valid if it maps to a documented gate or to grammar rvoip
+  does not enforce, and a field the two read differently is a deviation of
+  one of them. The oracle never silently accepts something the custom parser
+  must reject.
+- `rvoip-sip-core` is never linked into production builds (feature-gated, refused
+  in production closures), and no workspace build turns the feature on: the
+  `just parity-oracle` recipe builds and runs it.
