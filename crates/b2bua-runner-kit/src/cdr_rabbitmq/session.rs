@@ -8,19 +8,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use async_rs::{Runtime, Tokio};
+use amqp_connect::{connect_stream, open_over, Connected};
 use b2bua::metrics::B2buaMetrics;
 use lapin::{
     options::{BasicPublishOptions, ConfirmSelectOptions},
     uri::AMQPUri,
-    BasicProperties, Channel, Connection, ConnectionProperties,
+    BasicProperties, Channel, Connection,
 };
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 
 use super::confirms::{track_confirms, Pending};
-use super::connector::{connect_socket, BrokerStream};
 use super::declaration::declaration;
 use super::resolver::BrokerResolver;
 use super::settings::RabbitMqCdrSettings;
@@ -33,7 +32,9 @@ pub(super) enum OpenError {
     Uri(String),
     /// The broker host did not resolve before the connect deadline.
     Resolve(std::io::Error),
-    /// Connect, handshake, channel, `confirm.select` or declare failed.
+    /// The TCP connect or the TLS handshake failed or missed the deadline.
+    Connect(std::io::Error),
+    /// The AMQP handshake, channel, `confirm.select` or declare failed.
     Amqp(lapin::Error),
 }
 
@@ -42,6 +43,7 @@ impl std::fmt::Display for OpenError {
         match self {
             OpenError::Uri(e) => write!(f, "not an AMQP URI: {e}"),
             OpenError::Resolve(e) => write!(f, "broker host unresolved: {e}"),
+            OpenError::Connect(e) => write!(f, "broker connect failed: {e}"),
             OpenError::Amqp(e) => write!(f, "{e}"),
         }
     }
@@ -108,10 +110,11 @@ impl Session {
     /// selects publisher confirms and declares the queue, then spawns the
     /// confirm tracker recording into `metrics`, bounded by the writer's close
     /// deadline `close_by`. Resolution, the TCP connect and the TLS handshake
-    /// stop at `deadline`; the caller bounds the rest by it, and dropping this
-    /// future (or a failure half-way) shuts down whatever socket it connected.
-    /// The client's auto-recovery stays off: a connection lost is this
-    /// session's end, and the writer opens the next one.
+    /// run on this task and stop at `deadline`; the caller bounds the rest by
+    /// it, and dropping this future (or a failure half-way) shuts down
+    /// whatever socket it connected. The client is handed the connected stream
+    /// with auto-recovery off: a connection lost is this session's end, and
+    /// the writer opens the next one.
     pub(super) async fn open(
         settings: &RabbitMqCdrSettings,
         resolver: &mut BrokerResolver,
@@ -124,17 +127,12 @@ impl Session {
             .resolve(&uri.authority.host, uri.authority.port, deadline)
             .await
             .map_err(OpenError::Resolve)?;
+        let Connected { stream, socket: descriptor } =
+            connect_stream(&uri, &addrs, deadline).await.map_err(OpenError::Connect)?;
         let socket = Arc::new(SocketKill::default());
+        socket.arm(descriptor);
         let guard = KillOnDrop::new(socket.clone());
-        let connect = {
-            let socket = socket.clone();
-            async move |uri: AMQPUri, runtime: Runtime<Tokio>| -> lapin::Result<BrokerStream> {
-                Ok(connect_socket(&uri, &addrs, deadline, &socket, &runtime).await?)
-            }
-        };
-        let runtime = Runtime::tokio_current();
-        let connection =
-            Connection::connector(uri, runtime, connect, ConnectionProperties::default()).await?;
+        let connection = open_over(uri, stream).await?;
         let channel = connection.create_channel().await?;
         channel.confirm_select(ConfirmSelectOptions::default()).await?;
         let (options, args) = declaration(settings.declare);

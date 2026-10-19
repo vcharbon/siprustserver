@@ -16,7 +16,6 @@
 
 mod backoff;
 mod confirms;
-mod connector;
 mod declaration;
 mod resolver;
 mod session;
