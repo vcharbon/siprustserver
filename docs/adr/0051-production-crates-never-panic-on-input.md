@@ -103,6 +103,12 @@ set explicitly. A `Drop` body never panics: a panic during unwinding aborts.
 
 Every handler panic and every discharge is counted and alerted on: each one is a defect.
 
+A long-lived task of the shell is supervised: one whose work survives in shared state restarts
+after a panic (`task-restart`), counted per task in `*_task_restarts_total{task}`; one the
+process cannot serve without ends the process, which exits non-zero. A runner's boot returns
+its refusal to the binary's root, which logs it once through the running log writer and exits
+with a failure code.
+
 ### 6. Errors replacing panics
 
 A function that can fail on input returns an error; a signature that was infallible changes
