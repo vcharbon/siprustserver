@@ -29,7 +29,6 @@ use std::net::SocketAddr;
 
 use async_trait::async_trait;
 
-use crate::codec::encode_frame;
 use crate::framing::{frame_with_len_prefix, MAX_FRAME_LEN};
 use crate::Frame;
 
@@ -100,7 +99,7 @@ pub enum SendError {
 /// `frame` encoded, within the frame cap; one that does not encode or passes
 /// [`MAX_FRAME_LEN`] is [`SendError::Unencodable`].
 pub fn payload(frame: &Frame) -> Result<Vec<u8>, SendError> {
-    let payload = encode_frame(frame).map_err(|e| SendError::Unencodable(e.to_string()))?;
+    let payload = crate::encode_frame(frame).map_err(|e| SendError::Unencodable(e.to_string()))?;
     if u32::try_from(payload.len()).map_or(true, |len| len > MAX_FRAME_LEN) {
         let len = payload.len();
         return Err(SendError::Unencodable(format!("{len} bytes past the {MAX_FRAME_LEN} cap")));

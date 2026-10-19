@@ -42,7 +42,13 @@ async fn main() {
     let cfg = LimiterConfig { lease_sec: env.lease_sec };
     let (addr, janitor_secs) = (env.listen, env.janitor_sec);
 
-    let clock = Clock::checked_system().unwrap_or_else(|e| panic!("refusing to start: {e}"));
+    let clock = match Clock::checked_system() {
+        Ok(clock) => clock,
+        Err(e) => {
+            eprintln!("call-limiter refusing to start: {e}");
+            std::process::exit(1);
+        }
+    };
     let store = Arc::new(CallStore::new(cfg, clock));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
 
