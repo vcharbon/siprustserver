@@ -639,12 +639,6 @@ dependencies = [
 
 [[package]]
 name = "base64"
-version = "0.21.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
-
-[[package]]
-name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -4131,12 +4125,11 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-core"
-version = "0.1.26"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e19493e0b7cdf37c836ea1ccf1a02a0fee67a047c668eebab43393b4edd480c"
+checksum = "92968b4d42951c030e5b3a11172929fa1ed16b5d6bce4124a6034144285d7f55"
 dependencies = [
- "anyhow",
- "base64 0.21.7",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "log",
@@ -4144,7 +4137,6 @@ dependencies = [
  "ordered-float 4.6.0",
  "rand 0.8.8",
  "serde",
- "serde_bytes",
  "serde_json",
  "thiserror 1.0.69",
  "tracing",

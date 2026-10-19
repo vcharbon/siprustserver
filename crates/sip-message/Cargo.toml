@@ -14,13 +14,13 @@ workspace = true
 
 [features]
 default = []
-# `rvoip-oracle` pulls in rvoip-sip-core as the parity-oracle second impl for
-# the compliance matrix. Off by default (production builds never link it);
-# enable in CI test runs: `cargo test -p sip-message --features rvoip-oracle`.
+# `rvoip-oracle` links rvoip-sip-core, the parity oracle (ADR-0001), for the
+# differential tests. No workspace build turns it on and production closures
+# refuse it (`purity.toml`); `just parity-oracle` builds and runs it.
 rvoip-oracle = ["dep:rvoip-sip-core"]
 
 [dependencies]
-rvoip-sip-core = { version = "0.1.26", optional = true }
+rvoip-sip-core = { version = "0.4", optional = true }
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
 # The message's raw datagram + body are refcounted slices of ONE buffer, so a

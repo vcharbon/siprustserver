@@ -3,10 +3,11 @@
 //!
 //! `SipParser` is the **layer interface** (the DI seam that mimics Effect
 //! Layer): consumers depend on the trait, not a concrete parser, and any
-//! impl — `CustomParser` (production) or `RvoipParser` (dev-only oracle) —
-//! is swappable behind it. Contract wrappers (the effect-layer-test 4-wrapper
-//! model: property/paranoid/parity/scopedAudit) implement this same trait as
-//! decorators.
+//! impl is swappable behind it. Contract wrappers (the effect-layer-test
+//! 4-wrapper model: property/paranoid/parity/scopedAudit) implement this same
+//! trait as decorators. The parity oracle ([`rvoip`], feature `rvoip-oracle`)
+//! is no impl: it reads a datagram into the fields a differential test
+//! compares.
 //!
 //! Pure + synchronous + never-panics across the boundary: parse failures are
 //! `Err(SipParseError)`, never panics. There is no async / Effect runtime at
