@@ -149,12 +149,7 @@ fn turn(call: &call::Call, event: &CallEvent) -> (Option<&'static str>, Option<H
     };
     let actions: Vec<RuleAction> = (rule.handle)(&ctx).map(|r| r.actions).unwrap_or_default();
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     (Some(rule.id), Some(exec.execute(&actions, call, &ctx)))
 }
 

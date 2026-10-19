@@ -180,7 +180,6 @@ pub(super) async fn initial_invite_turn(
             &ctx.limiter,
             &ctx.config,
             turn,
-            &ctx.wire_faults,
             &ctx.services,
             req.image(),
             &ctx.clock,
@@ -223,8 +222,7 @@ pub(super) async fn initial_invite_turn(
         now_ms,
         crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
     );
-    let mut exec =
-        ActionExecutor { config: &ctx.config, turn, now_ms, wire_faults: &ctx.wire_faults };
+    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
     Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)))
 }
 

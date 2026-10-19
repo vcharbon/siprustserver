@@ -64,6 +64,7 @@ pub mod timers;
 pub mod trace;
 pub mod turn_notes;
 pub mod turn_scope;
+pub mod wire_fault_set;
 pub mod wire_faults;
 
 pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};

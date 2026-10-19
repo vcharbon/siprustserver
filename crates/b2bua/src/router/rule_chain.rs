@@ -80,8 +80,7 @@ pub(super) fn rule_chain_turn(
     let cap_exceeded = i64::try_from(ctx.config.max_messages_per_call)
         .is_ok_and(|cap| bumped > cap)
         && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    let mut exec =
-        ActionExecutor { config: &ctx.config, turn, now_ms, wire_faults: &ctx.wire_faults };
+    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
     // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
     // repeated here and never reaches a rule; the discharging ACK or PRACK
     // retires its ladder before the rules run and they read the fact; a

@@ -142,12 +142,7 @@ fn stub_service_init_seeds_then_rule_advances_then_declines() {
 
     let config = B2buaConfig::default();
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let event = info_event();
     let services = vec![stub::service_def()];
 
@@ -201,12 +196,7 @@ fn dormant_service_leaves_call_untouched() {
 
     let config = B2buaConfig::default();
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let event = info_event();
 
     fn dormant_init(_: &RuleCall) -> Option<ServiceSeed> {
@@ -256,12 +246,7 @@ fn a_configured_seed_reads_the_service_parameters() {
     let mut config = B2buaConfig::default();
     config.service_params.insert(Marker("from-config"));
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let event = info_event();
     let seeded = seed_services(
         HandlerResult::new(test_call()),

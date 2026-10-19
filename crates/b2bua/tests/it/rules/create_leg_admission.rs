@@ -47,12 +47,7 @@ fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult 
         matched_client_txn: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config,
-        turn: &mut id_gen,
-        now_ms: 1_700_000_000_000,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 1_700_000_000_000 };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,

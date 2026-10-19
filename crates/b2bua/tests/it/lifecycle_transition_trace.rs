@@ -107,12 +107,7 @@ fn a_lifecycle_handlers_cursor_move_is_on_the_trace() {
     };
     let config = B2buaConfig::default();
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,

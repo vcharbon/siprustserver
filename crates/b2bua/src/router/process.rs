@@ -46,7 +46,7 @@ pub(super) async fn process(
     let _guard = ctx.state.lock(&call_ref).await;
     let now_ms = ctx.clock.now_ms();
     // The turn opens before its gates: their refusals draw identifiers too.
-    let mut turn = TurnScope::of(ctx.id_gen.turn());
+    let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
 
     match reaper_verdict_gate(ctx, &event, &call_ref, now_ms).await {
         Gate::Consumed => return,

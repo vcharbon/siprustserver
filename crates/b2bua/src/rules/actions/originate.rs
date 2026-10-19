@@ -316,7 +316,7 @@ impl ActionExecutor<'_> {
         // CSeq the dialog already used and leaves the dialog un-advanced: the
         // exact defect `cseq-in-dialog-order` gates on, on purpose.
         let reuse = m == InDialogMethod::Options
-            && self.wire_faults.is_armed(crate::wire_faults::WireFaultPoint::KeepaliveCseqReuse);
+            && self.turn.faults.is_armed(crate::wire_fault_set::WireFaultPoint::KeepaliveCseqReuse);
         let outbound_cseq = if reuse { dialog.our_cseq } else { dialog.our_cseq + 1 };
         // The call as it stands before the request records anything: one that
         // is not built leaves it so.

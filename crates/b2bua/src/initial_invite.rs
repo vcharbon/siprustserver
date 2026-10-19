@@ -188,7 +188,6 @@ pub async fn handle_initial_invite(
     limiter: &LimiterWorker,
     config: &B2buaConfig,
     turn: &mut TurnScope,
-    wire_faults: &crate::wire_faults::WireFaults,
     services: &[ServiceDef],
     invite_wire: &[u8],
     clock: &Clock,
@@ -239,7 +238,7 @@ pub async fn handle_initial_invite(
                 0,
             )
             .await;
-            let mut exec = ActionExecutor { config, turn, now_ms, wire_faults };
+            let mut exec = ActionExecutor { config, turn, now_ms };
             let setup_event = setup_event(&result.call, &a_invite);
             let from_a = call::Direction::FromA;
             seed_services(result, services, &mut exec, &setup_event, "a", from_a)

@@ -70,14 +70,13 @@ pub use prack::{Owed, Settle};
 pub(crate) use provisional_arrival::invite_open;
 
 /// Executes rule actions against a working copy of the call, drawing every
-/// identifier it mints from its turn.
+/// identifier it mints from its turn and noting there what it reports.
 pub struct ActionExecutor<'a> {
     pub config: &'a B2buaConfig,
-    /// The turn the actions run in: its identifier source.
+    /// The turn the actions run in: its identifier source, its notes and the
+    /// wire faults its guarded emissions read.
     pub turn: &'a mut TurnScope,
     pub now_ms: i64,
-    /// The wire-fault seam; consulted where a guarded emission is built.
-    pub wire_faults: &'a crate::wire_faults::WireFaults,
 }
 
 impl ActionExecutor<'_> {

@@ -51,7 +51,7 @@ pub(super) async fn discharge_folded_terminal(
         let _ = ctx.txn.relinquish_server(key).await;
     }
     let mut result = HandlerResult::new(raise_sequences(terminal, before));
-    let mut turn = TurnScope::of(ctx.id_gen.turn());
+    let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
     answer_the_records_rounds(ctx, call_ref, before, ours, &mut result, now_ms, &mut turn);
     super::super::notes::drain(ctx, call_ref, &mut turn);
     let result = crate::rules::invariants::enforce(
@@ -109,8 +109,7 @@ fn answer_the_records_rounds(
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let mut exec =
-        ActionExecutor { config: &ctx.config, turn, now_ms, wire_faults: &ctx.wire_faults };
+    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
     let answered = exec.execute(&actions, record, &rule_ctx).effects;
     result.effects.critical.extend(answered.critical);
     result.effects.outbound.extend(answered.outbound);

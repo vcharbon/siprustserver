@@ -153,12 +153,7 @@ fn an_owed_prack_on_a_dialog_the_leg_lacks_is_a_defect() {
     call.provisionals.push(owed);
     let config = B2buaConfig::default();
     let mut scope = TurnScope::of(sip_ids::TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut scope,
-        now_ms: 0,
-        wire_faults: &crate::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
     let mut fx = crate::effects::HandlerEffects::new();
     exec.settle_owed_pracks(&mut call, &mut fx, Owed::Call, Settle::TurnEnd);
     let defects: Vec<_> = scope.notes.defects().iter().map(|d| d.name).collect();
@@ -180,12 +175,7 @@ fn an_unbuilt_prack_records_nothing() {
     call.provisionals.push(owed);
     let config = B2buaConfig::default();
     let mut scope = TurnScope::of(sip_ids::TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut scope,
-        now_ms: 0,
-        wire_faults: &crate::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
     let mut fx = crate::effects::HandlerEffects::new();
     exec.settle_owed_pracks(&mut call, &mut fx, Owed::Call, Settle::TurnEnd);
     assert!(fx.outbound.is_empty(), "no PRACK leaves");

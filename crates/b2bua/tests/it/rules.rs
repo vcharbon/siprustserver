@@ -262,12 +262,7 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     exec.execute(actions, call, &ctx)
 }
 
@@ -756,12 +751,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let result = exec.execute(
         &[RuleAction::BeginTermination {
             reason: Some("CANCEL".into()),
@@ -1230,12 +1220,7 @@ fn execute_with(config: &B2buaConfig, call: &call::Call, actions: &[RuleAction])
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 0 };
     exec.execute(actions, call, &ctx)
 }
 
@@ -1483,12 +1468,7 @@ fn execute_from_b1(call: &call::Call, event: &CallEvent, actions: &[RuleAction])
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     exec.execute(actions, call, &ctx)
 }
 
@@ -1866,12 +1846,7 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule(handle_to_s1)];
 
     let result = {
@@ -1901,12 +1876,7 @@ fn undeclared_transition_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule(handle_to_s2_undeclared)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1929,12 +1899,7 @@ fn undeclared_effect_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     // `sm_rule` declares `effects: &[]`, but the handler emits a `LegMessage`.
     let rules = vec![sm_rule(handle_emits_leg_message)];
 
@@ -1952,12 +1917,7 @@ fn declared_effect_passes_the_drift_check() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule_with_effects(handle_emits_leg_message, &SM_EFFECTS_LEG_MESSAGE)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1975,12 +1935,7 @@ fn declared_terminal_clear_state_deactivates_machine() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule_with_transitions(handle_clears_state, &SM_TRANSITIONS_TERMINAL)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1998,12 +1953,7 @@ fn undeclared_terminal_clear_state_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule(handle_clears_state)]; // transitions: S0 => S1 only
 
     let ctx = ctx_for(&call, &event, &config);
@@ -2088,12 +2038,7 @@ Content-Length: 0\r\n\r\n";
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -2157,12 +2102,7 @@ Content-Length: 0\r\n\r\n";
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
     let rs = &result.call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog").route_set;
@@ -2213,12 +2153,7 @@ Content-Length: 0\r\n\r\n";
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -2312,12 +2247,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let result = exec.execute(&[RuleAction::CancelLeg { leg_id: "b-1".into() }], &call, &ctx);
 
     let cancel_effect = result
@@ -2407,12 +2337,7 @@ mod media_primitives {
         id_gen: &'a mut TurnScope,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let mut exec = ActionExecutor {
-            config,
-            turn: id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config, turn: id_gen, now_ms: 0 };
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,
@@ -2771,12 +2696,7 @@ mod answer_a_leg_new_dialog {
         id_gen: &'a mut TurnScope,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let mut exec = ActionExecutor {
-            config,
-            turn: id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config, turn: id_gen, now_ms: 0 };
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,
@@ -3312,12 +3232,7 @@ mod ack_leg_body {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let result = exec.execute(
             &[RuleAction::AckLeg {
                 leg_id: "b-1".into(),
@@ -3410,12 +3325,7 @@ mod ack_leg_body {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         exec.execute(
             &[RuleAction::AckLeg {
                 leg_id: "b-1".into(),
@@ -3576,12 +3486,7 @@ mod default_sdp_create_leg {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
 
         // The service sources the fake offer from the config parameter — the whole
         // opt-in wiring. (A normal reroute passes `body_override: None` here, which
@@ -3683,12 +3588,7 @@ mod header_update_removal_withholds_a_relayed_name {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let create = RuleAction::CreateLeg {
             destination: ("10.0.1.5".into(), 5070), // IP literal → admission passes
             new_ruri: None,
@@ -4002,12 +3902,7 @@ mod limiter_settle {
         let config = B2buaConfig::default();
         let ctx = ctx_for(call, &event, &config);
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let result = exec.execute(actions, call, &ctx);
         invariants::enforce(
             &ObligationSet::core(),
@@ -4160,12 +4055,7 @@ mod service_timers {
     fn distinct_keys_coexist_and_same_key_reschedule_supersedes() {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 1_000,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 1_000 };
         let call = test_call();
         let event = info_like_event(&call);
         let ctx = ctx_at(&call, &event, &config);
@@ -4412,12 +4302,7 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
         .push(RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::secs(3600)));
 
     let mut id_gen = scope(0x65);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms };
     let result = exec.execute(&actions, &call, &ctx);
 
     let armed = result
@@ -4477,12 +4362,7 @@ fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let mut id_gen = scope(0x65);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms };
     exec.execute(
         &[RuleAction::arm(
             TimerKey::call(TimerType::Keepalive),
@@ -4511,12 +4391,7 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let mut id_gen = scope(0x65);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms };
     let result = exec.execute(
         &[RuleAction::arm(
             TimerKey::call(TimerType::Keepalive),
@@ -4593,12 +4468,7 @@ fn discharge_ack(
     };
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let mut call = call.clone();
     let mut fx = b2bua::effects::HandlerEffects::new();
     let discharged = exec.discharge(&mut call, &mut fx, &event, source_leg_id);
@@ -4765,12 +4635,7 @@ mod ladder_give_up {
     ) -> (HandlerResult, HandlerResult) {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let event = give_up_of(call, obligation);
         let mut call = call.clone();
         let mut fx = b2bua::effects::HandlerEffects::new();
@@ -4984,12 +4849,7 @@ mod going_away_gate {
     fn run(rules: &[RuleDefinition], call: &call::Call, event: &CallEvent) -> HandlerResult {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let ctx = ctx_for(call, event, &config);
         execute_rules(rules, call, &ctx, &mut exec, &ObligationSet::core())
     }
@@ -5100,12 +4960,7 @@ mod going_away_gate {
         let config = B2buaConfig::default();
         let ctx = ctx_for(&call, &event, &config);
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let result = exec.execute(
             &[RuleAction::BeginTermination {
                 reason: Some("CANCEL".into()),
@@ -5268,12 +5123,7 @@ fn on_verdict(call: &call::Call, outcome: &str) -> HandlerResult {
     let event = reaper_verdict(call, outcome);
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        wire_faults: &b2bua::wire_faults::WireFaults::none(),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let ctx = ctx_for(call, &event, &config);
     execute_rules(&default_rules(), call, &ctx, &mut exec, &ObligationSet::core())
 }
@@ -5416,12 +5266,7 @@ mod sdp_body_author {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            wire_faults: &b2bua::wire_faults::WireFaults::none(),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let reinvite = RuleAction::SendReinvite {
             leg_id: "a".into(),
             body: Some(Body::new(BOB_V5.as_bytes().to_vec(), None, author)),
