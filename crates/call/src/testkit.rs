@@ -142,7 +142,9 @@ pub fn stage_reinvite_round(leg: &mut Leg, branch: &str, stage: RoundStage) {
     if leg.dialogs.confirmed().is_none() {
         stage_leg(leg, LegState::Confirmed);
     }
-    let d = leg.dialogs.confirmed_mut().expect("a confirmed dialog");
+    let Some(d) = leg.dialogs.confirmed_mut() else {
+        return;
+    };
     d.our_cseq += 1;
     d.pending_invite_txn = Some(InviteTxnHandle {
         branch: branch.into(),
