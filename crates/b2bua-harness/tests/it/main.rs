@@ -98,6 +98,7 @@ mod limiter_release_queue;
 mod load_refusal_ahead_of_permits;
 mod local_answer_contact;
 mod long_ring;
+mod lower_via_hops;
 mod masked_face_last_shown;
 mod max_duration_anchor;
 mod max_forwards;

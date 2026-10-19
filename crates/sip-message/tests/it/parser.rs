@@ -79,16 +79,18 @@ fn v3_1_1_11_multipart_mime() {
     assert!(!req.body().is_empty(), "body should be non-empty");
 }
 
-// --- §3.1.1 valid-per-RFC but rejected by ADR-0007 ---
+// --- §3.1.1 valid-per-RFC but refused by a gate of ADR-0001 ---
 
 #[test]
-fn v3_1_1_7_long_values_rejected_by_adr_0007() {
+fn v3_1_1_7_long_values_refused_for_its_cookie_less_top_via() {
     assert!(parse("rfc4475-valid", "longValues").is_err());
 }
 
 #[test]
-fn v3_1_1_10_varied_transports_rejected_by_adr_0007() {
-    assert!(parse("rfc4475-valid", "variedTransports").is_err());
+fn v3_1_1_10_varied_transports_parses_its_lower_hops_whatever_the_transport() {
+    let msg = parse("rfc4475-valid", "variedTransports").unwrap_or_else(|e| panic!("{}", e.reason));
+    let transports: Vec<&str> = msg.via().iter().map(|v| v.transport()).collect();
+    assert_eq!(transports, ["UDP", "SCTP", "TLS", "UNKNOWN", "TCP"]);
 }
 
 // --- §3.1.2 invalid messages the eager parser REJECTS ---

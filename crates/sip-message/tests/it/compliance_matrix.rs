@@ -68,7 +68,7 @@ fn set(items: &[&'static str]) -> HashSet<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// RFC 4475 §3.1.1 — valid messages (must parse, except ADR-0007 rejections)
+// RFC 4475 §3.1.1 — valid messages (must parse, except the gates of ADR-0001)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -88,9 +88,10 @@ fn rfc4475_valid() {
         "unusualReasonPhrase",     // 3.1.1.12
         "emptyReasonPhrase",       // 3.1.1.13
     ];
-    // ADR-0007: custom rejects 3.1.1.1 (top-Via no magic cookie), 3.1.1.7
-    // (long-values top Via magic-cookie-less), 3.1.1.10 (UNKNOWN transport).
-    let reject = set(&["shortTorturousInvite", "longValues", "variedTransports"]);
+    // 3.1.1.1 and 3.1.1.7 carry a top Via without the magic cookie: RFC 2543
+    // requests, refused by scope choice (ADR-0001 gates, departing from RFC
+    // 3261 §17.2.3).
+    let reject = set(&["shortTorturousInvite", "longValues"]);
     run_category("rfc4475-valid", &names, &reject, false);
 }
 
