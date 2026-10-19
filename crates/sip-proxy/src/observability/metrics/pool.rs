@@ -32,9 +32,9 @@ impl ProxyMetrics {
 #[derive(Debug, Default)]
 pub(super) struct PoolGauges {
     /// Workers per health state: alive, unknown, dead.
-    health: [AtomicU64; 3],
+    health: [AtomicU64; c::HEALTH_STATES.len()],
     /// Alive workers per acceptance of new calls: accept, refuse.
-    acceptance: [AtomicU64; 2],
+    acceptance: [AtomicU64; c::ACCEPTANCE_STATES.len()],
     /// `1` iff no worker is `Alive` (routable): the proxy can serve no new
     /// dialog. Pairs with the `/readyz` gate.
     empty: AtomicU64,
@@ -45,14 +45,14 @@ pub(super) struct PoolGauges {
 }
 
 impl PoolGauges {
-    pub(super) fn set_health_counts(&self, counts: [u64; 3]) {
+    pub(super) fn set_health_counts(&self, counts: [u64; c::HEALTH_STATES.len()]) {
         for (gauge, n) in self.health.iter().zip(counts) {
             gauge.store(n, Ordering::Relaxed);
         }
         self.empty.store(u64::from(counts[0] == 0), Ordering::Relaxed);
     }
 
-    pub(super) fn set_acceptance_counts(&self, counts: [u64; 2]) {
+    pub(super) fn set_acceptance_counts(&self, counts: [u64; c::ACCEPTANCE_STATES.len()]) {
         for (gauge, n) in self.acceptance.iter().zip(counts) {
             gauge.store(n, Ordering::Relaxed);
         }

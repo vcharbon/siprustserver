@@ -81,7 +81,6 @@ crates/b2bua/src/rules/relay/passthrough.rs 1
 crates/b2bua/src/rules/relay/sdp_session.rs 4
 crates/b2bua/src/store/adoption.rs 2
 crates/b2bua/src/store/mod.rs 50
-crates/b2bua/src/store/poison.rs 1
 crates/b2bua/src/store/resident.rs 6
 crates/b2bua/src/store/takeover.rs 6
 crates/b2bua/src/store/terminate_writer.rs 1

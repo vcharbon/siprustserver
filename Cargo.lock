@@ -499,6 +499,7 @@ dependencies = [
  "http-net",
  "http-net-testkit",
  "load-shed",
+ "lock-poison",
  "metric-catalogue",
  "observe",
  "proptest",
@@ -2709,6 +2710,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lock-poison"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4575,6 +4583,7 @@ dependencies = [
  "hmac 0.13.0",
  "layer-harness",
  "load-shed",
+ "lock-poison",
  "metric-catalogue",
  "observe",
  "proptest",
@@ -4646,6 +4655,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "lock-poison",
  "metric-catalogue",
  "proptest",
  "sha2 0.11.1",

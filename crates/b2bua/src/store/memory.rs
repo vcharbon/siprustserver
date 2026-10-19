@@ -60,7 +60,7 @@ impl InMemoryCallStore {
 
     /// The maps, a poisoned lock taken as it stands (`store::locked`).
     fn locked(&self) -> MutexGuard<'_, Inner> {
-        super::locked(&self.inner, "replica bodies")
+        super::locked(&self.inner, super::REPLICA_BODIES)
     }
 
     /// Store `body` (and replace the index keys `call_ref` owns when `indexes`

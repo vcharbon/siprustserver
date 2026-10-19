@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use load_shed::{at_ms, Ewma, TokenBucket};
 
-use crate::poison::locked;
+use crate::poison::{locked, LOAD_OBSERVER};
 
 use super::band::{compute_band, EluBand};
 use super::config::LoadObserverConfig;
@@ -228,7 +228,7 @@ impl WorkerLoadObserver {
     /// refresh the rate diffs, stash `elu`/`gc`, mark the payload fresh, then
     /// run one AIMD step.
     pub fn apply_payload(&self, worker_id: &str, payload: &OverloadPayload, now_ms: i64) {
-        let mut workers = locked(&self.workers, "load observer workers");
+        let mut workers = locked(&self.workers, LOAD_OBSERVER);
         let state = workers
             .entry(worker_id.to_string())
             .or_insert_with(|| WorkerState::fresh(&self.config, now_ms));
@@ -244,7 +244,7 @@ impl WorkerLoadObserver {
     /// a per-worker counter but NO AIMD step is taken (the band/cap are left where
     /// the last good payload put them).
     pub fn note_payload_missing(&self, worker_id: &str, now_ms: i64) {
-        let mut workers = locked(&self.workers, "load observer workers");
+        let mut workers = locked(&self.workers, LOAD_OBSERVER);
         let state = workers
             .entry(worker_id.to_string())
             .or_insert_with(|| WorkerState::fresh(&self.config, now_ms));
@@ -256,7 +256,7 @@ impl WorkerLoadObserver {
     /// independently of the worker's own report. A no-op for an unobserved worker
     /// (no bucket yet — bootstrap admits without one).
     pub fn record_own_admitted(&self, worker_id: &str) {
-        if let Some(state) = locked(&self.workers, "load observer workers").get_mut(worker_id) {
+        if let Some(state) = locked(&self.workers, LOAD_OBSERVER).get_mut(worker_id) {
             state.own_admitted_since_last_tick += 1;
         }
     }
@@ -268,7 +268,7 @@ impl WorkerLoadObserver {
     /// The strategy answers an empty bucket and counts it
     /// (`SelectError::RateCapExhausted`).
     pub fn try_consume_for(&self, worker_id: &str, now_ms: i64) -> Result<(), u32> {
-        let mut workers = locked(&self.workers, "load observer workers");
+        let mut workers = locked(&self.workers, LOAD_OBSERVER);
         match workers.get_mut(worker_id) {
             Some(state) => state.bucket.try_take(at_ms(now_ms)),
             None => Ok(()),
@@ -277,7 +277,7 @@ impl WorkerLoadObserver {
 
     /// The worker's current band, or `None` if no payload has ever arrived.
     pub fn band_for(&self, worker_id: &str) -> Option<EluBand> {
-        locked(&self.workers, "load observer workers").get(worker_id).map(|s| s.band)
+        locked(&self.workers, LOAD_OBSERVER).get(worker_id).map(|s| s.band)
     }
 
     /// Periodic sweep — call every ~`options_interval_ms`. Each worker `alive`
@@ -295,7 +295,7 @@ impl WorkerLoadObserver {
     /// `last_action = StaleDecrease` + `payload_missing_count`.
     pub fn sweep_stale(&self, now_ms: i64, alive: impl Fn(&str) -> bool) -> u64 {
         let c = &self.config;
-        let mut workers = locked(&self.workers, "load observer workers");
+        let mut workers = locked(&self.workers, LOAD_OBSERVER);
         let mut floored = 0u64;
         for (worker_id, state) in workers.iter_mut() {
             let age = now_ms - state.last_payload_at_ms;
@@ -315,7 +315,7 @@ impl WorkerLoadObserver {
     /// consume would, so `tokens` is current.
     #[cfg(test)]
     pub fn snapshot(&self, now_ms: i64) -> Vec<AimdSnapshot> {
-        let mut workers = locked(&self.workers, "load observer workers");
+        let mut workers = locked(&self.workers, LOAD_OBSERVER);
         let mut out = Vec::with_capacity(workers.len());
         for (worker_id, state) in workers.iter_mut() {
             let tokens = state.bucket.level(at_ms(now_ms));
@@ -344,7 +344,7 @@ impl WorkerLoadObserver {
     /// Drop state for workers that left the registry — the map stays bounded under
     /// worker churn (nothing else ever removes an entry).
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
-        locked(&self.workers, "load observer workers").retain(|id, _| keep(id));
+        locked(&self.workers, LOAD_OBSERVER).retain(|id, _| keep(id));
     }
 
     /// Forget a worker's state entirely. A recreated pod (same ordinal, new host)
@@ -352,6 +352,6 @@ impl WorkerLoadObserver {
     /// `AboveCritical` at the moment it crashed) excluded the idle fresh pod from
     /// new-dialog selection until its first `X-Overload` reply.
     pub fn reset(&self, worker_id: &str) {
-        locked(&self.workers, "load observer workers").remove(worker_id);
+        locked(&self.workers, LOAD_OBSERVER).remove(worker_id);
     }
 }

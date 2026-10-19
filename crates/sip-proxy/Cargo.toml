@@ -18,6 +18,8 @@ metric-catalogue = { path = "../metric-catalogue" }
 bytes.workspace = true
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
+# Every std lock recovers from poison, counted per named lock (ADR-0051 §7).
+lock-poison = { path = "../lock-poison" }
 sip-clock = { path = "../sip-clock" }
 sip-txn = { path = "../sip-txn" } # IdGen (To-tags), timer constants, and the health prober's client transactions
 # The token bucket, EWMA, load-sampler seam and Retry-After policy the self-gate

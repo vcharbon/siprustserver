@@ -17,7 +17,7 @@ use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
 use crate::addr::ProxyAddr;
-use crate::poison::locked;
+use crate::poison::{locked, SIMULATED_REGISTRY};
 
 use super::projection::WorkerSet;
 use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
@@ -74,8 +74,7 @@ impl SimulatedWorkerRegistry {
             entry.health,
             entry.acceptance,
         );
-        locked(&self.ports, "simulated registry ports")
-            .insert(entry.id.clone(), entry.address.port);
+        locked(&self.ports, SIMULATED_REGISTRY).insert(entry.id.clone(), entry.address.port);
         self.membership.add(Peer::new(entry.id.clone(), entry.address.host.clone()));
         self.set.recompose();
     }
@@ -86,7 +85,7 @@ impl SimulatedWorkerRegistry {
         if self.set.resolve(id).is_none() {
             return;
         }
-        locked(&self.ports, "simulated registry ports").remove(id);
+        locked(&self.ports, SIMULATED_REGISTRY).remove(id);
         self.membership.remove(id);
         self.set.recompose();
     }
@@ -103,7 +102,7 @@ impl SimulatedWorkerRegistry {
             // The per-worker port is a proxy annotation, dropped with the
             // departure; re-seed it so the returning endpoint keeps its bind.
             // Everything else is what a fresh join gets.
-            if let Some(port) = locked(&self.ports, "simulated registry ports").get(id).copied() {
+            if let Some(port) = locked(&self.ports, SIMULATED_REGISTRY).get(id).copied() {
                 self.set.preset(
                     id,
                     cur.host.clone(),
@@ -139,7 +138,7 @@ impl SimulatedWorkerRegistry {
         if cur.address == address {
             return;
         }
-        locked(&self.ports, "simulated registry ports").insert(id.to_string(), address.port);
+        locked(&self.ports, SIMULATED_REGISTRY).insert(id.to_string(), address.port);
         if cur.address.host != address.host {
             // Host change is membership identity. Re-seed the annotation at the new
             // host (carrying the current health/acceptance + new port) so the

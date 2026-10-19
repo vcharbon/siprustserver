@@ -707,7 +707,7 @@ impl B2buaMetrics {
         catalogue::worker::CALL_CREATIONS.render_value(&mut s, creations);
         catalogue::worker::CALL_REMOVALS.render_value(&mut s, removals);
         catalogue::worker::STORE_POISONED_LOCK_RECOVERIES
-            .render_value(&mut s, crate::store::poisoned_lock_recoveries());
+            .render(&mut s, |series| crate::store::LOCK_RECOVERIES.count_at(series.at(0)));
 
         // Per-method SIP traffic, the repeats and give-ups, replication per
         // stream, the drains.

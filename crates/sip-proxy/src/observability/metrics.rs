@@ -159,7 +159,7 @@ fn count_outcome(counters: &[AtomicU64], labels: &[&str], label: &str) {
 pub struct ProxyMetrics {
     /// `[direction][result]` — fixed slots, lock-free (multiple increments per
     /// packet on the hot path).
-    messages: [[AtomicU64; 3]; 2],
+    messages: [[AtomicU64; MessageResult::ALL.len()]; Direction::ALL.len()],
     /// One slot per native method — lock-free; an extension method's count
     /// sits in `request_extensions`.
     requests: [AtomicU64; Method::NATIVE_TOKENS.len()],
@@ -231,7 +231,7 @@ pub struct ProxyMetrics {
     /// face ∈ {int, ext} and direction ∈ {inbound (recv), outbound (egress)}.
     /// A single-face proxy only ever touches the `int` slots — cheap fixed
     /// atomics, no restructuring of the existing counters.
-    face_messages: [[AtomicU64; 2]; 2],
+    face_messages: [[AtomicU64; Direction::ALL.len()]; Face::ALL.len()],
     /// Claims of the internal plane the external face does not honour.
     external_untrusted: FixedCounts,
     /// Per-peer failure/timeout counters
@@ -492,7 +492,7 @@ impl ProxyMetrics {
         c::RESOLVER_CACHE_SIZE.render_value(&mut s, load(&self.resolver_cache_size));
         c::SEND_FAILURES.render_value(&mut s, load(&self.send_failures));
         c::PARSE_PANICS.render_value(&mut s, load(&self.parse_panics));
-        c::POISONED_LOCK_RECOVERIES.render_value(&mut s, crate::poison::poisoned_lock_recoveries());
+        c::POISONED_LOCK_RECOVERIES.render(&mut s, |l| crate::poison::RECOVERIES.count_at(l.at(0)));
         let udp = self.udp_totals();
         c::UDP_QUEUE_DEPTH.render_value(&mut s, udp.queue_depth);
         c::UDP_QUEUE_MAX.render_value(&mut s, udp.queue_max);

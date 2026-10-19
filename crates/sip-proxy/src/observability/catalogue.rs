@@ -16,7 +16,7 @@ use crate::resolver::{outcome, refresh_outcome};
 use crate::self_gate::ShedReason;
 
 /// `direction:result`, every direction then every result.
-const MESSAGE_LABELS: [&str; 6] = [
+const MESSAGE_LABELS: [&str; Direction::ALL.len() * MessageResult::ALL.len()] = [
     "inbound:forwarded",
     "inbound:responded",
     "inbound:dropped",
@@ -26,7 +26,8 @@ const MESSAGE_LABELS: [&str; 6] = [
 ];
 
 /// `face:direction`, every face then every direction.
-const FACE_LABELS: [&str; 4] = ["int:inbound", "int:outbound", "ext:inbound", "ext:outbound"];
+const FACE_LABELS: [&str; Face::ALL.len() * Direction::ALL.len()] =
+    ["int:inbound", "int:outbound", "ext:inbound", "ext:outbound"];
 
 /// A request's method: every method modelled natively; an extension method
 /// gets its own series, under the family's cap.
@@ -252,8 +253,8 @@ pub const PARSE_PANICS: Family = Family::counter(
 
 pub const POISONED_LOCK_RECOVERIES: Family = Family::counter(
     "sip_proxy_poisoned_lock_recoveries_total",
-    Labels::None,
-    "Proxy locks a panic poisoned, taken as they stood and cleared (process-wide); each one is a defect, expected 0.",
+    Labels::Product(&[Dim::new("lock", &crate::poison::LOCKS)]),
+    "Proxy locks a panic poisoned, taken as they stood and cleared (process-wide), by lock; each one is a defect, expected 0.",
 );
 
 pub const UDP_QUEUE_DEPTH: Family = Family::gauge(

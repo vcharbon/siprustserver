@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use load_shed::{clamp01, Ewma, LoadSampler, TokenBucket};
 
-use crate::poison::locked;
+use crate::poison::{locked, SELF_GATE};
 
 // ---------------------------------------------------------------------------
 // Decision / bypass types
@@ -340,7 +340,7 @@ impl EluCpsGate {
     /// GC fraction). Called by the periodic task every
     /// [`sampler_interval`](EluCpsGate::sampler_interval).
     pub fn sample(&self) {
-        let mut inner = locked(&self.inner, "self gate");
+        let mut inner = locked(&self.inner, SELF_GATE);
         let elu = inner.sampler.elu();
         let gc = inner.sampler.gc_fraction();
         inner.elu_ewma.observe(elu);
@@ -349,14 +349,14 @@ impl EluCpsGate {
 
     /// Current EWMA-smoothed proxy ELU (`0..=1`) — exposed for tests/diagnostics.
     pub fn elu_ewma(&self) -> f64 {
-        locked(&self.inner, "self gate").elu_ewma.get()
+        locked(&self.inner, SELF_GATE).elu_ewma.get()
     }
 
     /// Snapshot of the gate's published state. A read changes nothing:
     /// `cps_bucket_level` is the level projected to now.
     pub fn metrics(&self) -> ProxySelfGateMetrics {
         let (elu_ewma, gc_fraction, cps_bucket_level, cps_bucket_max) = {
-            let inner = locked(&self.inner, "self gate");
+            let inner = locked(&self.inner, SELF_GATE);
             let level = inner.bucket.projected_level(inner.now());
             (inner.elu_ewma.get(), inner.gc_fraction, level, inner.bucket.capacity())
         };
@@ -383,7 +383,7 @@ impl ProxySelfGate for EluCpsGate {
     ///    with the time-to-token of that same failed consume as `Retry-After`.
     /// 3. Otherwise **admit** (a token was consumed in step 2).
     fn try_admit_external(&self) -> AdmitDecision {
-        let mut inner = locked(&self.inner, "self gate");
+        let mut inner = locked(&self.inner, SELF_GATE);
 
         // 1. Intake pressure — hard reject before spending a token.
         if inner.elu_ewma.get() > self.elu_critical {

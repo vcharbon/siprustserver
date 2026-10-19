@@ -73,8 +73,8 @@ pub const PARSE_PANICS: Family = Family::counter(
 
 pub const POISONED_LOCK_RECOVERIES: Family = Family::counter(
     "b2bua_txn_poisoned_lock_recoveries_total",
-    Labels::None,
-    "Transaction-layer locks a panic poisoned, taken as they stood and cleared (process-wide); each one is a defect, expected 0.",
+    Labels::Product(&[Dim::new("lock", &crate::poison::LOCKS)]),
+    "Transaction-layer locks a panic poisoned, taken as they stood and cleared (process-wide), by lock; each one is a defect, expected 0.",
 );
 
 pub const SEND_ERRORS: Family = Family::counter(

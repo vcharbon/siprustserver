@@ -1,84 +1,53 @@
-//! Poison-tolerant locking (ADR-0051 §7): a panic under one of the proxy's
-//! locks never stops it. Every critical section leaves its state whole
-//! between statements, so a poisoned lock is taken as it stands, its poison
-//! cleared, and the recovery logged and counted once per panic
-//! (`sip_proxy_poisoned_lock_recoveries_total`).
+//! The proxy's named locks (ADR-0051 §7): every std lock of the crate is
+//! taken through [`locked`], [`read`] or [`write`] under one of these names,
+//! and a poisoned one is recovered and counted under it
+//! (`sip_proxy_poisoned_lock_recoveries_total{lock}`).
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{
-    LockResult, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-static RECOVERIES: AtomicU64 = AtomicU64::new(0);
+use lock_poison::Recoveries;
 
-/// The guard of `lock`, its poison cleared by `clear` and the recovery
-/// counted when a panic poisoned it. `what` names the lock in the warning.
-fn recovered<G>(lock: LockResult<G>, clear: impl FnOnce(), what: &'static str) -> G {
-    lock.unwrap_or_else(|poisoned: PoisonError<G>| {
-        let guard = poisoned.into_inner();
-        clear();
-        let total = RECOVERIES.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-        tracing::warn!(lock = what, total, "a panic poisoned a proxy lock; recovered as it stands");
-        guard
-    })
+pub(crate) const INVITE_BRANCH_LRU: &str = "invite_branch_lru";
+pub(crate) const REFUSALS_MEMO: &str = "refusals_memo";
+pub(crate) const LOAD_OBSERVER: &str = "load_observer";
+pub(crate) const SELF_GATE: &str = "self_gate";
+pub(crate) const RESOLVER_IN_FLIGHT: &str = "resolver_in_flight";
+pub(crate) const RESOLVER_PINS: &str = "resolver_pins";
+pub(crate) const RESOLVER_REFRESHES: &str = "resolver_refreshes";
+pub(crate) const RESOLVER_CACHE: &str = "resolver_cache";
+pub(crate) const TRACE_REGISTRY: &str = "trace_registry";
+pub(crate) const UDP_SHARD_STATS: &str = "udp_shard_stats";
+pub(crate) const SIMULATED_REGISTRY: &str = "simulated_registry";
+
+/// Every lock name, in counter order: the `lock` label's values.
+pub const LOCKS: [&str; 11] = [
+    INVITE_BRANCH_LRU,
+    REFUSALS_MEMO,
+    LOAD_OBSERVER,
+    SELF_GATE,
+    RESOLVER_IN_FLIGHT,
+    RESOLVER_PINS,
+    RESOLVER_REFRESHES,
+    RESOLVER_CACHE,
+    TRACE_REGISTRY,
+    UDP_SHARD_STATS,
+    SIMULATED_REGISTRY,
+];
+
+/// The recoveries of the proxy's locks in this process.
+pub(crate) static RECOVERIES: Recoveries<{ LOCKS.len() }> = Recoveries::new(LOCKS);
+
+/// Lock `m`, the lock `name`.
+pub(crate) fn locked<'a, T>(m: &'a Mutex<T>, name: &'static str) -> MutexGuard<'a, T> {
+    RECOVERIES.mutex(m, name)
 }
 
-/// Lock `m`, taking a poisoned guard as it stands.
-pub(crate) fn locked<'a, T>(m: &'a Mutex<T>, what: &'static str) -> MutexGuard<'a, T> {
-    #[expect(clippy::disallowed_methods, reason = "the proxy's one Mutex lock, poison recovered")]
-    let lock = m.lock();
-    recovered(lock, || m.clear_poison(), what)
+/// Read-lock `rw`, the lock `name`.
+pub(crate) fn read<'a, T>(rw: &'a RwLock<T>, name: &'static str) -> RwLockReadGuard<'a, T> {
+    RECOVERIES.read(rw, name)
 }
 
-/// Read-lock `rw`, taking a poisoned guard as it stands.
-pub(crate) fn read<'a, T>(rw: &'a RwLock<T>, what: &'static str) -> RwLockReadGuard<'a, T> {
-    #[expect(clippy::disallowed_methods, reason = "the proxy's one read lock, poison recovered")]
-    let lock = rw.read();
-    recovered(lock, || rw.clear_poison(), what)
-}
-
-/// Write-lock `rw`, taking a poisoned guard as it stands.
-pub(crate) fn write<'a, T>(rw: &'a RwLock<T>, what: &'static str) -> RwLockWriteGuard<'a, T> {
-    #[expect(clippy::disallowed_methods, reason = "the proxy's one write lock, poison recovered")]
-    let lock = rw.write();
-    recovered(lock, || rw.clear_poison(), what)
-}
-
-/// The proxy's locks recovered from a panic in this process.
-pub fn poisoned_lock_recoveries() -> u64 {
-    RECOVERIES.load(Ordering::Relaxed)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex, RwLock};
-
-    use super::{locked, poisoned_lock_recoveries, read, write};
-
-    #[test]
-    fn a_poisoned_lock_is_recovered_once_and_counted() {
-        let m = Arc::new(Mutex::new(1));
-        let held = m.clone();
-        let _ = std::thread::spawn(move || {
-            let _guard = held.lock();
-            panic!("poison the mutex");
-        })
-        .join();
-        let rw = Arc::new(RwLock::new(2));
-        let held = rw.clone();
-        let _ = std::thread::spawn(move || {
-            let _guard = held.write();
-            panic!("poison the rwlock");
-        })
-        .join();
-
-        let before = poisoned_lock_recoveries();
-        assert_eq!(*locked(&m, "test"), 1);
-        assert!(!m.is_poisoned(), "the poison is cleared");
-        assert_eq!(*read(&rw, "test"), 2);
-        assert!(!rw.is_poisoned(), "the poison is cleared");
-        assert_eq!(*write(&rw, "test"), 2);
-        assert_eq!(*locked(&m, "test"), 1);
-        assert_eq!(poisoned_lock_recoveries() - before, 2, "one recovery per panic");
-    }
+/// Write-lock `rw`, the lock `name`.
+pub(crate) fn write<'a, T>(rw: &'a RwLock<T>, name: &'static str) -> RwLockWriteGuard<'a, T> {
+    RECOVERIES.write(rw, name)
 }

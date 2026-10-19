@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex};
 use repl_net::frame::{Frame, Op, Partition, Watermark};
 use sip_clock::Clock;
 
-use crate::store::PartitionRole;
+use crate::store::{locked, PartitionRole, REPLICA_CHANGELOG};
 
 pub use progress::DEFAULT_CLAIM_TTL;
 
@@ -265,7 +265,7 @@ pub struct ServeGuard {
 
 impl Drop for ServeGuard {
     fn drop(&mut self) {
-        let mut inner = crate::store::locked(&self.changelog.inner, "replica changelog");
+        let mut inner = locked(&self.changelog.inner, REPLICA_CHANGELOG);
         if let Some(log) = inner.peers.get_mut(&self.peer) {
             log.serving = log.serving.saturating_sub(1);
             let sub = log.sub_mut(self.partition);
@@ -332,7 +332,7 @@ impl Changelog {
 
     /// The current head `(gen, counter)`.
     pub fn head(&self) -> Watermark {
-        Watermark::new(self.gen, crate::store::locked(&self.inner, "replica changelog").counter)
+        Watermark::new(self.gen, locked(&self.inner, REPLICA_CHANGELOG).counter)
     }
 
     /// This node's shared wall clock (`Clock::now_ms()`), for stamping the
@@ -348,7 +348,7 @@ impl Changelog {
     /// `ServeGuard` drops. Creates the peer log if absent.
     pub fn serving(&self, peer: &str, partition: Partition) -> ServeGuard {
         {
-            let mut inner = crate::store::locked(&self.inner, "replica changelog");
+            let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
             let now = self.clock.now_ms();
             let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now));
             log.serving += 1;
@@ -382,7 +382,7 @@ impl Changelog {
         if since.gen < self.gen {
             return false;
         }
-        let inner = crate::store::locked(&self.inner, "replica changelog");
+        let inner = locked(&self.inner, REPLICA_CHANGELOG);
         if since.counter > inner.counter {
             return true;
         }
@@ -430,7 +430,7 @@ impl Changelog {
         incarnation: Option<String>,
     ) {
         let now = self.clock.now_ms();
-        let inner = &mut *crate::store::locked(&self.inner, "replica changelog");
+        let inner = &mut *locked(&self.inner, REPLICA_CHANGELOG);
         inner.counter += 1;
         let c = inner.counter;
 
@@ -467,7 +467,7 @@ impl Changelog {
         // Brief lock: snapshot the due entries, then DROP the guard before any
         // body read/await.
         let due: Vec<Due> = {
-            let inner = crate::store::locked(&self.inner, "replica changelog");
+            let inner = locked(&self.inner, REPLICA_CHANGELOG);
             let Some(log) = inner.peers.get(peer) else {
                 return Vec::new();
             };
@@ -522,7 +522,7 @@ impl Changelog {
 
     /// The `(op, answered)` `call_ref`'s entry holds now, `None` when it has none.
     fn current(&self, peer: &str, partition: Partition, call_ref: &str) -> Option<(Op, bool)> {
-        let inner = crate::store::locked(&self.inner, "replica changelog");
+        let inner = locked(&self.inner, REPLICA_CHANGELOG);
         let st = inner.peers.get(peer)?.sub(partition).by_ref.get(call_ref)?;
         Some((st.op, st.answered))
     }
@@ -532,7 +532,7 @@ impl Changelog {
     /// and the live peer-log count. A peer whose entries grow without draining is
     /// an outbound leak distinct from the call map. One brief lock; pure read.
     pub fn depth(&self) -> (u64, u64) {
-        let inner = crate::store::locked(&self.inner, "replica changelog");
+        let inner = locked(&self.inner, REPLICA_CHANGELOG);
         let entries: usize =
             inner.peers.values().map(|p| p.pri.entries.len() + p.bak.entries.len()).sum();
         (entries as u64, inner.peers.len() as u64)
@@ -542,7 +542,7 @@ impl Changelog {
     /// (lazy TTL — deterministic, no background task, no `DelayQueue` aliasing).
     pub fn reap(&self, now_ms: i64) {
         let dead_peer_ttl = self.dead_peer_ttl_ms;
-        let mut inner = crate::store::locked(&self.inner, "replica changelog");
+        let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
         // Drop idle peers wholesale — but NEVER one with an active serve task.
         inner.peers.retain(|_, log| log.serving > 0 || now_ms - log.last_active_ms < dead_peer_ttl);
         // Reap expired tombstones from each surviving sub-log, raising its floor.
@@ -567,7 +567,7 @@ impl Changelog {
     /// Whether a peer log exists (test introspection).
     #[cfg(test)]
     pub fn has_peer(&self, peer: &str) -> bool {
-        crate::store::locked(&self.inner, "replica changelog").peers.contains_key(peer)
+        locked(&self.inner, REPLICA_CHANGELOG).peers.contains_key(peer)
     }
 }
 

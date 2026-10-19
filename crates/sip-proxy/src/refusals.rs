@@ -192,7 +192,7 @@ impl Refusals {
         let slot = usize::from(key.to_le_bytes()[0]) % STRIPES;
         #[expect(clippy::indexing_slicing, reason = "a remainder of STRIPES indexes the stripes")]
         let stripe = &self.stripes[slot];
-        crate::poison::locked(stripe, "refusals memo")
+        crate::poison::locked(stripe, crate::poison::REFUSALS_MEMO)
     }
 
     fn count(&self, added: usize, forgotten: usize) {

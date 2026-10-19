@@ -24,6 +24,8 @@ metric-catalogue = { path = "../metric-catalogue" }
 sip-net = { path = "../sip-net" }
 # Every timer arms and every deadline is computed within range (ADR-0051 §2).
 sip-clock = { path = "../sip-clock" }
+# The refusals memo recovers from poison, counted per named lock (ADR-0051 §7).
+lock-poison = { path = "../lock-poison" }
 tracing.workspace = true
 # Identifiers are HMAC-SHA256 over a counter, keyed from the OS RNG (`rng.rs`).
 hmac.workspace = true

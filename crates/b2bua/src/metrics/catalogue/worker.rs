@@ -105,8 +105,8 @@ pub const CALL_REMOVALS: Family = Family::counter(
 
 pub const STORE_POISONED_LOCK_RECOVERIES: Family = Family::counter(
     "b2bua_store_poisoned_lock_recoveries_total",
-    Labels::None,
-    "store locks a panic poisoned, taken as they stood and cleared (process-wide) — expected 0",
+    Labels::Product(&[Dim::new("lock", &crate::store::LOCKS)]),
+    "store locks a panic poisoned, taken as they stood and cleared (process-wide), by lock — expected 0",
 );
 
 pub const REQUESTS: Family = Family::counter(

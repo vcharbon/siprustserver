@@ -8,7 +8,9 @@ use std::sync::Arc;
 use super::super::incarnation::is_another_call;
 use super::super::resurrection::Burial;
 use super::{CallMeta, ReplicatingCallStore};
-use crate::store::{locked, PartitionRole, PropagateDirection};
+use crate::store::{
+    locked, PartitionRole, PropagateDirection, DISPLACED_BODIES, RESURRECTION_TOMBSTONES,
+};
 
 /// What a write is, for the rules of [`ReplicatingCallStore::admits`].
 #[derive(Clone, Copy)]
@@ -49,10 +51,10 @@ impl ReplicatingCallStore {
         body: &Arc<[u8]>,
         write: Write,
     ) -> bool {
-        let mut tombstones = locked(&self.tombstones, "resurrection tombstones");
+        let mut tombstones = locked(&self.tombstones, RESURRECTION_TOMBSTONES);
         let keep_for_reap = |incarnation: Option<&str>, body: &Arc<[u8]>| {
             if let Some(id) = incarnation {
-                locked(&self.displaced, "displaced bodies").insert(id.to_string(), body.clone());
+                locked(&self.displaced, DISPLACED_BODIES).insert(id.to_string(), body.clone());
             }
         };
         match tombstones.burial(call_ref, incarnation, write.now) {

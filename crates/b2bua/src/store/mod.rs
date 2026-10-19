@@ -28,8 +28,8 @@ pub use call_store::{
 };
 pub use faults::{FaultInjectingCallStore, StoreFaultPoint, StoreFaults};
 pub use memory::InMemoryCallStore;
-pub(crate) use poison::locked;
-pub use poison::poisoned_lock_recoveries;
+pub(crate) use poison::*;
+pub use poison::{LOCKS, LOCK_RECOVERIES};
 pub use takeover::TakeoverProbe;
 pub use terminate_writer::BufferedTerminateWriter;
 

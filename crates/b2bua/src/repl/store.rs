@@ -35,6 +35,7 @@ use super::resurrection::{Burial, ResurrectionTombstones};
 use super::shed_marks::ShedMarks;
 use crate::store::{
     locked, CallStore, InMemoryCallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
+    DISPLACED_BODIES, REPLICA_METADATA, RESURRECTION_TOMBSTONES, SHED_MARKS,
 };
 use admission::Write;
 
@@ -145,8 +146,8 @@ impl ReplicatingCallStore {
     /// resurrection-guard prune gap.
     pub fn map_lens(&self) -> (usize, usize, usize, usize) {
         let (bodies, indexes) = self.inner.lens();
-        let meta = locked(&self.meta, "replica metadata").len();
-        let tomb = locked(&self.tombstones, "resurrection tombstones").len();
+        let meta = locked(&self.meta, REPLICA_METADATA).len();
+        let tomb = locked(&self.tombstones, RESURRECTION_TOMBSTONES).len();
         (bodies, indexes, meta, tomb)
     }
 
@@ -189,7 +190,7 @@ impl ReplicatingCallStore {
         if self.is_expired(call_ref) {
             return None;
         }
-        locked(&self.meta, "replica metadata")
+        locked(&self.meta, REPLICA_METADATA)
             .get(call_ref)
             .map(|m| (m.meta.call_gen, m.meta.call_bgen))
     }
@@ -200,7 +201,7 @@ impl ReplicatingCallStore {
     /// failover/reclaim hydration reads this to re-anchor the call's absolute
     /// timer deadlines before re-arming them. Pure read (one brief lock).
     pub fn skew_offset_ms(&self, call_ref: &str) -> Option<i64> {
-        locked(&self.meta, "replica metadata").get(call_ref).and_then(|m| m.skew_offset_ms)
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).and_then(|m| m.skew_offset_ms)
     }
 
     /// Snapshot the LIVE callRef KEYS stored in `(role, primary)` under a BRIEF
@@ -212,7 +213,7 @@ impl ReplicatingCallStore {
     /// `None` anyway). Pure read; no body touched.
     pub fn scan_call_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {
         let now = self.clock.now_ms();
-        let meta = locked(&self.meta, "replica metadata");
+        let meta = locked(&self.meta, REPLICA_METADATA);
         meta.iter()
             .filter(|(_, m)| m.role == role && m.primary == primary)
             .filter(|(_, m)| !matches!(m.expiry_at_ms, Some(e) if now >= e))
@@ -245,7 +246,7 @@ impl ReplicatingCallStore {
     /// it re-serves the call, closing that un-backed-up window. No-op if we hold
     /// no meta entry for the ref yet. Pure metadata; no body / changelog touched.
     pub fn reestablish_backup(&self, call_ref: &str, backup: &str) {
-        if let Some(m) = locked(&self.meta, "replica metadata").get_mut(call_ref) {
+        if let Some(m) = locked(&self.meta, REPLICA_METADATA).get_mut(call_ref) {
             m.backup = Some(backup.to_string());
         }
     }
@@ -260,7 +261,7 @@ impl ReplicatingCallStore {
     /// One brief lock; no body touched. Includes expired-but-not-yet-reaped
     /// entries — the reaper, not the gauge, prunes.
     pub fn meta_counts(&self) -> (u64, u64) {
-        let total = locked(&self.meta, "replica metadata").len() as u64;
+        let total = locked(&self.meta, REPLICA_METADATA).len() as u64;
         (total, self.backup_held())
     }
 
@@ -284,7 +285,7 @@ impl ReplicatingCallStore {
         ttl_ms: i64,
     ) {
         let expiry = self.expiry_for(self.clock.now_ms(), ttl_ms);
-        locked(&self.shed, "shed marks").mark(call_ref, primary, gen, floor, expiry);
+        locked(&self.shed, SHED_MARKS).mark(call_ref, primary, gen, floor, expiry);
     }
 
     /// The highest position `primary`'s flow may report while it streams
@@ -292,14 +293,14 @@ impl ReplicatingCallStore {
     /// when it has none. Marks an older incarnation sent are dropped first: a
     /// rebooted primary serves none of their calls.
     pub fn shed_floor(&self, primary: &str, gen: u64) -> Option<Watermark> {
-        let mut shed = locked(&self.shed, "shed marks");
+        let mut shed = locked(&self.shed, SHED_MARKS);
         shed.drop_older(primary, gen);
         shed.floor(primary)
     }
 
     /// Drop every shed mark of `primary`.
     pub fn clear_shed_of(&self, primary: &str) {
-        locked(&self.shed, "shed marks").clear_primary(primary);
+        locked(&self.shed, SHED_MARKS).clear_primary(primary);
     }
 
     /// Whether a `Put` of `incarnation` of `call_ref` would resurrect a call
@@ -307,7 +308,7 @@ impl ReplicatingCallStore {
     /// [`put_call`](CallStore::put_call) would ignore it.
     pub fn buries(&self, call_ref: &str, incarnation: Option<&str>) -> bool {
         let now = self.clock.now_ms();
-        locked(&self.tombstones, "resurrection tombstones")
+        locked(&self.tombstones, RESURRECTION_TOMBSTONES)
             .burial(call_ref, incarnation, now)
             .is_some()
     }
@@ -319,7 +320,7 @@ impl ReplicatingCallStore {
     /// it settles an expired one. Calls written again after the take are
     /// handed again.
     pub fn take_displaced(&self) -> Vec<Arc<[u8]>> {
-        locked(&self.displaced, "displaced bodies").drain().map(|(_, body)| body).collect()
+        locked(&self.displaced, DISPLACED_BODIES).drain().map(|(_, body)| body).collect()
     }
 
     /// The call incarnation of the body stored for a callRef, or `None` when
@@ -328,14 +329,12 @@ impl ReplicatingCallStore {
         if self.is_expired(call_ref) {
             return None;
         }
-        locked(&self.meta, "replica metadata")
-            .get(call_ref)
-            .and_then(|m| m.meta.incarnation.clone())
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).and_then(|m| m.meta.incarnation.clone())
     }
 
     /// Standing shed marks, all primaries.
     pub fn shed_count(&self) -> usize {
-        locked(&self.shed, "shed marks").len()
+        locked(&self.shed, SHED_MARKS).len()
     }
 
     /// Account one `meta` entry leaving role `old` for role `new` (`None` =
@@ -365,7 +364,7 @@ impl ReplicatingCallStore {
     /// once the authority has published it, it has it. No-op for a ref we hold no
     /// meta for.
     pub fn note_authority_answer(&self, call_ref: &str) {
-        if let Some(m) = locked(&self.meta, "replica metadata").get_mut(call_ref) {
+        if let Some(m) = locked(&self.meta, REPLICA_METADATA).get_mut(call_ref) {
             m.authority_answered = true;
         }
     }
@@ -378,20 +377,20 @@ impl ReplicatingCallStore {
     ///
     /// [`note_authority_answer`]: Self::note_authority_answer
     pub fn authority_answered(&self, call_ref: &str) -> bool {
-        locked(&self.meta, "replica metadata").get(call_ref).is_some_and(|m| m.authority_answered)
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).is_some_and(|m| m.authority_answered)
     }
 
     /// Is this call's body past its TTL? An expired body reads as absent until
     /// [`reap`](Self::reap) evicts it. Pure read.
     fn is_expired(&self, call_ref: &str) -> bool {
         let now = self.clock.now_ms();
-        let meta = locked(&self.meta, "replica metadata");
+        let meta = locked(&self.meta, REPLICA_METADATA);
         matches!(meta.get(call_ref), Some(m) if matches!(m.expiry_at_ms, Some(e) if now >= e))
     }
 
     /// The refs whose body is expired at `now_ms`.
     fn expired_snapshot(&self, now_ms: i64) -> Vec<String> {
-        locked(&self.meta, "replica metadata")
+        locked(&self.meta, REPLICA_METADATA)
             .iter()
             .filter(|(_, m)| matches!(m.expiry_at_ms, Some(e) if now_ms >= e))
             .map(|(k, _)| k.clone())
@@ -407,7 +406,7 @@ impl ReplicatingCallStore {
     fn evict_snapshot(&self, expired: Vec<String>, now_ms: i64) -> Vec<Arc<[u8]>> {
         let mut evicted = Vec::with_capacity(expired.len());
         for call_ref in &expired {
-            let mut meta = locked(&self.meta, "replica metadata");
+            let mut meta = locked(&self.meta, REPLICA_METADATA);
             let still_expired = meta
                 .get(call_ref)
                 .is_some_and(|m| matches!(m.expiry_at_ms, Some(e) if now_ms >= e));
@@ -434,8 +433,8 @@ impl ReplicatingCallStore {
     /// after advancing the clock.
     #[must_use = "an evicted body may owe a release the caller must settle"]
     pub async fn reap(&self, now_ms: i64) -> Vec<Arc<[u8]>> {
-        locked(&self.tombstones, "resurrection tombstones").prune(now_ms);
-        locked(&self.shed, "shed marks").reap(now_ms);
+        locked(&self.tombstones, RESURRECTION_TOMBSTONES).prune(now_ms);
+        locked(&self.shed, SHED_MARKS).reap(now_ms);
         self.changelog.reap(now_ms);
         let expired = self.expired_snapshot(now_ms);
         self.evict_snapshot(expired, now_ms)
@@ -501,7 +500,7 @@ impl CallStore for ReplicatingCallStore {
         // may change, and rebuilding the entry from this write alone would
         // silently clear each of them.
         {
-            let mut meta = locked(&self.meta, "replica metadata");
+            let mut meta = locked(&self.meta, REPLICA_METADATA);
             // An unnamed write is one of the held call: it takes its name.
             ref_meta.incarnation = ref_meta
                 .incarnation
@@ -548,7 +547,7 @@ impl CallStore for ReplicatingCallStore {
             }
         }
 
-        locked(&self.shed, "shed marks").clear(call_ref);
+        locked(&self.shed, SHED_MARKS).clear(call_ref);
 
         // HA path only: non-blocking changelog bump for the pulling peer.
         if let Some(peer) = &opts.peer {
@@ -569,9 +568,9 @@ impl CallStore for ReplicatingCallStore {
     ) -> Result<(), StoreError> {
         let deleted_at = self.clock.now_ms();
         let incarnation = {
-            let mut meta = locked(&self.meta, "replica metadata");
+            let mut meta = locked(&self.meta, REPLICA_METADATA);
             let held = meta.get(call_ref).and_then(|m| m.meta.incarnation.as_deref());
-            let mut tombstones = locked(&self.tombstones, "resurrection tombstones");
+            let mut tombstones = locked(&self.tombstones, RESURRECTION_TOMBSTONES);
             // A delete of another call than the held one ends that call alone:
             // the held call stays, and nothing propagates over its entry.
             if meta.contains_key(call_ref) && is_another_call(held, opts.incarnation.as_deref()) {
@@ -591,7 +590,7 @@ impl CallStore for ReplicatingCallStore {
             tombstones.bury(call_ref, incarnation.clone(), Burial::Deleted, deleted_at);
             incarnation
         };
-        locked(&self.shed, "shed marks").clear(call_ref);
+        locked(&self.shed, SHED_MARKS).clear(call_ref);
 
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
@@ -629,7 +628,7 @@ impl BodySource for ReplicatingCallStore {
     }
 
     fn read_meta(&self, call_ref: &str) -> Option<RefMeta> {
-        locked(&self.meta, "replica metadata").get(call_ref).map(|m| m.meta.clone())
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).map(|m| m.meta.clone())
     }
 
     /// Body and metadata under the metadata lock, the lock every write holds,
@@ -641,7 +640,7 @@ impl BodySource for ReplicatingCallStore {
         call_ref: &str,
     ) -> Option<(Arc<[u8]>, RefMeta)> {
         let now = self.clock.now_ms();
-        let meta = locked(&self.meta, "replica metadata");
+        let meta = locked(&self.meta, REPLICA_METADATA);
         let m = meta.get(call_ref)?;
         if matches!(m.expiry_at_ms, Some(e) if now >= e) {
             return None;
@@ -658,7 +657,7 @@ impl BodySource for ReplicatingCallStore {
     /// yet-reaped refs are filtered out (the body would read `None` anyway).
     fn scan_refs_backed_by(&self, primary: &str, backup: &str) -> Vec<String> {
         let now = self.clock.now_ms();
-        let meta = locked(&self.meta, "replica metadata");
+        let meta = locked(&self.meta, REPLICA_METADATA);
         meta.iter()
             .filter(|(_, m)| m.role == PartitionRole::Primary && m.primary == primary)
             .filter(|(_, m)| m.backup.as_deref() == Some(backup))

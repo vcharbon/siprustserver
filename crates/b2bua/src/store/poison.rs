@@ -1,47 +1,46 @@
-//! Poison-tolerant locking for the store's maps.
-//!
-//! Every critical section over a store map leaves it whole between
-//! statements, so a panic under the lock loses nothing a later reader needs:
-//! a poisoned lock is taken as it stands, its poison cleared, and the recovery
-//! logged and counted once per panic.
+//! The store's named locks (ADR-0051 §7). Every critical section over a store
+//! map leaves it whole between statements, so a panic under the lock loses
+//! nothing a later reader needs: a poisoned lock is taken as it stands, its
+//! poison cleared, and the recovery logged and counted under its name
+//! (`b2bua_store_poisoned_lock_recoveries_total{lock}`).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-static RECOVERIES: AtomicU64 = AtomicU64::new(0);
+use lock_poison::Recoveries;
 
-/// Lock `m`, taking a poisoned guard as it stands. `what` names the lock in
-/// the warning a recovery logs.
-pub(crate) fn locked<'a, T>(m: &'a Mutex<T>, what: &'static str) -> MutexGuard<'a, T> {
-    match m.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let guard = poisoned.into_inner();
-            m.clear_poison();
-            let total = RECOVERIES.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::warn!(
-                lock = what,
-                total,
-                "a panic poisoned a store lock; recovered as it stands"
-            );
-            guard
-        }
-    }
-}
+pub(crate) const REPLICA_BODIES: &str = "replica_bodies";
+pub(crate) const REPLICA_METADATA: &str = "replica_metadata";
+pub(crate) const REPLICA_CHANGELOG: &str = "replica_changelog";
+pub(crate) const RESURRECTION_TOMBSTONES: &str = "resurrection_tombstones";
+pub(crate) const DISPLACED_BODIES: &str = "displaced_bodies";
+pub(crate) const SHED_MARKS: &str = "shed_marks";
 
-/// Store locks recovered from a panic in this process.
-pub fn poisoned_lock_recoveries() -> u64 {
-    RECOVERIES.load(Ordering::Relaxed)
+/// Every lock name, in counter order: the `lock` label's values.
+pub const LOCKS: [&str; 6] = [
+    REPLICA_BODIES,
+    REPLICA_METADATA,
+    REPLICA_CHANGELOG,
+    RESURRECTION_TOMBSTONES,
+    DISPLACED_BODIES,
+    SHED_MARKS,
+];
+
+/// The recoveries of the store's locks in this process.
+pub static LOCK_RECOVERIES: Recoveries<{ LOCKS.len() }> = Recoveries::new(LOCKS);
+
+/// Lock `m`, the store lock `name`.
+pub(crate) fn locked<'a, T>(m: &'a Mutex<T>, name: &'static str) -> MutexGuard<'a, T> {
+    LOCK_RECOVERIES.mutex(m, name)
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{locked, poisoned_lock_recoveries};
+    use super::{locked, LOCK_RECOVERIES, SHED_MARKS};
 
     #[test]
-    fn a_poisoned_lock_is_recovered_once_and_counted() {
+    fn a_poisoned_lock_is_recovered_once_and_counted_under_its_name() {
         let m = Arc::new(Mutex::new(1));
         let poisoner = m.clone();
         let _ = std::thread::spawn(move || {
@@ -49,10 +48,10 @@ mod tests {
             panic!("poison the lock");
         })
         .join();
-        let before = poisoned_lock_recoveries();
-        assert_eq!(*locked(&m, "test"), 1);
+        let before = LOCK_RECOVERIES.count(SHED_MARKS);
+        assert_eq!(*locked(&m, SHED_MARKS), 1);
         assert!(!m.is_poisoned(), "the poison is cleared");
-        assert_eq!(*locked(&m, "test"), 1);
-        assert_eq!(poisoned_lock_recoveries() - before, 1, "one recovery per panic");
+        assert_eq!(*locked(&m, SHED_MARKS), 1);
+        assert_eq!(LOCK_RECOVERIES.count(SHED_MARKS) - before, 1, "one recovery per panic");
     }
 }

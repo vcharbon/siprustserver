@@ -35,7 +35,7 @@ use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
-use crate::poison::locked;
+use crate::poison::{locked, INVITE_BRANCH_LRU};
 use crate::strategy::RouteParams;
 
 /// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
@@ -222,7 +222,7 @@ impl CancelBranchLru {
     /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos.
     pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
         let expires_at_ms = self.now_ms() + ttl_ms;
-        locked(&self.table, "invite branch lru")
+        locked(&self.table, INVITE_BRANCH_LRU)
             .insert(key.to_string(), StoredEntry { entry, expires_at_ms });
     }
 
@@ -230,7 +230,7 @@ impl CancelBranchLru {
     /// entry and returns `None` for it.
     pub fn lookup(&self, key: &str) -> Option<CancelEntry> {
         let now = self.now_ms();
-        let mut table = locked(&self.table, "invite branch lru");
+        let mut table = locked(&self.table, INVITE_BRANCH_LRU);
         match table.get(key) {
             Some(e) if e.expires_at_ms <= now => {
                 table.remove(key);
@@ -243,14 +243,14 @@ impl CancelBranchLru {
 
     /// Current map size — tests/metrics.
     pub fn size(&self) -> usize {
-        locked(&self.table, "invite branch lru").len()
+        locked(&self.table, INVITE_BRANCH_LRU).len()
     }
 
     /// Drop all expired entries; returns the count swept. The owner task calls
     /// this periodically.
     pub fn sweep_expired(&self) -> usize {
         let now = self.now_ms();
-        let mut table = locked(&self.table, "invite branch lru");
+        let mut table = locked(&self.table, INVITE_BRANCH_LRU);
         let before = table.len();
         table.retain(|_, e| e.expires_at_ms > now);
         before - table.len()
@@ -299,11 +299,12 @@ mod tests {
             panic!("a panic under the table lock");
         })
         .join();
-        let recovered = crate::poison::poisoned_lock_recoveries();
+        let counted = || crate::poison::RECOVERIES.count(INVITE_BRANCH_LRU);
+        let recovered = counted();
         assert_eq!(lru.size(), 1, "the table as it stood");
         lru.remember(&key("after"), entry("z9hG4bK-after"), 60_000);
         assert!(lru.lookup(&key("after")).is_some());
-        assert!(crate::poison::poisoned_lock_recoveries() > recovered, "the recovery is counted");
+        assert_eq!(counted() - recovered, 1, "the recovery is counted once, under its lock");
     }
 
     #[test]

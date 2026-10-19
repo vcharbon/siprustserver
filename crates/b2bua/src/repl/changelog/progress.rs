@@ -29,7 +29,7 @@ impl Changelog {
     /// Claims older than `ttl` read as unknown: the server sets it to twice
     /// its idle `Noop` interval.
     pub fn set_claim_ttl(&self, ttl: Duration) {
-        crate::store::locked(&self.inner, "replica changelog").claim_ttl = ttl;
+        crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG).claim_ttl = ttl;
     }
 
     /// Record a puller's reported applied position for `(peer, partition)`
@@ -38,7 +38,7 @@ impl Changelog {
     /// its earlier claim no longer vouches for it. Ignored for a peer with no
     /// log.
     pub fn note_applied(&self, peer: &str, partition: Partition, at: Watermark) {
-        let mut inner = crate::store::locked(&self.inner, "replica changelog");
+        let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
         if let Some(log) = inner.peers.get_mut(peer) {
             log.sub_mut(partition).applied = Some(Claim { at, made: Instant::now() });
         }
@@ -50,7 +50,7 @@ impl Changelog {
     /// restarts at head 0, so an unreported flow is unknown, never vacuously
     /// current.
     pub fn flow_caught_up(&self, peer: &str, partition: Partition) -> bool {
-        let inner = crate::store::locked(&self.inner, "replica changelog");
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
         let Some(log) = inner.peers.get(peer) else {
             return false;
         };

@@ -67,5 +67,5 @@ pub use rng::{EntropyUnavailable, IdGen};
 pub use stateless_tag::StatelessTagger;
 // Whether the owner loop is turning (`TransactionLayer::owner_pulse`).
 pub use pulse::LoopPulse;
-// This crate's locks a panic poisoned, recovered (ADR-0051 §7).
-pub use poison::poisoned_lock_recoveries;
+// This crate's named locks and their recoveries from a panic (ADR-0051 §7).
+pub use poison::{LOCKS, LOCK_RECOVERIES};
