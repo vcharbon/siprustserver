@@ -1,8 +1,9 @@
 //! The Prometheus text exposition (format 0.0.4) of a family, from its
 //! catalogue entry and one value per series.
 
-use std::collections::HashMap;
 use std::fmt::{Display, Write};
+
+use lookup_map::LookupMap;
 
 use crate::family::{Family, Kind};
 use crate::labels::{Dim, Labels, Series};
@@ -134,7 +135,7 @@ impl Family {
             .into_iter()
             .map(|(r, v)| (r.into_iter().map(|s| s.as_ref().to_owned()).collect(), Some(v)))
             .collect();
-        let index: HashMap<Vec<String>, usize> =
+        let index: LookupMap<Vec<String>, usize> =
             rows.iter().enumerate().map(|(i, (r, _))| (r.clone(), i)).collect();
         let mut key = Vec::new();
         self.labels.for_each_series(|series| {

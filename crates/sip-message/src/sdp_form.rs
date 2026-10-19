@@ -5,7 +5,7 @@
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
 use crate::sdp_doc::{direction_of, media_line, Sections};
-use std::collections::HashMap;
+use lookup_map::LookupMap;
 
 /// `sdp` in canonical form, or `None` where it already is one, states no
 /// media section, or is not a session description (no `v=` first line).
@@ -63,7 +63,7 @@ fn media_in_form<'a>(section: &'a str, session_direction: &'a str) -> Vec<&'a st
     let mut out = vec![m];
     out.extend(others);
     // Each format's `rtpmap` then `fmtp` attributes, in wire order, read in one pass.
-    let mut bound: HashMap<&str, (Vec<usize>, Vec<usize>)> = HashMap::new();
+    let mut bound: LookupMap<&str, (Vec<usize>, Vec<usize>)> = LookupMap::new();
     for (i, attribute) in attributes.iter().enumerate() {
         if let Some(format) = format_of(attribute, "a=rtpmap:") {
             bound.entry(format).or_default().0.push(i);

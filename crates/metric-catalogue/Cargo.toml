@@ -13,3 +13,5 @@ tier = "pure"
 workspace = true
 
 [dependencies]
+# Hash lookups with no iteration in hash-seed order (ADR-0051 §1).
+lookup-map = { path = "../lookup-map" }

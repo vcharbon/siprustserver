@@ -148,6 +148,11 @@ disallowed-types = [
   { path = "std::os::unix::net::UnixStream", reason = "pure tier: network" },
   { path = "std::os::unix::net::UnixListener", reason = "pure tier: network" },
   { path = "std::os::unix::net::UnixDatagram", reason = "pure tier: network" },
+  # Iteration in hash-seed order, through any door (`into_iter`, `extend`,
+  # `FromIterator`, `Debug`, a derived `Serialize`): a pure crate looks up
+  # through `lookup-map`, whose types cannot be iterated.
+  { path = "std::collections::HashMap", reason = "pure tier: iterates in hash-seed order; look up through `lookup_map::LookupMap`, or use `BTreeMap` or `IndexMap` where order reaches output" },
+  { path = "std::collections::HashSet", reason = "pure tier: iterates in hash-seed order; look up through `lookup_map::LookupSet`, or use `BTreeSet` or `IndexSet` where order reaches output" },
   # Interior mutability: a pure function's output depends only on its inputs.
   { path = "std::cell::Cell", reason = "pure tier: interior mutability; return the new value" },
   { path = "std::cell::RefCell", reason = "pure tier: interior mutability; return the new value" },

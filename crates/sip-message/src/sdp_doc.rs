@@ -16,7 +16,7 @@
 //!
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
-use std::collections::HashSet;
+use lookup_map::LookupSet;
 
 /// One `m=`-rooted media description with its trailing media-level lines. The
 /// m-line shape is `m=<type> <port> <transport> <fmt> ...`.
@@ -289,7 +289,7 @@ pub fn direction_of(attr: &str) -> Option<SdpDirection> {
 /// occurrence of a payload type wins — a repeated binding states nothing new.
 pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: LookupSet<&str> = LookupSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "rtpmap:") else { continue };
         let Some((pt, enc)) = tail.trim().split_once(' ') else { continue };
@@ -309,7 +309,7 @@ pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
 /// of a format wins.
 pub fn extract_fmtps(media: &MediaLine) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: LookupSet<&str> = LookupSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "fmtp:") else { continue };
         let tail = tail.trim();

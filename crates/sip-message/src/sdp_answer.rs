@@ -21,7 +21,7 @@ use crate::sdp_doc::{
 
 mod formats;
 
-use std::collections::HashMap;
+use lookup_map::LookupMap;
 
 use formats::{is_dynamic, FormatTable};
 
@@ -363,11 +363,11 @@ fn sdes_answer(
     )
 }
 
-/// The first key of each crypto suite in `keys`, by its lower-cased name
+/// The first key of each crypto suite `of` the keys, by its lower-cased name
 /// (suite names compare case-insensitively).
-fn first_by_suite(keys: &[(String, String, String)]) -> HashMap<String, &(String, String, String)> {
-    let mut first = HashMap::new();
-    for key in keys {
+fn first_by_suite(of: &[(String, String, String)]) -> LookupMap<String, &(String, String, String)> {
+    let mut first = LookupMap::new();
+    for key in of {
         first.entry(key.1.to_ascii_lowercase()).or_insert(key);
     }
     first
@@ -433,7 +433,7 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
         ),
         eol,
     );
-    let offered_maps: HashMap<String, String> =
+    let offered_maps: LookupMap<String, String> =
         extract_rtpmaps(answer.stream).into_iter().collect();
     let offered_mid = answer.stream.attributes.iter().find_map(|a| a.strip_prefix("mid:"));
     let (mut dir_written, mut crypto_written, mut mid_written) = (false, false, false);

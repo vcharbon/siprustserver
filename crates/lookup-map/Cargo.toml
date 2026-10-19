@@ -1,0 +1,15 @@
+[package]
+name = "lookup-map"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Hash maps and sets for lookups only: the std collections under their random seed, with no iteration, so no output follows the seed's order. The pure tier's one hash collection (ADR-0051 §1)."
+
+[package.metadata.purity]
+tier = "pure"
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -9,7 +9,7 @@
 //! ([`HeaderName::item_separator`]) — a comma for the option-tag headers, a
 //! `;` for the RFC 3323 §4.2 priv-value set.
 
-use std::collections::HashSet;
+use lookup_map::LookupSet;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
@@ -99,7 +99,7 @@ impl<K: TokenKind> TokenListHeader<K> {
     /// The set with each of `tokens` added as [`with`](Self::with) adds it, at
     /// one hash probe per token whatever the size of the set.
     fn extended(mut self, tokens: impl IntoIterator<Item = SipStr>) -> Self {
-        let mut seen: HashSet<Folded> = self.tokens.iter().cloned().map(Folded).collect();
+        let mut seen: LookupSet<Folded> = self.tokens.iter().cloned().map(Folded).collect();
         for token in tokens {
             if is_token(token.as_str()) && seen.insert(Folded(token.clone())) {
                 self.tokens.push(token);

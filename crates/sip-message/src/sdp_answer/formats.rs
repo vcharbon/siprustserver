@@ -1,7 +1,7 @@
 //! Payload-format matching between two media lines (RFC 3264 §6.1): which
 //! format of one line is the same payload format as a format of the other.
 
-use std::collections::HashMap;
+use lookup_map::LookupMap;
 
 use crate::sdp_doc::{canonical_rtpmap, extract_fmtps, extract_rtpmaps, MediaLine};
 
@@ -19,25 +19,25 @@ struct PayloadFormat {
 /// attributes) whatever their counts.
 pub(super) struct FormatTable<'a> {
     media: &'a MediaLine,
-    payload: HashMap<&'a str, PayloadFormat>,
+    payload: LookupMap<&'a str, PayloadFormat>,
     /// The first format naming each payload format.
-    first: HashMap<PayloadFormat, usize>,
+    first: LookupMap<PayloadFormat, usize>,
     /// The first dynamic format naming each payload format.
-    first_dynamic: HashMap<PayloadFormat, usize>,
+    first_dynamic: LookupMap<PayloadFormat, usize>,
     /// The first position of each static format.
-    first_static: HashMap<&'a str, usize>,
+    first_static: LookupMap<&'a str, usize>,
 }
 
 impl<'a> FormatTable<'a> {
     pub(super) fn of(media: &'a MediaLine) -> Self {
-        let rtpmaps: HashMap<String, String> = extract_rtpmaps(media).into_iter().collect();
-        let fmtps: HashMap<String, String> = extract_fmtps(media).into_iter().collect();
+        let rtpmaps: LookupMap<String, String> = extract_rtpmaps(media).into_iter().collect();
+        let fmtps: LookupMap<String, String> = extract_fmtps(media).into_iter().collect();
         let mut table = Self {
             media,
-            payload: HashMap::new(),
-            first: HashMap::new(),
-            first_dynamic: HashMap::new(),
-            first_static: HashMap::new(),
+            payload: LookupMap::new(),
+            first: LookupMap::new(),
+            first_dynamic: LookupMap::new(),
+            first_static: LookupMap::new(),
         };
         for (i, format) in media.formats.iter().enumerate() {
             let format = format.as_str();
@@ -87,8 +87,8 @@ impl<'a> FormatTable<'a> {
 fn payload_format(
     format: &str,
     media: &MediaLine,
-    rtpmaps: &HashMap<String, String>,
-    fmtps: &HashMap<String, String>,
+    rtpmaps: &LookupMap<String, String>,
+    fmtps: &LookupMap<String, String>,
 ) -> Option<PayloadFormat> {
     let encoding = rtpmaps
         .get(format)

@@ -825,7 +825,8 @@ class RealPass(Case):
         ws.commit()
         rc, out = ws.run(SCRIPT, "--report")
         self.assertEqual(rc, 0, out)
-        self.assertIn("crates/a/src/lib.rs 8\n", out)
+        # The `HashMap` the signature names is a site of its own.
+        self.assertIn("crates/a/src/lib.rs 9\n", out)
         self.assertNotIn("does not refer to", out)
 
     HIDDEN = (

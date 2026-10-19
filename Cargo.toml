@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lookup-map",
     "crates/sip-message",
     "crates/sip-template",
     "crates/wire-mutations",

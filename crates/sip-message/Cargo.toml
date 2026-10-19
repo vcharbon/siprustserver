@@ -34,6 +34,8 @@ memchr.workspace = true
 # exports.
 base64.workspace = true
 schemars.workspace = true
+# Hash lookups with no iteration in hash-seed order (ADR-0051 §1).
+lookup-map = { path = "../lookup-map" }
 
 [dev-dependencies]
 bytes.workspace = true

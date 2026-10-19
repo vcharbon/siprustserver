@@ -14,7 +14,9 @@
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
 use crate::sdp_doc::{media_line, parse_origin, parse_sdp_body, MediaLine, Section, Sections};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use lookup_map::LookupMap;
 
 /// What one party has stated about its session on a dialog: the value of the
 /// `o=` line it last sent and the value of each of its `m=` lines, in order.
@@ -87,8 +89,8 @@ fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Opt
 
     // The stated slots by preference, each queue in stated order; a slot taken
     // through one queue is passed over by the others.
-    let mut live: HashMap<&str, VecDeque<usize>> = HashMap::new();
-    let mut of_kind: HashMap<&str, VecDeque<usize>> = HashMap::new();
+    let mut live: LookupMap<&str, VecDeque<usize>> = LookupMap::new();
+    let mut of_kind: LookupMap<&str, VecDeque<usize>> = LookupMap::new();
     let mut stated_rejected: VecDeque<usize> = VecDeque::new();
     for (i, m) in stated_media.iter().enumerate() {
         of_kind.entry(m.r#type.as_str()).or_default().push_back(i);

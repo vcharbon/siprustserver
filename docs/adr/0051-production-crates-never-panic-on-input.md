@@ -35,8 +35,12 @@ crates declare none, so none of them can enter a production binary.
   as parameters, so a pure function's output depends only on its inputs. `tracing` is allowed:
   it cannot change an outcome. A process-global registry is not. A std `HashMap` / `HashSet`
   serves lookups only: its random seed defends a peer-keyed map, and its iteration order is
-  that seed, so a pure crate never iterates one; where order reaches output it uses a
-  `BTreeMap` / `BTreeSet` or an `IndexMap` / `IndexSet` (insertion order).
+  that seed, so a pure crate never iterates one. The rule holds by type: a pure crate names
+  no std `HashMap` / `HashSet` (a pure-tier `disallowed-types` entry) and looks up through
+  `lookup-map`'s `LookupMap` / `LookupSet`, which keep the seed and offer no iteration, no
+  ordered `Debug` and no `Serialize`; the iterating methods stay listed as well. Where order
+  reaches output it uses a `BTreeMap` / `BTreeSet` or an `IndexMap` / `IndexSet` (insertion
+  order).
 - **shell**: effects allowed.
 - **both**: the panic set of §2.
 
