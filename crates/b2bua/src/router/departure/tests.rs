@@ -14,7 +14,7 @@ use sip_net_testkit::SimulatedSignalingNetwork;
 
 use b2bua_sdk::event::CallEvent;
 
-use super::take_over_departed;
+use super::{sweep, take_over_departed, take_over_one, Swept};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::repl::ReplicatingCallStore;
@@ -249,4 +249,42 @@ async fn an_aborted_core_takes_nothing_more_over() {
     }
     assert!(at_abort < UNDECIDED as u64, "the sweep was under way at the abort");
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), at_abort, "nothing taken over after it");
+}
+
+/// A call whose takeover panics costs that call only: the sweep takes the
+/// others over and counts the panic.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_that_panics_costs_its_call_only_and_is_counted() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let (first, bad, last) = (born("first"), born("bad"), born("last"));
+    for call in [&first, &bad, &last] {
+        put(&n.store, call).await;
+    }
+    let refs = vec![first.call_ref.clone(), bad.call_ref.clone(), last.call_ref.clone()];
+    let bad_ref = bad.call_ref.clone();
+
+    let task = tokio::spawn({
+        let ctx = ctx.clone();
+        async move {
+            sweep(&ctx, "w0", refs, move |ctx, call_ref| {
+                let bad = call_ref == bad_ref;
+                async move {
+                    assert!(!bad, "the takeover of this call panics");
+                    take_over_one(&ctx, &call_ref).await
+                }
+            })
+            .await;
+        }
+    });
+
+    let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
+    let answered = ["SIP/2.0 503 Service Unavailable", "SIP/2.0 503 Service Unavailable"];
+    assert_eq!(lines, answered, "both other undecided callers are answered");
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 2, "the other two calls taken over");
+    assert_eq!(n.metrics.departure_takeover_panics_total(), 1, "the panic is counted");
+    assert!(task.await.is_ok(), "the sweep itself ran to its end");
+    let _ = Swept::Left;
 }

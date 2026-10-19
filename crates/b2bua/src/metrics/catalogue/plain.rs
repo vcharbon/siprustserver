@@ -194,6 +194,10 @@ plain_counters! {
         "b2bua_reaper_sweep_panics_total",
         "reaper sweep steps that panicked; the next pass runs one interval later — expected 0",
     ) => reaper_sweep_panics, bump_reaper_sweep_panic, reaper_sweep_panics_total;
+    DEPARTURE_TAKEOVER_PANICS = (
+        "b2bua_departure_takeover_panics_total",
+        "departed-peer calls whose takeover panicked; the sweep goes on with the next call — expected 0",
+    ) => departure_takeover_panics, bump_departure_takeover_panic, departure_takeover_panics_total;
     STORE_RECONCILED_ORPHAN_STAMPS = (
         "b2bua_store_reconciled_orphan_stamps_total",
         "last-touched stamps of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",
