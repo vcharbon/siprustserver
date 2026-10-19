@@ -11,12 +11,26 @@ use tokio::time::Instant;
 /// range of the timer wheel (2^36 ms, about 2.2 years).
 pub const MAX_DELAY: Duration = Duration::from_secs(365 * 24 * 3600);
 
-/// The instant `delay` after `from`, at most [`MAX_DELAY`] after it.
+/// The instant `delay` after `from`, at most [`MAX_DELAY`] after it, and at
+/// most the furthest instant the platform represents: past it the deadline
+/// saturates there.
 pub fn after(from: Instant, delay: Duration) -> Instant {
-    let delay = delay.min(MAX_DELAY);
-    // A year past any instant a process reads is representable: the platform
-    // instant counts seconds in 64 bits.
-    from.checked_add(delay).unwrap_or(from)
+    let mut at = from;
+    let mut left = delay.min(MAX_DELAY);
+    let mut step = left;
+    // Each step that does not fit is halved, each that fits is taken, so the
+    // walk ends at `from + delay` or at the last instant short of it.
+    while !left.is_zero() && !step.is_zero() {
+        match at.checked_add(step) {
+            Some(next) => {
+                at = next;
+                left = left.saturating_sub(step);
+                step = step.min(left);
+            }
+            None => step /= 2,
+        }
+    }
+    at
 }
 
 /// The instant `delay` from now, at most [`MAX_DELAY`] out.

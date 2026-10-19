@@ -47,9 +47,11 @@ impl IdGen {
         Ok(Self::keyed(&key))
     }
 
-    /// The generator under `key`, at most the hash's 64-byte block: a
-    /// shorter key is zero-padded to it, as HMAC keys it (RFC 2104 §2).
+    /// The generator under `key`, at most the hash's 64-byte block (a longer
+    /// key fails the build): a shorter key is zero-padded to it, as HMAC
+    /// keys it (RFC 2104 §2).
     fn keyed<const N: usize>(key: &[u8; N]) -> Self {
+        let () = FitsBlock::<N>::CHECKED;
         let mut block = hmac::digest::Key::<Hmac<Sha256>>::default();
         for (slot, byte) in block.iter_mut().zip(key) {
             *slot = *byte;
@@ -93,6 +95,16 @@ impl IdGen {
     pub fn new_sequence_number(&self) -> u32 {
         (self.next_u64() % 100_000_000) as u32 + 1
     }
+}
+
+/// A key of `N` bytes fits HMAC-SHA256's 64-byte block, where HMAC
+/// zero-pads it (a longer one HMAC hashes instead); [`CHECKED`](Self::CHECKED)
+/// is evaluated at compile time.
+struct FitsBlock<const N: usize>;
+
+impl<const N: usize> FitsBlock<N> {
+    #[expect(clippy::disallowed_macros, reason = "checked at compile time")]
+    const CHECKED: () = assert!(N <= 64, "a key longer than the block is hashed, not padded");
 }
 
 /// The OS RNG did not answer, so no generator was keyed.

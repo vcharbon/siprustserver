@@ -104,13 +104,13 @@ impl Lifetime {
 }
 
 impl Owner {
-    /// Put a fresh transaction in the map `Active`, arm its backstop and
-    /// return it. An INVITE (either role) gets the configured INVITE bound
-    /// plus the margin, a non-INVITE the margin alone, all measured from now —
-    /// for a seed, from the seed, never from the first copy's send on another
-    /// node. The backstop never precedes a client transaction's `Timeout`:
-    /// it lies `TXN_MAX_AGE` past the INVITE bound, and `TXN_MAX_AGE` exceeds
-    /// Timer F.
+    /// Put a fresh transaction in the map `Active` and arm its backstop. An
+    /// INVITE (either role) gets the configured INVITE bound plus the margin,
+    /// a non-INVITE the margin alone, all measured from now — for a seed,
+    /// from the seed, never from the first copy's send on another node. The
+    /// backstop never precedes a client transaction's `Timeout`: it lies
+    /// `TXN_MAX_AGE` past the INVITE bound, and `TXN_MAX_AGE` exceeds Timer
+    /// F (for a bound within the clock's one-year ceiling less the margin).
     pub(super) fn open_txn(&mut self, head: NewTransaction) {
         self.open_txn_with(head, |_| {});
     }
