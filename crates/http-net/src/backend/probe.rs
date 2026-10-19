@@ -11,9 +11,11 @@
 //! [`BreakerConfig::health_path`]: super::BreakerConfig::health_path
 //! [`BreakerConfig::probe_timeout`]: super::BreakerConfig::probe_timeout
 
-use std::sync::{PoisonError, Weak};
+use std::sync::Weak;
 
 use tokio::sync::watch;
+
+use crate::poison::{locked, BACKEND_REPORT};
 
 use crate::transport::{HttpError, HttpRequest};
 
@@ -66,7 +68,7 @@ async fn probe_until_closed(inner: Weak<Inner>) -> bool {
             }
             None => Err(AttemptError::Transport(HttpError::dns(&inner.peer))),
         };
-        let report = inner.report.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let report = locked(&inner.report, BACKEND_REPORT).clone();
         if let Some(report) = report {
             report(answer.as_ref());
         }

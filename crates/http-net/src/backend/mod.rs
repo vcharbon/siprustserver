@@ -33,6 +33,7 @@ pub use breaker::{BreakerConfig, Sent, WindowBreaker};
 pub use config::BackendConfig;
 pub use retry::Budgets;
 
+use crate::poison::{locked, BACKEND_BREAKER, BACKEND_PROBE, BACKEND_REPORT};
 use crate::resolved_target::ResolvedTarget;
 use crate::resolver::NameResolver;
 use crate::settings::ClientSettings;
@@ -178,7 +179,7 @@ impl BackendClient {
 
     /// From now on, `report` hears each probe's outcome.
     pub fn report_probes_to(&self, report: ProbeReport) {
-        *self.inner.report.lock().unwrap_or_else(PoisonError::into_inner) = Some(report);
+        *locked(&self.inner.report, BACKEND_REPORT) = Some(report);
     }
 
     /// The number of the client generation taking new requests, `1` for the
@@ -262,7 +263,7 @@ impl Inner {
     /// The breaker. Every step leaves it whole, so a poisoned lock is taken
     /// as it is.
     fn lock_breaker(&self) -> MutexGuard<'_, WindowBreaker> {
-        self.breaker.lock().unwrap_or_else(PoisonError::into_inner)
+        locked(&self.breaker, BACKEND_BREAKER)
     }
 
     /// `request` ended without a response: the rule may open the breaker.
@@ -281,12 +282,12 @@ impl Inner {
         metrics::breaker_moved(&self.peer, true);
         tracing::warn!(
             backend = %self.peer,
-            window_ms = self.config.window.as_millis() as u64,
+            window_ms = u64::try_from(self.config.window.as_millis()).unwrap_or(u64::MAX),
             min_sent = self.config.min_sent,
             "backend breaker open: requests fail at once until a probe of {} is answered",
             self.config.health_path
         );
-        let mut probe = self.probe.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut probe = locked(&self.probe, BACKEND_PROBE);
         if probe.is_none() {
             let open = self.open.subscribe();
             *probe = Some(tokio::spawn(probe::run(Arc::downgrade(self), open)));

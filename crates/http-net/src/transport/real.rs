@@ -41,7 +41,7 @@ use crate::settings::ClientSettings;
 /// The real HTTP transport. Clone shares the pooled client.
 #[derive(Clone)]
 pub struct RealHttpNetwork {
-    client: reqwest::Client,
+    client: super::real_client::Built,
 }
 
 impl Default for RealHttpNetwork {
@@ -187,10 +187,9 @@ async fn serve_connection(stream: TcpStream, peer: SocketAddr, service: Arc<dyn 
             for (name, value) in &resp.headers {
                 builder = builder.header(name.as_str(), value.as_str());
             }
-            let built = builder
-                .body(Full::new(Bytes::from(resp.body)))
-                .expect("status + headers + full body always builds a response");
-            Ok(built)
+            // A status or header HTTP cannot carry closes the connection
+            // without a response, as an abort does.
+            builder.body(Full::new(Bytes::from(resp.body))).map_err(std::io::Error::other)
         }
     });
     let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, handler).await;

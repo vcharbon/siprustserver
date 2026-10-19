@@ -75,7 +75,12 @@ impl BackendConfig {
             }
         };
         let ms = |suffix: &str, default: Duration| -> Result<Duration, String> {
-            positive(suffix, default.as_millis() as u64).map(Duration::from_millis)
+            let default = u64::try_from(default.as_millis()).unwrap_or(u64::MAX);
+            positive(suffix, default).map(Duration::from_millis)
+        };
+        let count = |suffix: &str, default: usize| -> Result<usize, String> {
+            let n = positive(suffix, default as u64)?;
+            usize::try_from(n).map_err(|_| format!("{prefix}_{suffix}={n}: past this platform"))
         };
         let health_path = match stated("HEALTH_PATH") {
             (_, None) => defaults.breaker.health_path.clone(),
@@ -87,14 +92,14 @@ impl BackendConfig {
             client: ClientSettings::from_lookup(prefix, &defaults.client, &lookup)?,
             breaker: BreakerConfig {
                 window: ms("BREAKER_WINDOW_MS", d.window)?,
-                min_sent: positive("BREAKER_REQUESTS", d.min_sent as u64)? as usize,
+                min_sent: count("BREAKER_REQUESTS", d.min_sent)?,
                 probe_period: ms("BREAKER_PROBE_MS", d.probe_period)?,
                 probe_timeout: ms("BREAKER_PROBE_TIMEOUT_MS", d.probe_timeout)?,
                 health_path,
             },
             lookup: LookupSettings {
                 bound: ms("LOOKUP_TIMEOUT_MS", defaults.lookup.bound)?,
-                max_stuck: positive("LOOKUP_MAX_STUCK", defaults.lookup.max_stuck as u64)? as usize,
+                max_stuck: count("LOOKUP_MAX_STUCK", defaults.lookup.max_stuck)?,
             },
             attempt: ms("TIMEOUT_MS", defaults.attempt)?,
         })

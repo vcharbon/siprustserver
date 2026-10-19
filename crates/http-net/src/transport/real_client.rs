@@ -19,10 +19,7 @@ use crate::settings::ClientSettings;
 /// A pooled `http://` client under `settings`, its name lookups going
 /// through `target` when one is given. It follows no redirect: a 3xx is the
 /// endpoint's answer, returned to the caller as its status.
-pub(super) fn build(
-    settings: &ClientSettings,
-    target: Option<Arc<ResolvedTarget>>,
-) -> reqwest::Client {
+pub(super) fn build(settings: &ClientSettings, target: Option<Arc<ResolvedTarget>>) -> Built {
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -41,19 +38,27 @@ pub(super) fn build(
     if let Some(target) = target {
         builder = builder.dns_resolver(Arc::new(super::reqwest_resolve::TargetResolve(target)));
     }
-    builder.build().expect("reqwest client builds with a no-tls config")
+    builder.build().map_err(|e| e.to_string())
 }
+
+/// A client [`build`] made, or why it could not: every request on one that
+/// did not build fails with that reason.
+pub(super) type Built = Result<reqwest::Client, String>;
 
 /// Send `req` to `url` on `client`; a failure is counted under `peer` by its
 /// cause and returned classified. A response body past [`MAX_BODY_BYTES`],
 /// declared or streamed, fails [`FailureCause::BodyTooLarge`] once the cap is
 /// passed, the rest left unread.
 pub(super) async fn send(
-    client: &reqwest::Client,
+    client: &Built,
     peer: &str,
     url: &str,
     req: HttpRequest,
 ) -> Result<HttpResponse, HttpError> {
+    let client = client.as_ref().map_err(|why| {
+        crate::failures::record(peer, FailureCause::Other);
+        HttpError::new(peer, FailureCause::Other, format!("the client did not build: {why}"))
+    })?;
     let failed = |e: reqwest::Error| {
         // Cause-labelled counter only — the caller's episode owns the log
         // line (ADR-0026: no per-request output).
@@ -103,7 +108,7 @@ pub(super) async fn send(
 ///
 /// [`FailureCause::Dns`]: crate::failures::FailureCause::Dns
 pub(super) struct NamedClient {
-    client: reqwest::Client,
+    client: Built,
     target: Arc<ResolvedTarget>,
     /// `http://<target>`, the authority as configured.
     base: String,

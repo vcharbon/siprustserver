@@ -2054,6 +2054,7 @@ dependencies = [
  "http-net-testkit",
  "hyper",
  "hyper-util",
+ "lock-poison",
  "metric-catalogue",
  "metric-values",
  "reqwest",

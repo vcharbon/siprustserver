@@ -102,9 +102,12 @@ impl ClientSettings {
             }
         };
         let ms = |suffix: &str, default: Duration| -> Result<Duration, String> {
-            positive(suffix, default.as_millis() as u64).map(Duration::from_millis)
+            let default = u64::try_from(default.as_millis()).unwrap_or(u64::MAX);
+            positive(suffix, default).map(Duration::from_millis)
         };
-        let max_in_flight = positive("MAX_IN_FLIGHT", defaults.max_in_flight as u64)? as usize;
+        let max_in_flight = positive("MAX_IN_FLIGHT", defaults.max_in_flight as u64)?;
+        let max_in_flight = usize::try_from(max_in_flight)
+            .map_err(|_| format!("{prefix}_MAX_IN_FLIGHT={max_in_flight}: past this platform"))?;
         let retries = positive("KEEPALIVE_RETRIES", u64::from(defaults.keepalive_retries))?;
         Ok(Self {
             connect_timeout: ms("CONNECT_TIMEOUT_MS", defaults.connect_timeout)?,

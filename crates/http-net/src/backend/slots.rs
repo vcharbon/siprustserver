@@ -15,9 +15,12 @@ pub(super) struct Slots {
 }
 
 impl Slots {
-    /// `cap` slots for the backend `peer`.
+    /// `cap` slots for the backend `peer`, at least one and at most the
+    /// semaphore's ceiling.
     pub(super) fn new(cap: usize, peer: String) -> Self {
-        Self { semaphore: Arc::new(Semaphore::new(cap.max(1))), peer }
+        #[expect(clippy::disallowed_methods, reason = "the count is held within the ceiling")]
+        let semaphore = Semaphore::new(cap.clamp(1, Semaphore::MAX_PERMITS));
+        Self { semaphore: Arc::new(semaphore), peer }
     }
 
     /// A slot, waited for until `deadline`; `None` when none freed by then.

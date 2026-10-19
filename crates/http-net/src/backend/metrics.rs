@@ -129,7 +129,7 @@ pub(crate) fn slot_waited(peer: &str) {
 
 /// A request to `peer` waited `waited` for a slot, got one or not.
 pub(crate) fn slot_wait_ended(peer: &str, waited: Duration, got_one: bool) {
-    rows().slot_wait_ms.add(&[peer], waited.as_millis() as u64);
+    rows().slot_wait_ms.add(&[peer], u64::try_from(waited.as_millis()).unwrap_or(u64::MAX));
     if !got_one {
         rows().slot_expired.add(&[peer], 1);
     }

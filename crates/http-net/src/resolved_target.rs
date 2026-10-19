@@ -28,10 +28,12 @@
 //! already a fresh one: it lands and is kept.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::sync::watch;
+
+use crate::poison::{locked, RESOLVED_NAME};
 
 use crate::resolver::NameResolver;
 
@@ -106,7 +108,7 @@ impl Named {
     /// The state. Every step leaves it whole, so a poisoned lock is taken
     /// as it is.
     fn lock(&self) -> MutexGuard<'_, NameState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        locked(&self.state, RESOLVED_NAME)
     }
 
     /// The addresses kept (a stale set starting its fresh lookup behind
@@ -254,7 +256,7 @@ impl ResolvedTarget {
     /// The first address to send to; `None` when the name does not resolve
     /// ([`resolve_all`](Self::resolve_all)).
     pub async fn resolve(&self) -> Option<SocketAddr> {
-        self.resolve_all().await.map(|addrs| addrs[0])
+        self.resolve_all().await.and_then(|addrs| addrs.first().copied())
     }
 
     /// Every address kept now, without a lookup.
@@ -277,7 +279,9 @@ impl ResolvedTarget {
     pub fn address(&self) -> Option<SocketAddr> {
         match &self.kind {
             Kind::Addr(addr) => Some(*addr),
-            Kind::Name(named) => named.lock().addrs.as_ref().map(|addrs| addrs[0]),
+            Kind::Name(named) => {
+                named.lock().addrs.as_ref().and_then(|addrs| addrs.first().copied())
+            }
         }
     }
 

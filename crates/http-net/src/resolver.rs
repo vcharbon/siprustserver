@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::poison::{locked, MEMORY_RESOLVER};
+
 /// Resolves a `host:port` name to socket addresses.
 #[async_trait]
 pub trait NameResolver: Send + Sync {
@@ -47,17 +49,18 @@ impl MemoryResolver {
 
     /// `name` resolves to `addrs` from now on.
     pub fn point(&self, name: &str, addrs: impl IntoIterator<Item = SocketAddr>) {
-        self.names.lock().unwrap().insert(name.to_string(), addrs.into_iter().collect());
+        let addrs = addrs.into_iter().collect();
+        locked(&self.names, MEMORY_RESOLVER).insert(name.to_string(), addrs);
     }
 
     /// `name` resolves to nothing from now on.
     pub fn unpoint(&self, name: &str) {
-        self.names.lock().unwrap().remove(name);
+        locked(&self.names, MEMORY_RESOLVER).remove(name);
     }
 
     /// Every lookup started from now on takes `delay` before it answers.
     pub fn slow(&self, delay: Duration) {
-        *self.delay.lock().unwrap() = delay;
+        *locked(&self.delay, MEMORY_RESOLVER) = delay;
     }
 
     /// The lookups started so far.
@@ -70,10 +73,10 @@ impl MemoryResolver {
 impl NameResolver for MemoryResolver {
     async fn resolve(&self, name: &str) -> Vec<SocketAddr> {
         self.lookups.fetch_add(1, Ordering::SeqCst);
-        let delay = *self.delay.lock().unwrap();
+        let delay = *locked(&self.delay, MEMORY_RESOLVER);
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        self.names.lock().unwrap().get(name).cloned().unwrap_or_default()
+        locked(&self.names, MEMORY_RESOLVER).get(name).cloned().unwrap_or_default()
     }
 }

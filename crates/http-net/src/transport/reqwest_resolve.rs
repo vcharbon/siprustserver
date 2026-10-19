@@ -23,7 +23,10 @@ impl Resolve for TargetResolve {
         let target = self.0.clone();
         Box::pin(async move {
             match target.resolve_all().await {
-                Some(addrs) => Ok(Box::new((0..addrs.len()).map(move |i| addrs[i])) as Addrs),
+                Some(addrs) => {
+                    let all: Vec<_> = addrs.iter().copied().collect();
+                    Ok(Box::new(all.into_iter()) as Addrs)
+                }
                 None => Err(Box::new(NotResolved(name.as_str().to_string())) as _),
             }
         })
