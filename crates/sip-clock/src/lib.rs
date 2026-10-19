@@ -75,11 +75,32 @@
 //! before it corrupts a restore. Keep the infra discipline too (slewing chrony,
 //! host kept awake) — the SUT bounds the residual, it does not license drift.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
+use std::time::SystemTime;
 use tokio::time::Instant;
 
 pub mod deadline;
 pub mod delay_queue;
+pub mod wall;
+
+pub use wall::PreEpochClock;
 
 /// A monotonic-anchored clock. Cheap to [`Clone`] (two scalars); share one
 /// instance everywhere that needs a timestamp so all readers sit on the same
@@ -100,20 +121,23 @@ impl Clock {
     /// Subsequent [`now_ms`](Clock::now_ms) reads add the monotonic elapsed to
     /// this anchor, so the returned timestamp is wall-clock-aligned at startup
     /// and monotonic (never decreasing) thereafter.
+    /// A wall clock before the epoch anchors there, negative: a runner refuses
+    /// to start on one through [`checked_system`](Self::checked_system).
     pub fn system() -> Self {
-        // FAIL LOUDLY on a pre-epoch clock instead of silently anchoring to 1970
-        // (`unwrap_or(0)`): a node that anchored at 0 would compute a
-        // ~55-year skew offset against every healthy peer, so every replicated
-        // timer it reclaimed would be reaped or deferred by decades — a silent,
-        // catastrophic corruption. A `SystemTime` before 1970 in production is a
-        // grossly-misconfigured host clock; crashing at boot is the correct,
-        // visible failure (k8s restarts the pod; the operator sees CrashLoopBackOff
-        // instead of a mysterious cluster-wide reclaim storm days later).
-        let anchor_wall_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system wall clock is before the UNIX epoch (grossly misconfigured host clock) — refusing to anchor Clock to a pre-1970 time")
-            .as_millis() as i64;
-        Self { anchor_wall_ms, anchor_instant: Instant::now() }
+        Self { anchor_wall_ms: wall::epoch_ms(SystemTime::now()), anchor_instant: Instant::now() }
+    }
+
+    /// [`system`](Self::system), refused on a wall clock before the UNIX
+    /// epoch: a node anchored there would skew every replicated deadline it
+    /// restores by decades, so a runner's boot stops on the error instead.
+    pub fn checked_system() -> Result<Self, PreEpochClock> {
+        Self::anchored_at(SystemTime::now())
+    }
+
+    /// A clock whose wall anchor is `wall`, refused before the epoch.
+    pub fn anchored_at(wall: SystemTime) -> Result<Self, PreEpochClock> {
+        let anchor_wall_ms = wall::checked_epoch_ms(wall)?;
+        Ok(Self { anchor_wall_ms, anchor_instant: Instant::now() })
     }
 
     /// Test constructor: pin the wall anchor to a fixed epoch-ms value.
@@ -130,7 +154,7 @@ impl Clock {
     /// Monotonic-derived: `anchor + elapsed_since_anchor`. Never decreasing.
     /// Not for behavioural decisions — deadlines/timers use `tokio::time`.
     pub fn now_ms(&self) -> i64 {
-        self.anchor_wall_ms + self.anchor_instant.elapsed().as_millis() as i64
+        self.anchor_wall_ms.saturating_add(wall::millis_i64(self.anchor_instant.elapsed()))
     }
 
     /// **Divergence** between a freshly-read raw wall clock and this monotonic-
@@ -150,17 +174,15 @@ impl Clock {
     /// from this — timestamps must stay monotonic; the behavioural correction is
     /// the replication-boundary re-anchor, not a clock rewrite.
     pub fn wall_divergence_ms(&self, raw_wall_ms: i64) -> i64 {
-        raw_wall_ms - self.now_ms()
+        raw_wall_ms.saturating_sub(self.now_ms())
     }
 }
 
 /// Read the raw system wall clock in epoch ms (NOT monotonic-anchored) for the
 /// `clock_wall_divergence_ms` sampler — the one place that deliberately reads
-/// `SystemTime` to compare against a [`Clock`]. Returns `0` on a pre-epoch clock
-/// (the sampler is observability-only; unlike [`Clock::system`] it must never
-/// panic a running worker).
+/// `SystemTime` to compare against a [`Clock`]. Negative on a pre-epoch clock.
 pub fn raw_system_wall_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    wall::epoch_ms(SystemTime::now())
 }
 
 /// Test helpers driving the paused tokio clock. Behind the `testkit` feature so

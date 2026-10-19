@@ -48,15 +48,14 @@ async fn wall_divergence_is_raw_minus_now() {
     assert_eq!(clock.wall_divergence_ms(1_000_000), -10_000);
 }
 
-#[test]
-fn system_panics_on_pre_epoch_clock() {
-    let pre_epoch = UNIX_EPOCH - std::time::Duration::from_secs(1);
-    let result = std::panic::catch_unwind(|| {
-        pre_epoch
-            .duration_since(UNIX_EPOCH)
-            .expect("system wall clock is before the UNIX epoch (grossly misconfigured host clock) — refusing to anchor Clock to a pre-1970 time")
-    });
-    assert!(result.is_err(), "a pre-epoch clock must panic, not anchor to 0");
+#[tokio::test(start_paused = true)]
+async fn a_pre_epoch_wall_clock_is_refused_not_anchored_at_the_epoch() {
+    use std::time::UNIX_EPOCH;
+    let pre_epoch = UNIX_EPOCH - Duration::from_secs(1);
+    assert_eq!(Clock::anchored_at(pre_epoch).unwrap_err(), PreEpochClock { before_ms: 1_000 });
+    assert_eq!(wall::epoch_ms(pre_epoch), -1_000, "a raw reading stays faithful");
+    let at = UNIX_EPOCH + Duration::from_millis(1_234);
+    assert_eq!(Clock::anchored_at(at).unwrap().now_ms(), 1_234);
 }
 
 #[tokio::test(start_paused = true)]

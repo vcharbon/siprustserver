@@ -36,6 +36,7 @@ where
     let (abort, aborted) = tokio::sync::oneshot::channel::<()>();
     let (done, finished) = std::sync::mpsc::channel();
     let runner = std::thread::spawn(move || {
+        #[expect(clippy::expect_used, reason = "test support: a runtime not built fails the test")]
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)
@@ -60,6 +61,7 @@ where
             match finished.recv_timeout(ABORT_GRACE) {
                 Ok(out) => out,
                 Err(RecvTimeoutError::Disconnected) => None,
+                #[expect(clippy::panic, reason = "test support: a stuck scenario fails the test")]
                 Err(RecvTimeoutError::Timeout) => panic!(
                     "the scenario's runtime did not take the abort within {ABORT_GRACE:?}: \
                          a task is stuck in a synchronous loop (its thread is left running)"
@@ -109,7 +111,7 @@ pub async fn pump(total: Duration) {
 /// pipeline it observes.
 pub async fn pump_sampled(total: Duration, mut on_chunk: impl FnMut()) {
     const CHUNK: Duration = Duration::from_millis(100);
-    let chunks = (total.as_millis() as u64).div_ceil(100).max(1);
+    let chunks = u64::try_from(total.as_millis()).unwrap_or(u64::MAX).div_ceil(100).max(1);
     for _ in 0..=chunks {
         advance_settled(CHUNK).await;
         on_chunk();
