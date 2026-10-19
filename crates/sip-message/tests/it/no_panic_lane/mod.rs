@@ -25,39 +25,20 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use proptest::collection::vec;
-use proptest::test_runner::{Config, FileFailurePersistence, RngSeed, TestRunner};
+use proptest::test_runner::TestRunner;
+use wire_mutations::lane::{on_lane_stack, LANE_STACK};
+use wire_mutations::{mutate, Mutation};
 
 mod echo;
-mod mutate;
 mod probe;
 mod regressions;
 pub(crate) mod seeds;
 
-use mutate::Mutation;
 use probe::Digest;
 use seeds::Seed;
 
-/// The stack the lane runs on: well under a runtime worker's, so a recursion
-/// the input drives overflows here first.
-const LANE_STACK: usize = 512 * 1024;
-
 /// Cases per proptest property.
 const CASES: u32 = 2048;
-
-/// The seed every proptest property draws its cases from.
-const LANE_SEED: u64 = 0x5eed_1a5e;
-
-/// Runs `f` on a thread with the lane's stack, its panic re-raised here.
-fn on_lane_stack(f: impl FnOnce() + Send + 'static) {
-    let worker = std::thread::Builder::new()
-        .name("no-panic-lane".into())
-        .stack_size(LANE_STACK)
-        .spawn(f)
-        .expect("spawn the lane thread");
-    if let Err(panic) = worker.join() {
-        std::panic::resume_unwind(panic);
-    }
-}
 
 /// One family of one seed, as the corpus ran it.
 struct Line {
@@ -264,17 +245,9 @@ fn structured_corpus_parse_results_unchanged() {
     assert!(report.is_empty(), "outcomes changed:\n{report}");
 }
 
-/// The lane's runner: a fixed seed, so every run draws the same cases and a
-/// red run repeats; a failure is also persisted under `name`.
+/// The lane's runner over [`CASES`] cases, a failure persisted under `name`.
 fn runner(name: &'static str) -> TestRunner {
-    TestRunner::new(Config {
-        cases: CASES,
-        max_shrink_time: 60_000,
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(name))),
-        source_file: Some(file!()),
-        rng_seed: RngSeed::Fixed(LANE_SEED),
-        ..Config::default()
-    })
+    wire_mutations::lane::runner(name, CASES)
 }
 
 /// Up to four stacked mutations of any message seed return from every

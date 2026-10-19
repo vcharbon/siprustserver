@@ -36,6 +36,9 @@ tokio = { workspace = true, features = ["test-util"] }
 # A test endpoint double implements the `UdpEndpoint` async trait.
 async-trait = { workspace = true }
 sip-net-testkit = { path = "../sip-net-testkit" }
+# The no-panic property lane: its runner and the shared structured mutations.
+proptest.workspace = true
+wire-mutations = { path = "../wire-mutations" }
 
 [features]
 # Harness seams on the layer's counters, for a post-call gate proven to fire.

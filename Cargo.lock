@@ -4518,6 +4518,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.21",
+ "wire-mutations",
 ]
 
 [[package]]
@@ -4643,6 +4644,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac 0.13.0",
  "metric-catalogue",
+ "proptest",
  "sha2 0.11.1",
  "sip-message",
  "sip-net",
@@ -4651,6 +4653,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "wire-mutations",
 ]
 
 [[package]]
@@ -5718,6 +5721,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "wire-mutations"
+version = "0.1.0"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]

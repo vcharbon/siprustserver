@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/sip-message",
     "crates/sip-template",
+    "crates/wire-mutations",
     "crates/observe",
     "crates/alloc-counter",
     "crates/sip-clock",
