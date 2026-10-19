@@ -67,10 +67,10 @@ fn every_seed_decodes_or_refuses() {
         let mut shallow = json.bytes.clone();
         shallow.splice(at..at, [0x91; 8]);
         assert!(decodes(&shallow), "the service JSON nested 8 deeper decodes");
-        for depth in 0..NEST_DEPTHS.len() {
-            assert!(NEST_DEPTHS[depth] >= call::codec::MAX_DEPTH - 1);
+        for (depth, &deep) in NEST_DEPTHS.iter().enumerate() {
+            assert!(deep >= call::codec::MAX_DEPTH - 1);
             let nested = msgpack::apply(&json.bytes, &Mutation::Nest { at, depth });
-            assert!(!decodes(&nested), "nested {} deep is refused", NEST_DEPTHS[depth]);
+            assert!(!decodes(&nested), "nested {deep} deep is refused");
         }
     });
 }
