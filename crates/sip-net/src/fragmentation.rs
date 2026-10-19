@@ -19,6 +19,11 @@ pub const PMTUDISC_DONT: libc::c_int = libc::IP_PMTUDISC_DONT;
 #[cfg(target_os = "linux")]
 pub const PMTUDISC_DO: libc::c_int = libc::IP_PMTUDISC_DO;
 
+/// The option length of one `c_int`, the shape both options take.
+#[cfg(target_os = "linux")]
+#[expect(clippy::cast_possible_truncation, reason = "the size of a c_int fits a socklen_t")]
+const C_INT_LEN: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+
 /// Pin the IPv4 or IPv6 path-MTU-discovery mode to "never set DF" on `socket`.
 /// Off Linux the option does not exist and the socket keeps the platform
 /// default.
@@ -42,7 +47,7 @@ pub(crate) fn pin_fragmentation(socket: &socket2::Socket, ipv4: bool) -> std::io
                 level,
                 name,
                 std::ptr::addr_of!(value).cast(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                C_INT_LEN,
             )
         };
         if rc != 0 {
@@ -69,7 +74,7 @@ pub fn mtu_discover_mode(fd: std::os::fd::RawFd, ipv4: bool) -> std::io::Result<
         (libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER)
     };
     let mut value: libc::c_int = -1;
-    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let mut len = C_INT_LEN;
     // SAFETY: `fd` is a live socket for the duration of the call, and the
     // out-pointer/length pair describes the single `c_int` the option returns.
     #[allow(unsafe_code)]

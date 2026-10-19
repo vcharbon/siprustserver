@@ -123,7 +123,7 @@ impl Report {
         let pad = usize::from(resolved.cache_oblivious);
         let sample_pages = 1 + pad;
         let sample_pages_max = resolved.small_max.div_ceil(resolved.page).max(1) + pad;
-        let interval = 2f64.powi(resolved.lg_prof_sample as i32);
+        let interval = 2f64.powi(i32::try_from(resolved.lg_prof_sample).unwrap_or(i32::MAX));
         let per_sample = |pages: usize| match resolved.prof_active {
             Some(true) => (pages * resolved.page) as f64 / interval,
             _ => 0.0,
@@ -206,8 +206,8 @@ impl Report {
 /// most [`SAMPLE_OVERHEAD_LIMIT`] of the live bytes of its class.
 pub fn recommended_lg_prof_sample(sample_bytes: usize) -> u32 {
     let floor = sample_bytes as f64 / SAMPLE_OVERHEAD_LIMIT;
-    let mut lg = 0;
-    while 2f64.powi(lg as i32) < floor {
+    let mut lg: u32 = 0;
+    while 2f64.powi(i32::try_from(lg).unwrap_or(i32::MAX)) < floor {
         lg += 1;
     }
     lg
@@ -216,9 +216,9 @@ pub fn recommended_lg_prof_sample(sample_bytes: usize) -> u32 {
 /// The bracketed mode of `/sys/kernel/mm/transparent_hugepage/enabled`
 /// (`always [madvise] never` → `madvise`).
 pub fn host_thp_mode(enabled: &str) -> Option<String> {
-    let start = enabled.find('[')? + 1;
-    let end = enabled[start..].find(']')? + start;
-    Some(enabled[start..end].to_string())
+    let (_, rest) = enabled.split_once('[')?;
+    let (mode, _) = rest.split_once(']')?;
+    Some(mode.to_string())
 }
 
 #[cfg(test)]

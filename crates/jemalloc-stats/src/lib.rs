@@ -37,6 +37,24 @@
 //! the same `cfg(not(target_env = "msvc"))` as the allocator. On msvc this
 //! crate is no-op stubs so callers need no second cfg.
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 pub mod catalogue;
 pub mod defaults;
 pub mod footprint;
@@ -298,15 +316,11 @@ mod imp {
                 (_, m) => read(&format!("stats.mutexes.{m}")),
             });
         });
-        let mut at = 0;
-        c::MUTEX_WAITS.render(s, |_| {
-            at += 1;
-            Reading(rows[at - 1].map(|(w, _)| w))
-        });
-        let mut at = 0;
+        let mut waits = rows.iter().copied();
+        c::MUTEX_WAITS.render(s, |_| Reading(waits.next().flatten().map(|(w, _)| w)));
+        let mut seconds = rows.iter().copied();
         c::MUTEX_WAIT_SECONDS.render(s, |_| {
-            at += 1;
-            Reading(rows[at - 1].map(|(_, ns)| format!("{:.9}", ns as f64 / 1e9)))
+            Reading(seconds.next().flatten().map(|(_, ns)| format!("{:.9}", ns as f64 / 1e9)))
         });
     }
 
@@ -365,7 +379,7 @@ mod imp {
             small_max,
             cache_oblivious: raw(b"opt.cache_oblivious\0").unwrap_or(true),
             prof_active: raw::<bool>(b"prof.active\0"),
-            lg_prof_sample: lg_prof_sample().unwrap_or(19) as u32,
+            lg_prof_sample: u32::try_from(lg_prof_sample().unwrap_or(19)).unwrap_or(u32::MAX),
             opt_narenas: raw(b"opt.narenas\0").unwrap_or(0),
             narenas: raw(b"arenas.narenas\0").unwrap_or(0),
             thp: raw_str(b"opt.thp\0").unwrap_or_else(|| "?".into()),

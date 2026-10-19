@@ -49,7 +49,12 @@ impl WatchHealthState {
 }
 
 fn unix_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_millis().max(1) as u64)
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| millis(d).max(1))
+}
+
+/// `d` in whole milliseconds, held at `u64::MAX`.
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The episode of building the kube client.
@@ -63,7 +68,7 @@ impl ConnectEpisode {
     pub(super) fn failed(&mut self, state: &WatchHealthState, cause: &str, retry_in: Duration) {
         self.failures += 1;
         state.client_failed.store(true, Ordering::Relaxed);
-        let retry_in_ms = retry_in.as_millis() as u64;
+        let retry_in_ms = millis(retry_in);
         if self.failures == 1 {
             tracing::warn!(
                 cause,
@@ -131,7 +136,7 @@ impl WatchEpisode {
         self.last_error = None;
         state.broken_since_unix_ms.store(0, Ordering::Relaxed);
         tracing::info!(
-            broken_for_ms = started.elapsed().as_millis() as u64,
+            broken_for_ms = millis(started.elapsed()),
             errors = self.errors,
             "EndpointSlice watch delivering again"
         );

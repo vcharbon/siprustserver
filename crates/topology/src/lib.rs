@@ -30,6 +30,24 @@
 //! arc-swap / thiserror / the leaf `sip-clock`). proxy → topology and
 //! b2bua → topology; never the reverse.
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -159,6 +177,13 @@ pub struct MembershipParseError {
     pub reason: String,
 }
 
+/// The membership deltas a slow subscriber may fall behind by before it lags
+/// and reconciles from the snapshot.
+const DELTA_BACKLOG: usize = 256;
+
+/// The shortest reconcile period: a zero period ticks this often.
+const MIN_RECONCILE_PERIOD: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// Shared lock-free state backing both the read seam and the mutators. The
 /// static + simulated memberships are thin wrappers over this; the proxy's
 /// `WorkerSet` composes its `WorkerEntry` view directly over a `Membership`.
@@ -172,7 +197,8 @@ impl MembershipState {
     pub fn new(initial: Vec<Peer>) -> Self {
         let mut initial = initial;
         sort_by_ordinal(&mut initial);
-        let (tx, _rx) = broadcast::channel(256);
+        #[expect(clippy::disallowed_methods, reason = "DELTA_BACKLOG is not zero")]
+        let (tx, _rx) = broadcast::channel(DELTA_BACKLOG);
         Self { peers: ArcSwap::from_pointee(initial), tx }
     }
 
@@ -353,7 +379,8 @@ where
         // The periodic belt-and-suspenders reconcile (ADR-0012 D2). `interval`'s
         // first tick fires immediately — consume it; the synchronous initial
         // reconcile above already covered the boot snapshot.
-        let mut ticker = tokio::time::interval(period);
+        #[expect(clippy::disallowed_methods, reason = "the period is held above zero")]
+        let mut ticker = tokio::time::interval(period.max(MIN_RECONCILE_PERIOD));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticker.tick().await;
         loop {
@@ -390,14 +417,14 @@ pub fn parse_peer_list(source: &str, raw: &str) -> Result<Vec<Peer>, MembershipP
         if part.is_empty() {
             return Err(err(format!("empty entry in {source}")));
         }
-        match part.find('@') {
+        match part.split_once('@') {
             // No `@`, or leading `@`, are invalid.
-            Some(0) | None => {
+            Some(("", _)) | None => {
                 return Err(err(format!("entry \"{part}\" must be of the form ordinal@host")))
             }
-            Some(at) => {
-                let ordinal = part[..at].trim();
-                let host = part[at + 1..].trim();
+            Some((ordinal, host)) => {
+                let ordinal = ordinal.trim();
+                let host = host.trim();
                 if ordinal.is_empty() {
                     return Err(err(format!("empty ordinal in entry \"{part}\"")));
                 }

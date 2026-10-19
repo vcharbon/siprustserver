@@ -44,6 +44,24 @@
 //! Once the request line has been read the timeout no longer applies, so a long
 //! flamegraph capture is unaffected.
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -181,6 +199,10 @@ impl ProbeServer {
         idle_timeout: Duration,
     ) -> std::io::Result<Self> {
         let local = listener.local_addr()?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MAX_CONNECTIONS is below the permit ceiling"
+        )]
         let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         let task = tokio::spawn(async move {
             while let Ok((stream, _peer)) = listener.accept().await {
@@ -229,7 +251,7 @@ async fn handle_conn(
         Ok(read) => read?,
         Err(_elapsed) => return Ok(()), // silent client — drop
     };
-    let req = String::from_utf8_lossy(&buf[..n]);
+    let req = String::from_utf8_lossy(buf.get(..n).unwrap_or(&buf));
     let mut request_line = req.split_whitespace();
     let method = request_line.next().unwrap_or("GET");
     let path = request_line.next().unwrap_or("/");

@@ -24,7 +24,7 @@ const MALLOC_CONF_C: &[u8] = b"narenas:4,thp:never,dirty_decay_ms:1000,muzzy_dec
 #[used]
 #[allow(unsafe_code)] // the one exported symbol jemalloc reads; see SAFETY above
 #[unsafe(export_name = "_rjem_malloc_conf")]
-static JE_MALLOC_CONF: Option<&u8> = Some(&MALLOC_CONF_C[0]);
+static JE_MALLOC_CONF: Option<&u8> = MALLOC_CONF_C.first();
 
 #[cfg(test)]
 mod defaults_tests {

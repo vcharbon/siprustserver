@@ -36,6 +36,7 @@ pub fn rx_dropped(socket: &impl AsFd) -> std::io::Result<u64> {
         // Sized up to the drop slot: the kernel copies at most `len` bytes of
         // its array and reports how many it wrote.
         let mut meminfo = [0u32; DROPS + 1];
+        #[expect(clippy::cast_possible_truncation, reason = "a few dozen bytes fit a socklen_t")]
         let mut len = std::mem::size_of_val(&meminfo) as libc::socklen_t;
         // SAFETY: the fd is borrowed live for the call, and the out-pointer and
         // length describe the `u32` array `SO_MEMINFO` fills.

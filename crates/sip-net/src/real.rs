@@ -148,6 +148,7 @@ impl SignalingNetwork for RealSignalingNetwork {
 /// inequality is the only thing standing between the kernel's reassembled
 /// datagram and a torn SIP message (ADR-0027).
 const RECV_BUF_LEN: usize = 65_536;
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(RECV_BUF_LEN > crate::types::MAX_UDP_PAYLOAD);
 
 /// The receive pump. Mirrors the source's `socket.on("message", ...)` handler:
@@ -172,7 +173,8 @@ async fn recv_loop(
     // pump. The source logged and continued on transient errors; for our
     // test/loopback usage surfacing an error here is effectively terminal.
     while let Ok((n, src)) = socket.recv_from(&mut buf).await {
-        let raw = buf[..n].to_vec();
+        // `recv_from` reports at most the buffer's length.
+        let raw = buf.get(..n).unwrap_or(&buf).to_vec();
         let depth = queue.depth();
         match pre_ingress::judge(pre_ingress.as_ref(), &raw, src, depth, &counters) {
             PreIngressAction::Drop => {
@@ -189,7 +191,8 @@ async fn recv_loop(
                 }
             }
             PreIngressAction::Accept => {
-                let pkt = UdpPacket { raw, src, arrival_ms: clock.now_ms().max(0) as u64 };
+                let arrival_ms = u64::try_from(clock.now_ms()).unwrap_or(0);
+                let pkt = UdpPacket { raw, src, arrival_ms };
                 if queue.offer(pkt) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {

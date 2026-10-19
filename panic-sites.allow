@@ -104,9 +104,6 @@ crates/http-net/src/settings.rs 2
 crates/http-net/src/transport/real.rs 1
 crates/http-net/src/transport/real_client.rs 1
 crates/http-net/src/transport/reqwest_resolve.rs 1
-crates/jemalloc-stats/src/defaults.rs 1
-crates/jemalloc-stats/src/footprint.rs 4
-crates/jemalloc-stats/src/lib.rs 3
 crates/load-shed/src/retry_after.rs 1
 crates/load-shed/src/sampler.rs 5
 crates/load-shed/src/token_bucket.rs 2
@@ -120,13 +117,9 @@ crates/observe/src/trace_ids.rs 1
 crates/observe/src/wave.rs 11
 crates/observe/src/wave_set.rs 16
 crates/observe/src/writer.rs 1
-crates/probe-http/src/lib.rs 2
 crates/repl-net/src/codec.rs 45
 crates/repl-net/src/framing.rs 7
 crates/repl-net/src/transport/real.rs 1
-crates/sip-net/src/fragmentation.rs 2
-crates/sip-net/src/real.rs 3
-crates/sip-net/src/socket_stats.rs 1
 crates/sip-proxy-runner/src/binds.rs 4
 crates/sip-proxy-runner/src/config.rs 8
 crates/sip-proxy-runner/src/config/preflight.rs 2
@@ -135,5 +128,3 @@ crates/sip-proxy-runner/src/intake_shed.rs 1
 crates/sip-proxy-runner/src/main.rs 6
 crates/sip-proxy-runner/src/readiness.rs 1
 crates/sip-proxy-runner/src/signal.rs 1
-crates/topology/src/k8s/watch_health.rs 3
-crates/topology/src/lib.rs 4
