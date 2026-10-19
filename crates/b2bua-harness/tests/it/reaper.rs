@@ -286,6 +286,46 @@ async fn handler_panic_strike1_on_a_reinvite_2xx_acks_its_retransmission() {
     let _ = s.finish().await;
 }
 
+/// As above, but both legs answer their BYEs at once and the call is reaped
+/// before bob repeats his 2xx at T1. The relayed re-INVITE's transaction is
+/// held Accepted past its call (RFC 6026 §7.2), so the repeat is ACKed from
+/// that INVITE, through its route set (RFC 3261 §13.2.2.4), and draws no BYE:
+/// the call's teardown already ended the dialog.
+#[tokio::test(start_paused = true)]
+async fn handler_panic_strike1_on_a_reinvite_2xx_acks_its_retransmission_after_release() {
+    let s = B2buaScene::with_b2bua("reaper-panic-strike1-reinvite-2xx-released", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port)
+            .services(vec![panic_on_reinvite_2xx_service()])
+    })
+    .await;
+    let mut dialog = s.establish().await;
+
+    let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
+    let mut bob_reinvite = s.bob.receive("INVITE").await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+
+    s.bob.try_receive("BYE").await.expect("strike 1 sends bob a BYE").respond(200, "OK").await;
+    reinvite.try_expect(487).await.expect("alice's re-INVITE is answered 487");
+    s.alice.try_receive("BYE").await.expect("strike 1 sends alice a BYE").respond(200, "OK").await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+
+    // bob's 2xx retransmission (RFC 3261 §13.3.1.4, at T1), after the release.
+    s.h.advance(Duration::from_millis(300)).await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+    let ack = s.bob.try_receive("ACK").await.expect("bob's 2xx is ACKed after the release");
+    assert_eq!(ack.request().cseq().seq(), bob_reinvite.request().cseq().seq());
+    assert_eq!(ack.request().to().tag(), bob_reinvite.request().to().tag());
+    for _ in 0..10 {
+        s.h.advance(Duration::from_millis(100)).await;
+    }
+    assert!(s.bob.take_queued().await.is_none(), "the re-INVITE's 2xx draws no BYE");
+
+    let cdrs = s.b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "exactly one CDR despite the panic");
+    assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
+    let _ = s.finish().await;
+}
+
 /// bob's 183 kills its handler while his INVITE rings. Strike 1 tears the
 /// call down on the wire: bob is CANCELled and his INVITE ends 487, alice is
 /// answered 503, and one CDR names the panic.
