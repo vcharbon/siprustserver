@@ -18,7 +18,7 @@ mod limiter;
 mod operator;
 mod removal_class;
 mod retransmit_row;
-mod shell;
+pub mod shell;
 mod udp_transport;
 mod wire_drops;
 

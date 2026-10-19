@@ -31,6 +31,7 @@ pub mod limiter;
 pub mod model_gate;
 mod operator;
 mod proxy_core;
+mod reaped;
 mod scene;
 pub mod terminated;
 pub mod witness;
@@ -283,6 +284,8 @@ pub struct B2buaSut {
     brake: Option<(b2bua::ingress_brake::IngressBrakeCounters, Arc<AtomicUsize>)>,
     /// Where this SUT's run starts in the process's model-invariant record.
     since: model_gate::Mark,
+    /// The shell faults the run met ([`reaped::ShellFaults`]).
+    shell: reaped::ShellFaults,
     _core: B2buaCore,
 }
 
@@ -605,7 +608,18 @@ impl B2buaSutBuilder {
             clock: clock.clone(),
             since,
         }));
-        B2buaSut { addr: sa, cdr, metrics, limiter: sut_limiter, clock, brake, since, _core: core }
+        let shell = reaped::ShellFaults::from_now();
+        B2buaSut {
+            addr: sa,
+            cdr,
+            metrics,
+            limiter: sut_limiter,
+            clock,
+            brake,
+            since,
+            shell,
+            _core: core,
+        }
     }
 }
 
@@ -962,6 +976,9 @@ impl B2buaSut {
     ///      its limiter store counts no hold, and the default limiter never
     ///      failed open ([`limiter_count`](Self::limiter_count)).
     ///   7. the worker's limiter release queue is empty.
+    ///   8. the store's sweep corrected nothing, and no lock was poisoned
+    ///      nor supervised task restarted since the SUT started, unless the
+    ///      test declared it ([`expect_shell_faults`](Self::expect_shell_faults)).
     ///
     /// A new leak dimension (e.g. the `b2bua_timer_queue_len − b2bua_timer_live`
     /// tombstone gap from the CLAUDE.md timer hazard) is added here once and is
@@ -1004,53 +1021,5 @@ impl B2buaSut {
         let mut keys = self._core.limiter().waiting_keys();
         keys.sort();
         keys
-    }
-
-    /// Checks 1–5 of [`assert_fully_reaped`](Self::assert_fully_reaped): every
-    /// call created was reaped and no per-call state survives, the limiter
-    /// aside. For a caller that judges the calls at one instant and the
-    /// limiter after a later settle, which a release still in flight needs.
-    #[track_caller]
-    pub fn assert_calls_reaped(&self) {
-        let (creations, removals) = (self.metrics.creations_total(), self.metrics.removals_total());
-        assert_eq!(
-            creations, removals,
-            "call leak: creations ({creations}) != removals ({removals}) — a call \
-             was created but never reaped"
-        );
-        assert_eq!(
-            self.active_calls(),
-            0,
-            "call leak: {} live call(s) left in the map",
-            self.active_calls()
-        );
-        assert_eq!(
-            self._core.unborn_calls(),
-            0,
-            "admission leak: {} admitted new call(s) still counted unborn",
-            self._core.unborn_calls()
-        );
-        assert_eq!(
-            self.lock_count(),
-            0,
-            "lock leak: {} stranded per-call serialization lock(s)",
-            self.lock_count()
-        );
-        // 4. (ADR-0020) the reaper's last-touched ledger mirrors the call map;
-        //    a residue is a stamp leak.
-        assert_eq!(
-            self._core.touched_count(),
-            0,
-            "stamp leak: {} stranded last-touched ledger entr(ies)",
-            self._core.touched_count()
-        );
-        // 5. the setup-CANCEL marks (the decision-application drop guard) are
-        //    cleared on every teardown path; a residue is a mark leak.
-        assert_eq!(
-            self._core.setup_cancelled_count(),
-            0,
-            "mark leak: {} stranded setup-CANCEL mark(s)",
-            self._core.setup_cancelled_count()
-        );
     }
 }

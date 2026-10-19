@@ -95,6 +95,7 @@ pub fn generic_method(seed: u64) -> InDialogMethod {
 /// teardown sweep. Panics on any protocol surprise (a failed `expect`/`receive`).
 pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) {
     let mut obs = Observation::new();
+    let shell_since = b2bua::metrics::shell::shell_faults();
     let name = cell.name();
     let mut fh = FailoverHarness::new(&name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
@@ -323,11 +324,12 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 
     let sweep = TeardownSweep {
         nodes: vec![
-            node_end_state(primary, &primary_ord, &primary_ord),
-            node_end_state(backup, &primary_ord, &bak_ord),
+            NodeEndState::of(primary, &primary_ord, &primary_ord),
+            NodeEndState::of(backup, &primary_ord, &bak_ord),
         ],
         cdr_count: primary.cdr_records().len() + backup.cdr_records().len(),
         limiter_total,
+        shell_faults: b2bua::metrics::shell::shell_faults().saturating_sub(shell_since),
     };
     obs.disposition = disposition_of(primary, backup);
 
@@ -596,18 +598,6 @@ fn method_name(m: InDialogMethod) -> &'static str {
         InDialogMethod::Message => "MESSAGE",
         InDialogMethod::Prack => "PRACK",
         InDialogMethod::Refer => "REFER",
-    }
-}
-
-fn node_end_state(node: &ReplicatedB2buaSut, primary_ord: &str, ordinal: &str) -> NodeEndState {
-    let alive = node.is_ready() || node.active_calls() > 0 || node.lock_count() > 0;
-    NodeEndState {
-        ordinal: ordinal.to_string(),
-        alive,
-        active_calls: node.active_calls(),
-        lock_count: node.lock_count(),
-        residual_pri: node.scan_primary(primary_ord),
-        residual_bak: node.scan_backed_up(primary_ord),
     }
 }
 

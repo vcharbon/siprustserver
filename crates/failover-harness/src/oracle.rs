@@ -27,6 +27,8 @@
 
 use sip_message::{SipRequest, SipResponse};
 
+use crate::ReplicatedB2buaSut;
+
 /// What one UA logically observed during a scenario, in order. Tokens embed the
 /// dialog identifiers so the differential compare is strict on From/To/CSeq.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -130,6 +132,25 @@ pub struct NodeEndState {
     pub lock_count: usize,
     pub residual_pri: Vec<String>,
     pub residual_bak: Vec<String>,
+    /// The store entries the node's reaper sweep corrected.
+    pub store_reconciled: u64,
+}
+
+impl NodeEndState {
+    /// The end state of `node`, named `ordinal`, for the call whose primary is
+    /// `primary_ord`.
+    pub(crate) fn of(node: &ReplicatedB2buaSut, primary_ord: &str, ordinal: &str) -> Self {
+        let alive = node.is_ready() || node.active_calls() > 0 || node.lock_count() > 0;
+        NodeEndState {
+            ordinal: ordinal.to_string(),
+            alive,
+            active_calls: node.active_calls(),
+            lock_count: node.lock_count(),
+            residual_pri: node.scan_primary(primary_ord),
+            residual_bak: node.scan_backed_up(primary_ord),
+            store_reconciled: node.metrics().store_reconciled_total(),
+        }
+    }
 }
 
 /// The universal post-condition checked a few simulated seconds after every
@@ -139,11 +160,14 @@ pub struct TeardownSweep {
     pub nodes: Vec<NodeEndState>,
     pub cdr_count: usize,
     pub limiter_total: i64,
+    /// The poisoned locks recovered and the tasks restarted during the cell.
+    pub shell_faults: u64,
 }
 
 impl TeardownSweep {
     /// Assert everything cleared: no held context on any alive node, the limiter
-    /// drained to zero, and exactly one CDR written for the call.
+    /// drained to zero, exactly one CDR written for the call, and no store
+    /// correction, poisoned lock or task restart met on the way.
     pub fn assert_clean(&self, cell: &str) {
         for n in &self.nodes {
             if !n.alive {
@@ -169,7 +193,17 @@ impl TeardownSweep {
                 "[{cell}] node {} left {} residual bak: Element(s) {:?} — a later reboot could resurrect them",
                 n.ordinal, n.residual_bak.len(), n.residual_bak,
             );
+            assert_eq!(
+                n.store_reconciled, 0,
+                "[{cell}] node {} store defect: the reaper sweep corrected {} entr(ies)",
+                n.ordinal, n.store_reconciled,
+            );
         }
+        assert_eq!(
+            self.shell_faults, 0,
+            "[{cell}] shell defect: {} poisoned lock(s) recovered or task(s) restarted",
+            self.shell_faults,
+        );
         assert!(
             self.cdr_count >= 1,
             "[{cell}] no CDR was written for the call (expected one end-event after the flush window)",
@@ -295,9 +329,18 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "shell defect: 1 poisoned lock(s)")]
+    fn a_shell_fault_fails_the_sweep() {
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 0, shell_faults: 1 };
+        sweep.assert_clean("self");
+    }
+
+    #[test]
     #[should_panic(expected = "did not drain")]
     fn an_outstanding_limiter_hold_fails_the_sweep() {
-        let sweep = TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 1 };
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 1, shell_faults: 0 };
         sweep.assert_clean("self");
     }
 
@@ -312,9 +355,11 @@ mod tests {
                 lock_count: 0,
                 residual_pri: vec![],
                 residual_bak: vec![],
+                store_reconciled: 0,
             }],
             cdr_count: 1,
             limiter_total: 0,
+            shell_faults: 0,
         };
         sweep.assert_clean("self");
     }
@@ -322,14 +367,16 @@ mod tests {
     #[test]
     #[should_panic(expected = "no CDR")]
     fn a_missing_cdr_fails_the_sweep() {
-        let sweep = TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0 };
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0, shell_faults: 0 };
         sweep.assert_clean("self");
     }
 
     #[test]
     #[should_panic(expected = "one node discharges it")]
     fn a_call_discharged_twice_fails_the_sweep() {
-        let sweep = TeardownSweep { nodes: vec![], cdr_count: 2, limiter_total: 0 };
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 2, limiter_total: 0, shell_faults: 0 };
         sweep.assert_clean("self");
     }
 }

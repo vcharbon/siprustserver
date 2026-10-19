@@ -141,6 +141,7 @@ mod reack_delayed_offer_after_caller_ack;
 mod reack_retransmitted_2xx;
 mod realcall_functional;
 mod reaped_limiter_check;
+mod reaped_shell_check;
 mod reaper;
 mod reaper_liveness;
 mod refer_allow;
