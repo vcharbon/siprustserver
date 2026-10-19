@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use async_rs::{Runtime, Tokio};
 use b2bua::metrics::B2buaMetrics;
 use lapin::{
     options::{BasicPublishOptions, ConfirmSelectOptions},
@@ -19,7 +20,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 
 use super::confirms::{track_confirms, Pending};
-use super::connector::connect_socket;
+use super::connector::{connect_socket, BrokerStream};
 use super::declaration::declaration;
 use super::resolver::BrokerResolver;
 use super::settings::RabbitMqCdrSettings;
@@ -106,11 +107,11 @@ impl Session {
     /// Resolves the broker through `resolver`, connects, opens a channel,
     /// selects publisher confirms and declares the queue, then spawns the
     /// confirm tracker recording into `metrics`, bounded by the writer's close
-    /// deadline `close_by`. Resolution and the TCP connect
+    /// deadline `close_by`. Resolution, the TCP connect and the TLS handshake
     /// stop at `deadline`; the caller bounds the rest by it, and dropping this
     /// future (or a failure half-way) shuts down whatever socket it connected.
-    // `HandshakeResult` is the AMQP client's connector contract.
-    #[allow(clippy::result_large_err)]
+    /// The client's auto-recovery stays off: a connection lost is this
+    /// session's end, and the writer opens the next one.
     pub(super) async fn open(
         settings: &RabbitMqCdrSettings,
         resolver: &mut BrokerResolver,
@@ -127,17 +128,17 @@ impl Session {
         let guard = KillOnDrop::new(socket.clone());
         let connect = {
             let socket = socket.clone();
-            let deadline = deadline.into_std();
-            Box::new(move |uri: &AMQPUri| connect_socket(uri, &addrs, deadline, &socket))
+            async move |uri: AMQPUri, runtime: Runtime<Tokio>| -> lapin::Result<BrokerStream> {
+                Ok(connect_socket(&uri, &addrs, deadline, &socket, &runtime).await?)
+            }
         };
-        let props = ConnectionProperties::default()
-            .with_executor(tokio_executor_trait::Tokio::current())
-            .with_reactor(tokio_reactor_trait::Tokio);
-        let connection = Connection::connector(uri, connect, props).await?;
+        let runtime = Runtime::tokio_current();
+        let connection =
+            Connection::connector(uri, runtime, connect, ConnectionProperties::default()).await?;
         let channel = connection.create_channel().await?;
         channel.confirm_select(ConfirmSelectOptions::default()).await?;
         let (options, args) = declaration(settings.declare);
-        channel.queue_declare(&settings.queue, options, args).await?;
+        channel.queue_declare(settings.queue.as_str().into(), options, args).await?;
         guard.disarm();
 
         let health = Arc::new(Health {
@@ -209,8 +210,8 @@ impl Session {
             return Err(PublishRefused::Ended);
         }
         let publish = self.channel.basic_publish(
-            "",
-            queue,
+            "".into(),
+            queue.into(),
             BasicPublishOptions { mandatory: true, immediate: false },
             payload,
             BasicProperties::default().with_delivery_mode(2),

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::metrics::B2buaMetrics;
-use lapin::publisher_confirm::{Confirmation, PublisherConfirm};
+use lapin::{Confirmation, PublisherConfirm};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit};
 use tokio::time::{timeout, timeout_at, Instant};
 
@@ -127,9 +127,7 @@ mod tests {
         assert_eq!(outcome_of(Ok(Confirmation::Ack(None))), Outcome::Acked);
         assert_eq!(outcome_of(Ok(Confirmation::Nack(None))), Outcome::Nacked);
         assert!(matches!(outcome_of(Ok(Confirmation::NotRequested)), Outcome::Lost(_)));
-        assert!(matches!(
-            outcome_of(Err(lapin::Error::InvalidChannelState(lapin::ChannelState::Closed))),
-            Outcome::Lost(_)
-        ));
+        let closed = lapin::ErrorKind::InvalidChannelState(lapin::ChannelState::Closed, "publish");
+        assert!(matches!(outcome_of(Err(closed.into())), Outcome::Lost(_)));
     }
 }

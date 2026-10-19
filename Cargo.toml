@@ -194,15 +194,15 @@ opentelemetry-otlp = { version = "0.33.1", default-features = false, features = 
 # no h2, no system-proxy probing is compiled in.
 reqwest = { version = "0.13", default-features = false }
 # CDR-on-RabbitMQ sink (b2bua-runner-kit, composed by every runner) + the
-# dedicated CDR metrics consumer (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client; it is runtime-
-# agnostic, so the two `*-trait` shims bind its executor/reactor to the same
-# tokio runtime everything else runs on (no second async runtime). Producer-side
+# dedicated CDR metrics consumer (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client;
+# `async-rs` is the runtime seam it is built on, bound to the tokio runtime
+# everything else runs on (no second async runtime). TLS is rustls on `ring`,
+# the provider the kube client installs, with the system root store. Producer-side
 # the existing `BufferedCdrWriter` bounded queue is preserved in front of the
 # sink (drop-on-overload), and the broker queue is additionally bounded with
 # `x-max-length` + drop-head overflow — the "max buffer" guarantee end to end.
-lapin = "2"
-tokio-executor-trait = "2"
-tokio-reactor-trait = "1"
+lapin = { version = "4.12.3", default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
+async-rs = { version = "0.8.13", default-features = false, features = ["tokio"] }
 
 # Keep line tables in release builds so on-demand pprof CPU flamegraphs (the
 # /debug/flamegraph route on the b2bua-worker + front-proxy metrics servers,

@@ -76,10 +76,8 @@ fn writer(url: String, queue: &str, declare: CdrQueueDeclare) -> (RabbitMqCdrWri
 }
 
 async fn admin(url: &str) -> lapin::Channel {
-    let props = ConnectionProperties::default()
-        .with_executor(tokio_executor_trait::Tokio::current())
-        .with_reactor(tokio_reactor_trait::Tokio);
-    let conn = Connection::connect(url, props).await.expect("admin connect");
+    let conn =
+        Connection::connect(url, ConnectionProperties::default()).await.expect("admin connect");
     let chan = conn.create_channel().await.expect("admin channel");
     // The connection must outlive the channel: leak it for the test's life.
     std::mem::forget(conn);
@@ -114,14 +112,14 @@ async fn every_record_the_broker_acks_is_in_the_queue() {
     let took = t0.elapsed();
     let held = chan
         .queue_declare(
-            queue,
+            queue.into(),
             lapin::options::QueueDeclareOptions { passive: true, ..Default::default() },
             Default::default(),
         )
         .await
         .expect("passive declare")
         .message_count();
-    chan.queue_delete(queue, QueueDeleteOptions::default()).await.expect("cleanup");
+    chan.queue_delete(queue.into(), QueueDeleteOptions::default()).await.expect("cleanup");
     eprintln!("5000 records acked in {took:?}; queue held {held}");
     assert_eq!((m.cdr_written_total(), m.cdr_dropped_total()), (5_000, 0));
     assert_eq!(held, 5_000, "every acked record is in the queue");
@@ -134,13 +132,15 @@ async fn a_publish_to_a_deleted_queue_is_returned_and_counted_dropped() {
     let Some(url) = url() else { return };
     let chan = admin(&url).await;
     let queue = "cdr-sink-deleted";
-    chan.queue_declare(queue, Default::default(), Default::default()).await.expect("declare");
+    chan.queue_declare(queue.into(), Default::default(), Default::default())
+        .await
+        .expect("declare");
     let (w, m) = writer(url, queue, CdrQueueDeclare::Existing);
     let call = a_call();
     w.write(&call, 2_000).await;
     settle(&m, 1, Duration::from_secs(5)).await;
     assert_eq!((m.cdr_written_total(), m.cdr_dropped_total()), (1, 0));
-    chan.queue_delete(queue, QueueDeleteOptions::default()).await.expect("delete");
+    chan.queue_delete(queue.into(), QueueDeleteOptions::default()).await.expect("delete");
     w.write(&call, 2_000).await;
     settle(&m, 2, Duration::from_secs(5)).await;
     assert_eq!((m.cdr_written_total(), m.cdr_dropped_total()), (1, 1), "returned, not written");
@@ -198,6 +198,6 @@ async fn a_frozen_broker_turns_into_bounded_writes_and_counted_drops() {
     eprintln!("after thaw: written {} dropped {}", m.cdr_written_total(), m.cdr_dropped_total());
     assert!(m.cdr_written_total() >= before + 100, "the sink delivers again after the thaw");
     assert_eq!(m.cdr_written_total() + m.cdr_dropped_total(), 2_200);
-    chan.queue_purge(queue, QueuePurgeOptions::default()).await.ok();
-    chan.queue_delete(queue, QueueDeleteOptions::default()).await.ok();
+    chan.queue_purge(queue.into(), QueuePurgeOptions::default()).await.ok();
+    chan.queue_delete(queue.into(), QueueDeleteOptions::default()).await.ok();
 }

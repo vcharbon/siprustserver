@@ -96,11 +96,8 @@ async fn consume(
     max_len: i64,
     consumer: &Consumer,
 ) -> Result<(), lapin::Error> {
-    let props = ConnectionProperties::default()
-        .with_executor(tokio_executor_trait::Tokio::current())
-        .with_reactor(tokio_reactor_trait::Tokio);
     tracing::info!(node = observe::node(), state = "connecting", %url, "AMQP connection");
-    let conn = Connection::connect(url, props).await?;
+    let conn = Connection::connect(url, ConnectionProperties::default()).await?;
     tracing::info!(node = observe::node(), state = "connected", %url, "AMQP connection");
     let chan = conn.create_channel().await?;
 
@@ -111,11 +108,16 @@ async fn consume(
         args.insert("x-max-length".into(), AMQPValue::LongLongInt(max_len));
         args.insert("x-overflow".into(), AMQPValue::LongString(LongString::from("drop-head")));
     }
-    chan.queue_declare(queue, QueueDeclareOptions { durable: true, ..Default::default() }, args)
-        .await?;
+    let durable = QueueDeclareOptions { durable: true, ..Default::default() };
+    chan.queue_declare(queue.into(), durable, args).await?;
 
     let mut deliveries = chan
-        .basic_consume(queue, "cdr-consumer", BasicConsumeOptions::default(), FieldTable::default())
+        .basic_consume(
+            queue.into(),
+            "cdr-consumer".into(),
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
         .await?;
     tracing::info!(node = observe::node(), state = "consuming", %queue, %url, "AMQP connection");
 
@@ -125,7 +127,9 @@ async fn consume(
         // redelivered forever. A shipped observation is acked once it landed,
         // so a consumer gone before then leaves its CDR to the broker.
         match consumer.deliver(&delivery.data) {
-            None => delivery.ack(BasicAckOptions::default()).await?,
+            None => {
+                delivery.ack(BasicAckOptions::default()).await?;
+            }
             Some(shipped) => {
                 let acker = delivery.acker;
                 tokio::spawn(async move {

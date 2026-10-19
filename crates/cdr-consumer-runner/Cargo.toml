@@ -18,10 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 metric-catalogue = { path = "../metric-catalogue" }
-# Same AMQP client + tokio-runtime shims the b2bua-runner sink publishes with.
+# Same AMQP client the b2bua-runner sink publishes with, on the running tokio runtime.
 lapin = { workspace = true }
-tokio-executor-trait = { workspace = true }
-tokio-reactor-trait = { workspace = true }
 tokio = { workspace = true }
 # Only created_at/terminated_at are needed off a JSON CDR; a tiny Deserialize view
 # ignores the rest of the record (serde_json skips unknown fields by default),
