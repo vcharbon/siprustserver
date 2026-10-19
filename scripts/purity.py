@@ -36,8 +36,10 @@ Checks:
   pure      over each pure member's `cargo tree -p <crate> -e
              normal,no-proc-macro` and each binary's (the features the
              binary turns on): a first-party crate a pure crate depends on
-             is pure, a third-party crate it reaches is in `pure-deps`; a
-             `pure-deps` entry no pure crate reaches is stale
+             is pure, a third-party crate it reaches is in `pure-deps` (each
+             crate version followed through its own dependencies, an entry
+             naming every version); a `pure-deps` entry no pure crate reaches
+             is stale
   lints      every member inherits `[lints] workspace = true` or restates
              the workspace's table, `rust.unsafe_code = "deny"` its one
              allowed difference; no clippy.toml below the root and no
@@ -164,14 +166,15 @@ class Workspace:
 
 
 def tree(root, *args):
-    """`(depth, name, is_local, feature)` per line of a depth-prefixed tree."""
+    """`(depth, name, version, is_local, feature)` per line of a
+    depth-prefixed tree; a feature line has no version."""
     rows = []
     for line in cargo(root, "tree", *args, "--prefix", "depth", "-f", "{p}").splitlines():
         m = LINE.match(line)
         if not m:
             continue
-        depth, name, _ver, paren, feature = m.groups()
-        rows.append((int(depth), name, bool(paren and paren.startswith("/")), feature))
+        depth, name, version, paren, feature = m.groups()
+        rows.append((int(depth), name, version, bool(paren and paren.startswith("/")), feature))
     return rows
 
 
@@ -189,7 +192,8 @@ def closure(ws, config):
             bad.append(f"{config.path} names binary {binary}, which is no first-party crate")
             continue
         chain = []
-        for depth, name, local, feature in tree(ws.root, "-p", binary, "-e", "normal,features"):
+        for depth, name, _, local, feature in tree(ws.root, "-p", binary, "-e",
+                                                   "normal,features"):
             test = feature is not None and config.is_test_feature(name, feature)
             del chain[depth:]
             chain.append(name if feature is None else f"{name}/{feature}" if test else None)
@@ -221,21 +225,23 @@ def images(root, config):
 
 
 class Graph:
-    """The normal dependency edges of several resolved trees, by crate name."""
+    """The normal dependency edges of several resolved trees, by crate
+    `(name, version)`: two versions of one crate keep their own edges."""
 
     def __init__(self):
         self.children, self.local = {}, set()
 
     def add(self, rows):
         stack = []
-        for depth, name, local, _ in rows:
+        for depth, name, version, local, _ in rows:
+            node = (name, version)
             del stack[depth:]
-            self.children.setdefault(name, set())
+            self.children.setdefault(node, set())
             if local:
-                self.local.add(name)
+                self.local.add(node)
             if stack:
-                self.children[stack[-1]].add(name)
-            stack.append(name)
+                self.children[stack[-1]].add(node)
+            stack.append(node)
 
 
 def dependency_graph(ws, config):
@@ -251,20 +257,22 @@ def pure_rule(ws, config, graph):
     """What each pure crate reaches against the rule, `{(crate, dep): via}`,
     and the `pure-deps` entries some pure crate reaches."""
     breaches, used = {}, set()
-    for crate in sorted(n for n in graph.local if ws.tiers.get(n) == "pure"):
-        todo = [(c, [crate, c]) for c in sorted(graph.children.get(crate, ()))]
+    for root in sorted(n for n in graph.local if ws.tiers.get(n[0]) == "pure"):
+        crate = root[0]
+        todo = [(c, [crate, c[0]]) for c in sorted(graph.children.get(root, ()))]
         seen = set()
         while todo:
-            name, path = todo.pop()
-            if name in seen:
+            node, path = todo.pop()
+            if node in seen:
                 continue
-            seen.add(name)
-            if name in graph.local:
+            seen.add(node)
+            name = node[0]
+            if node in graph.local:
                 if ws.tiers.get(name) != "pure":
                     breaches.setdefault((crate, name), " > ".join(path))
             elif name in config.pure_deps:
                 used.add(name)
-                todo += [(c, path + [c]) for c in sorted(graph.children.get(name, ()))]
+                todo += [(c, path + [c[0]]) for c in sorted(graph.children.get(node, ()))]
             else:
                 breaches.setdefault((crate, name), " > ".join(path))
     return breaches, used

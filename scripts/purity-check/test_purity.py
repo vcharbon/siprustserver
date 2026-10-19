@@ -1,8 +1,12 @@
 """Checks of scripts/purity.py on throwaway path-only cargo workspaces (cargo
 metadata and cargo tree, nothing built)."""
+import importlib.util
+import os
+import sys
+import types
 import unittest
 
-from workspace import Workspace
+from workspace import SCRIPTS, Workspace
 
 SCRIPT = "purity.py"
 
@@ -193,6 +197,35 @@ class PureRule(Case):
         rc, out = ws.run(SCRIPT, "--staged")
         self.assertEqual(rc, 1)
         self.assertIn("adds known breach `pure-reaches: core -> io`", out)
+
+
+def purity_module():
+    """scripts/purity.py, imported from the scripts under check."""
+    sys.path.insert(0, SCRIPTS)
+    try:
+        spec = importlib.util.spec_from_file_location("purity", os.path.join(SCRIPTS, SCRIPT))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(SCRIPTS)
+
+
+class Versions(unittest.TestCase):
+    """Two versions of one third-party crate keep their own edges: a pure
+    crate reaches only what the version it resolves reaches."""
+
+    def test_a_pure_crate_reaches_only_its_own_version_s_children(self):
+        purity = purity_module()
+        graph = purity.Graph()
+        graph.add([(0, "p", "0.1.0", True, None), (1, "digest", "0.11.0", False, None)])
+        graph.add([(0, "bin", "0.1.0", True, None), (1, "digest", "0.10.0", False, None),
+                   (2, "generic-array", "0.14.0", False, None)])
+        ws = types.SimpleNamespace(tiers={"p": "pure", "bin": "shell"})
+        conf = types.SimpleNamespace(pure_deps={"digest", "generic-array"})
+        breaches, used = purity.pure_rule(ws, conf, graph)
+        self.assertEqual(breaches, {})
+        self.assertEqual(used, {"digest"})
 
 
 class Features(Case):
