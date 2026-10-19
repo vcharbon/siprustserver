@@ -9,7 +9,7 @@ use crate::model::{
 
 /// The id the next attempt of `call` opens under.
 pub fn next_attempt_id(call: &Call) -> AttemptId {
-    AttemptId(call.attempts.len() as u32)
+    AttemptId(call.attempts.len())
 }
 
 /// The attempt `id` names on `call`.
@@ -27,19 +27,20 @@ pub fn open_attempt(
     cause: AttemptCause,
     no_answer: Deadline,
 ) -> (AttemptId, Vec<AttemptId>) {
-    let mut ended = Vec::new();
-    for at in 0..call.attempts.len() {
-        if !call.attempts[at].is_open() || rings(call, &call.attempts[at]) {
-            continue;
-        }
-        let outcome = if all_legs_ended(call, &call.attempts[at]) {
-            AttemptOutcome::Failed
-        } else {
-            AttemptOutcome::Superseded
-        };
-        call.attempts[at].outcome = Some(outcome);
-        ended.push(call.attempts[at].id);
-    }
+    let decided: Vec<Option<AttemptOutcome>> = call
+        .attempts
+        .iter()
+        .map(|a| {
+            (a.is_open() && !rings(call, a)).then(|| {
+                if all_legs_ended(call, a) {
+                    AttemptOutcome::Failed
+                } else {
+                    AttemptOutcome::Superseded
+                }
+            })
+        })
+        .collect();
+    let ended = set_outcomes(call, &decided).into_iter().map(|(id, _)| id).collect();
     let id = next_attempt_id(call);
     call.attempts.push(Attempt {
         id,
@@ -80,26 +81,42 @@ pub fn end_attempt(call: &mut Call, id: AttemptId, outcome: AttemptOutcome) -> b
 /// outcomes.
 pub fn settle_attempts(call: &mut Call) -> Vec<(AttemptId, AttemptOutcome)> {
     let going_away = matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    let mut settled = Vec::new();
-    for at in 0..call.attempts.len() {
-        let attempt = &call.attempts[at];
-        if !attempt.is_open() {
-            continue;
+    let decided: Vec<Option<AttemptOutcome>> = call
+        .attempts
+        .iter()
+        .map(|attempt| {
+            if !attempt.is_open() {
+                return None;
+            }
+            let legs = || attempt.legs.iter().filter_map(|id| b_leg(call, id));
+            if legs().any(|l| l.disposition() == LegDisposition::Bridged) {
+                Some(AttemptOutcome::Answered)
+            } else if going_away {
+                Some(AttemptOutcome::CallEnded)
+            } else if all_legs_ended(call, attempt) {
+                Some(AttemptOutcome::Failed)
+            } else {
+                None
+            }
+        })
+        .collect();
+    set_outcomes(call, &decided)
+}
+
+/// End each attempt with the outcome `decided` holds at its position; the
+/// attempts ended, with their outcomes, in order.
+fn set_outcomes(
+    call: &mut Call,
+    decided: &[Option<AttemptOutcome>],
+) -> Vec<(AttemptId, AttemptOutcome)> {
+    let mut ended = Vec::new();
+    for (attempt, outcome) in call.attempts.iter_mut().zip(decided) {
+        if let Some(outcome) = *outcome {
+            attempt.outcome = Some(outcome);
+            ended.push((attempt.id, outcome));
         }
-        let legs = || attempt.legs.iter().filter_map(|id| b_leg(call, id));
-        let outcome = if legs().any(|l| l.disposition() == LegDisposition::Bridged) {
-            AttemptOutcome::Answered
-        } else if going_away {
-            AttemptOutcome::CallEnded
-        } else if all_legs_ended(call, attempt) {
-            AttemptOutcome::Failed
-        } else {
-            continue;
-        };
-        call.attempts[at].outcome = Some(outcome);
-        settled.push((call.attempts[at].id, outcome));
     }
-    settled
+    ended
 }
 
 /// Whether a dialled leg has ended: it reads `Terminated` and waits on

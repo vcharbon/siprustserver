@@ -199,7 +199,7 @@ async fn a_refusal_raises_the_dialog_sequence_and_nothing_else() {
     let call_ref = live.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live.clone(), MaterialiseOrigin::Reclaim));
     let replica = sent_to_the_caller(answered(4, 2, CallModelState::Active), 1);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
     let after = ctx.state.peek(&call_ref).expect("the call plays on");
@@ -213,7 +213,7 @@ async fn a_refusal_raises_the_dialog_sequence_and_nothing_else() {
     let copy = answered(4, 2, CallModelState::Active);
     assert!(ctx.state.materialize_if_absent(copy.clone(), MaterialiseOrigin::Takeover));
     let primary = sent_to_the_caller(answered(6, 1, CallModelState::Active), 1);
-    let body = MsgpackCodec::new().encode(&primary);
+    let body = MsgpackCodec::new().encode(&primary).unwrap();
     fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
     let after = ctx.state.peek(&call_ref).expect("the copy plays on");
@@ -252,7 +252,7 @@ async fn a_round_fold_raises_the_records_sequence_on_every_dialog() {
     let call_ref = live.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
     let replica = with_callee(in_round(4, 2, RoundStage::Answered), 5);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
     let after = ctx.state.peek(&call_ref).expect("the call plays on");
@@ -277,7 +277,7 @@ async fn a_refusal_raises_the_sequence_past_a_round_it_never_reaches() {
     assert!(ctx.state.materialize_if_absent(live.clone(), MaterialiseOrigin::Reclaim));
     let mut replica = with_callee(answered(4, 2, CallModelState::Active), 1);
     stage_reinvite_round(&mut replica.b_legs[0], "z9hG4bK-round", RoundStage::Open);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
     let after = ctx.state.peek(&call_ref).expect("the call is still ending");
@@ -309,7 +309,7 @@ async fn a_forward_terminal_ends_no_call_at_the_backup_and_its_counter_is_adopte
 
     // The partitioned primary tore its own copy down and flushed it forward.
     let replica = answered(3, 1, CallModelState::Terminated);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -337,7 +337,7 @@ async fn a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it()
     // The authority answered the caller and flushed; its `b` is behind the
     // Element's, so the store refused the frame and handed the body up.
     let replica = answered(3, 1, CallModelState::Active);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -362,7 +362,7 @@ async fn a_forward_terminating_body_only_moves_the_counter() {
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
 
     let replica = answered(4, 1, CallModelState::Terminating);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -392,12 +392,12 @@ async fn a_backups_adoption_never_overwrites_the_primarys_body_at_the_adopted_ve
     let call_ref = copy.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(copy, MaterialiseOrigin::Takeover));
     let healed = answered(6, 2, CallModelState::Active);
-    let body = MsgpackCodec::new().encode(&healed);
+    let body = MsgpackCodec::new().encode(&healed).unwrap();
     let opts = PutOpts::default();
     let bak = PartitionRole::Backup;
     n.store.put_call(bak, "w0", &call_ref, body, &[], 60_000, 6, 2, &opts).await.unwrap();
 
-    let refused = MsgpackCodec::new().encode(&answered(6, 1, CallModelState::Active));
+    let refused = MsgpackCodec::new().encode(&answered(6, 1, CallModelState::Active)).unwrap();
     fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &refused, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -419,7 +419,7 @@ async fn a_direction_that_contradicts_this_nodes_role_folds_nothing() {
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
 
     let replica = answered(5, 1, CallModelState::Terminated);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -449,7 +449,7 @@ async fn an_expired_deferred_terminal_read_before_the_reap_is_still_released_onc
         ],
     );
     let call_ref = terminal.call_ref.clone();
-    let body = MsgpackCodec::new().encode(&terminal);
+    let body = MsgpackCodec::new().encode(&terminal).unwrap();
     n.store
         .put_call(
             PartitionRole::Backup,
@@ -504,7 +504,7 @@ async fn a_poisoned_changelog_lock_does_not_cost_an_expired_terminal_its_release
         ],
     );
     let call_ref = terminal.call_ref.clone();
-    let body = MsgpackCodec::new().encode(&terminal);
+    let body = MsgpackCodec::new().encode(&terminal).unwrap();
     n.store
         .put_call(
             PartitionRole::Backup,
@@ -559,7 +559,7 @@ async fn a_refused_flush_of_another_call_never_ends_the_live_one() {
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
 
     let replica = as_call(answered(1, 3, CallModelState::Terminated), "first-key");
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -587,7 +587,7 @@ async fn a_reverse_reconcile_of_another_stored_call_never_ends_the_live_one() {
             PartitionRole::Primary,
             "w0",
             &call_ref,
-            MsgpackCodec::new().encode(&stored),
+            MsgpackCodec::new().encode(&stored).unwrap(),
             &[],
             60_000,
             2,
@@ -625,7 +625,7 @@ async fn a_deferred_terminal_another_call_replaced_is_released_by_its_own_key() 
             incarnation: Some(call.incarnation().to_string()),
             ..PutOpts::default()
         };
-        let body = MsgpackCodec::new().encode(call);
+        let body = MsgpackCodec::new().encode(call).unwrap();
         n.store
             .put_call(PartitionRole::Backup, "w0", &call_ref, body, &[], ttl_ms, p, b, &opts)
             .await
@@ -653,7 +653,7 @@ async fn a_reverse_fold_holds_the_backups_version_so_its_next_write_folds() {
     let call_ref = live.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
     let relayed = in_round(4, 2, RoundStage::Open);
-    let body = MsgpackCodec::new().encode(&relayed);
+    let body = MsgpackCodec::new().encode(&relayed).unwrap();
     let opts = PutOpts::default();
     let pri = PartitionRole::Primary;
     n.store.put_call(pri, "w0", &call_ref, body, &[], 60_000, 4, 2, &opts).await.unwrap();
@@ -684,7 +684,7 @@ async fn a_refused_flush_answering_the_round_the_live_copy_holds_open_folds() {
         assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
 
         let replica = in_round(4, 2, stage);
-        let body = MsgpackCodec::new().encode(&replica);
+        let body = MsgpackCodec::new().encode(&replica).unwrap();
         fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
         sip_clock::testkit::settle().await;
 
@@ -711,7 +711,7 @@ async fn a_round_fold_keeps_what_the_live_copy_wrote_since_the_branch() {
 
     let mut replica = in_round(4, 2, RoundStage::Answered);
     replica.message_count = Some(3);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -741,7 +741,7 @@ async fn a_round_fold_leaves_the_live_copys_own_timers_where_it_armed_them() {
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
 
     let replica = in_round(4, 2, RoundStage::Answered);
-    let body = MsgpackCodec::new().encode(&replica);
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
     fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, now + 5_000).await;
     sip_clock::testkit::settle().await;
 

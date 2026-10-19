@@ -97,7 +97,7 @@ fn call_in(pri: &str, bak: &str, cid: &str, a_state: LegState, state: CallModelS
 
 /// The msgpack body of `call` — what a flush puts on the wire.
 fn body(call: &Call) -> Vec<u8> {
-    MsgpackCodec::new().encode(call)
+    MsgpackCodec::new().encode(call).unwrap()
 }
 
 /// The lifecycle state of the body `node` holds in `(role, primary, call_ref)`,

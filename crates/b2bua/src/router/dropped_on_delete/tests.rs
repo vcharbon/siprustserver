@@ -21,7 +21,7 @@ fn ringing(primary: &str, backup: &str, cid: &str) -> Call {
 /// `call`, stored in `role` of `primary`'s partition and materialised from
 /// `origin`: the live copy, its lock released.
 async fn live(n: &Node, call: &Call, role: PartitionRole, primary: &str, origin: Origin) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let r = &call.call_ref;
     n.store.put_call(role, primary, r, body, &[], 60_000, 1, 0, &PutOpts::default()).await.unwrap();
     let ctx = n.core.router_ctx();

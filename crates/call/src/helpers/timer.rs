@@ -40,7 +40,8 @@ pub fn arm_timer(call: &mut Call, key: TimerKey, fire_at: i64) -> TimerEntry {
 /// Take the entry `key` holds off the ledger, if any.
 pub fn disarm_timer(call: &mut Call, key: &TimerKey) -> Option<TimerEntry> {
     let at = call.timers.iter().position(|t| &t.key == key)?;
-    Some(call.timers.remove(at))
+    call.timers.get_mut(at..).filter(|tail| !tail.is_empty())?.rotate_left(1);
+    call.timers.pop()
 }
 
 /// Take every entry `retired` selects off the ledger, in ledger order.

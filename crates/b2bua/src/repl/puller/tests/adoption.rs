@@ -17,7 +17,7 @@ fn adopted_body(adopted: bool) -> Arc<[u8]> {
     let mut call =
         codec.decode(&body_at(Some(200), call::CallModelState::Active)).expect("decodes");
     call.topology.as_mut().expect("a proxied call").gen_adopted = adopted;
-    Arc::from(codec.encode(&call))
+    Arc::from(codec.encode(&call).unwrap())
 }
 
 /// At the Element's own `(p,b)`, the authority's call replaces an Element

@@ -427,7 +427,7 @@ impl ReplicatedB2buaSut {
                 role,
                 primary,
                 call_ref,
-                codec.encode(&call),
+                codec.encode(&call).expect("replica body encodes"),
                 &[],
                 600_000,
                 p,

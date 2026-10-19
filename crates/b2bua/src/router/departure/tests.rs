@@ -47,7 +47,7 @@ fn ended(cid: &str) -> Call {
 }
 
 async fn put(store: &ReplicatingCallStore, call: &Call) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     store
         .put_call(BAK, "w0", &call.call_ref, body, &[], 60_000, 1, 0, &PutOpts::default())
         .await

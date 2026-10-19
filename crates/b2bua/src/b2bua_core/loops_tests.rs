@@ -41,7 +41,7 @@ async fn a_crashed_cores_loops_read_ended_within_one_poll() {
 async fn seeded(n: &Node, cid: &str) -> String {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let call = build_initial_call(&invite("w0", "w1", cid), src(), &config, &IdGen::seeded(1), 0);
-    let body = MsgpackCodec::new().encode(&call);
+    let body = MsgpackCodec::new().encode(&call).unwrap();
     n.store
         .put_call(
             PartitionRole::Primary,

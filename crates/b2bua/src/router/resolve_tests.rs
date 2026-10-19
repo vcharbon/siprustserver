@@ -98,7 +98,7 @@ async fn an_acting_backup_binds_the_leg_from_the_replicated_index() {
     let ctx = n.core.router_ctx();
     let call = answered_call("w0", "w1", "cid-takeover");
     let r = call.call_ref.clone();
-    let body = MsgpackCodec::new().encode(&call);
+    let body = MsgpackCodec::new().encode(&call).unwrap();
     n.store
         .put_call(
             PartitionRole::Backup,

@@ -19,17 +19,13 @@ pub fn derive_call_ref(primary_ordinal: &str, a_leg_call_id: &str, a_leg_from_ta
 /// callers can detect and upgrade them at the boundary. The single source of the
 /// `callRef` grammar; [`parse_call_ref`] and [`call_ref_primary`] both delegate.
 fn split_call_ref(reference: &str) -> Option<(&str, &str, &str)> {
-    let i1 = reference.find('|')?;
-    if i1 == 0 {
+    let (primary, rest) = reference.split_once('|')?;
+    let (call_id, from_tag) = rest.split_once('|')?;
+    // Every segment holds at least one char.
+    if primary.is_empty() || call_id.is_empty() || from_tag.is_empty() {
         return None;
     }
-    let rest = i1 + 1;
-    let i2 = rest + reference[rest..].find('|')?;
-    // Need ≥1 char between the pipes and ≥1 char after the second pipe.
-    if i2 <= i1 + 1 || i2 >= reference.len() - 1 {
-        return None;
-    }
-    Some((&reference[..i1], &reference[i1 + 1..i2], &reference[i2 + 1..]))
+    Some((primary, call_id, from_tag))
 }
 
 /// Parse a `callRef` back into its three owned segments. Returns `None` on

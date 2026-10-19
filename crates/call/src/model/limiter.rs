@@ -305,10 +305,10 @@ impl CallLimiterState {
 
     /// Whether `set` names an id (with its multiplicity) held lacks.
     fn lacks_any(&self, set: &[LimiterEntry]) -> bool {
-        let mut held: Vec<&str> = self.held.iter().map(|e| e.id.as_str()).collect();
-        set.iter().any(|e| match held.iter().position(|id| *id == e.id) {
-            Some(i) => {
-                held.swap_remove(i);
+        let mut held: Vec<Option<&str>> = self.held.iter().map(|e| Some(e.id.as_str())).collect();
+        set.iter().any(|e| match held.iter_mut().find(|id| **id == Some(e.id.as_str())) {
+            Some(slot) => {
+                *slot = None;
                 false
             }
             None => true,

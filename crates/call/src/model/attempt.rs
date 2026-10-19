@@ -10,7 +10,7 @@ use super::deadline::Deadline;
 /// attempt opened after it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct AttemptId(pub u32);
+pub struct AttemptId(pub usize);
 
 impl std::fmt::Debug for AttemptId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

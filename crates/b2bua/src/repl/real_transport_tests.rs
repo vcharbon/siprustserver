@@ -117,7 +117,7 @@ fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (Strin
     // +5 min: restored into the DelayQueue but never fires during the test.
     let fire_at = clock.now_ms() + 300_000;
     call::helpers::arm_timer(&mut call, TimerKey::call(TimerType::Keepalive), fire_at);
-    let body = MsgpackCodec::new().encode(&call);
+    let body = MsgpackCodec::new().encode(&call).unwrap();
     (call.call_ref.clone(), body)
 }
 

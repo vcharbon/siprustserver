@@ -9,6 +9,7 @@
 mod adoption;
 mod call_store;
 mod faults;
+mod flush_body;
 mod memory;
 mod poison;
 mod replica_index;
@@ -814,25 +815,8 @@ impl CallState {
         }
         .or_else(|| call.topology.clone());
         let (call_gen, call_bgen) = stored.as_ref().map(|t| (t.gen, t.bak_gen)).unwrap_or((0, 0));
-        // Embed the authoritative topology in the BODY too, not just the frame
-        // meta. `call` is the pre-`update` clone (its `topology` counters are one
-        // bump stale), so a node that hydrates from this body would branch at the
-        // stale `(p,b)` — invisible while a backup only ever takes over a CRASHED
-        // primary (its meta is gone on reboot), but it desynced a reverse-flush
-        // against an ALIVE primary (the misroute): the backup branched one `p`
-        // behind, so the Reverse `(p,b)` apply rule rejected its flush and the
-        // live primary never reconciled (FixCallTerminateOnBackup C2/C3/C11).
-        let body = match (call.topology.as_ref(), stored.as_ref()) {
-            // A pre-`update` clone whose topology is stale → patch it to the
-            // authoritative one before encoding.
-            (Some(t), Some(s)) if t != s => {
-                let mut consistent = call.clone();
-                consistent.topology = Some(s.clone());
-                self.codec.encode(&consistent)
-            }
-            // Already consistent (the common path — `call` IS the authoritative
-            // copy, e.g. a fresh flush) → encode it directly, no clone.
-            _ => self.codec.encode(call),
+        let Some(body) = flush_body::encode(&self.codec, call, stored.as_ref()) else {
+            return;
         };
         let (role, primary, mut opts) = self.store_target(&call.call_ref);
         opts.incarnation = Some(call.incarnation().to_string());

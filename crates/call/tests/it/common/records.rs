@@ -5,7 +5,7 @@ use super::*;
 
 pub(super) fn arb_attempt() -> impl Strategy<Value = Attempt> {
     (
-        0u32..4,
+        0usize..4,
         prop_oneof![
             Just(AttemptCause::Route),
             Just(AttemptCause::Failover),
@@ -180,7 +180,7 @@ pub(super) fn arb_message_ring() -> impl Strategy<Value = MessageRing> {
 pub(super) fn arb_timer() -> impl Strategy<Value = TimerEntry> {
     let scope = prop_oneof![
         Just(TimerScope::Call),
-        (0u32..4).prop_map(|id| TimerScope::Attempt(AttemptId(id))),
+        (0usize..4).prop_map(|id| TimerScope::Attempt(AttemptId(id))),
         arb_tag().prop_map(TimerScope::Leg),
     ];
     (arb_timer_type(), scope, any::<u64>(), any::<i64>()).prop_map(|(timer_type, scope, g, at)| {

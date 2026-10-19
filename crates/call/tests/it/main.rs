@@ -11,6 +11,7 @@ mod common;
 mod attempts;
 mod callref;
 mod codec_roundtrip;
+mod decode_bounds;
 mod index_key;
 mod invite_glare;
 mod lifecycle;

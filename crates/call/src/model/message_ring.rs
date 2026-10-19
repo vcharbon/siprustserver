@@ -66,8 +66,9 @@ impl MessageRing {
         self.entries.push(entry);
         if self.entries.len() > cap {
             let excess = self.entries.len() - cap;
-            self.entries.drain(..excess);
-            self.dropped = self.dropped.saturating_add(excess as u32);
+            self.entries = std::mem::take(&mut self.entries).into_iter().skip(excess).collect();
+            let evicted = u32::try_from(excess).unwrap_or(u32::MAX);
+            self.dropped = self.dropped.saturating_add(evicted);
         }
     }
 

@@ -168,9 +168,8 @@ fn fronted_fork<'a>(call: &'a Call, face: &Dialog) -> Option<(String, Option<&'a
 pub fn note_shown(call: &mut Call, b_leg_id: &str, b_tag: &str) {
     for d in call.a_leg.dialogs.iter_mut() {
         let at = d.fronts.iter().position(|f| f.leg_id == b_leg_id && f.peer_tag == b_tag);
-        if let Some(at) = at {
-            let shown = d.fronts.remove(at);
-            d.fronts.push(shown);
+        if let Some(tail) = at.and_then(|at| d.fronts.get_mut(at..)).filter(|t| !t.is_empty()) {
+            tail.rotate_left(1);
         }
     }
 }

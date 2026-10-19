@@ -84,7 +84,7 @@ fn named(call: &Call, opts: PutOpts) -> PutOpts {
 
 /// The primary's own write of `call` at `(p, 0)`, flushed toward B.
 async fn primary_put(a: &ReplicatingCallStore, call: &Call, p: i64) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     a.put_call(PRI, "A", &call.call_ref, body, &[], 600_000, p, 0, &named(call, fwd("B")))
         .await
         .unwrap();
@@ -98,7 +98,7 @@ async fn primary_delete(a: &ReplicatingCallStore, call: &Call) {
 /// B's own write of `call` at `(p, b)`: what its takeover copy flushes back
 /// toward the primary (`b > 0`).
 async fn takeover_write(b: &ReplicatingCallStore, call: &Call, p: i64, bgen: i64) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     b.put_call(BAK, "A", &call.call_ref, body, &[], 30_000, p, bgen, &named(call, rev("A")))
         .await
         .unwrap();
@@ -106,7 +106,7 @@ async fn takeover_write(b: &ReplicatingCallStore, call: &Call, p: i64, bgen: i64
 
 /// B's copy of a call A replicated: what B's Backup flow applies.
 async fn replicated(b: &ReplicatingCallStore, call: &Call, p: i64) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let opts = named(call, PutOpts { origin_now_ms: Some(0), ..PutOpts::default() });
     b.put_call(BAK, "A", &call.call_ref, body, &[], 600_000, p, 0, &opts).await.unwrap();
 }

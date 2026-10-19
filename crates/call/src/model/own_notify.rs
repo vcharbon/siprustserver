@@ -24,6 +24,7 @@ pub struct OwnNotify {
 impl OwnNotify {
     /// 8·T1: the NOTIFY's last retransmission inside it leaves at 7·T1 (RFC
     /// 3261 §17.1.2.2), so a final that has not come by then is read as lost.
+    #[expect(clippy::cast_possible_wrap, reason = "T1 is the constant 500 ms")]
     pub const ANSWER_CAP_MS: i64 = 8 * T1 as i64;
 
     /// When the requests behind the NOTIFY leave though it is unanswered.

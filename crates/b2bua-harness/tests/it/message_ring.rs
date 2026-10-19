@@ -221,14 +221,14 @@ async fn a_basic_call_records_every_distinct_message_on_both_legs() {
     // ── The replicated body at steady state, ring on: the bytes the store
     // flushes, against the same call with its rings blanked ─────────────
     let codec = MsgpackCodec::new();
-    let with_ring = codec.encode(&live).len();
+    let with_ring = codec.encode(&live).unwrap().len();
     let mut blank = live.clone();
     blank.a_leg.messages = Default::default();
     for b in &mut blank.b_legs {
         b.messages = Default::default();
     }
     blank.message_seq = 0;
-    let without_ring = codec.encode(&blank).len();
+    let without_ring = codec.encode(&blank).unwrap().len();
     eprintln!(
         "steady-state body: {with_ring} bytes with the ring ({} entries), {without_ring} without, +{}",
         live.a_leg.messages.entries.len() + b_leg(&live).messages.entries.len(),

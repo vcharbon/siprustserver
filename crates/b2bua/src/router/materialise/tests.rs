@@ -37,7 +37,7 @@ fn call_in(pri: &str, bak: &str, cid: &str, state: CallModelState, clock: &Clock
 
 /// Seed `call` into `(role, primary)` of the replicating store.
 async fn put(store: &ReplicatingCallStore, role: PartitionRole, primary: &str, call: &Call) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
     store
         .put_call(role, primary, &call.call_ref, body, &[], 60_000, gen, 0, &PutOpts::default())

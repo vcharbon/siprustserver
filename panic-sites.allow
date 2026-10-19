@@ -91,16 +91,6 @@ crates/call-limiter-runner/src/main.rs 5
 crates/call-limiter/src/metrics.rs 4
 crates/call-limiter/src/server.rs 1
 crates/call-limiter/src/store.rs 18
-crates/call/src/callref.rs 4
-crates/call/src/codec.rs 1
-crates/call/src/helpers/attempt.rs 9
-crates/call/src/helpers/peering.rs 1
-crates/call/src/helpers/timer.rs 1
-crates/call/src/model/deadline.rs 2
-crates/call/src/model/emission.rs 1
-crates/call/src/model/limiter.rs 1
-crates/call/src/model/message_ring.rs 2
-crates/call/src/model/own_notify.rs 1
 crates/http-net/src/backend/config.rs 3
 crates/http-net/src/backend/metrics.rs 1
 crates/http-net/src/backend/mod.rs 4

@@ -739,7 +739,7 @@ fn body_at(final_sent: Option<u16>, state: call::CallModelState) -> Arc<[u8]> {
     let mut call = crate::initial_invite::build_initial_call(&invite, src, &config, &id_gen, 0);
     call.a_leg.invite_final_sent = final_sent;
     call.state = state;
-    Arc::from(call::MsgpackCodec::new().encode(&call))
+    Arc::from(call::MsgpackCodec::new().encode(&call).unwrap())
 }
 
 /// A forward `Put` of `body` at `(p, b)`.

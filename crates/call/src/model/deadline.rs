@@ -19,8 +19,8 @@ pub enum Deadline {
 impl Deadline {
     /// A wait stated in milliseconds: absent, zero or negative is off.
     pub fn of_millis(millis: Option<i64>) -> Self {
-        match millis {
-            Some(ms) if ms > 0 => Deadline::After(Duration::from_millis(ms as u64)),
+        match millis.and_then(|ms| u64::try_from(ms).ok()) {
+            Some(ms) if ms > 0 => Deadline::After(Duration::from_millis(ms)),
             _ => Deadline::Off,
         }
     }
@@ -33,9 +33,10 @@ impl Deadline {
         }
     }
 
-    /// The wait in milliseconds, when the deadline is on.
+    /// The wait in milliseconds, when the deadline is on; a wait past
+    /// `i64::MAX` milliseconds reads as `i64::MAX`.
     pub fn millis(self) -> Option<i64> {
-        self.duration().map(|d| d.as_millis() as i64)
+        self.duration().map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
     }
 }
 
@@ -53,5 +54,14 @@ mod tests {
     #[test]
     fn a_positive_wait_keeps_its_milliseconds() {
         assert_eq!(Deadline::of_millis(Some(750)).millis(), Some(750));
+    }
+
+    /// A decoded body may carry any duration: one past `i64` milliseconds
+    /// reads as the longest wait, never as a negative one.
+    #[test]
+    fn a_wait_past_i64_milliseconds_reads_as_the_longest() {
+        assert_eq!(Deadline::After(Duration::MAX).millis(), Some(i64::MAX));
+        let past = Duration::from_millis(u64::try_from(i64::MAX).unwrap() + 1);
+        assert_eq!(Deadline::After(past).millis(), Some(i64::MAX));
     }
 }

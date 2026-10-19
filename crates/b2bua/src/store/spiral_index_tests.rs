@@ -225,7 +225,7 @@ async fn backup_with_replicas(last: u8) -> (CallState, Arc<ReplicatingCallStore>
 }
 
 async fn put_replica(repl: &ReplicatingCallStore, call: &Call) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let idx = call_index_keys(call);
     repl.put_call(
         PartitionRole::Backup,

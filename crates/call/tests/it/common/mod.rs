@@ -616,7 +616,7 @@ fn arb_leg() -> BoxedStrategy<Leg> {
         ),
         (arb_message_ring(), proptest::option::of(200u16..300)),
         arb_sdp_session(),
-        (proptest::option::of((0u32..4).prop_map(AttemptId)), arb_ring()),
+        (proptest::option::of((0usize..4).prop_map(AttemptId)), arb_ring()),
     )
         .prop_map(
             |(

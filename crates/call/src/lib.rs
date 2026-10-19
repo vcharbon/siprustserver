@@ -19,6 +19,25 @@
 //! - **SIP parsing.** SIP payloads are carried as raw bytes; header/message
 //!   extraction lives in `sip-message` only.
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::iter_over_hash_type,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 pub mod callref;
 pub mod codec;
 pub mod features;
@@ -42,7 +61,7 @@ pub use index_key::{
 // The transaction kinds and timeouts a transaction user names.
 pub use txn::{TxnKind, TxnTimeoutKind};
 // Pluggable body codec (msgpack default).
-pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
+pub use codec::{CallBodyCodec, CallDecodeError, CallEncodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.
 pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology, Leg,

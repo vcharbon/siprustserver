@@ -175,7 +175,7 @@ fn a_primary_behind_the_copy_on_its_round_does_not_cover_it() {
 /// `call`, stored as `w1`'s Element of `w0`'s call and taken over: the live
 /// takeover copy, its lock released.
 async fn taken_over(n: &Node, call: &Call) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let ttl = 60_000;
     let opts = PutOpts::default();
     let r = &call.call_ref;
@@ -200,7 +200,7 @@ async fn primary_wrote(n: &Node, call_ref: &str, write: PrimaryWrite) {
 }
 
 fn put(call: &Call) -> PrimaryWrite {
-    PrimaryWrite::Put(Arc::from(MsgpackCodec::new().encode(call)))
+    PrimaryWrite::Put(Arc::from(MsgpackCodec::new().encode(call).unwrap()))
 }
 
 #[tokio::test(start_paused = true)]
