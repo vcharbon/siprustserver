@@ -20,6 +20,8 @@ pub struct Reconciled {
     pub orphan_index: u64,
     /// Resident calls with no key list, indexed again.
     pub missing_index: u64,
+    /// Takeover marks of no resident call, dropped.
+    pub orphan_takeover: u64,
 }
 
 impl Reconciled {
@@ -30,19 +32,25 @@ impl Reconciled {
 }
 
 impl CallState {
-    /// One reconcile pass at `now_ms`. The map lengths are compared first, and
-    /// the entries are walked only when one of them differs from the call
-    /// map's: an orphan stamp or index entry is dropped, a resident call with
-    /// no stamp is stamped now, one with no key list is indexed again under
-    /// the keys no other call holds, and a key a resident call owns is never
-    /// moved.
+    /// One reconcile pass at `now_ms`. A takeover mark of no resident call is
+    /// dropped (the marks are few, so they are walked every pass). The map
+    /// lengths are compared next, and the entries are walked only when one of
+    /// them differs from the call map's: an orphan stamp or index entry is
+    /// dropped, a resident call with no stamp is stamped now, one with no key
+    /// list is indexed again under the keys no other call holds, and a key a
+    /// resident call owns is never moved.
     pub fn reconcile(&self, now_ms: i64) -> Reconciled {
         let mut inner = self.locked();
+        let Inner { calls, takeover, .. } = &mut *inner;
+        let orphan_takeover = takeover.retain(|call_ref| calls.contains_key(call_ref));
         let calls = inner.calls.len();
-        if inner.touched.len() == calls && inner.indexed.len() == calls {
-            return Reconciled::default();
-        }
-        reconcile_inner(&mut inner, now_ms)
+        let mut fixed = if inner.touched.len() == calls && inner.indexed.len() == calls {
+            Reconciled::default()
+        } else {
+            reconcile_inner(&mut inner, now_ms)
+        };
+        fixed.orphan_takeover = orphan_takeover;
+        fixed
     }
 
     /// The state an insert a panic cut before its stamp leaves: `call_ref`'s

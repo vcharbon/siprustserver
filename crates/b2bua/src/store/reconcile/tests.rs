@@ -62,6 +62,41 @@ fn a_call_with_no_stamp_is_stamped_by_the_next_pass() {
     assert!(state.reconcile(43).is_clean(), "the store is whole again");
 }
 
+/// A removal clears the call's takeover mark with it.
+#[test]
+fn a_removed_call_leaves_no_takeover_mark() {
+    let state = state();
+    state.create(call("a", "a@192.0.2.9"));
+    state.mark_takeover("a");
+    state.remove("a");
+    assert!(!state.is_takeover("a"));
+    assert!(state.reconcile(5).is_clean());
+}
+
+/// A takeover mark whose call a cut removal left gone is dropped by the next
+/// pass and counted, the store's other entries untouched.
+#[test]
+fn a_takeover_mark_of_a_gone_call_is_dropped_by_the_next_pass() {
+    let state = state();
+    state.create(call("a", "a@192.0.2.9"));
+    state.create(call("b", "b@192.0.2.9"));
+    state.mark_takeover("a");
+    state.mark_takeover("b");
+    {
+        let mut inner = state.locked();
+        inner.calls.remove("a");
+        inner.touched.remove("a");
+        let keys = inner.indexed.remove("a").unwrap_or_default();
+        inner.unindex("a", &keys);
+    }
+
+    let fixed = state.reconcile(6);
+    assert_eq!(fixed, Reconciled { orphan_takeover: 1, ..Reconciled::default() });
+    assert!(!state.is_takeover("a"), "the orphan mark is dropped");
+    assert!(state.is_takeover("b"), "a resident call's mark stays");
+    assert!(state.reconcile(7).is_clean(), "the store is whole again");
+}
+
 /// A removal a panic cut after the call left: its stamp and its index entries
 /// are dropped, and a key another live call holds is left where it is.
 #[test]

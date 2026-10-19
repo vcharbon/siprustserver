@@ -162,12 +162,13 @@ impl CdrWriter for BufferedCdrWriter {
         self.inner.read_all().await
     }
 
-    /// The first close waits for the drainer, which ends at its deadline; a
-    /// later one waits for that within its own deadline.
+    /// The drainer, while buffering.
     fn task(&self) -> Option<tokio::task::AbortHandle> {
         self.drainer.clone()
     }
 
+    /// The first close waits for the drainer, which ends at its deadline; a
+    /// later one waits for that within its own deadline.
     async fn close(&self, deadline: Instant) {
         if self.tx.is_none() {
             return self.inner.close(deadline).await;

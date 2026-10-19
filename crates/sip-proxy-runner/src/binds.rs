@@ -16,15 +16,22 @@ use crate::intake_shed::{intake_shed_hook, intake_shed_watermark};
 
 /// The proxy's sockets.
 pub struct Sockets {
-    /// The metrics/probe HTTP listener; its accept loop starts later.
+    /// The metrics/probe HTTP listener, its address read; its accept loop
+    /// starts later.
     pub metrics: tokio::net::TcpListener,
-    /// The internal-face signalling endpoint of each recv shard.
-    pub internal: Vec<Box<dyn UdpEndpoint>>,
-    /// The external-face signalling endpoint of each recv shard; none on a
-    /// single-face proxy.
-    pub external: Vec<Box<dyn UdpEndpoint>>,
+    /// The signalling endpoints of each recv shard.
+    pub shards: Vec<ShardSockets>,
     /// The OPTIONS health probe's own source socket.
     pub probe: Box<dyn UdpEndpoint>,
+}
+
+/// One recv shard's signalling endpoints.
+pub struct ShardSockets {
+    /// Its internal-face endpoint.
+    pub internal: Box<dyn UdpEndpoint>,
+    /// Its external-face endpoint: one exactly when the proxy has an
+    /// external face.
+    pub external: Option<Box<dyn UdpEndpoint>>,
 }
 
 /// Bind every socket `cfg` names, each signalling endpoint stamping arrivals
@@ -54,6 +61,9 @@ pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Result<Sockets, S
             tokio::net::TcpListener::bind(metrics_sa)
         })
         .await?;
+    // The probe server reads the address when it starts: a listener that
+    // cannot name it refuses the boot here, before any SIP socket is bound.
+    metrics.local_addr().map_err(|e| format!("metrics listener on {metrics_sa}: {e}"))?;
 
     // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
     // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
@@ -148,7 +158,10 @@ pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Result<Sockets, S
     )
     .await?;
 
-    Ok(Sockets { metrics, internal, external, probe })
+    let mut external = external.into_iter();
+    let shards =
+        internal.into_iter().map(|internal| ShardSockets { internal, external: external.next() });
+    Ok(Sockets { metrics, shards: shards.collect(), probe })
 }
 
 /// Log the buffer sizes the kernel granted one face's signalling socket,

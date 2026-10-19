@@ -31,6 +31,7 @@ b2bua-runner b2bua_store_reconciled_orphan_stamps_total counter fixed {}
 b2bua-runner b2bua_store_reconciled_missing_stamps_total counter fixed {}
 b2bua-runner b2bua_store_reconciled_orphan_index_total counter fixed {}
 b2bua-runner b2bua_store_reconciled_missing_index_total counter fixed {}
+b2bua-runner b2bua_store_reconciled_orphan_takeover_total counter fixed {}
 b2bua-runner b2bua_replica_reap_panics_total counter fixed {}
 b2bua-runner b2bua_reaper_verdicts_total counter fixed {}
 b2bua-runner b2bua_reaper_discharged_total counter fixed {}

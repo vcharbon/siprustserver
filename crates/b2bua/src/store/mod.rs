@@ -524,6 +524,7 @@ impl CallState {
         // derived entries the sweep reconciles.
         let mut inner = self.locked();
         let removed = inner.calls.remove(call_ref);
+        inner.takeover.remove(call_ref);
         let keys = inner.indexed.remove(call_ref).unwrap_or_default();
         inner.unindex(call_ref, &keys);
         let mut answered = false;
@@ -535,7 +536,6 @@ impl CallState {
             incarnation = Some(was.incarnation().to_string());
         }
         inner.locks.remove(call_ref);
-        inner.takeover.remove(call_ref);
         inner.touched.remove(call_ref);
         inner.shrink_idle();
         drop(inner);
@@ -702,7 +702,9 @@ impl CallState {
     /// inserted — the router then re-arms its timers exactly once. Idempotent: a
     /// call already live (re-served, or never lost) is left untouched.
     ///
-    /// A traced call opens this node's own root span here, after the residency
+    /// Every caller holds the call's per-call lock ([`lock`](Self::lock)), so no
+    /// other insert of it runs between the residency check and the insert. A
+    /// traced call opens this node's own root span here, after the residency
     /// check, so a span is opened only for a call this node goes on to serve
     /// (ADR-0026 §5). The idle clock starts at the insert, never at `created_at`
     /// (ADR-0020 X4): a hours-old failed-over or reclaimed long-hold call is
@@ -726,9 +728,7 @@ impl CallState {
         if self.contains(&call_ref) {
             return false;
         }
-        // Outside the store lock: the trace registry takes its own, and an
-        // adoption is idempotent per call, so an insert that wins a race
-        // below keeps the span this one opened.
+        // Outside the store lock: the trace registry takes its own.
         crate::trace::adopt_replicated(&mut call, now_ms);
         call.limiter.enter_epoch();
         {

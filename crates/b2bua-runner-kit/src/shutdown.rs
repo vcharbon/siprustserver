@@ -8,9 +8,10 @@
 //!   `B2BUA_DRAIN_MIN_MS`, or `B2BUA_DRAIN_GRACE_MS`; the queued limiter
 //!   releases flushed within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (ADR-0040 decision
 //!   9). Exit 0; the orchestrator restarts the ordinal.
-//! - **A loop task ended** — the transaction owner or the router returned,
-//!   was aborted or panicked, before or during a drain: nothing serves any
-//!   more. The queued limiter releases are flushed within the same bound,
+//! - **A loop task ended** — the transaction owner, the router or a vital
+//!   task (the timer driver, the terminate writer, the CDR drainer, the
+//!   changelog server) returned, was aborted or panicked, before or during a
+//!   drain: nothing serves any more. The queued limiter releases are flushed within the same bound,
 //!   and the process exits non-zero; the orchestrator restarts it.
 //!
 //! Every exit then closes the CDR sink within `B2BUA_DRAIN_CDR_FLUSH_MS`, which
@@ -141,7 +142,8 @@ async fn drained(core: &B2buaCore, name: &str, bounds: DrainBounds, stop: Stop) 
     ExitCode::SUCCESS
 }
 
-/// A loop task ended: nothing serves any more. The queued limiter releases
+/// A loop or vital task ended ([`b2bua::loops::WorkerLoops`]): nothing serves
+/// any more. The queued limiter releases
 /// still leave, within the drain's flush bound (ADR-0040 decision 9: the
 /// release queue runs on its own task), then the process exits non-zero.
 async fn loop_ended(

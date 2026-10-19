@@ -148,7 +148,7 @@ use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::strategies::LoadBalancerStrategy;
 use sip_proxy::{ExternalFaceParts, RoutingStrategy};
-use sip_proxy_runner::binds::{bind_sockets, Sockets};
+use sip_proxy_runner::binds::{bind_sockets, ShardSockets, Sockets};
 use sip_proxy_runner::config::{refusal, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
 use sip_proxy_runner::health_sampler::HealthSampler;
@@ -241,12 +241,8 @@ async fn run() -> Result<i32, String> {
     // packets against it, so the self-gate's intake age is a difference of two
     // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::checked_system().map_err(|e| e.to_string())?;
-    let Sockets {
-        metrics: metrics_listener,
-        internal: endpoints,
-        external: ext_endpoints,
-        probe: probe_ep,
-    } = bind_sockets(&cfg, &clock).await?;
+    let Sockets { metrics: metrics_listener, shards, probe: probe_ep } =
+        bind_sockets(&cfg, &clock).await?;
 
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(
@@ -345,19 +341,16 @@ async fn run() -> Result<i32, String> {
     // the probe routes read (ADR-0050 §5, §11).
     let probe = shared.health_probe(probe_ep, health_control, observer, cfg.probe);
     let mut cores = Vec::with_capacity(recv_shards);
-    let mut ext_endpoints = ext_endpoints.into_iter();
-    for (shard, endpoint) in endpoints.into_iter().enumerate() {
+    for (shard, ShardSockets { internal, external }) in shards.into_iter().enumerate() {
         let mut builder = shared.shard(shard);
-        if let Some(ext) = &ext_face {
+        if let (Some(ext), Some(endpoint)) = (&ext_face, external) {
             builder = builder.external_face(ExternalFaceParts {
-                endpoint: ext_endpoints
-                    .next()
-                    .ok_or_else(|| format!("no external endpoint bound for shard {shard}"))?,
+                endpoint,
                 advertised: ext.advertise.clone(),
                 int_cidrs: ext.int_cidrs.clone(),
             });
         }
-        cores.push(builder.build(endpoint));
+        cores.push(builder.build(internal));
     }
     if !prewarm_targets.is_empty() {
         // Each recv shard owns its own resolver cache, so prewarm every core.

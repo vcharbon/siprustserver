@@ -39,6 +39,14 @@ impl TakeoverMarks {
     pub(super) fn len(&self) -> usize {
         self.refs.len()
     }
+
+    /// Keep the marks `keep` holds, and count the ones dropped.
+    pub(super) fn retain(&mut self, keep: impl Fn(&str) -> bool) -> u64 {
+        let before = self.refs.len();
+        self.refs.retain(|call_ref| keep(call_ref));
+        self.live.store(self.refs.len(), Ordering::Release);
+        u64::try_from(before - self.refs.len()).unwrap_or(u64::MAX)
+    }
 }
 
 impl CallState {

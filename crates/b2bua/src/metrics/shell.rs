@@ -34,5 +34,6 @@ impl super::B2buaMetrics {
             + self.store_reconciled_missing_stamps_total()
             + self.store_reconciled_orphan_index_total()
             + self.store_reconciled_missing_index_total()
+            + self.store_reconciled_orphan_takeover_total()
     }
 }
