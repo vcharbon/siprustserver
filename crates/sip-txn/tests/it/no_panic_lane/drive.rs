@@ -33,9 +33,32 @@ pub enum Failure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Outcome {
     pub failure: Option<Failure>,
-    /// Messages the layer handed the TU.
+    /// Messages and cancellations the layer handed the TU for the case's
+    /// two copies of its datagram: the preamble's and the follow-up's are
+    /// not counted.
     pub handed_up: usize,
+    /// Of those, the responses that matched a client transaction.
+    pub matched: usize,
+    /// Copies of the client INVITE the peer received over the whole case.
+    pub invite_copies: usize,
 }
+
+/// What the TU has been handed so far.
+#[derive(Default)]
+struct Seen {
+    handed_up: AtomicUsize,
+    matched: AtomicUsize,
+}
+
+impl Seen {
+    fn read(&self) -> (usize, usize) {
+        (self.handed_up.load(Ordering::Relaxed), self.matched.load(Ordering::Relaxed))
+    }
+}
+
+/// How long the TU rings an INVITE before its final: a CANCEL or PRACK sent
+/// a datagram gap after the INVITE meets it ringing.
+pub const FINAL_DELAY: Duration = Duration::from_secs(2);
 
 /// How long a case runs after its last datagram: past the INVITE bound
 /// (158 s), every Timer B/F/H/J/K/L and the safety-net sweep.
@@ -87,22 +110,26 @@ async fn drive(seed: &Seed, datagram: &[u8]) -> Outcome {
     let peer = net.bind_udp(BindUdpOpts::new(addr(PEER), 4096)).await.expect("bind the peer");
     let (layer, events) =
         TransactionLayer::spawn(endpoint, Arc::new(CustomParser::new()), config());
-    let handed_up = Arc::new(AtomicUsize::new(0));
-    let tu = tokio::spawn(answer_requests(layer.clone(), events, handed_up.clone()));
+    let seen = Arc::new(Seen::default());
+    let tu = tokio::spawn(answer_requests(layer.clone(), events, seen.clone()));
 
     for (request, kind) in seeds::client_requests() {
         if layer.send_request(request, addr(PEER), kind).await.is_err() {
-            return Outcome { failure: Some(Failure::OwnerEnded), handed_up: 0 };
+            let failure = Some(Failure::OwnerEnded);
+            return Outcome { failure, handed_up: 0, matched: 0, invite_copies: 0 };
         }
     }
     for before in &seed.before {
         let _ = peer.send_to(before, addr(LAYER)).await;
         tokio::time::sleep(RETRANSMIT_GAP).await;
     }
+    tokio::time::sleep(seed.settle).await;
+    let (preamble_handed_up, preamble_matched) = seen.read();
     let _ = peer.send_to(datagram, addr(LAYER)).await;
     tokio::time::sleep(RETRANSMIT_GAP).await;
     let _ = peer.send_to(datagram, addr(LAYER)).await;
     tokio::time::sleep(RETRANSMIT_GAP).await;
+    let (handed_up, matched) = seen.read();
     for after in &seed.after {
         let _ = peer.send_to(after, addr(LAYER)).await;
         tokio::time::sleep(RETRANSMIT_GAP).await;
@@ -117,21 +144,45 @@ async fn drive(seed: &Seed, datagram: &[u8]) -> Outcome {
         None
     };
     tu.abort();
-    Outcome { failure, handed_up: handed_up.load(Ordering::Relaxed) }
+    let invite_copies = std::iter::from_fn(|| peer.try_recv())
+        .filter(|p| p.raw.starts_with(b"INVITE ") && contains(&p.raw, b"z9hG4bK-lane-inv"))
+        .count();
+    Outcome {
+        failure,
+        handed_up: handed_up - preamble_handed_up,
+        matched: matched - preamble_matched,
+        invite_copies,
+    }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// The lane's TU: every request it is handed is answered through the layer,
-/// an INVITE with a 180 then a final its Call-ID picks (2xx, busy or
-/// unavailable), any other request but an ACK with a 200. Every message
-/// handed up is counted in `handed_up`.
+/// an INVITE with a 180 then, [`FINAL_DELAY`] later, a final its Call-ID
+/// picks (2xx, busy or unavailable), any other request but an ACK with a
+/// 200. What it is handed is counted in `seen`.
 async fn answer_requests(
     layer: TransactionLayer,
     mut events: mpsc::Receiver<TransactionEvent>,
-    handed_up: Arc<AtomicUsize>,
+    seen: Arc<Seen>,
 ) {
     while let Some(event) = events.recv().await {
-        let TransactionEvent::Message { message, src, .. } = event else { continue };
-        handed_up.fetch_add(1, Ordering::Relaxed);
+        let (message, src, matched) = match event {
+            TransactionEvent::Message { message, src, matched_client_txn } => {
+                (message, src, matched_client_txn)
+            }
+            TransactionEvent::Cancelled { .. } => {
+                seen.handed_up.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            _ => continue,
+        };
+        seen.handed_up.fetch_add(1, Ordering::Relaxed);
+        if matched {
+            seen.matched.fetch_add(1, Ordering::Relaxed);
+        }
         let SipMessage::Request(req) = *message else { continue };
         let to_tag = req.to().tag().is_none().then(|| "lane-uas".to_owned());
         let opts = GenerateResponseOpts { to_tag, ..GenerateResponseOpts::default() };
@@ -141,7 +192,16 @@ async fn answer_requests(
                 if let Ok(ringing) = generate_response(&req, 180, "Ringing", &opts) {
                     let _ = layer.send_response(ringing, src).await;
                 }
-                INVITE_FINALS[req.call_id().as_str().len() % INVITE_FINALS.len()]
+                let (status, reason) =
+                    INVITE_FINALS[req.call_id().as_str().len() % INVITE_FINALS.len()];
+                if let Ok(resp) = generate_response(&req, status, reason, &opts) {
+                    let layer = layer.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(FINAL_DELAY).await;
+                        let _ = layer.send_response(resp, src).await;
+                    });
+                }
+                continue;
             }
             _ => (200, "OK"),
         };
@@ -151,6 +211,7 @@ async fn answer_requests(
     }
 }
 
-/// The finals the TU answers an INVITE with, one picked per Call-ID.
+/// The finals the TU answers an INVITE with, one picked per Call-ID: the
+/// seeds' dialog (a 22-byte Call-ID) is answered 200.
 const INVITE_FINALS: [(u16, &str); 3] =
-    [(200, "OK"), (486, "Busy Here"), (503, "Service Unavailable")];
+    [(486, "Busy Here"), (200, "OK"), (503, "Service Unavailable")];

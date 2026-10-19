@@ -36,16 +36,29 @@ const CASES: u32 = 1024;
 /// Threads the corpus is spread over, each on the lane's stack.
 const WORKERS: usize = 4;
 
-/// Every seed, unmutated, reaches the TU: the lane drives the layer's
-/// request and response paths, not only its parse refusals.
+/// Every seed, unmutated, reaches what it is for, after its preamble: a
+/// request reaches the TU, a response matches its client transaction, and
+/// the 100 the layer absorbs stops the client INVITE's retransmissions. The
+/// lane drives the layer's request and response paths, not only its parse
+/// refusals.
 #[test]
 fn every_seed_reaches_the_tu() {
     on_lane_stack(|| {
         for seed in seeds::all() {
             let outcome = drive::outcome(&seed, &seed.bytes);
             assert_eq!(outcome.failure, None, "{}", seed.name);
-            let absorbed = seed.name == "resp/100-invite";
-            assert!(absorbed || outcome.handed_up > 0, "{} reached no TU: {outcome:?}", seed.name);
+            if seed.name == "resp/100-invite" {
+                assert_eq!(outcome.invite_copies, 1, "the 100 stops Timer A: {outcome:?}");
+            } else if seed.name.starts_with("resp/") {
+                assert!(outcome.matched > 0, "{} matched no client txn: {outcome:?}", seed.name);
+            } else {
+                assert!(outcome.handed_up > 0, "{} reached no TU: {outcome:?}", seed.name);
+            }
+            // The check sees the seed, not its preamble: a datagram the
+            // parser refuses in its place reaches nothing.
+            let refused = drive::outcome(&seed, b"not a SIP message");
+            assert_eq!((refused.handed_up, refused.matched), (0, 0), "{}", seed.name);
+            assert!(refused.invite_copies > 1, "{}: Timer A runs: {refused:?}", seed.name);
         }
     });
 }

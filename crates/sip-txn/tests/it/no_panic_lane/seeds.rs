@@ -5,8 +5,12 @@
 //! ACK belongs to) and after it (the CANCEL of a mutated INVITE). Addresses
 //! are documentation ranges (RFC 5737) and `example.*` names.
 
+use std::time::Duration;
+
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
 use sip_txn::TxnKind;
+
+use super::drive::FINAL_DELAY;
 
 /// Where the layer under test listens.
 pub const LAYER: &str = "192.0.2.10:5060";
@@ -19,6 +23,9 @@ pub struct Seed {
     pub name: &'static str,
     pub bytes: Vec<u8>,
     pub before: Vec<Vec<u8>>,
+    /// How long the case waits after `before`, so the mutated copy meets
+    /// the state it belongs to (the ACK of a 2xx after the 2xx).
+    pub settle: Duration,
     pub after: Vec<Vec<u8>>,
 }
 
@@ -88,11 +95,19 @@ fn cancel() -> Vec<u8> {
     )
 }
 
-/// The ACK of a non-2xx final to [`invite`].
+/// The ACK of the TU's 2xx to [`invite`], on its own branch (RFC 3261
+/// §13.2.2.4).
 fn ack() -> Vec<u8> {
     message(
         "ACK sip:bob@192.0.2.10:5060 SIP/2.0",
-        &[PEER_VIA, "Max-Forwards: 70", PEER_FROM, PEER_TO_TAGGED, PEER_CALL_ID, "CSeq: 1 ACK"],
+        &[
+            "Via: SIP/2.0/UDP 192.0.2.20:5060;branch=z9hG4bK-peer-ack;rport",
+            "Max-Forwards: 70",
+            PEER_FROM,
+            "To: <sip:bob@example.net>;tag=lane-uas",
+            PEER_CALL_ID,
+            "CSeq: 1 ACK",
+        ],
         "",
     )
 }
@@ -200,7 +215,7 @@ fn bye_response(status: &str, extra: &[&str]) -> Vec<u8> {
 }
 
 fn seed(name: &'static str, bytes: Vec<u8>) -> Seed {
-    Seed { name, bytes, before: Vec::new(), after: Vec::new() }
+    Seed { name, bytes, before: Vec::new(), settle: Duration::ZERO, after: Vec::new() }
 }
 
 /// Every seed of the lane.
@@ -208,7 +223,7 @@ pub fn all() -> Vec<Seed> {
     vec![
         Seed { after: vec![cancel()], ..seed("req/invite", invite()) },
         Seed { before: vec![invite()], ..seed("req/cancel", cancel()) },
-        Seed { before: vec![invite()], ..seed("req/ack", ack()) },
+        Seed { before: vec![invite()], settle: FINAL_DELAY, ..seed("req/ack", ack()) },
         seed(
             "req/reinvite",
             in_dialog(
