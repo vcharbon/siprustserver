@@ -1,9 +1,11 @@
 //! [`WorkerLoops`] — the two loops a worker serves through: the transaction
 //! layer's owner (recv, timer wheel, sweep) and the router. For each, whether
 //! it is turning ([`LoopPulse`]: a loop idle on its input is alive, one parked
-//! on a single piece of work is not) and whether its task still runs. The
-//! host judges the pulses against a stall threshold for its probes and exits
-//! when a task ends.
+//! on a single piece of work is not) and whether its task still runs. Beside
+//! them, the vital tasks the loops depend on (the timer driver, the store and
+//! CDR drainers, the changelog server): whether each still runs. The host
+//! judges the pulses against a stall threshold for its probes and exits when
+//! a task ends.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,10 +29,11 @@ struct Loop {
     task: AbortHandle,
 }
 
-/// The worker's loops. Clone-cheap; holding it keeps no task alive.
+/// The worker's loops and vital tasks. Holding it keeps no task alive.
 #[derive(Clone)]
 pub struct WorkerLoops {
     loops: [Loop; 2],
+    vital: Vec<(&'static str, AbortHandle)>,
 }
 
 impl WorkerLoops {
@@ -45,7 +48,15 @@ impl WorkerLoops {
                 Loop { name: owner_name, pulse: owner.0, task: owner.1 },
                 Loop { name: router_name, pulse: router.0, task: router.1 },
             ],
+            vital: Vec::new(),
         }
+    }
+
+    /// These loops and the vital task `task`, named `name`: the worker ends
+    /// when it ends.
+    pub fn with_vital(mut self, name: &'static str, task: AbortHandle) -> Self {
+        self.vital.push((name, task));
+        self
     }
 
     /// The loops on one piece of work for longer than `threshold`.
@@ -53,14 +64,18 @@ impl WorkerLoops {
         self.loops.iter().filter(|l| l.pulse.stalled(threshold)).map(|l| l.name).collect()
     }
 
-    /// The first loop whose task has ended: returned, aborted or panicked.
+    /// The first loop, then vital task, whose task has ended: returned,
+    /// aborted or panicked.
     pub fn ended(&self) -> Option<&'static str> {
-        self.loops.iter().find(|l| l.task.is_finished()).map(|l| l.name)
+        let loops = self.loops.iter().map(|l| (l.name, &l.task));
+        let vital = self.vital.iter().map(|(name, task)| (*name, task));
+        loops.chain(vital).find(|(_, task)| task.is_finished()).map(|(name, _)| name)
     }
 
-    /// Resolves with the first loop whose task has ended, looked at every
-    /// [`ENDED_POLL`].
+    /// Resolves with the first loop or vital task whose task has ended,
+    /// looked at every [`ENDED_POLL`].
     pub async fn wait_ended(&self) -> &'static str {
+        #[expect(clippy::disallowed_methods, reason = "ENDED_POLL is not zero")]
         let mut tick = tokio::time::interval(ENDED_POLL);
         loop {
             tick.tick().await;
@@ -74,7 +89,8 @@ impl WorkerLoops {
     pub fn prometheus_text(&self, threshold: Duration) -> String {
         let mut s = String::new();
         LOOP_STALLED.render(&mut s, |series| {
-            u64::from(self.loops[series.index(&LOOP)].pulse.stalled(threshold))
+            let loop_ = self.loops.get(series.index(&LOOP));
+            u64::from(loop_.is_some_and(|l| l.pulse.stalled(threshold)))
         });
         s
     }
@@ -116,5 +132,15 @@ mod tests {
         router_task.abort();
         let ended = tokio::time::timeout(ENDED_POLL * 2, loops.wait_ended()).await;
         assert_eq!(ended, Ok("router"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_vital_task_that_panics_is_named_within_one_poll() {
+        let (loops, _, _) = loops();
+        let vital = tokio::spawn(async { panic!("the vital task panics") });
+        let loops = loops.with_vital("timer_driver", vital.abort_handle());
+        let ended = tokio::time::timeout(ENDED_POLL * 2, loops.wait_ended()).await;
+        assert_eq!(ended, Ok("timer_driver"));
+        assert!(vital.await.is_err_and(|e| e.is_panic()));
     }
 }

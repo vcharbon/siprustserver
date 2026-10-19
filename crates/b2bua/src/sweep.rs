@@ -53,7 +53,8 @@ impl Drop for AbortOnDrop {
 /// with the next step; the panicking step runs again one interval later,
 /// never sooner.
 pub(crate) async fn run(interval: Duration, steps: Vec<SweepStep>) {
-    let mut tick = tokio::time::interval(interval);
+    #[expect(clippy::disallowed_methods, reason = "the period is held above zero")]
+    let mut tick = tokio::time::interval(interval.max(Duration::from_millis(1)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // skip the immediate first tick
     loop {

@@ -386,10 +386,9 @@ impl Puller {
                 None
             } else {
                 self.note_state("bootstrap_start", "cold watermark");
-                Some(
-                    tokio::time::Instant::now()
-                        + Duration::from_millis(self.config.bootstrap_hard_timeout_ms),
-                )
+                Some(sip_clock::deadline::from_now(Duration::from_millis(
+                    self.config.bootstrap_hard_timeout_ms,
+                )))
             };
 
         loop {
@@ -438,13 +437,10 @@ impl Puller {
     /// real catch-up from a best-effort timer expiry.
     fn mark_bootstrap_complete(&self, applied: u64, reason: &'static str) {
         if !self.status_tx.borrow().bootstrap_complete {
-            let duration_ms = self
-                .bootstrap_started_at
-                .lock()
-                .unwrap()
-                .take()
-                .map(|at| at.elapsed().as_millis() as u64)
-                .unwrap_or(0);
+            let started =
+                crate::poison::locked(&self.bootstrap_started_at, crate::poison::PULLER_BOOTSTRAP)
+                    .take();
+            let duration_ms = started.map_or(0, |at| sip_clock::wall::millis_u64(at.elapsed()));
             tracing::info!(
                 node = observe::node(),
                 peer = %self.peer.ordinal,
@@ -602,7 +598,7 @@ impl Puller {
         // The idle bound (ADR-0045): a stream that delivers nothing for this long
         // is left, whatever the phase.
         let idle = Duration::from_millis(self.config.idle_timeout_ms);
-        let mut quiet_until = tokio::time::Instant::now() + idle;
+        let mut quiet_until = sip_clock::deadline::from_now(idle);
 
         loop {
             // While bootstrap is outstanding, race the first frame against the
@@ -644,7 +640,7 @@ impl Puller {
                 },
             };
             if frame.is_some() {
-                quiet_until = tokio::time::Instant::now() + idle;
+                quiet_until = sip_clock::deadline::from_now(idle);
             }
             match frame {
                 Some(Frame::Data {
@@ -762,11 +758,13 @@ impl Puller {
                     // fails every retry with `deadline == None`, and
                     // `all_bootstrapped()` pins the node NotReady until it returns.
                     // The re-bootstrap gets exactly the bound a cold boot gets.
-                    *deadline = Some(
-                        tokio::time::Instant::now()
-                            + Duration::from_millis(self.config.bootstrap_hard_timeout_ms),
-                    );
-                    *self.bootstrap_started_at.lock().unwrap() = Some(tokio::time::Instant::now());
+                    *deadline = Some(sip_clock::deadline::from_now(Duration::from_millis(
+                        self.config.bootstrap_hard_timeout_ms,
+                    )));
+                    *crate::poison::locked(
+                        &self.bootstrap_started_at,
+                        crate::poison::PULLER_BOOTSTRAP,
+                    ) = Some(tokio::time::Instant::now());
                     self.note_state("reset_to_bootstrap", "server dropped our watermark");
                     return self.ended(connected_at);
                 }

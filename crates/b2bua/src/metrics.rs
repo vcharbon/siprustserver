@@ -10,12 +10,15 @@ use metric_values::{FixedCounts, OpenRows};
 
 use crate::dispatch::{Discard, PastBound};
 use crate::drain::DrainExit;
+use catalogue::worker::{DRAIN_BUCKETS, PAST_BOUND, REMOVAL_CLASS};
 
 pub mod catalogue;
+mod cells;
 mod limiter;
 mod operator;
 mod removal_class;
 mod retransmit_row;
+mod shell;
 mod udp_transport;
 mod wire_drops;
 
@@ -413,15 +416,12 @@ impl B2buaMetrics {
     /// `b2bua_limiter_release_flush_seconds_total` (ADR-0040 decision 9).
     pub fn record_drain_exit(&self, outcome: &crate::drain::DrainOutcome) {
         let elapsed = outcome.elapsed;
-        self.inner.drain_exits[outcome.exit as usize].fetch_add(1, Ordering::Relaxed);
+        cells::add_at(&self.inner.drain_exits, outcome.exit as usize, 1);
         self.inner.limiter.count_release_flush(&outcome.release_flush);
         let secs = elapsed.as_secs_f64();
-        for (i, le) in catalogue::worker::DRAIN_BUCKETS.iter().enumerate() {
-            if secs <= *le {
-                self.inner.drain_seconds_buckets[i].fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        self.inner.drain_seconds_sum_ms.fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
+        let buckets = DRAIN_BUCKETS.iter().zip(&self.inner.drain_seconds_buckets);
+        buckets.filter(|(le, _)| secs <= **le).for_each(|(_, n)| cells::add(n, 1));
+        cells::add(&self.inner.drain_seconds_sum_ms, sip_clock::wall::millis_u64(elapsed));
         self.inner.drain_seconds_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -430,7 +430,7 @@ impl B2buaMetrics {
         DrainExit::ALL
             .iter()
             .find(|e| e.label() == reason)
-            .map_or(0, |e| self.inner.drain_exits[*e as usize].load(Ordering::Relaxed))
+            .map_or(0, |e| cells::get_at(&self.inner.drain_exits, *e as usize))
     }
 
     /// Count one forward flush the Backup flow refused because it would regress
@@ -560,7 +560,9 @@ impl B2buaMetrics {
         let rows = self.inner.rows.repl_applied.rows();
         let get = |op: &str| {
             rows.iter()
-                .filter(|(k, _)| k[0] == "backup" && k[2] == op)
+                .filter(|(k, _)| {
+                    k.first().is_some_and(|f| f == "backup") && k.get(2).is_some_and(|o| o == op)
+                })
                 .map(|(_, v)| *v)
                 .sum::<u64>()
         };
@@ -587,10 +589,10 @@ impl B2buaMetrics {
     /// atomic); [`clock_wall_divergence_ms`](Self::clock_wall_divergence_ms) reads
     /// it back.
     pub fn set_clock_wall_divergence_ms(&self, divergence_ms: i64) {
-        self.inner.clock_wall_divergence_ms.store(divergence_ms as u64, Ordering::Relaxed);
+        self.inner.clock_wall_divergence_ms.store(divergence_ms.cast_unsigned(), Ordering::Relaxed);
     }
     pub fn clock_wall_divergence_ms(&self) -> i64 {
-        self.inner.clock_wall_divergence_ms.load(Ordering::Relaxed) as i64
+        self.inner.clock_wall_divergence_ms.load(Ordering::Relaxed).cast_signed()
     }
 
     /// Push the call-store map lengths (memory-attribution gauges). Sampled
@@ -706,8 +708,7 @@ impl B2buaMetrics {
         catalogue::plain::render(self, &mut s);
         catalogue::worker::CALL_CREATIONS.render_value(&mut s, creations);
         catalogue::worker::CALL_REMOVALS.render_value(&mut s, removals);
-        catalogue::worker::STORE_POISONED_LOCK_RECOVERIES
-            .render(&mut s, |series| crate::store::LOCK_RECOVERIES.count_at(series.at(0)));
+        shell::render(&mut s);
 
         // Per-method SIP traffic, the repeats and give-ups, replication per
         // stream, the drains.
@@ -727,8 +728,7 @@ impl B2buaMetrics {
         rows.repl_noops_sent.render(&mut s);
         rows.repl_forward_flush_refused.render(&mut s);
         catalogue::worker::DRAIN_EXITS.render(&mut s, |series| {
-            let exit = DrainExit::ALL[series.index(&catalogue::worker::DRAIN_REASON)];
-            i.drain_exits[exit as usize].load(Ordering::Relaxed)
+            cells::get_at(&i.drain_exits, series.index(&catalogue::worker::DRAIN_REASON))
         });
         catalogue::worker::DRAIN_SECONDS.render_histogram(&mut s, |_| HistogramValue {
             buckets: catalogue::worker::DRAIN_BUCKETS
@@ -741,13 +741,11 @@ impl B2buaMetrics {
         });
         operator::render(self, &mut s);
         self.inner.limiter.render(&mut s);
-        catalogue::worker::CALL_REMOVALS_BY_CLASS.render(&mut s, |series| {
-            self.removals_of_total(
-                RemovalClass::ALL[series.index(&catalogue::worker::REMOVAL_CLASS)],
-            )
+        catalogue::worker::CALL_REMOVALS_BY_CLASS.render(&mut s, |r| {
+            cells::total(&RemovalClass::ALL, r.index(&REMOVAL_CLASS), |c| self.removals_of_total(c))
         });
         catalogue::worker::DISPATCH_PAST_BOUND.render(&mut s, |series| {
-            self.past_bound_of_total(PAST_BOUNDS[series.index(&catalogue::worker::PAST_BOUND)])
+            cells::total(&PAST_BOUNDS, series.index(&PAST_BOUND), |b| self.past_bound_of_total(b))
         });
         catalogue::worker::DISPATCH_OVERFLOW_REFUSED
             .render_value(&mut s, self.overflow_refused_total());
@@ -755,7 +753,8 @@ impl B2buaMetrics {
         catalogue::worker::CALLS_NEAR_LIFETIME_CAP
             .render_value(&mut s, self.calls_near_lifetime_cap());
         catalogue::DISPATCH_INVITE_DISCARD_ANSWERED.render(&mut s, |site| {
-            self.invite_discard_answered_of_total(DISCARD_SITES[site.index(&catalogue::SITE)])
+            let at = site.index(&catalogue::SITE);
+            cells::total(&DISCARD_SITES, at, |d| self.invite_discard_answered_of_total(d))
         });
 
         // Gauges last.

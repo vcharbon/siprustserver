@@ -22,7 +22,7 @@
 //! breaker runs unguarded, and a guarded limiter has none: it is never
 //! guarded twice.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::watch;
@@ -82,7 +82,7 @@ impl BreakerLimiter {
 
     /// Hold (`open`) or resume the queue and the batch, once per transition.
     fn apply(&self, open: bool) {
-        let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut applied = crate::poison::locked(&self.applied, crate::poison::LIMITER_BREAKER);
         if *applied == open {
             return;
         }

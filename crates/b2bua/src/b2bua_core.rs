@@ -12,7 +12,7 @@ use sip_net::UdpEndpoint;
 use sip_txn::TransactionLayer;
 
 use crate::admission::Refusals;
-use crate::capacity::{CapacityGate, Occupancy};
+use crate::capacity::CapacityGate;
 use crate::cdr::CdrWriter;
 use crate::dispatch::PerCallDispatcher;
 use crate::metrics::B2buaMetrics;
@@ -33,6 +33,7 @@ mod drain_tests;
 mod loops_tests;
 mod readiness;
 mod release_all;
+mod samplers;
 mod txn_config;
 use txn_config::txn_config;
 #[cfg(test)]
@@ -161,6 +162,9 @@ impl B2buaCore {
         // Abort handles for the directly-spawned tasks (serve loop + router).
         // Collected so a harness can simulate a crash by aborting them.
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        // The tasks the worker ends with (`WorkerLoops::with_vital`).
+        let mut vital = vec![("timer_driver", timers.task())];
+        vital.extend(cdr.task().map(|task| ("cdr_drainer", task)));
 
         // Replication wiring (opt-in). When present: drain the store write path
         // through a buffered writer into the replicating store, serve our
@@ -178,6 +182,7 @@ impl B2buaCore {
                 // changelog bumps on every flush carrying a peer.
                 let writer =
                     BufferedTerminateWriter::spawn(setup.store.clone() as Arc<dyn CallStore>, 1024);
+                vital.push(("terminate_writer", writer.task()));
                 let (repl_tx, repl_rx) =
                     tokio::sync::mpsc::unbounded_channel::<router::ReplCommand>();
                 // Route flushes/removes for backed-up calls through the policy, and
@@ -218,7 +223,9 @@ impl B2buaCore {
                 )
                 .with_metrics(metrics.clone())
                 .with_config(setup.serve);
-                tasks.push(spawn_keeping_node(server.run(setup.listener)));
+                let server = spawn_keeping_node(server.run(setup.listener));
+                vital.push(("repl_server", server.abort_handle()));
+                tasks.push(server);
 
                 // Context rebuild is **puller-driven and continuous** (ADR-0014):
                 // each bootstrap pass signals `ReclaimAll` itself (puller.rs
@@ -233,26 +240,35 @@ impl B2buaCore {
                 // The worker's own withdrawal from routing latches Draining
                 // whether or not SIGTERM has arrived (ADR-0031 D6). A watch, not
                 // a handle held by the supervisor: readiness already owns the
-                // supervisor, and a cycle would outlive `abort`.
-                let mut self_endpoint = supervisor.self_endpoint();
+                // supervisor, and a cycle would outlive `abort`. A restarted run
+                // reads the watch afresh.
+                let watched = supervisor.clone();
                 let latch = readiness.clone();
-                tasks.push(spawn_keeping_node(async move {
-                    loop {
-                        if self_endpoint.borrow_and_update().is_withdrawn() {
-                            latch.set_withdrawn();
-                            return;
+                tasks.push(crate::supervise::spawn(
+                    crate::supervise::WITHDRAWAL_LATCH,
+                    move || {
+                        let mut self_endpoint = watched.self_endpoint();
+                        let latch = latch.clone();
+                        async move {
+                            loop {
+                                if self_endpoint.borrow_and_update().is_withdrawn() {
+                                    latch.set_withdrawn();
+                                    return;
+                                }
+                                if self_endpoint.changed().await.is_err() {
+                                    return;
+                                }
+                            }
                         }
-                        if self_endpoint.changed().await.is_err() {
-                            return;
-                        }
-                    }
-                }));
+                    },
+                ));
                 (readiness, Some(supervisor), Some((repl_tx, repl_rx)))
             }
             // Unwired node: always-200 OPTIONS, no replication part at all; its
             // boot instant names the process.
             None => (
-                Readiness::always_ready().with_incarnation(clock.now_ms().max(0) as u64),
+                Readiness::always_ready()
+                    .with_incarnation(u64::try_from(clock.now_ms()).unwrap_or(0)),
                 None,
                 None,
             ),
@@ -365,7 +381,11 @@ impl B2buaCore {
         let router = spawn_keeping_node(run);
         let owner = (ctx.txn.owner_pulse().clone(), ctx.txn.owner_task());
         let routing = (ctx.router_pulse.clone(), router.abort_handle());
-        let loops = crate::loops::WorkerLoops::new(owner, routing);
+        let loops = vital
+            .into_iter()
+            .fold(crate::loops::WorkerLoops::new(owner, routing), |loops, (name, task)| {
+                loops.with_vital(name, task)
+            });
         tasks.push(router);
         // The single periodic sweep task, driving two concerns off ONE
         // `tokio::time::interval` (`sweep::run`), each step behind its own panic
@@ -419,67 +439,12 @@ impl B2buaCore {
         // timer (CLAUDE.md: behaviour rides `tokio::time` directly). Each tick
         // reads the ELU/GC sampler and feeds the EWMAs published on `X-Overload`,
         // then samples the capacity gate (RSS + the level the ingress brake reads).
-        // Aborted with the other tasks on a simulated `crash()`. This task owns no
-        // per-call state, so it needs no release path.
-        {
-            let overload = overload.clone();
-            let ctx2 = ctx.clone();
-            tasks.push(spawn_keeping_node(async move {
-                let mut tick = tokio::time::interval(OverloadSignal::SAMPLE_PERIOD);
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                tick.tick().await; // skip the immediate first tick (TS first fire is +100 ms)
-                loop {
-                    tick.tick().await;
-                    overload.sample();
-                    ctx2.capacity.sample(Occupancy {
-                        calls: ctx2.unborn.with_live(|| ctx2.state.active_count() as u64),
-                        transactions: ctx2.txn.metrics().active_transactions() as u64,
-                    });
-                }
-            }));
-        }
+        // Aborted with the other tasks on a simulated `crash()`.
+        tasks.push(samplers::spawn_overload_sampler(overload.clone(), ctx.clone()));
 
-        // Clock-skew divergence sampler (clock-skew hardening observability).
-        // Every ~30 s, read the RAW system wall clock and compare it to this
-        // node's monotonic-anchored `Clock::now_ms` — `now_ms` does NOT follow a
-        // host NTP step, so the gap names exactly the event that skews cross-node
-        // replicated timer deadlines. Publishes `clock_wall_divergence_ms` and
-        // rate-limits a warn line when the magnitude crosses 500 ms.
-        // Observability only: does NOT re-anchor the clock (timestamps stay
-        // monotonic; the behavioural fix is the replication-boundary re-anchor).
-        // Rides `tokio::time::interval` so a paused-clock test advances it too;
+        // Clock-skew divergence sampler (clock-skew hardening observability),
         // aborted with the other tasks on a simulated `crash()`.
-        {
-            let clock = ctx.clock.clone();
-            let metrics = metrics.clone();
-            tasks.push(spawn_keeping_node(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                tick.tick().await; // skip the immediate first tick
-                let mut warned_recently = false;
-                loop {
-                    tick.tick().await;
-                    let divergence = clock.wall_divergence_ms(sip_clock::raw_system_wall_ms());
-                    metrics.set_clock_wall_divergence_ms(divergence);
-                    if divergence.abs() > 500 {
-                        // Rate-limit: warn on the RISING edge only, so a sustained
-                        // step logs once, not every 30 s.
-                        if !warned_recently {
-                            tracing::warn!(
-                                divergence_ms = divergence,
-                                "clock skew: wall-clock divergence (raw SystemTime - monotonic \
-                                 Clock::now_ms) — likely a host NTP step; cross-node replicated \
-                                 timer deadlines may skew. Fix is INFRA (slewing chrony + host \
-                                 kept awake), NOT the SUT."
-                            );
-                            warned_recently = true;
-                        }
-                    } else {
-                        warned_recently = false;
-                    }
-                }
-            }));
-        }
+        tasks.push(samplers::spawn_clock_divergence(ctx.clock.clone(), metrics.clone()));
 
         Self {
             ctx,
@@ -560,7 +525,7 @@ impl B2buaCore {
     /// this `B2buaCore` afterwards releases the last store/supervisor `Arc`s so a
     /// reboot can re-listen on the same addresses. No per-call body runs on.
     pub fn abort(&mut self) {
-        for t in self.tasks.drain(..) {
+        for t in std::mem::take(&mut self.tasks) {
             t.abort();
         }
         self.ctx.dispatcher.halt();

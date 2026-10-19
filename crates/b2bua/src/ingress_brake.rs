@@ -118,7 +118,7 @@ impl IngressBrakeCounters {
     /// INVITEs of `class` this brake refused first: each once, however many
     /// of its copies were answered.
     pub fn refused(&self, class: Class) -> u64 {
-        self.refused[class.index()].load(Ordering::Relaxed)
+        self.refused.get(class.index()).map_or(0, |n| n.load(Ordering::Relaxed))
     }
 
     /// Copies of a refused INVITE — refused here or at the backlog — this
@@ -137,7 +137,9 @@ impl IngressBrakeCounters {
     }
 
     fn record_refused(&self, class: Class) {
-        self.refused[class.index()].fetch_add(1, Ordering::Relaxed);
+        if let Some(n) = self.refused.get(class.index()) {
+            n.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn record_copy(&self) {

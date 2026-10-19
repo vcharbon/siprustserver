@@ -39,6 +39,7 @@ use b2bua_sdk::event::CallEvent;
 pub const MARGIN: Duration = Duration::from_secs(2);
 
 // The admit bound's slack lies well inside the margin.
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(ADMIT_SLACK.as_millis() * 4 <= MARGIN.as_millis());
 
 /// The `/call/failure` consults one failover chain may send: the first, and
@@ -63,15 +64,18 @@ pub fn release_budget(decision: Duration, admit: Duration) -> Option<Duration> {
 
 /// [`release_budget`] under `config`'s decision deadline.
 pub(crate) fn release_budget_under(config: &B2buaConfig, admit: Duration) -> Option<Duration> {
-    let decision = Duration::from_millis(config.call_control_timeout_ms.max(0) as u64);
-    release_budget(decision, admit)
+    release_budget(decision_deadline(config), admit)
+}
+
+/// `config`'s decision deadline, zero when not positive.
+fn decision_deadline(config: &B2buaConfig) -> Duration {
+    Duration::from_millis(u64::try_from(config.call_control_timeout_ms).unwrap_or(0))
 }
 
 /// [`failure_budget`] under `config`'s decision deadline
 /// (`call_control_timeout_ms`, off when not positive).
 pub(crate) fn failure_budget_under(config: &B2buaConfig, admit: Duration) -> Option<Duration> {
-    let decision = Duration::from_millis(config.call_control_timeout_ms.max(0) as u64);
-    failure_budget(decision, admit)
+    failure_budget(decision_deadline(config), admit)
 }
 
 /// The payload key a `/call/failure` fold states the deadline it answers
@@ -127,7 +131,8 @@ pub fn arm(mut result: HandlerResult, budgets: &AnswerBudgets, now_ms: i64) -> H
         }
     }
     for (timer_type, budget) in deadlines {
-        let fire_at = now_ms + (budget + MARGIN).as_millis() as i64;
+        let fire_at =
+            now_ms.saturating_add(sip_clock::wall::millis_i64(budget.saturating_add(MARGIN)));
         crate::timer_arm::arm(
             &mut result.call,
             &mut result.effects,

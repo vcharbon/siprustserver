@@ -62,7 +62,10 @@ pub(super) fn parse_call_failure_request(v: &serde_json::Value) -> CallFailureRe
         callback_context: v.get("callback_context").and_then(|x| x.as_str()).map(str::to_string),
         failure: FailureInfo {
             origin: v.get("origin").and_then(|x| x.as_str()).unwrap_or("external").to_string(),
-            status_code: v.get("sip_code").and_then(|x| x.as_u64()).map(|c| c as u16),
+            status_code: v
+                .get("sip_code")
+                .and_then(|x| x.as_u64())
+                .and_then(|c| u16::try_from(c).ok()),
             limiter_id: v.get("limiter_id").and_then(|x| x.as_str()).map(str::to_string),
             failed_leg_id: v
                 .get("failed_leg_id")

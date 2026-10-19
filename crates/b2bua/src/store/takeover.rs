@@ -47,7 +47,7 @@ impl CallState {
     /// router later reads it via [`is_takeover`](Self::is_takeover) to drive
     /// self-release once the served transaction(s) finish. Idempotent per call_ref.
     pub fn mark_takeover(&self, call_ref: &str) {
-        self.inner.lock().unwrap().takeover.insert(call_ref);
+        self.locked().takeover.insert(call_ref);
     }
 
     /// Is `call_ref` a live acting-backup **takeover copy** (ADR-0014)? The router
@@ -55,14 +55,14 @@ impl CallState {
     /// transaction(s) have all cleared, it self-releases the live copy via
     /// [`drop_local`](Self::drop_local).
     pub fn is_takeover(&self, call_ref: &str) -> bool {
-        self.inner.lock().unwrap().takeover.contains(call_ref)
+        self.locked().takeover.contains(call_ref)
     }
 
     /// [`is_takeover`](Self::is_takeover) as the replication pullers read it on
     /// every write they apply: while no copy is live it answers without taking
     /// the call map's lock.
     pub fn takeover_probe(&self) -> TakeoverProbe {
-        let live = self.inner.lock().unwrap().takeover.live.clone();
+        let live = self.locked().takeover.live.clone();
         let state = self.clone();
         Arc::new(move |call_ref: &str| {
             live.load(Ordering::Acquire) != 0 && state.is_takeover(call_ref)

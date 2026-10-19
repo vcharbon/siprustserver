@@ -68,7 +68,7 @@ pub(super) fn route_result_payload(
     failed_leg_id: Option<String>,
 ) -> serde_json::Value {
     let no_answer_ms = route.no_answer().millis();
-    super::callouts::to_payload(RoutePayload {
+    super::fold_payload::to_payload(RoutePayload {
         destination: RouteDestinationPayload {
             host: route.destination.host,
             port: route.destination.port,

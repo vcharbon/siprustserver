@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use load_shed::{at_ms, TokenBucket};
 use observe::{CallIdentity, CallSpan, RateDraw, SampleAdmission, TraceEvent};
 
+use crate::poison::{locked, read, write, TRACE_PROCESS, TRACE_SPANS};
+
 /// The correlation triple stamped on a `Call` when a trace activates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceIds {
@@ -94,7 +96,7 @@ impl CallTraces {
 
     /// Root spans currently open, across every node.
     pub fn active(&self) -> usize {
-        self.spans.lock().expect("trace registry mutex").len()
+        locked(&self.spans, TRACE_SPANS).len()
     }
 
     /// Run the admission chain and, on success, open the call's root span.
@@ -139,7 +141,7 @@ impl CallTraces {
     /// Record one fact on a call's root span. No-op when the call has no span
     /// (it was never sampled, or its span is already closed).
     pub fn record(&self, call_ref: &str, event: TraceEvent<'_>) {
-        if let Some(span) = self.spans.lock().expect("trace registry mutex").get(call_ref) {
+        if let Some(span) = locked(&self.spans, TRACE_SPANS).get(call_ref) {
             span.record(event);
         }
     }
@@ -154,7 +156,7 @@ impl CallTraces {
         request: RoundTripSide<'_>,
         response: RoundTripSide<'_>,
     ) {
-        let spans = self.spans.lock().expect("trace registry mutex");
+        let spans = locked(&self.spans, TRACE_SPANS);
         let Some(root) = spans.get(call_ref) else {
             return;
         };
@@ -171,11 +173,11 @@ impl CallTraces {
     /// Close a call's root span, returning its active-trace slot to the gate.
     /// Idempotent — every teardown path may call it.
     pub fn close(&self, call_ref: &str) {
-        self.spans.lock().expect("trace registry mutex").remove(call_ref);
+        locked(&self.spans, TRACE_SPANS).remove(call_ref);
     }
 
     fn existing(&self, call_ref: &str) -> Option<TraceIds> {
-        self.spans.lock().expect("trace registry mutex").get(call_ref).map(|s| TraceIds {
+        locked(&self.spans, TRACE_SPANS).get(call_ref).map(|s| TraceIds {
             trace_id: s.trace_id().to_string(),
             root_span_id: s.span_id().to_string(),
         })
@@ -186,7 +188,7 @@ impl CallTraces {
             trace_id: span.trace_id().to_string(),
             root_span_id: span.span_id().to_string(),
         };
-        self.spans.lock().expect("trace registry mutex").insert(call_ref, span);
+        locked(&self.spans, TRACE_SPANS).insert(call_ref, span);
         ids
     }
 }
@@ -264,7 +266,7 @@ fn cell() -> &'static RwLock<Arc<CallTraces>> {
 /// The process's trace registry. Inert (no exporter → no draw, no span) unless
 /// the process was started with an OTLP endpoint.
 pub fn traces() -> Arc<CallTraces> {
-    cell().read().expect("process trace registry lock").clone()
+    read(cell(), TRACE_PROCESS).clone()
 }
 
 /// Replace the process's trace registry. A runner calls this once at startup,
@@ -272,7 +274,7 @@ pub fn traces() -> Arc<CallTraces> {
 /// gate. Process-wide by construction — there is one admission gate per
 /// process, so there is one registry.
 pub fn install_process_traces(registry: Arc<CallTraces>) {
-    *cell().write().expect("process trace registry lock") = registry;
+    *write(cell(), TRACE_PROCESS) = registry;
     INSTALLED.store(true, Ordering::SeqCst);
 }
 
@@ -280,7 +282,7 @@ pub fn install_process_traces(registry: Arc<CallTraces>) {
 /// default never displaces one a runner or a test chose. Returns whether it
 /// installed.
 pub fn install_process_traces_unless_installed(registry: Arc<CallTraces>) -> bool {
-    let mut slot = cell().write().expect("process trace registry lock");
+    let mut slot = write(cell(), TRACE_PROCESS);
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return false;
     }

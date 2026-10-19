@@ -81,7 +81,7 @@ impl Unborn {
 
 impl UnbornInner {
     fn lock(&self) -> std::sync::MutexGuard<'_, ByCall> {
-        self.by_call.lock().unwrap_or_else(|p| p.into_inner())
+        crate::poison::locked(&self.by_call, crate::poison::ADMIT_BY_CALL)
     }
 }
 

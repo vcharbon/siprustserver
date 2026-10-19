@@ -12,6 +12,7 @@ use call::{Call, CallModelState, Obligation, TimerType};
 use sip_message::{Method, SipMessage};
 
 use super::admit::UnbornCall;
+use super::incarnation_gate::of_another_incarnation;
 use super::interpret::process_result;
 use sip_txn::Reoffer;
 
@@ -41,7 +42,11 @@ pub(super) async fn process(
     mut res: Resolution,
     unborn: Option<UnbornCall>,
 ) {
-    let call_ref = res.call_ref.clone().expect("dispatched events carry a callRef");
+    let Some(call_ref) = res.call_ref.clone() else {
+        // The dispatcher keys every event it runs by its callRef.
+        tracing::error!(node = observe::node(), "a dispatched event carries no callRef: dropped");
+        return;
+    };
     let _guard = ctx.state.lock(&call_ref).await;
     let now_ms = ctx.clock.now_ms();
 
@@ -287,34 +292,6 @@ async fn reaper_verdict_gate(
     Gate::Pass
 }
 
-/// The incarnation gate: an event stamped with another incarnation than the
-/// call live on its `call_ref` (`differs`) is a straggler of an earlier call
-/// there — a timer fire or transaction timeout queued before that call's
-/// release, a callout result, a late message on its Via or Contact — and is
-/// dropped before any rule reads it; the caller answers a request as one
-/// naming no call (481, RFC 3261 §12.2.2). An admit it carries releases its
-/// key when owed, as one reaching no call does. An unstamped event passes.
-fn of_another_incarnation(
-    ctx: &RouterCtx,
-    event: &CallEvent,
-    res: &Resolution,
-    differs: impl FnOnce(&str) -> bool,
-) -> bool {
-    let Some(stamp) = res.incarnation.as_deref() else { return false };
-    if !differs(stamp) {
-        return false;
-    }
-    ctx.metrics.bump_other_incarnation_dropped();
-    super::callouts::release_admit_fold_call(&ctx.limiter, event);
-    tracing::debug!(
-        call_ref = res.call_ref.as_deref().unwrap_or_default(),
-        incarnation = stamp,
-        kind = event.kind(),
-        "event of another call incarnation dropped"
-    );
-    true
-}
-
 /// The live call for an in-dialog event: resident, or materialised as an
 /// acting-backup takeover (`bak:`), or — for a ref this node is primary for —
 /// as an on-demand reclaim (`pri:`), the in-dialog request that races the bulk
@@ -423,7 +400,8 @@ pub(super) fn rule_chain_turn(
         call.message_count.unwrap_or(0) + 1
     };
     call.message_count = Some(bumped);
-    let cap_exceeded = bumped > ctx.config.max_messages_per_call as i64
+    let cap_exceeded = i64::try_from(ctx.config.max_messages_per_call)
+        .is_ok_and(|cap| bumped > cap)
         && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
     let exec = ActionExecutor {
         config: &ctx.config,

@@ -18,14 +18,17 @@ pub const METHOD: Dim = Dim::new("method", &Method::NATIVE_TOKENS);
 
 const ANSWERED_METHOD_VALUES: [&str; 13] = {
     let mut out = [""; 13];
-    let mut i = 0;
-    let mut j = 0;
-    while i < Method::NATIVE_TOKENS.len() {
-        if !matches!(Method::NATIVE_TOKENS[i].as_bytes(), b"ACK") {
-            out[j] = Method::NATIVE_TOKENS[i];
-            j += 1;
+    let mut slots: &mut [&str] = &mut out;
+    let mut tokens: &[&str] = &Method::NATIVE_TOKENS;
+    while let Some((slot, more)) = slots.split_first_mut() {
+        while let Some((token, rest)) = tokens.split_first() {
+            tokens = rest;
+            if !matches!(token.as_bytes(), b"ACK") {
+                *slot = token;
+                break;
+            }
         }
-        i += 1;
+        slots = more;
     }
     out
 };
@@ -101,12 +104,6 @@ pub const CALL_REMOVALS: Family = Family::counter(
     "b2bua_call_removals_total",
     Labels::None,
     "B2BUA calls this worker stopped serving (one per call_ref teardown). Matched 1:1 with creations.",
-);
-
-pub const STORE_POISONED_LOCK_RECOVERIES: Family = Family::counter(
-    "b2bua_store_poisoned_lock_recoveries_total",
-    Labels::Product(&[Dim::new("lock", &crate::store::LOCKS)]),
-    "store locks a panic poisoned, taken as they stood and cleared (process-wide), by lock — expected 0",
 );
 
 pub const REQUESTS: Family = Family::counter(

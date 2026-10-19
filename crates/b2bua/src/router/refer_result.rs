@@ -5,7 +5,7 @@
 use serde::Serialize;
 use serde_json::json;
 
-use super::callouts::to_payload;
+use super::fold_payload::to_payload;
 use crate::decision::{CallDecisionError, CallReferResponse, SipHeaderUpdates};
 use crate::decision_log::STACK_AUTHORED;
 

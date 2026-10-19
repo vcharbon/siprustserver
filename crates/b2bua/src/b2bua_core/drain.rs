@@ -97,12 +97,12 @@ impl B2buaCore {
         tracing::info!(
             reason = outcome.exit.label(),
             residual = outcome.residual,
-            elapsed_ms = outcome.elapsed.as_millis() as u64,
+            elapsed_ms = sip_clock::wall::millis_u64(outcome.elapsed),
             withdrawn = self.is_withdrawn(),
             release_flush = flush.outcome().label(),
             releases_queued = flush.queued,
             releases_given_up = flush.given_up,
-            release_flush_ms = flush.elapsed.as_millis() as u64,
+            release_flush_ms = sip_clock::wall::millis_u64(flush.elapsed),
             "drain returned"
         );
         outcome

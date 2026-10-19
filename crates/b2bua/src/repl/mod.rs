@@ -99,4 +99,7 @@ mod s12_tests;
 mod s13_tests;
 
 #[cfg(test)]
+mod puller_restart_tests;
+
+#[cfg(test)]
 mod real_transport_tests;

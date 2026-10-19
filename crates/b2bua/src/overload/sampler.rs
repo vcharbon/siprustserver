@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use load_shed::{clamp01, LoadSampler};
 
 use super::cpu_budget::CpuBudget;
+use crate::poison::{locked, OVERLOAD_SAMPLER};
 
 /// Production [`LoadSampler`] — a faithful tokio runtime busy-ratio.
 ///
@@ -112,7 +113,7 @@ impl LoadSampler for LiveLoadSampler {
         let busy_now = Self::sum_busy(handle);
         let workers = handle.metrics().num_workers();
 
-        let mut prev = self.prev.lock().unwrap();
+        let mut prev = locked(&self.prev, OVERLOAD_SAMPLER);
         let wall = now.saturating_duration_since(prev.at).as_secs_f64();
         // Busy clock is monotonic, but guard against a zero/negative wall window
         // (two reads in the same instant) which would divide by ~0.

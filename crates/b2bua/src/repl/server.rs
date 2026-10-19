@@ -275,7 +275,7 @@ impl ReplServer {
         // ---- poll-tail ----
         let mut ever_caught_up = false;
         let mut streamed_full_batch = false;
-        let mut next_noop = tokio::time::Instant::now() + self.config.noop_interval;
+        let mut next_noop = sip_clock::deadline::from_now(self.config.noop_interval);
         loop {
             let frames = self
                 .changelog
@@ -324,7 +324,7 @@ impl ReplServer {
                 }
                 ever_caught_up = true;
                 streamed_full_batch = false;
-                next_noop = tokio::time::Instant::now() + self.config.noop_interval;
+                next_noop = sip_clock::deadline::from_now(self.config.noop_interval);
             }
             // `sleep` is cancel-safe, so the peer's close can race it here.
             tokio::select! {
@@ -422,7 +422,7 @@ impl ReplServer {
                     node = observe::node(),
                     peer = %caller,
                     flow,
-                    stall_ms = self.config.send_stall.as_millis() as u64,
+                    stall_ms = sip_clock::wall::millis_u64(self.config.send_stall),
                     "replication stream dropped: the peer stopped reading"
                 );
                 Err(Unsent::Stalled)

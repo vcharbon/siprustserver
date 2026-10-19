@@ -33,7 +33,7 @@
 //! loses the queue unflushed.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use crate::abort_on_drop::AbortOnDrop;
@@ -202,7 +202,7 @@ impl ReleaseQueue {
     /// (every step keeps `entries` and `by_key` in step or loses a key the
     /// lease frees), so a poisoned lock is taken as it is.
     fn lock(&self) -> MutexGuard<'_, Waiting> {
-        self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::poison::locked(&self.waiting, crate::poison::LIMITER_RELEASE_WAITING)
     }
 
     /// Queue the release of `key` and return at once. A key already waiting
@@ -319,7 +319,7 @@ impl ReleaseQueue {
                 if queued > 0 {
                     tracing::info!(
                         queued,
-                        elapsed_ms = elapsed.as_millis() as u64,
+                        elapsed_ms = sip_clock::wall::millis_u64(elapsed),
                         "limiter release queue flushed"
                     );
                 }

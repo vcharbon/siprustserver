@@ -9,6 +9,7 @@
 pub mod capacity;
 pub mod limiter;
 pub mod plain;
+pub mod shell;
 pub mod udp;
 pub mod worker;
 
@@ -133,7 +134,9 @@ const WORKER_FAMILIES: [Family; plain::FAMILIES.len() + WORKER_REST.len()] =
 const WORKER_REST: &[Family] = &[
     worker::CALL_CREATIONS,
     worker::CALL_REMOVALS,
-    worker::STORE_POISONED_LOCK_RECOVERIES,
+    shell::STORE_POISONED_LOCK_RECOVERIES,
+    shell::POISONED_LOCK_RECOVERIES,
+    shell::TASK_RESTARTS,
     worker::REQUESTS,
     worker::REQUESTS_OVERFLOW,
     worker::RESPONSES,
@@ -218,13 +221,21 @@ const WORKER_REST: &[Family] = &[
     worker::PEER_FAILURES_OVERFLOW,
 ];
 
-/// `a` then `b`.
+/// `a` then `b`; evaluated at build time, where a short output fails the build.
 const fn concat<const N: usize>(a: &[Family], b: &[Family]) -> [Family; N] {
+    #[expect(clippy::indexing_slicing, reason = "build time: an empty `a` fails the build")]
     let mut out = [a[0]; N];
-    let mut i = 0;
-    while i < N {
-        out[i] = if i < a.len() { a[i] } else { b[i - a.len()] };
-        i += 1;
+    let (mut a, mut b) = (a, b);
+    let mut slots: &mut [Family] = &mut out;
+    while let Some((slot, more)) = slots.split_first_mut() {
+        if let Some((first, rest)) = a.split_first() {
+            *slot = *first;
+            a = rest;
+        } else if let Some((first, rest)) = b.split_first() {
+            *slot = *first;
+            b = rest;
+        }
+        slots = more;
     }
     out
 }

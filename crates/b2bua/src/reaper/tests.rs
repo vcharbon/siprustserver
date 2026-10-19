@@ -180,6 +180,38 @@ async fn a_condemned_takeover_copy_is_not_swept() {
     assert!(outcomes(&mut rx).is_empty());
 }
 
+/// A call inserted without its stamp (an insert a panic cut short) is found
+/// by the next sweep, stamped at the sweep's instant and counted; the pass
+/// after it finds the store whole.
+#[tokio::test]
+async fn a_call_inserted_without_its_stamp_is_stamped_by_the_next_sweep() {
+    let (reaper, _rx, state, refs) = condemned_rig(2);
+    state.cut_stamp(&refs[0]);
+    let in_flight = InFlight::default();
+    reaper.maybe_sweep(&state, &in_flight, 77);
+    assert_eq!(state.last_touched(&refs[0]), Some(77));
+    assert_eq!(reaper.metrics.store_reconciled_missing_stamps_total(), 1);
+    reaper.maybe_sweep(&state, &in_flight, 78);
+    assert_eq!(reaper.metrics.store_reconciled_missing_stamps_total(), 1, "counted once");
+}
+
+/// The stamp and the index entries of a call gone from the call map (a
+/// removal a panic cut short) are dropped by the next sweep and counted.
+#[tokio::test]
+async fn the_orphan_entries_of_a_gone_call_are_dropped_by_the_next_sweep() {
+    let (reaper, _rx, state, refs) = condemned_rig(2);
+    state.cut_call(&refs[0]);
+    assert!(state.indexes(&refs[0]));
+    let in_flight = InFlight::default();
+    reaper.maybe_sweep(&state, &in_flight, 5);
+    assert!(!state.indexes(&refs[0]), "no index entry names the gone call");
+    assert_eq!(state.last_touched(&refs[0]), None);
+    assert_eq!(state.touched_count(), 1);
+    assert_eq!(reaper.metrics.store_reconciled_orphan_stamps_total(), 1);
+    assert!(reaper.metrics.store_reconciled_orphan_index_total() >= 1);
+    assert!(state.indexes(&refs[1]), "the live call keeps its keys");
+}
+
 /// A wave of stale calls filling the sweep budget does not starve a
 /// condemned call.
 #[tokio::test]

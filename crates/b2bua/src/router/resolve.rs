@@ -219,7 +219,15 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 indexed: None,
             }
         }
-        CallEvent::Lifecycle(_) => unreachable!("a lifecycle event is delivered, never dispatched"),
+        // A lifecycle event is delivered, never dispatched: it names no call.
+        CallEvent::Lifecycle(_) => Resolution {
+            call_ref: None,
+            source_leg_id: "a".into(),
+            direction: Direction::FromA,
+            initial_invite: false,
+            incarnation: None,
+            indexed: None,
+        },
     }
 }
 

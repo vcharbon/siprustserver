@@ -31,7 +31,7 @@ pub fn arm_refresh(
     if !call.limiter.counted() || call.state != CallModelState::Active {
         return result;
     }
-    let due_by = now_ms + period.as_millis() as i64;
+    let due_by = now_ms.saturating_add(sip_clock::wall::millis_i64(period));
     let refresh = TimerKey::call(TimerType::LimiterRefresh);
     let fire_at = match call.timers.iter().find(|t| t.key == refresh).map(|t| t.fire_at) {
         Some(at) if at > now_ms && at <= due_by => return result,

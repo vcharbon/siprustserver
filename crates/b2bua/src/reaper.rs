@@ -35,8 +35,14 @@ use tokio::sync::mpsc;
 use crate::dispatch::{HandlerFailure, InFlight};
 use crate::effects::HandlerResult;
 use crate::metrics::B2buaMetrics;
-use crate::store::CallState;
+use crate::poison::{locked, REAPER_LEDGERS};
+use crate::store::{CallState, Reconciled};
 use b2bua_sdk::event::CallEvent;
+
+/// One of the reaper's ledgers ([`REAPER_LEDGERS`]).
+fn ledger<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    locked(m, REAPER_LEDGERS)
+}
 
 /// The synthetic-event topic every reaper verdict carries.
 pub const REAPER_TOPIC: &str = "reaper";
@@ -125,7 +131,9 @@ impl Reaper {
     ) -> Self {
         Self {
             enabled,
-            sweep_interval_ms: sweep_interval_sec.max(1) as u64 * 1000,
+            sweep_interval_ms: u64::try_from(sweep_interval_sec.max(1))
+                .unwrap_or(1)
+                .saturating_mul(1000),
             idle_max_ms,
             strikes: Arc::new(Mutex::new(HashMap::new())),
             attempts: Arc::new(Mutex::new(HashMap::new())),
@@ -150,13 +158,12 @@ impl Reaper {
             if !this.enabled {
                 return;
             }
-            if failure == HandlerFailure::Aborted
-                && this.overflow_aborts.lock().unwrap().remove(call_ref)
+            if failure == HandlerFailure::Aborted && ledger(&this.overflow_aborts).remove(call_ref)
             {
                 return;
             }
             let strike = {
-                let mut strikes = this.strikes.lock().unwrap();
+                let mut strikes = ledger(&this.strikes);
                 let s = strikes.entry(call_ref.to_string()).or_insert(0);
                 *s += 1;
                 *s
@@ -171,7 +178,7 @@ impl Reaper {
     /// stale escalation (abort, discharge) until it is gone. Once per call,
     /// so a flood sends one verdict, not one per refused event.
     pub fn on_overflow_ceiling(&self, call_ref: &str) {
-        if self.enabled && self.condemned.lock().unwrap().insert(call_ref.to_string()) {
+        if self.enabled && ledger(&self.condemned).insert(call_ref.to_string()) {
             self.send_verdict(call_ref, OUTCOME_OVERFLOW, serde_json::json!({}));
         }
     }
@@ -180,7 +187,7 @@ impl Reaper {
     /// `message-cap` verdict. The verdict is admitted past every bound and
     /// the call's requests are refused from then on, so one is enough.
     pub fn on_lifetime_cap(&self, call_ref: &str) {
-        if self.enabled && self.capped.lock().unwrap().insert(call_ref.to_string()) {
+        if self.enabled && ledger(&self.capped).insert(call_ref.to_string()) {
             self.send_verdict(call_ref, OUTCOME_MESSAGE_CAP, serde_json::json!({}));
         }
     }
@@ -190,9 +197,38 @@ impl Reaper {
     /// drives the Model-Y backup-durable reap, so the two periodic concerns share
     /// one `tokio::time::interval` (deterministic under `start_paused` +
     /// `Harness::advance`) with an explicit ordering instead of two racing timers.
+    ///
+    /// Every pass first reconciles the store's derived entries with its call
+    /// map ([`CallState::reconcile`]), counting each correction by kind,
+    /// whether the reaper is enabled or not: the stamps it reads are among
+    /// them.
     pub fn maybe_sweep(&self, state: &CallState, in_flight: &InFlight, now_ms: i64) {
+        self.count_reconciled(state.reconcile(now_ms));
         if self.enabled {
             self.sweep_once(state, in_flight, now_ms);
+        }
+    }
+
+    /// Count one reconcile pass's corrections, logging a pass that made any.
+    fn count_reconciled(&self, fixed: Reconciled) {
+        if fixed.is_clean() {
+            return;
+        }
+        tracing::warn!(
+            node = observe::node(),
+            ?fixed,
+            "the store reconciled entries a cut write left"
+        );
+        let m = &self.metrics;
+        for (n, bump) in [
+            (fixed.orphan_stamps, B2buaMetrics::bump_store_reconciled_orphan_stamp as fn(&_)),
+            (fixed.missing_stamps, B2buaMetrics::bump_store_reconciled_missing_stamp),
+            (fixed.orphan_index, B2buaMetrics::bump_store_reconciled_orphan_index),
+            (fixed.missing_index, B2buaMetrics::bump_store_reconciled_missing_index),
+        ] {
+            for _ in 0..n {
+                bump(m);
+            }
         }
     }
 
@@ -210,7 +246,7 @@ impl Reaper {
         // by `TerminatingTimeout`: it needs no further verdict. A takeover copy
         // is its self-release's (ADR-0020 X3).
         let condemned: Vec<String> = {
-            let mut set = self.condemned.lock().unwrap();
+            let mut set = ledger(&self.condemned);
             set.retain(|r| {
                 state.model_state(r) == Some(CallModelState::Active) && !state.is_takeover(r)
             });
@@ -241,11 +277,11 @@ impl Reaper {
         }
         // Prune escalation state for calls no longer resident (normal
         // termination, reap completed, self-release) — bounded by live calls.
-        self.strikes.lock().unwrap().retain(|r, _| state.contains(r));
-        self.attempts.lock().unwrap().retain(|r, _| state.contains(r));
-        self.condemned_attempts.lock().unwrap().retain(|r, _| state.contains(r));
-        self.overflow_aborts.lock().unwrap().retain(|r| state.contains(r));
-        self.capped.lock().unwrap().retain(|r| state.contains(r));
+        ledger(&self.strikes).retain(|r, _| state.contains(r));
+        ledger(&self.attempts).retain(|r, _| state.contains(r));
+        ledger(&self.condemned_attempts).retain(|r, _| state.contains(r));
+        ledger(&self.overflow_aborts).retain(|r| state.contains(r));
+        ledger(&self.capped).retain(|r| state.contains(r));
     }
 
     /// One rung of `call_ref`'s escalation on `ladder`: the verdict `verdict`
@@ -264,7 +300,7 @@ impl Reaper {
         verdict: impl FnOnce() -> (&'static str, serde_json::Value),
     ) {
         let attempt = {
-            let mut attempts = ladder.lock().unwrap();
+            let mut attempts = ledger(ladder);
             let a = attempts.entry(call_ref.to_string()).or_insert(0);
             *a += 1;
             *a
@@ -275,10 +311,10 @@ impl Reaper {
         }
         if attempt > ESCALATE_ABORT_AFTER {
             if overflow {
-                self.overflow_aborts.lock().unwrap().insert(call_ref.to_string());
+                ledger(&self.overflow_aborts).insert(call_ref.to_string());
             }
             if !in_flight.abort(call_ref) && overflow {
-                self.overflow_aborts.lock().unwrap().remove(call_ref);
+                ledger(&self.overflow_aborts).remove(call_ref);
             }
         }
         let (outcome, payload) = verdict();

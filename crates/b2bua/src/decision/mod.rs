@@ -137,7 +137,7 @@ impl DeadlineDecisionEngine {
         }
         std::sync::Arc::new(Self {
             inner,
-            deadline: std::time::Duration::from_millis(timeout_ms as u64),
+            deadline: std::time::Duration::from_millis(u64::try_from(timeout_ms).unwrap_or(0)),
             breaches: crate::lifecycle::backend_waves("decision-engine"),
         })
     }

@@ -194,6 +194,22 @@ plain_counters! {
         "b2bua_reaper_sweep_panics_total",
         "reaper sweep steps that panicked; the next pass runs one interval later — expected 0",
     ) => reaper_sweep_panics, bump_reaper_sweep_panic, reaper_sweep_panics_total;
+    STORE_RECONCILED_ORPHAN_STAMPS = (
+        "b2bua_store_reconciled_orphan_stamps_total",
+        "last-touched stamps of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",
+    ) => store_reconciled_orphan_stamps, bump_store_reconciled_orphan_stamp, store_reconciled_orphan_stamps_total;
+    STORE_RECONCILED_MISSING_STAMPS = (
+        "b2bua_store_reconciled_missing_stamps_total",
+        "resident calls with no last-touched stamp the reaper sweep stamped; each is a store write a panic cut short — expected 0",
+    ) => store_reconciled_missing_stamps, bump_store_reconciled_missing_stamp, store_reconciled_missing_stamps_total;
+    STORE_RECONCILED_ORPHAN_INDEX = (
+        "b2bua_store_reconciled_orphan_index_total",
+        "routing-index entries of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",
+    ) => store_reconciled_orphan_index, bump_store_reconciled_orphan_index, store_reconciled_orphan_index_total;
+    STORE_RECONCILED_MISSING_INDEX = (
+        "b2bua_store_reconciled_missing_index_total",
+        "resident calls with no routing-index key list the reaper sweep indexed again, never taking a key another call holds; each is a store write a panic cut short — expected 0",
+    ) => store_reconciled_missing_index, bump_store_reconciled_missing_index, store_reconciled_missing_index_total;
     REPLICA_REAP_PANICS = (
         "b2bua_replica_reap_panics_total",
         "replica reap steps that panicked; the next pass runs one interval later — expected 0",

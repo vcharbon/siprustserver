@@ -334,7 +334,7 @@ impl Readiness {
     /// The lock a cordon decision and the drain latch take, so a cordon is
     /// never set on a node that latched Draining after it read the state.
     fn transition(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.inner.transitions.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        crate::poison::locked(&self.inner.transitions, crate::poison::READINESS_TRANSITIONS)
     }
 
     fn line_transition(&self, state: &'static str, reason: &'static str) {

@@ -19,7 +19,7 @@ impl CallState {
     /// primary version whose body the copy does not hold
     /// ([`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)).
     pub fn adopt_version(&self, call_ref: &str, gen: i64, bak_gen: i64) -> Option<Call> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.locked();
         let call = inner.calls.get_mut(call_ref)?;
         let t = call.topology.as_mut()?;
         if t.gen >= gen && t.bak_gen >= bak_gen {

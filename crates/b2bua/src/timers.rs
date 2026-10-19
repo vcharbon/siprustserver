@@ -52,6 +52,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use sip_clock::delay_queue::MAX_DELAY;
 use sip_clock::Clock;
 use tokio::sync::mpsc;
 use tokio_util::time::{delay_queue::Key, DelayQueue};
@@ -60,6 +61,12 @@ use call::{TimerEntry, TimerKey};
 
 use crate::metrics::B2buaMetrics;
 use b2bua_sdk::event::CallEvent;
+
+/// The commands the driver's channel holds before a sender waits.
+const COMMAND_BACKLOG: usize = 1024;
+
+/// How often the driver re-publishes its gauges when idle.
+const GAUGE_PERIOD: Duration = Duration::from_secs(5);
 
 struct Fired {
     key: TimerKey,
@@ -79,6 +86,7 @@ enum TimerCmd {
 #[derive(Clone)]
 pub struct TimerService {
     cmd_tx: mpsc::Sender<TimerCmd>,
+    driver: tokio::task::AbortHandle,
 }
 
 impl TimerService {
@@ -96,7 +104,8 @@ impl TimerService {
         clock: Clock,
         metrics: B2buaMetrics,
     ) -> (Self, mpsc::UnboundedReceiver<CallEvent>) {
-        let (cmd_tx, cmd_rx) = mpsc::channel(1024);
+        #[expect(clippy::disallowed_methods, reason = "COMMAND_BACKLOG is not zero")]
+        let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_BACKLOG);
         // The fire channel is UNBOUNDED on purpose: timer fires are already bounded
         // by real time and by the live `DelayQueue` entries (one per scheduled
         // timer). A bounded buffer smaller than the queue could silently drop a
@@ -108,8 +117,13 @@ impl TimerService {
         // its task with the cmd channel, so blocking on a full fire channel would
         // deadlock against the router draining via cmd.
         let (fire_tx, fire_rx) = mpsc::unbounded_channel();
-        observe::spawn_keeping_node(driver(clock, cmd_rx, fire_tx, metrics));
-        (Self { cmd_tx }, fire_rx)
+        let driver = observe::spawn_keeping_node(driver(clock, cmd_rx, fire_tx, metrics));
+        (Self { cmd_tx, driver: driver.abort_handle() }, fire_rx)
+    }
+
+    /// The driver task.
+    pub fn task(&self) -> tokio::task::AbortHandle {
+        self.driver.clone()
     }
 
     /// Arm `entry` for the call `call_ref` whose incarnation is
@@ -140,7 +154,7 @@ impl TimerService {
     /// Each `TimerEntry.fire_at` is an **absolute wall deadline** (epoch ms),
     /// minted from `now_ms()` on whichever node first scheduled it (and replicated
     /// as part of the `Call`). The driver rebuilds a local monotonic timer as
-    /// `fire_at - now_ms()`, at least zero and at most `MAX_TIMER_DELAY`:
+    /// `fire_at - now_ms()`, at least zero and at most [`MAX_DELAY`]:
     ///
     /// - **Past-due** (`fire_at <= now_ms()`) → zero delay → fires on the next
     ///   driver tick, then routes through the rules exactly like any timer fire
@@ -210,7 +224,8 @@ async fn driver(
     // cadence so `queue_len − live` stays a trustworthy regression alarm even at
     // idle. `Skip` collapses a backlog of missed ticks (e.g. after a long
     // paused-clock advance) into one, rather than firing a storm.
-    let mut gauge_tick = tokio::time::interval(Duration::from_secs(5));
+    #[expect(clippy::disallowed_methods, reason = "GAUGE_PERIOD is not zero")]
+    let mut gauge_tick = tokio::time::interval(GAUGE_PERIOD);
     gauge_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -237,7 +252,8 @@ async fn driver(
                     // regardless of the clock anchor. Across a failover `restore`,
                     // `fire_at` came from the *dead* node's clock, so the result
                     // depends on cross-node wall-clock agreement (see `restore`).
-                    let key = queue.insert(
+                    let key = sip_clock::delay_queue::insert(
+                        &mut queue,
                         Fired {
                             key: entry.key,
                             generation: entry.generation,
@@ -279,7 +295,7 @@ async fn driver(
                     }
                 }
             },
-            expired = next_expired(&mut queue), if !queue.is_empty() => {
+            Some(expired) = next_expired(&mut queue), if !queue.is_empty() => {
                 // Deliver only the live generation. `poll_expired` already removed
                 // this entry from the queue (its `Key`/slot is now freed), so we
                 // only clear `active` — never `try_remove` it. With physical
@@ -322,26 +338,20 @@ async fn driver(
     }
 }
 
-/// The longest delay the driver arms, below the ceiling past which
-/// `DelayQueue::insert` panics (its wheel holds 2^36 ms, about 2.2 years). A
-/// deadline further out — a replicated `fire_at` read against a skewed or
-/// corrupt clock, a configured duration past a year — arms here.
-const MAX_TIMER_DELAY: Duration = Duration::from_secs(365 * 24 * 3600);
-
 /// The delay from `now_ms` to the absolute deadline `fire_at`: zero when past
-/// due, at most [`MAX_TIMER_DELAY`].
+/// due, at most [`MAX_DELAY`]. A deadline further out — a replicated `fire_at`
+/// read against a skewed or corrupt clock, a configured duration past a year —
+/// arms there ([`sip_clock::delay_queue`]).
 fn arm_delay(fire_at: i64, now_ms: i64) -> Duration {
     let ms = u64::try_from(fire_at.saturating_sub(now_ms)).unwrap_or(0);
-    Duration::from_millis(ms).min(MAX_TIMER_DELAY)
+    Duration::from_millis(ms).min(MAX_DELAY)
 }
 
-/// Await the next expired timer. Only polled while the queue is non-empty (an
-/// empty `DelayQueue` resolves to `Ready(None)` and would busy-spin `select!`).
-async fn next_expired(q: &mut DelayQueue<Fired>) -> Fired {
-    std::future::poll_fn(|cx| q.poll_expired(cx))
-        .await
-        .expect("guarded by !is_empty()")
-        .into_inner()
+/// Await the next expired timer, `None` from an empty queue. Only polled
+/// while the queue is non-empty (an empty `DelayQueue` resolves to
+/// `Ready(None)` and would busy-spin `select!`).
+async fn next_expired(q: &mut DelayQueue<Fired>) -> Option<Fired> {
+    std::future::poll_fn(|cx| q.poll_expired(cx)).await.map(|e| e.into_inner())
 }
 
 #[cfg(test)]

@@ -35,15 +35,22 @@ enum TerminateOp {
 #[derive(Clone)]
 pub struct BufferedTerminateWriter {
     tx: mpsc::Sender<TerminateOp>,
+    drainer: tokio::task::AbortHandle,
 }
 
 impl BufferedTerminateWriter {
     /// Spawn the drainer over `store`. The task lives until all writer clones
     /// drop.
     pub fn spawn(store: Arc<dyn CallStore>, capacity: usize) -> Self {
+        #[expect(clippy::disallowed_methods, reason = "the capacity is held above zero")]
         let (tx, rx) = mpsc::channel(capacity.max(1));
-        observe::spawn_keeping_node(drain(store, rx));
-        Self { tx }
+        let drainer = observe::spawn_keeping_node(drain(store, rx)).abort_handle();
+        Self { tx, drainer }
+    }
+
+    /// The drainer task.
+    pub fn task(&self) -> tokio::task::AbortHandle {
+        self.drainer.clone()
     }
 
     #[allow(clippy::too_many_arguments)]

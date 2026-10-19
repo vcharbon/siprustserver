@@ -39,10 +39,11 @@ pub(crate) fn screen(call: &mut Call, event: &CallEvent, now_ms: i64) -> Result<
         trace_drop(call, now_ms, event, Dropped::Disarmed);
         return Err(Dropped::Disarmed);
     };
-    if call.timers[at].generation != *generation {
+    if call.timers.get(at).is_some_and(|t| t.generation != *generation) {
         trace_drop(call, now_ms, event, Dropped::Superseded);
         return Err(Dropped::Superseded);
     }
+    #[expect(clippy::disallowed_methods, reason = "at is the position just found")]
     call.timers.remove(at);
     if crate::trace::sampled(call) {
         crate::trace::emit::timer_fire(call, now_ms, key, *generation);

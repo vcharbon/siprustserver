@@ -4,7 +4,7 @@
 //! and `new=accept` again once every one has closed. Never latched, and never
 //! read by the orchestrator's `/ready` nor by in-dialog routing.
 
-use std::sync::{PoisonError, RwLock};
+use std::sync::RwLock;
 
 use tokio::sync::watch;
 
@@ -17,11 +17,12 @@ pub(crate) struct BackendGate {
 impl BackendGate {
     /// From now on, `breaker` open refuses new calls.
     pub(crate) fn add(&self, breaker: watch::Receiver<bool>) {
-        self.breakers.write().unwrap_or_else(PoisonError::into_inner).push(breaker);
+        crate::poison::write(&self.breakers, crate::poison::BACKEND_GATE).push(breaker);
     }
 
     /// Whether any breaker gating it is open now.
     pub(crate) fn any_open(&self) -> bool {
-        self.breakers.read().unwrap_or_else(PoisonError::into_inner).iter().any(|b| *b.borrow())
+        let breakers = crate::poison::read(&self.breakers, crate::poison::BACKEND_GATE);
+        breakers.iter().any(|b| *b.borrow())
     }
 }

@@ -75,7 +75,9 @@ impl LimiterLease {
     /// and refresh tick.
     pub(crate) fn from_config(config: &B2buaConfig, metrics: B2buaMetrics) -> Arc<Self> {
         let pace = RefreshPace {
-            period: Duration::from_secs(config.limiter_refresh_sec.max(1) as u64),
+            period: Duration::from_secs(
+                u64::try_from(config.limiter_refresh_sec.max(1)).unwrap_or(1),
+            ),
             tick: Duration::from_millis(config.limiter_refresh_batch_ms),
         };
         Self::build(DEFAULT_LEASE, Some(pace), metrics)

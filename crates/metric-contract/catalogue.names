@@ -25,6 +25,10 @@ b2bua-runner b2bua_store_fault_audit_skipped_total counter fixed {}
 b2bua-runner b2bua_handler_panics_total counter fixed {}
 b2bua-runner b2bua_reaper_sweeps_total counter fixed {}
 b2bua-runner b2bua_reaper_sweep_panics_total counter fixed {}
+b2bua-runner b2bua_store_reconciled_orphan_stamps_total counter fixed {}
+b2bua-runner b2bua_store_reconciled_missing_stamps_total counter fixed {}
+b2bua-runner b2bua_store_reconciled_orphan_index_total counter fixed {}
+b2bua-runner b2bua_store_reconciled_missing_index_total counter fixed {}
 b2bua-runner b2bua_replica_reap_panics_total counter fixed {}
 b2bua-runner b2bua_reaper_verdicts_total counter fixed {}
 b2bua-runner b2bua_reaper_discharged_total counter fixed {}
@@ -44,6 +48,8 @@ b2bua-runner b2bua_repl_bootstrap_stalled_total counter fixed {}
 b2bua-runner b2bua_call_creations_total counter fixed {}
 b2bua-runner b2bua_call_removals_total counter fixed {}
 b2bua-runner b2bua_store_poisoned_lock_recoveries_total counter fixed {lock}
+b2bua-runner b2bua_poisoned_lock_recoveries_total counter fixed {lock}
+b2bua-runner b2bua_task_restarts_total counter fixed {task}
 b2bua-runner b2bua_requests_total counter capped:256 {method}
 b2bua-runner b2bua_requests_overflow_total counter fixed {}
 b2bua-runner b2bua_responses_total counter capped:256 {method,code}

@@ -54,13 +54,21 @@ use std::time::Duration;
 
 use repl_net::frame::{Partition, Watermark};
 use repl_net::transport::ReplicationNetwork;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use topology::{Membership, Peer};
 
 use super::peer_resolver::AddrResolver;
 use super::puller::{Puller, PullerConfig, PullerStatus};
 use super::self_endpoint::{SelfEndpoint, SelfObserver};
 use super::ReplicatingCallStore;
+use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
+
+mod backup_deferral;
+
+/// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
+fn wiring<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    locked(slot, SUPERVISOR_WIRING)
+}
 
 /// Default cadence of the supervisor's belt-and-suspenders snapshot reconcile
 /// (ADR-0012 D2): re-reads membership every 5 s and acts only on drift, so any
@@ -102,7 +110,23 @@ struct FlowState {
     ever_connected: bool,
 }
 
+/// Why a reconcile (re)starts a flow's puller.
+fn flow_reason(drift: bool, ended: bool) -> &'static str {
+    match (drift, ended) {
+        (true, _) => "host moved",
+        (false, true) => "puller ended",
+        (false, false) => "new peer",
+    }
+}
+
 impl FlowState {
+    /// Whether the flow's puller has ended while it was neither parked nor
+    /// replaced: a puller runs until it is cancelled, so only a panic ends
+    /// one the supervisor still holds the status of.
+    fn puller_ended(&self) -> bool {
+        self.status_rx.as_ref().is_some_and(|rx| rx.has_changed().is_err())
+    }
+
     fn cold() -> Self {
         Self {
             status_rx: None,
@@ -256,6 +280,13 @@ struct SupervisorInner {
     started_at: Mutex<Option<tokio::time::Instant>>,
 }
 
+impl SupervisorInner {
+    /// The per-peer flows ([`SUPERVISOR_PEERS`]).
+    fn peers(&self) -> std::sync::MutexGuard<'_, HashMap<String, PeerEntry>> {
+        locked(&self.peers, SUPERVISOR_PEERS)
+    }
+}
+
 impl ReplicationSupervisor {
     /// Build a supervisor for `self_ordinal`. Call [`start`](Self::start) to
     /// spawn the initial pullers + the topology-reconcile loop.
@@ -326,13 +357,13 @@ impl ReplicationSupervisor {
     /// to (reactive reclaim / bulk reclaim). Call **before** [`start`](Self::start)
     /// so the initial pullers pick it up; a re-spawned puller reads it too.
     pub fn set_repl_sink(&self, sink: impl Into<super::RouterSink>) {
-        *self.inner.repl_tx.lock().unwrap() = Some(sink.into());
+        *wiring(&self.inner.repl_tx) = Some(sink.into());
     }
 
     /// Wire the memory admission gate whose backup ceilings every puller
     /// applies (ADR-0037). Call **before** [`start`](Self::start).
     pub fn set_capacity(&self, gate: crate::capacity::CapacityGate) {
-        *self.inner.capacity.lock().unwrap() = Some(gate);
+        *wiring(&self.inner.capacity) = Some(gate);
     }
 
     /// Spawn the Reclaim pullers per current peer (excluding self), keep them in
@@ -341,86 +372,43 @@ impl ReplicationSupervisor {
     ///
     /// Both the boot snapshot and every subsequent wakeup (delta, `Lagged`
     /// overflow, or periodic tick) flow through one idempotent
-    /// `reconcile_from_snapshot`, run as the node `start` is called under. The
-    /// shared [`topology::spawn_membership_reconcile`] driver owns the
-    /// subscribe-before-snapshot ordering, the 5 s ticker and `Lagged` (ADR-0012 D1/D2).
+    /// `reconcile_from_snapshot`, run as the node `start` is called under: the
+    /// boot pass synchronously, under a subscription taken before it, then the
+    /// shared [`topology::follow_membership`] loop with its 5 s ticker and
+    /// `Lagged` handling (ADR-0012 D1/D2). The loop and the gate are restarted
+    /// and counted when a run panics ([`crate::supervise`]); a restarted loop
+    /// subscribes and reconciles before it follows.
     pub fn start(&self, membership: Arc<dyn Membership>) {
-        *self.inner.membership.lock().unwrap() = Some(membership.clone());
-        *self.inner.started_at.lock().unwrap() = Some(tokio::time::Instant::now());
+        *wiring(&self.inner.membership) = Some(membership.clone());
+        *wiring(&self.inner.started_at) = Some(tokio::time::Instant::now());
         if membership.observes_self() {
             self.inner.self_endpoint.enable();
         }
-        let this = self.clone();
         let period = self.inner.reconcile_period;
-        let node = observe::NodeScope::current();
-        let handle =
-            topology::spawn_membership_reconcile(membership.clone(), period, move |snapshot| {
-                node.enter(|| this.reconcile_from_snapshot(snapshot));
+        let mut boot_changes = Some(membership.changes());
+        self.reconcile_from_snapshot(membership.snapshot());
+        let (this, followed) = (self.clone(), membership.clone());
+        let handle = crate::supervise::spawn(crate::supervise::MEMBERSHIP_RECONCILE, move || {
+            let (this, membership) = (this.clone(), followed.clone());
+            let changes = boot_changes.take().unwrap_or_else(|| {
+                let changes = membership.changes();
+                this.reconcile_from_snapshot(membership.snapshot());
+                changes
             });
-        *self.inner.reconcile.lock().unwrap() = Some(handle);
+            topology::follow_membership(membership, changes, period, move |snapshot| {
+                this.reconcile_from_snapshot(snapshot);
+            })
+        });
+        *wiring(&self.inner.reconcile) = Some(handle);
 
         // Backup-deferral gate: open the Backup streams once the Reclaim flows
         // are all current-or-unreachable (ADR-0014 boot order).
         let this = self.clone();
-        let gate = observe::spawn_keeping_node(async move {
-            this.run_backup_gate(membership).await;
+        let gate = crate::supervise::spawn(crate::supervise::BACKUP_GATE, move || {
+            let (this, membership) = (this.clone(), membership.clone());
+            async move { this.run_backup_gate(membership).await }
         });
-        *self.inner.gate.lock().unwrap() = Some(gate);
-    }
-
-    /// Wait until the Reclaim flows for every desired peer are ready, then latch
-    /// `backup_enabled` and reconcile once so the Backup streams open. Exits
-    /// immediately for a peerless node (nothing to back up). One-shot: returns
-    /// once it has enabled backups; later peers get their Backup flow from the
-    /// periodic reconcile (which honours the latched flag).
-    ///
-    /// **Event-driven, not a clock-poll.** It wakes the instant any Reclaim
-    /// puller publishes a status change (its first `Noop` flips `current`), so the
-    /// Backup streams open within the same scheduler turn — no full poll interval
-    /// of latency. A `BACKUP_GATE_POLL` fallback bounds the wait against a lost
-    /// wakeup or an unreachable peer whose hard timer must still latch it.
-    async fn run_backup_gate(self, membership: Arc<dyn Membership>) {
-        loop {
-            if self.inner.backup_enabled.load(Ordering::SeqCst) {
-                return;
-            }
-            let desired: Vec<Peer> = membership
-                .snapshot()
-                .into_iter()
-                .filter(|p| p.ordinal != self.inner.self_ordinal)
-                .collect();
-            // A peerless node has no Backup streams to open — latch and stop.
-            if desired.is_empty() {
-                self.inner.backup_enabled.store(true, Ordering::SeqCst);
-                return;
-            }
-            self.sync();
-            // Only a ready member gates the latch (`desired_ordinals`): a member
-            // that is present but not ready is pulled, never waited on. Each
-            // status is marked seen before it is read, under the one lock, so
-            // the wait below wakes on every status published after the mark.
-            let (ready, receivers) = {
-                let mut peers = self.inner.peers.lock().unwrap();
-                let receivers: Vec<watch::Receiver<PullerStatus>> = desired
-                    .iter()
-                    .filter_map(|p| peers.get(&p.ordinal).and_then(|e| seen(&e.reclaim)))
-                    .collect();
-                fold(&mut peers);
-                let ready = desired
-                    .iter()
-                    .filter(|p| p.ready)
-                    .all(|p| peers.get(&p.ordinal).is_some_and(|e| e.reclaim.ready()));
-                (ready, receivers)
-            };
-            if ready {
-                self.inner.backup_enabled.store(true, Ordering::SeqCst);
-                self.reconcile_from_snapshot(membership.snapshot());
-                return;
-            }
-            // Wait for ANY Reclaim status change (readiness re-check) or the
-            // fallback poll, whichever comes first.
-            await_any_change_or_poll(receivers, BACKUP_GATE_POLL).await;
-        }
+        *wiring(&self.inner.gate) = Some(gate);
     }
 
     /// Reconcile the running pullers to a fresh membership `snapshot` (ADR-0012
@@ -442,7 +430,7 @@ impl ReplicationSupervisor {
             snapshot.into_iter().filter(|p| p.ordinal != self.inner.self_ordinal).collect();
         let backup_enabled = self.inner.backup_enabled.load(Ordering::SeqCst);
 
-        let mut peers = self.inner.peers.lock().unwrap();
+        let mut peers = self.inner.peers();
 
         for peer in &desired {
             let entry = peers.entry(peer.ordinal.clone()).or_insert_with(PeerEntry::cold);
@@ -468,27 +456,36 @@ impl ReplicationSupervisor {
                 }
             }
 
-            // Reclaim always; Backup only once the gate has latched.
-            if entry.reclaim.status_rx.is_none() || drift {
+            // Reclaim always; Backup only once the gate has latched. A puller
+            // that ended unparked panicked: it is respawned and counted.
+            let (reclaim_ended, backup_ended) =
+                (entry.reclaim.puller_ended(), entry.backup.puller_ended());
+            if entry.reclaim.status_rx.is_none() || drift || reclaim_ended {
                 tracing::info!(
                     node = observe::node(),
                     peer = %peer.ordinal,
                     host = %peer.host,
                     flow = "recovery",
-                    reason = if drift { "host moved" } else { "new peer" },
+                    reason = flow_reason(drift, reclaim_ended),
                     "replication peer flow started"
                 );
+                if reclaim_ended {
+                    crate::supervise::RESTARTS.restarted(crate::supervise::REPL_PULLER);
+                }
                 self.spawn_flow(&mut entry.reclaim, peer, Partition::Pri);
             }
-            if backup_enabled && (entry.backup.status_rx.is_none() || drift) {
+            if backup_enabled && (entry.backup.status_rx.is_none() || drift || backup_ended) {
                 tracing::info!(
                     node = observe::node(),
                     peer = %peer.ordinal,
                     host = %peer.host,
                     flow = "backup",
-                    reason = if drift { "host moved" } else { "new peer" },
+                    reason = flow_reason(drift, backup_ended),
                     "replication peer flow started"
                 );
+                if backup_ended {
+                    crate::supervise::RESTARTS.restarted(crate::supervise::REPL_PULLER);
+                }
                 self.spawn_flow(&mut entry.backup, peer, Partition::Bak);
             }
         }
@@ -507,7 +504,7 @@ impl ReplicationSupervisor {
                         peer = %ord,
                         "replication peer parked (left the membership set)"
                     );
-                    if let Some(sink) = self.inner.repl_tx.lock().unwrap().as_ref() {
+                    if let Some(sink) = wiring(&self.inner.repl_tx).as_ref() {
                         sink.send(crate::router::ReplCommand::PeerDeparted(ord.clone()));
                     }
                 }
@@ -569,11 +566,11 @@ impl ReplicationSupervisor {
             self.inner.metrics.clone(),
         );
         // Forward X11 fail-back commands to the router when a live core wired a sink.
-        let puller = match self.inner.repl_tx.lock().unwrap().clone() {
+        let puller = match wiring(&self.inner.repl_tx).clone() {
             Some(sink) => puller.with_repl_sink(sink),
             None => puller,
         };
-        let puller = match self.inner.capacity.lock().unwrap().clone() {
+        let puller = match wiring(&self.inner.capacity).clone() {
             Some(gate) => puller.with_capacity(gate),
             None => puller,
         };
@@ -594,13 +591,13 @@ impl ReplicationSupervisor {
         // Stop reacting to membership deltas + the backup gate FIRST so neither can
         // spawn a new puller against this (about-to-be-dead) node after we park the
         // existing ones. Aborting also frees each task's `Arc<SupervisorInner>`.
-        if let Some(h) = self.inner.reconcile.lock().unwrap().take() {
+        if let Some(h) = wiring(&self.inner.reconcile).take() {
             h.abort();
         }
-        if let Some(h) = self.inner.gate.lock().unwrap().take() {
+        if let Some(h) = wiring(&self.inner.gate).take() {
             h.abort();
         }
-        let mut peers = self.inner.peers.lock().unwrap();
+        let mut peers = self.inner.peers();
         for entry in peers.values_mut() {
             entry.park();
         }
@@ -609,14 +606,14 @@ impl ReplicationSupervisor {
     /// Fold every running puller's published status into the retained map. Tests
     /// call this (or any retained read) after advancing the clock.
     fn sync(&self) {
-        fold(&mut self.inner.peers.lock().unwrap());
+        fold(&mut self.inner.peers());
     }
 
     /// Is `peer`'s **Reclaim** flow current (its sticky current flag set)? Folds
     /// live status first.
     pub fn is_current(&self, peer: &str) -> bool {
         self.sync();
-        self.inner.peers.lock().unwrap().get(peer).map(|e| e.reclaim.current).unwrap_or(false)
+        self.inner.peers().get(peer).map(|e| e.reclaim.current).unwrap_or(false)
     }
 
     /// The peer ordinals whose Reclaim flow gates this node's readiness: the
@@ -640,7 +637,7 @@ impl ReplicationSupervisor {
     ///   a Reclaim flow that reached it and then lost it (`ever_connected`,
     ///   `current=false`) must not hold a rebooting node NotReady for that long.
     fn desired_ordinals(&self) -> Option<std::collections::HashSet<String>> {
-        self.inner.membership.lock().unwrap().as_ref().map(|m| {
+        wiring(&self.inner.membership).as_ref().map(|m| {
             m.snapshot()
                 .into_iter()
                 .filter(|p| p.ready && p.ordinal != self.inner.self_ordinal)
@@ -662,9 +659,7 @@ impl ReplicationSupervisor {
         self.sync();
         let desired = self.desired_ordinals();
         self.inner
-            .peers
-            .lock()
-            .unwrap()
+            .peers()
             .iter()
             .filter(|(ord, _)| desired.as_ref().is_none_or(|d| d.contains(ord.as_str())))
             .all(|(_, e)| e.reclaim.ready())
@@ -674,13 +669,7 @@ impl ReplicationSupervisor {
     /// warm resume)? Folds live status first. Sticky across Park (X5).
     pub fn bootstrap_complete(&self, peer: &str) -> bool {
         self.sync();
-        self.inner
-            .peers
-            .lock()
-            .unwrap()
-            .get(peer)
-            .map(|e| e.reclaim.bootstrap_complete)
-            .unwrap_or(false)
+        self.inner.peers().get(peer).map(|e| e.reclaim.bootstrap_complete).unwrap_or(false)
     }
 
     /// Whether the membership source's view is **authoritative** yet
@@ -691,7 +680,7 @@ impl ReplicationSupervisor {
     /// rebooting node latch Ready before a single reclaim puller existed —
     /// routing in-dialog traffic at it pre-reclaim (orphan 481s).
     pub fn membership_synced(&self) -> bool {
-        self.inner.membership.lock().unwrap().as_ref().is_some_and(|m| m.synced())
+        wiring(&self.inner.membership).as_ref().is_some_and(|m| m.synced())
     }
 
     /// Whether readiness may read the membership view: it is
@@ -702,7 +691,7 @@ impl ReplicationSupervisor {
     pub fn membership_settled(&self) -> bool {
         let bound = Duration::from_millis(self.inner.config.bootstrap_hard_timeout_ms);
         self.membership_synced()
-            || self.inner.started_at.lock().unwrap().is_some_and(|at| at.elapsed() >= bound)
+            || wiring(&self.inner.started_at).is_some_and(|at| at.elapsed() >= bound)
     }
 
     /// Are ALL **desired** peers' **Reclaim** flows bootstrap-complete? (The
@@ -714,9 +703,7 @@ impl ReplicationSupervisor {
         self.sync();
         let desired = self.desired_ordinals();
         self.inner
-            .peers
-            .lock()
-            .unwrap()
+            .peers()
             .iter()
             .filter(|(ord, _)| desired.as_ref().is_none_or(|d| d.contains(ord.as_str())))
             .all(|(_, e)| e.reclaim.bootstrap_complete)
@@ -732,9 +719,7 @@ impl ReplicationSupervisor {
     pub fn flow_watermark(&self, peer: &str, partition: Partition) -> Watermark {
         self.sync();
         self.inner
-            .peers
-            .lock()
-            .unwrap()
+            .peers()
             .get(peer)
             .map(|e| e.flow(partition).watermark)
             .unwrap_or_else(|| Watermark::new(0, 0))
@@ -747,7 +732,7 @@ impl ReplicationSupervisor {
     /// the ordinal was never seen. Pure read — it folds no puller status and
     /// spawns nothing.
     pub fn peer_link(&self, peer: &str) -> PeerLink {
-        match self.inner.peers.lock().unwrap().get(peer) {
+        match self.inner.peers().get(peer) {
             None => PeerLink::Absent,
             Some(e) if e.reclaim.status_rx.is_some() && e.ready => PeerLink::Active,
             Some(e) if e.reclaim.status_rx.is_some() => PeerLink::Kept,
@@ -762,13 +747,7 @@ impl ReplicationSupervisor {
 
     /// Whether the **Reclaim** puller is currently running (not Parked) for `peer`.
     pub fn is_running(&self, peer: &str) -> bool {
-        self.inner
-            .peers
-            .lock()
-            .unwrap()
-            .get(peer)
-            .map(|e| e.reclaim.status_rx.is_some())
-            .unwrap_or(false)
+        self.inner.peers().get(peer).map(|e| e.reclaim.status_rx.is_some()).unwrap_or(false)
     }
 
     /// Await `peer`'s **Reclaim** flow becoming current (sticky), folding live
@@ -776,7 +755,7 @@ impl ReplicationSupervisor {
     pub async fn await_current(&self, peer: &str) {
         loop {
             // Marked seen before the read, so the wait wakes on the next status.
-            let rx = self.inner.peers.lock().unwrap().get(peer).and_then(|e| seen(&e.reclaim));
+            let rx = self.inner.peers().get(peer).and_then(|e| seen(&e.reclaim));
             if self.is_current(peer) {
                 return;
             }
@@ -807,43 +786,4 @@ fn seen(flow: &FlowState) -> Option<watch::Receiver<PullerStatus>> {
         rx.mark_unchanged();
         rx
     })
-}
-
-/// Wait until **any** of `receivers` publishes a status change, or `fallback`
-/// elapses — whichever first. Used by the backup-deferral gate so it re-checks
-/// Reclaim readiness the instant a puller advances, without a full poll interval
-/// of latency. Each receiver must be marked seen at the status the caller read
-/// ([`seen`]). A receiver whose puller has ended never wakes it, so once none can
-/// publish the wait is the `fallback` poll. A short-lived forwarder task per
-/// receiver (aborted on return) avoids needing a `select_all` combinator; the
-/// gate is one-shot, so this runs only during boot until the Backup streams open.
-async fn await_any_change_or_poll(
-    receivers: Vec<watch::Receiver<PullerStatus>>,
-    fallback: Duration,
-) {
-    if receivers.is_empty() {
-        tokio::time::sleep(fallback).await;
-        return;
-    }
-    let (tx, mut rx) = mpsc::channel::<()>(1);
-    let handles: Vec<tokio::task::JoinHandle<()>> = receivers
-        .into_iter()
-        .map(|mut r| {
-            let tx = tx.clone();
-            observe::spawn_keeping_node(async move {
-                if r.changed().await.is_ok() {
-                    let _ = tx.try_send(());
-                }
-            })
-        })
-        .collect();
-    drop(tx);
-    // `None` (every forwarder ended without a change) disables its branch.
-    tokio::select! {
-        _ = tokio::time::sleep(fallback) => {}
-        Some(()) = rx.recv() => {}
-    }
-    for h in handles {
-        h.abort();
-    }
 }

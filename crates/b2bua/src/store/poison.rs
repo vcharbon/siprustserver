@@ -1,13 +1,15 @@
 //! The store's named locks (ADR-0051 §7). Every critical section over a store
-//! map leaves it whole between statements, so a panic under the lock loses
-//! nothing a later reader needs: a poisoned lock is taken as it stands, its
-//! poison cleared, and the recovery logged and counted under its name
-//! (`b2bua_store_poisoned_lock_recoveries_total{lock}`).
+//! map writes only values computed before it and writes the call map last on
+//! an insert, first on a removal, so a panic under the lock leaves at most
+//! derived entries the sweep reconciles: a poisoned lock is taken as it
+//! stands, its poison cleared, and the recovery logged and counted under its
+//! name (`b2bua_store_poisoned_lock_recoveries_total{lock}`).
 
 use std::sync::{Mutex, MutexGuard};
 
 use lock_poison::Recoveries;
 
+pub(crate) const CALL_STORE: &str = "call_store";
 pub(crate) const REPLICA_BODIES: &str = "replica_bodies";
 pub(crate) const REPLICA_METADATA: &str = "replica_metadata";
 pub(crate) const REPLICA_CHANGELOG: &str = "replica_changelog";
@@ -16,7 +18,8 @@ pub(crate) const DISPLACED_BODIES: &str = "displaced_bodies";
 pub(crate) const SHED_MARKS: &str = "shed_marks";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 6] = [
+pub const LOCKS: [&str; 7] = [
+    CALL_STORE,
     REPLICA_BODIES,
     REPLICA_METADATA,
     REPLICA_CHANGELOG,

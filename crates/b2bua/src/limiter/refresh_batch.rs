@@ -34,7 +34,7 @@
 //! intact, and counted.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -233,10 +233,9 @@ impl RefreshBatch {
         })
     }
 
-    /// Every step leaves the state whole, so a poisoned lock is taken as it
-    /// is.
+    /// Every step leaves the state whole: a poisoned lock is taken as it is.
     fn lock(&self) -> MutexGuard<'_, Due> {
-        self.due.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::poison::locked(&self.due, crate::poison::LIMITER_REFRESH_DUE)
     }
 
     /// Mark the refresh of `key`, the limiter key of `call_ref`, due with
@@ -365,7 +364,8 @@ impl RefreshBatch {
     /// Wait one tick, or until the backoff ends, or less when the batch
     /// resumes.
     async fn wait_round(&self) {
-        let until = self.lock().retry_at.unwrap_or_else(|| Instant::now() + self.tick());
+        let until =
+            self.lock().retry_at.unwrap_or_else(|| sip_clock::deadline::from_now(self.tick()));
         let resumed = async {
             while !self.lock().send_now {
                 self.resumed.notified().await;
@@ -383,7 +383,7 @@ impl RefreshBatch {
         let mut due = self.lock();
         due.failures = due.failures.saturating_add(1);
         let wait = backoff(due.failures).max(self.tick());
-        due.retry_at = Some(Instant::now() + wait);
+        due.retry_at = Some(sip_clock::deadline::from_now(wait));
     }
 
     /// When the first entry waiting is given up under the current lease.

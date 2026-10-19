@@ -115,6 +115,12 @@ pub trait CdrWriter: Send + Sync {
     /// close's deadline does not move the first one's. A sink that writes
     /// inline holds nothing to close.
     async fn close(&self, deadline: Instant);
+
+    /// The task this sink delivers through, when it has one: the worker ends
+    /// when that task ends.
+    fn task(&self) -> Option<tokio::task::AbortHandle> {
+        None
+    }
 }
 
 #[cfg(test)]

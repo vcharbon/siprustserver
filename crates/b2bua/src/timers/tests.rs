@@ -365,7 +365,7 @@ async fn a_restored_deadline_past_the_wheel_arms_at_the_ceiling() {
         Some(CallEvent::Timer { call_ref, .. }) => assert_eq!(call_ref, "near"),
         other => panic!("the driver keeps serving past the far deadline, got {other:?}"),
     }
-    tokio::time::advance(MAX_TIMER_DELAY - Duration::from_millis(1_000)).await;
+    tokio::time::advance(MAX_DELAY - Duration::from_millis(1_000)).await;
     match fire_rx.recv().await {
         Some(CallEvent::Timer { call_ref, .. }) => assert_eq!(call_ref, "far"),
         other => panic!("the far deadline fires at the ceiling, got {other:?}"),

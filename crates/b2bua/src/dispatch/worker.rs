@@ -18,6 +18,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use super::class::PermitPool;
 use super::queue::{CallQueue, Popped};
 use crate::metrics::B2buaMetrics;
+use crate::poison::{locked, DISPATCH_BODIES, DISPATCH_QUEUE, DISPATCH_SLOTS};
 
 /// A handler body: a self-contained future the worker runs on its own task.
 pub type DispatchBody = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -68,7 +69,7 @@ impl InFlight {
     /// the body future — releasing the lock guard — and the worker reports
     /// [`HandlerFailure::Aborted`]. `true` when there was a body to abort.
     pub fn abort(&self, call_ref: &str) -> bool {
-        match self.bodies.lock().unwrap().get(call_ref) {
+        match locked(&self.bodies, DISPATCH_BODIES).get(call_ref) {
             Some(h) => {
                 h.abort();
                 true
@@ -81,10 +82,10 @@ impl InFlight {
     /// after: the node crashed.
     pub fn halt(&self) {
         self.halted.store(true, Ordering::SeqCst);
-        for handle in self.bodies.lock().unwrap().values() {
+        for handle in locked(&self.bodies, DISPATCH_BODIES).values() {
             handle.abort();
         }
-        for handle in self.beside.lock().unwrap().iter() {
+        for handle in locked(&self.beside, DISPATCH_BODIES).iter() {
             handle.abort();
         }
     }
@@ -92,7 +93,7 @@ impl InFlight {
     /// Track `handle`, a task doing call work outside any call's queue, so a
     /// halt aborts it too; aborted at once after a halt.
     pub fn track(&self, handle: tokio::task::AbortHandle) {
-        let mut beside = self.beside.lock().unwrap();
+        let mut beside = locked(&self.beside, DISPATCH_BODIES);
         beside.retain(|h| !h.is_finished());
         if self.halted() {
             handle.abort();
@@ -105,11 +106,11 @@ impl InFlight {
     }
 
     fn insert(&self, call_ref: &str, handle: tokio::task::AbortHandle) {
-        self.bodies.lock().unwrap().insert(call_ref.to_string(), handle);
+        locked(&self.bodies, DISPATCH_BODIES).insert(call_ref.to_string(), handle);
     }
 
     fn remove(&self, call_ref: &str) {
-        self.bodies.lock().unwrap().remove(call_ref);
+        locked(&self.bodies, DISPATCH_BODIES).remove(call_ref);
     }
 }
 
@@ -132,11 +133,11 @@ pub(super) struct Held {
 impl Permits {
     /// `concurrency` shared permits, all of them open to new calls.
     pub(super) fn new(concurrency: usize) -> Self {
-        let concurrency = concurrency.max(1);
+        let concurrency = concurrency.clamp(1, Semaphore::MAX_PERMITS);
         Self {
             concurrency,
-            shared: Arc::new(Semaphore::new(concurrency)),
-            new_call: Arc::new(Semaphore::new(concurrency)),
+            shared: Arc::new(semaphore(concurrency)),
+            new_call: Arc::new(semaphore(concurrency)),
         }
     }
 
@@ -144,7 +145,7 @@ impl Permits {
     /// most the shared pool.
     pub(super) fn with_new_call_share(self, permits: usize) -> Self {
         let permits = permits.clamp(1, self.concurrency);
-        Self { new_call: Arc::new(Semaphore::new(permits)), ..self }
+        Self { new_call: Arc::new(semaphore(permits)), ..self }
     }
 
     /// Wait for the permits of `pool`. A wait on the exhausted new-call share
@@ -163,12 +164,21 @@ impl Permits {
     }
 }
 
+/// A pool of `permits`, at most the semaphore's ceiling.
+fn semaphore(permits: usize) -> Semaphore {
+    #[expect(clippy::disallowed_methods, reason = "the count is held within the ceiling")]
+    let pool = Semaphore::new(permits.min(Semaphore::MAX_PERMITS));
+    pool
+}
+
 /// A permit of `pool`, calling `waits` first when none is free.
 async fn take(pool: &Arc<Semaphore>, waits: impl FnOnce()) -> OwnedSemaphorePermit {
     if pool.available_permits() == 0 {
         waits();
     }
-    pool.clone().acquire_owned().await.expect("semaphore closed")
+    #[expect(clippy::expect_used, reason = "the pools of `Permits` are never closed")]
+    let permit = pool.clone().acquire_owned().await.expect("semaphore closed");
+    permit
 }
 
 /// One call's queue and the wake-up of its worker. Pushes and pops take the
@@ -206,7 +216,7 @@ pub(super) struct WorkerCtx<T> {
 /// behind it.
 pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: WorkerCtx<T>) {
     loop {
-        let next = slot.queue.lock().unwrap().pop(&ctx.metrics);
+        let next = locked(&slot.queue, DISPATCH_QUEUE).pop(&ctx.metrics);
         match next {
             None => slot.wake.notified().await,
             Some(Popped::Release(class)) => {
@@ -217,8 +227,8 @@ pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: 
                 // worker left.
                 ctx.in_flight.remove(&call_ref);
                 let next = {
-                    let mut slots = ctx.slots.lock().unwrap();
-                    let next = slot.queue.lock().unwrap().reopen(&ctx.metrics);
+                    let mut slots = locked(&ctx.slots, DISPATCH_SLOTS);
+                    let next = locked(&slot.queue, DISPATCH_QUEUE).reopen(&ctx.metrics);
                     if !next {
                         slots.remove(&call_ref);
                     }

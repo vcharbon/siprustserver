@@ -25,6 +25,7 @@ use super::RouterCtx;
 
 /// How long a released call's shown provisionals stay answerable: RFC 3262
 /// §3's 64·T1 bound.
+#[expect(clippy::cast_possible_wrap, reason = "a const: 64·T1 fits an i64")]
 const WINDOW_MS: i64 = 64 * sip_retransmit::timers::T1 as i64;
 
 type DialogKey = (String, String);
@@ -79,7 +80,7 @@ impl LatePrackBook {
         if shown.is_empty() {
             return;
         }
-        let Ok(mut inner) = self.inner.lock() else { return };
+        let mut inner = crate::poison::locked(&self.inner, crate::poison::LATE_PRACKS);
         inner.prune(now_ms);
         let until = now_ms + WINDOW_MS;
         for s in shown {
@@ -92,11 +93,12 @@ impl LatePrackBook {
     /// Whether `rack` is answerable in the `(call_id, tag)` dialog at
     /// `now_ms`, taking it off the book when it is.
     fn take(&self, call_id: &str, tag: &str, rack: (RSeq, CSeq), now_ms: i64) -> bool {
-        let Ok(mut inner) = self.inner.lock() else { return false };
+        let mut inner = crate::poison::locked(&self.inner, crate::poison::LATE_PRACKS);
         inner.prune(now_ms);
         let key = (call_id.to_string(), tag.to_string());
         let Some((_, racks)) = inner.racks.get_mut(&key) else { return false };
         let Some(at) = racks.iter().position(|r| *r == rack) else { return false };
+        #[expect(clippy::disallowed_methods, reason = "at is the position just found")]
         racks.swap_remove(at);
         true
     }

@@ -43,6 +43,15 @@ fn stable_jitter(call_ref: &str) -> u64 {
     h
 }
 
+/// `seed` brought into `0..span` ms; zero for a span that is not positive.
+fn jitter_within(seed: u64, span: i64) -> i64 {
+    match u64::try_from(span) {
+        // Below `span`, so it fits an i64.
+        Ok(span) if span > 0 => i64::try_from(seed % span).unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// Re-spread a reclaimed call's `Keepalive` deadlines for the bulk reboot sweep
 /// (`reclaim::reclaim_all`) — load management only, never correctness (`(p,b)`
 /// reconciliation makes any incidental keepalive overlap non-corrupting; ADR-0014).
@@ -83,7 +92,7 @@ fn smooth_keepalives(
         } else {
             let window = t.fire_at - now_ms;
             if window > 0 {
-                t.fire_at = now_ms + (stable_jitter(call_ref) % window as u64) as i64;
+                t.fire_at = now_ms + jitter_within(stable_jitter(call_ref), window);
             }
         }
     }
@@ -201,9 +210,8 @@ pub(super) fn sanitize_restored_timers(
                 continue;
             }
             if now_ms - t.fire_at >= keepalive_interval_ms {
-                let jitter = (stable_jitter(call_ref) ^ stable_jitter(&format!("{:?}", t.key)))
-                    % keepalive_interval_ms as u64;
-                t.fire_at = now_ms + jitter as i64;
+                let seed = stable_jitter(call_ref) ^ stable_jitter(&format!("{:?}", t.key));
+                t.fire_at = now_ms + jitter_within(seed, keepalive_interval_ms);
             }
         }
     }

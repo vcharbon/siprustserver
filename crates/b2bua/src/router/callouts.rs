@@ -11,6 +11,7 @@ use call::{AdmitReport, Call, CallLimiterState};
 use serde::Serialize;
 use serde_json::json;
 
+use super::fold_payload::{put, to_payload};
 use super::RouterCtx;
 use crate::answer_deadline;
 use crate::decision::{
@@ -117,13 +118,6 @@ fn record_round_trip(
         outcome,
         &serde_json::to_vec(payload).unwrap_or_default(),
     );
-}
-
-/// Serialize a typed payload to the internal-event JSON. Payload structs are
-/// program-constructed (no non-string keys, no non-finite floats), so failure
-/// is unreachable; degrade to an empty object rather than kill the callout task.
-pub(super) fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
-    serde_json::to_value(p).unwrap_or_else(|_| serde_json::Value::Object(Default::default()))
 }
 
 /// Replace the call's set on the cluster limiter with a route's
@@ -262,7 +256,7 @@ pub(super) fn spawn_failure_callout(
         record_round_trip(&trace, &ctx2, "/call/failure", sent_at_ms, &request, outcome, &payload);
         // The fold names the deadline it answers, when its turn armed one.
         if let Some(deadline) = deadline {
-            payload[answer_deadline::CONSULT_CHANGE] = json!(deadline);
+            put(&mut payload, answer_deadline::CONSULT_CHANGE, json!(deadline));
         }
         let fold = internal_event(to, "call-failure-result", outcome, payload, Vec::new());
         send_admit_fold(&ctx2.reentry_tx, &ctx2.limiter, fold);
@@ -418,7 +412,7 @@ async fn failure_outcome(
                     service_ext: Default::default(),
                     label: None,
                 });
-                payload[STACK_AUTHORED] = json!(true);
+                put(&mut payload, STACK_AUTHORED, json!(true));
                 break ("reject", payload);
             }
             Err(CallDecisionError::Unavailable(_)) => {
@@ -427,10 +421,10 @@ async fn failure_outcome(
         }
     };
     if let Some(report) = refused.filter(|_| outcome != "failover") {
-        payload[LimiterAdmitResult::REPORT] = to_payload(report);
+        put(&mut payload, LimiterAdmitResult::REPORT, to_payload(report));
     }
     if !refused_routes.is_empty() {
-        payload[crate::attempts::REFUSED_ROUTES] = json!(refused_routes);
+        put(&mut payload, crate::attempts::REFUSED_ROUTES, json!(refused_routes));
     }
     (outcome, payload)
 }
@@ -499,7 +493,7 @@ pub(super) fn spawn_release_callout(
                             crate::attempts::REFUSED_ROUTES: [refused],
                         });
                         if !route.service_ext.is_empty() {
-                            payload["service_ext"] = json!(route.service_ext);
+                            put(&mut payload, "service_ext", json!(route.service_ext));
                         }
                         ("release", payload)
                     }
@@ -510,7 +504,7 @@ pub(super) fn spawn_release_callout(
             Ok(CallReleaseResponse::Release { label, service_ext }) => {
                 let mut payload = json!({ "label": label, "event": event });
                 if !service_ext.is_empty() {
-                    payload["service_ext"] = json!(service_ext);
+                    put(&mut payload, "service_ext", json!(service_ext));
                 }
                 ("release", payload)
             }
@@ -522,7 +516,7 @@ pub(super) fn spawn_release_callout(
         record_round_trip(&trace, &ctx2, "/call/release", sent_at_ms, &request, outcome, &payload);
         // The fold names the deadline it answers, when its turn armed one.
         if let Some(deadline) = deadline {
-            payload[answer_deadline::CONSULT_CHANGE] = json!(deadline);
+            put(&mut payload, answer_deadline::CONSULT_CHANGE, json!(deadline));
         }
         let fold = internal_event(to, "call-release-result", outcome, payload, Vec::new());
         send_admit_fold(&ctx2.reentry_tx, &ctx2.limiter, fold);

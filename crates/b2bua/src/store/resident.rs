@@ -11,13 +11,13 @@ impl CallState {
     /// release the per-call runtime state that is NOT in the store — the root
     /// spans (ADR-0026) — and tests read it as ground truth.
     pub fn live_call_refs(&self) -> Vec<String> {
-        self.inner.lock().unwrap().calls.keys().cloned().collect()
+        self.locked().calls.keys().cloned().collect()
     }
 
     /// Every resident call still `Active`, as `(callRef, incarnation,
     /// answered)`: whether its caller's INVITE took a 2xx.
     pub fn active_call_answers(&self) -> Vec<(String, String, bool)> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         inner
             .calls
             .iter()
@@ -32,7 +32,7 @@ impl CallState {
     /// The distinct `(primary, backup)` ordinal pairs the resident calls'
     /// topologies name; `None` when a resident call names no topology.
     pub fn live_topologies(&self) -> Option<Vec<(String, String)>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         let mut pairs: Vec<(String, String)> = Vec::new();
         for call in inner.calls.values() {
             let t = call.topology.as_ref()?;

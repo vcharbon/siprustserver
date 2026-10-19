@@ -34,6 +34,8 @@ mod dialog_gate;
 #[cfg(test)]
 mod dialog_gate_tests;
 mod dropped_on_delete;
+mod fold_payload;
+mod incarnation_gate;
 mod ingress;
 mod initial_turn;
 mod interpret;

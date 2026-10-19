@@ -247,7 +247,10 @@ impl<T> CallQueue<T> {
             None => self.entries.push_back(Entry::Release(class)),
             Some(at) => {
                 // The last entry of the queue proper moves into the overflow.
-                if at < depth && len >= depth && self.entries[depth - 1].room() == Room::PastBounds
+                let last_proper = depth.checked_sub(1).and_then(|i| self.entries.get(i));
+                if at < depth
+                    && len >= depth
+                    && last_proper.map(Entry::room) == Some(Room::PastBounds)
                 {
                     self.waiting += 1;
                 }

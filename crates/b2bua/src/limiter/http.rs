@@ -26,7 +26,7 @@
 //! slot within its budget) is reported as a failure only.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -97,7 +97,7 @@ impl Endpoint {
 
     /// A request of `op` naming `keys` call keys left.
     fn sent(&self, op: LimiterOp, keys: usize) {
-        for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
+        for to in crate::poison::read(&self.reports, crate::poison::LIMITER_REPORTS).iter() {
             to.sent(op, keys);
         }
     }
@@ -106,7 +106,7 @@ impl Endpoint {
     /// episode, reported.
     fn failed(&self, op: LimiterOp, cause: LimiterFailure) {
         self.fail_open.record(&self.addr_key, cause.label(), 1);
-        for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
+        for to in crate::poison::read(&self.reports, crate::poison::LIMITER_REPORTS).iter() {
             to.failed(op, cause);
         }
     }
@@ -114,7 +114,7 @@ impl Endpoint {
     /// A valid answer stated the limiter's lease, `lease_ms`.
     fn stated_lease(&self, lease_ms: u64) {
         let lease = Duration::from_millis(lease_ms);
-        for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
+        for to in crate::poison::read(&self.reports, crate::poison::LIMITER_REPORTS).iter() {
             to.lease_stated(lease);
         }
     }
@@ -361,7 +361,7 @@ impl CallLimiter for HttpCallLimiter {
     }
 
     fn report_to(&self, reports: LimiterReports) {
-        let mut all = self.endpoint.reports.write().unwrap_or_else(PoisonError::into_inner);
+        let mut all = crate::poison::write(&self.endpoint.reports, crate::poison::LIMITER_REPORTS);
         all.retain(LimiterReports::is_live);
         all.push(reports);
     }

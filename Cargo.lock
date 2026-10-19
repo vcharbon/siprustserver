@@ -515,6 +515,7 @@ dependencies = [
  "sip-net-testkit",
  "sip-retransmit",
  "sip-txn",
+ "task-restart",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

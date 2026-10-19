@@ -207,15 +207,15 @@ impl SubLog {
         self.entries
             .range((start, Bound::Unbounded))
             .take(limit)
-            .map(|(c, call_ref)| {
-                let st = &self.by_ref[call_ref];
-                Due {
+            .filter_map(|(c, call_ref)| {
+                let st = self.by_ref.get(call_ref)?;
+                Some(Due {
                     counter: *c,
                     call_ref: call_ref.clone(),
                     op: st.op,
                     answered: st.answered,
                     incarnation: st.incarnation.clone(),
-                }
+                })
             })
             .collect()
     }

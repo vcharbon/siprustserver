@@ -28,6 +28,8 @@ pub struct BufferedCdrWriter {
     /// Turns `true` once the drainer has emptied its queue and closed `inner`.
     closed: watch::Receiver<bool>,
     dropped: Dropped,
+    /// The drainer, while buffering.
+    drainer: Option<tokio::task::AbortHandle>,
 }
 
 /// The records this buffer dropped: counted locally for `dropped_total()` and
@@ -58,12 +60,15 @@ impl BufferedCdrWriter {
             close_by: Arc::new(close_by),
             closed,
             dropped: Dropped { count: Arc::new(AtomicU64::new(0)), metrics },
+            drainer: None,
         };
         if queue_max > 0 {
+            #[expect(clippy::disallowed_methods, reason = "queue_max is above zero here")]
             let (tx, rx) = mpsc::channel::<(Call, i64)>(queue_max);
             writer.tx = Some(tx);
             let drainer = Drainer { inner: writer.inner.clone(), dropped: writer.dropped.clone() };
-            observe::spawn_keeping_node(drainer.run(rx, close_rx, closed_tx));
+            let task = observe::spawn_keeping_node(drainer.run(rx, close_rx, closed_tx));
+            writer.drainer = Some(task.abort_handle());
         }
         writer
     }
@@ -159,6 +164,10 @@ impl CdrWriter for BufferedCdrWriter {
 
     /// The first close waits for the drainer, which ends at its deadline; a
     /// later one waits for that within its own deadline.
+    fn task(&self) -> Option<tokio::task::AbortHandle> {
+        self.drainer.clone()
+    }
+
     async fn close(&self, deadline: Instant) {
         if self.tx.is_none() {
             return self.inner.close(deadline).await;

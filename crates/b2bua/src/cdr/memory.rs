@@ -9,6 +9,7 @@ use tokio::time::Instant;
 use call::Call;
 
 use super::{build_record, CdrRecord, CdrWriter};
+use crate::poison::{locked, CDR_MEMORY};
 
 #[derive(Clone, Default)]
 pub struct InMemoryCdrWriter {
@@ -22,18 +23,18 @@ impl InMemoryCdrWriter {
 
     /// Synchronous snapshot (for tests that already hold a handle).
     pub fn snapshot(&self) -> Vec<CdrRecord> {
-        self.records.lock().unwrap().clone()
+        locked(&self.records, CDR_MEMORY).clone()
     }
 }
 
 #[async_trait]
 impl CdrWriter for InMemoryCdrWriter {
     async fn write(&self, call: &Call, terminated_at: i64) {
-        self.records.lock().unwrap().push(build_record(call, terminated_at));
+        locked(&self.records, CDR_MEMORY).push(build_record(call, terminated_at));
     }
 
     async fn read_all(&self) -> Vec<CdrRecord> {
-        self.records.lock().unwrap().clone()
+        locked(&self.records, CDR_MEMORY).clone()
     }
 
     async fn close(&self, _deadline: Instant) {}
