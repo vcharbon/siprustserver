@@ -49,7 +49,8 @@ impl Series<'_> {
 
     /// The index, in `dims[dim].values`, of this series' value of the
     /// dimension at position `dim` of its block. A position the block lacks
-    /// is a caller's bug: refused in a debug build, the first value's index.
+    /// is a caller's bug, refused in a debug build; a release build reads
+    /// index 0.
     pub fn at(&self, dim: usize) -> usize {
         let at = self.at.get(dim).copied();
         debug_assert!(at.is_some(), "block {} has no position {dim}", self.block);
@@ -58,7 +59,7 @@ impl Series<'_> {
 
     /// The index, in `dim.values`, of this series' value of `dim`, wherever
     /// `dim` sits in the series' block. A dimension the block lacks is a
-    /// caller's bug: refused in a debug build, the first value's index.
+    /// caller's bug, refused in a debug build; a release build reads index 0.
     pub fn index(&self, dim: &Dim) -> usize {
         let pos = self.dims.iter().position(|d| d.name == dim.name && d.values == dim.values);
         let at = pos.and_then(|pos| self.at.get(pos).copied());
@@ -98,8 +99,10 @@ impl Labels {
 
     /// The first block of `arity` dimensions: the one a semi-open family's
     /// label set of that many values is named by. No block of that many
-    /// dimensions, or two naming them differently, is a declaration's bug:
-    /// refused in a debug build, an empty block.
+    /// dimensions, or two naming them differently, is a declaration's bug,
+    /// refused in a debug build; a release build returns an empty block when
+    /// none has that many (the row it names is written with no labels) and
+    /// the first block when two differ.
     pub fn block_of_arity(&self, arity: usize) -> &'static [Dim] {
         let mut found = self.blocks().into_iter().filter(|dims| dims.len() == arity);
         let block = found.next();

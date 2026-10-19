@@ -21,9 +21,14 @@
 //!
 //! Pure: no clock, no I/O, no global registry, no shared state. A process
 //! holds its values (the `metric-values` crate) and hands them to the
-//! renderer at scrape time. A declaration a caller uses against its kind or
-//! its label sets is a caller's bug: refused in a debug build, rendered as
-//! nothing.
+//! renderer at scrape time.
+//!
+//! A declaration a caller uses against its kind or its label sets is a
+//! caller's bug, refused by a debug assertion, which every binary's catalogue
+//! test runs over its static declarations. A release build goes on: a render
+//! of the other kind writes nothing, a series position or dimension the block
+//! lacks reads index 0, a row of an arity no block declares is written with no
+//! labels, and an undeclared row of a fixed family is not written.
 
 #![forbid(unsafe_code)]
 // The panic set at deny outside test code (ADR-0051 §3).

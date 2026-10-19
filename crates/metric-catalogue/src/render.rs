@@ -26,7 +26,9 @@ impl Family {
     /// sample per declared label set in exposition order, valued by `value`.
     /// Every declared label set is written, whatever its value.
     ///
-    /// A histogram renders with [`render_histogram`](Self::render_histogram).
+    /// A histogram renders with [`render_histogram`](Self::render_histogram):
+    /// one handed here is refused in a debug build and writes nothing in a
+    /// release build.
     pub fn render<V: Display>(&self, out: &mut String, mut value: impl FnMut(&Series<'_>) -> V) {
         if !self.renders_as(false) {
             return;
@@ -151,6 +153,8 @@ impl Family {
                 debug_assert!(false, "{} is fixed: {values:?} is not declared", self.name);
                 continue;
             }
+            // A release build writes a row of an arity no block declares with
+            // no labels: `block_of_arity` returns an empty block.
             let dims: &[Dim] = self.labels.block_of_arity(values.len());
             let labels: Vec<(&str, &str)> =
                 dims.iter().map(|d| d.name).zip(values.iter().map(String::as_str)).collect();
