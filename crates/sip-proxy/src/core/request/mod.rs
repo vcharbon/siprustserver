@@ -93,7 +93,7 @@ impl ProxyCore {
         // again (a digest retry, a retransmit whose memo has been evicted) — is
         // recorded HERE and only here: that activation reports `AlreadyOpen`
         // and records nothing.
-        let at_ms = start_ms as i64;
+        let at_ms = i64::try_from(start_ms).unwrap_or(i64::MAX);
         let call_id = req.call_id().as_str();
         emit::sip_in(&self.traces, call_id, at_ms, src, req.image());
         let initial_invite = matches!(req.method(), Method::Invite) && req.to().tag().is_none();

@@ -59,7 +59,7 @@ impl ProxyCore {
         emit::forwarded(
             &self.traces,
             call_id,
-            self.now_ms() as i64,
+            self.trace_ms(),
             emit::RouteFacts {
                 decision,
                 target,

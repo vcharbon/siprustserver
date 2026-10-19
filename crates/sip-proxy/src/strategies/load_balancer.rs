@@ -164,7 +164,10 @@ impl RoutingStrategy for LoadBalancerStrategy {
                 .collect()
         };
 
-        if candidates.is_empty() {
+        let keys: Vec<WorkerKey> = candidates.iter().map(|w| WorkerKey(w.id.clone())).collect();
+        let chosen = rendezvous_select(call_id, &keys)
+            .and_then(|key| candidates.iter().copied().find(|w| w.id == key.0));
+        let Some(winner) = chosen else {
             if !is_emergency && !alive.is_empty() {
                 self.metrics.record_overload_rejection("no_target_critical_filtered");
             }
@@ -180,14 +183,7 @@ impl RoutingStrategy for LoadBalancerStrategy {
                 )
             };
             return Err(SelectError::NoTarget { reason });
-        }
-
-        let keys: Vec<WorkerKey> = candidates.iter().map(|w| WorkerKey(w.id.clone())).collect();
-        let winner_idx = {
-            let winner = rendezvous_select(call_id, &keys).expect("non-empty candidates");
-            keys.iter().position(|k| k.0 == winner.0).expect("winner is in keys")
         };
-        let winner = candidates[winner_idx];
 
         // Per-worker AIMD token bucket (port of TS LoadBalancer.ts:335-348).
         // Emergency and in-dialog requests bypass the bucket entirely —

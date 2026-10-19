@@ -59,10 +59,27 @@ pub trait HmacKeyProvider: Send + Sync {
     fn verify_truncated(&self, input: &[u8], kid: &str, mac_prefix: &[u8]) -> bool;
 }
 
-fn mac_for(key: &HmacKey, input: &[u8]) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(&key.bytes).expect("HMAC accepts any key length");
-    mac.update(input);
-    mac.finalize().into_bytes().into()
+/// A key ready to MAC with: its `kid` and the HMAC state keyed once, at
+/// construction.
+struct Keyed {
+    id: String,
+    prf: HmacSha256,
+}
+
+impl Keyed {
+    /// `key`, validated and keyed; `label` names it in the error.
+    fn of(key: &HmacKey, label: &str) -> Result<Self, HmacKeyProviderConfigError> {
+        validate_key(key, label)?;
+        let prf = HmacSha256::new_from_slice(&key.bytes)
+            .map_err(|e| HmacKeyProviderConfigError(format!("{label} key: {e}")))?;
+        Ok(Self { id: key.id.clone(), prf })
+    }
+
+    fn mac(&self, input: &[u8]) -> [u8; 32] {
+        let mut mac = self.prf.clone();
+        mac.update(input);
+        mac.finalize().into_bytes().into()
+    }
 }
 
 fn validate_key(key: &HmacKey, label: &str) -> Result<(), HmacKeyProviderConfigError> {
@@ -81,8 +98,8 @@ fn validate_key(key: &HmacKey, label: &str) -> Result<(), HmacKeyProviderConfigE
 /// The static provider: an active key + an optional previous key accepted by
 /// verify only (rotation overlap).
 pub struct StaticHmacKeyProvider {
-    current: HmacKey,
-    previous: Option<HmacKey>,
+    current: Keyed,
+    previous: Option<Keyed>,
 }
 
 impl StaticHmacKeyProvider {
@@ -92,20 +109,18 @@ impl StaticHmacKeyProvider {
         current: HmacKey,
         previous: Option<HmacKey>,
     ) -> Result<Self, HmacKeyProviderConfigError> {
-        validate_key(&current, "current")?;
-        if let Some(prev) = &previous {
-            validate_key(prev, "previous")?;
-            if prev.id == current.id {
-                return Err(HmacKeyProviderConfigError(format!(
-                    "previous key id must differ from current key id (both are \"{}\")",
-                    current.id
-                )));
-            }
+        let current = Keyed::of(&current, "current")?;
+        let previous = previous.map(|prev| Keyed::of(&prev, "previous")).transpose()?;
+        if previous.as_ref().is_some_and(|prev| prev.id == current.id) {
+            return Err(HmacKeyProviderConfigError(format!(
+                "previous key id must differ from current key id (both are \"{}\")",
+                current.id
+            )));
         }
         Ok(Self { current, previous })
     }
 
-    fn lookup_key(&self, kid: &str) -> Option<&HmacKey> {
+    fn lookup_key(&self, kid: &str) -> Option<&Keyed> {
         if kid == self.current.id {
             Some(&self.current)
         } else {
@@ -116,7 +131,7 @@ impl StaticHmacKeyProvider {
 
 impl HmacKeyProvider for StaticHmacKeyProvider {
     fn sign(&self, input: &[u8]) -> HmacSignResult {
-        HmacSignResult { kid: self.current.id.clone(), mac: mac_for(&self.current, input) }
+        HmacSignResult { kid: self.current.id.clone(), mac: self.current.mac(input) }
     }
 
     fn verify_truncated(&self, input: &[u8], kid: &str, mac_prefix: &[u8]) -> bool {
@@ -129,7 +144,7 @@ impl HmacKeyProvider for StaticHmacKeyProvider {
         if mac_prefix.len() != TRUNCATED_MAC_BYTES {
             return false;
         }
-        let full = mac_for(key, input);
+        let full = key.mac(input);
         full[..TRUNCATED_MAC_BYTES].ct_eq(mac_prefix).into()
     }
 }

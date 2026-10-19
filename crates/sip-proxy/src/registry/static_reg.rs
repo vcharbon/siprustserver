@@ -49,17 +49,13 @@ pub fn parse_worker_list(
         if part.is_empty() {
             return Err(err(format!("empty entry in {source}")));
         }
-        let at = part.find('@');
-        match at {
-            // `at <= 0` (no `@`, or leading `@`) or trailing `@` are invalid.
-            Some(0) | None => {
+        match part.split_once('@') {
+            // No `@`, a leading `@` or a trailing `@` is invalid.
+            None | Some(("", _)) | Some((_, "")) => {
                 return Err(err(format!("entry \"{part}\" must be of the form id@host:port")))
             }
-            Some(at) if at == part.len() - 1 => {
-                return Err(err(format!("entry \"{part}\" must be of the form id@host:port")))
-            }
-            Some(at) => {
-                let id = part[..at].trim();
+            Some((id, host_port)) => {
+                let id = id.trim();
                 if id.is_empty() {
                     return Err(err(format!("empty worker id in entry \"{part}\"")));
                 }
@@ -67,7 +63,7 @@ pub fn parse_worker_list(
                     return Err(err(format!("duplicate worker id \"{id}\"")));
                 }
                 let addr =
-                    ProxyAddr::parse(&part[at + 1..]).filter(|a| a.port >= 1).ok_or_else(|| {
+                    ProxyAddr::parse(host_port).filter(|a| a.port >= 1).ok_or_else(|| {
                         err(format!(
                             "entry \"{part}\" has malformed host:port (port must be 1..65535)"
                         ))

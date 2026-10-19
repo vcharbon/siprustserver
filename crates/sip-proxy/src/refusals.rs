@@ -49,7 +49,7 @@ pub struct Refusals {
     tagger: StatelessTagger,
     jitter_sec: u32,
     hasher: RandomState,
-    stripes: Box<[Mutex<Memo>]>,
+    stripes: [Mutex<Memo>; STRIPES],
     remembered: AtomicUsize,
 }
 
@@ -103,15 +103,13 @@ impl Refusals {
             tagger: StatelessTagger::from_id_gen(id_gen),
             jitter_sec,
             hasher: RandomState::new(),
-            stripes: (0..STRIPES)
-                .map(|_| {
-                    Mutex::new(Memo {
-                        refused: HashMap::new(),
-                        order: VecDeque::new(),
-                        max: per_stripe,
-                    })
+            stripes: std::array::from_fn(|_| {
+                Mutex::new(Memo {
+                    refused: HashMap::new(),
+                    order: VecDeque::new(),
+                    max: per_stripe,
                 })
-                .collect(),
+            }),
             remembered: AtomicUsize::new(0),
         }
     }
@@ -189,7 +187,11 @@ impl Refusals {
     }
 
     fn lock(&self, key: u64) -> MutexGuard<'_, Memo> {
-        let stripe = &self.stripes[(key % STRIPES as u64) as usize];
+        // STRIPES divides 256: the key's low byte picks the stripe its
+        // remainder by STRIPES names.
+        let slot = usize::from(key.to_le_bytes()[0]) % STRIPES;
+        #[expect(clippy::indexing_slicing, reason = "a remainder of STRIPES indexes the stripes")]
+        let stripe = &self.stripes[slot];
         crate::poison::locked(stripe, "refusals memo")
     }
 

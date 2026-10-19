@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use load_shed::{at_ms, Ewma, TokenBucket};
 
@@ -132,7 +133,10 @@ pub struct WorkerLoadObserver {
 
 impl WorkerLoadObserver {
     pub fn new(config: LoadObserverConfig) -> Self {
-        let cooldown_ms = (config.aimd_cooldown_ticks * config.options_interval_ms as f64) as i64;
+        // A cooldown no duration holds (negative, NaN) blocks nothing.
+        let ticks_ms = config.aimd_cooldown_ticks * config.options_interval_ms as f64;
+        let cooldown = Duration::try_from_secs_f64(ticks_ms / 1000.0).unwrap_or(Duration::ZERO);
+        let cooldown_ms = i64::try_from(cooldown.as_millis()).unwrap_or(i64::MAX);
         Self { config, cooldown_ms, workers: Mutex::new(HashMap::new()) }
     }
 

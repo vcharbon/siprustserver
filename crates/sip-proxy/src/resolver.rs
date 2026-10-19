@@ -269,7 +269,7 @@ impl Inner {
 
     /// When a lookup starting now reaches its bound.
     fn lookup_deadline(&self) -> tokio::time::Instant {
-        tokio::time::Instant::now() + Duration::from_millis(self.cache.cfg.lookup_timeout_ms)
+        sip_clock::deadline::from_now(Duration::from_millis(self.cache.cfg.lookup_timeout_ms))
     }
 
     /// The first of `addrs` the socket it would leave from can send to.

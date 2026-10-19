@@ -233,7 +233,7 @@ impl HealthProbe {
     }
 
     fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
     /// Run the probe loop forever (spawn it; abort to stop). Returns when the
@@ -255,8 +255,10 @@ impl HealthProbe {
         let mut first_round = Some(FirstRound::of(state.pending.keys().cloned()));
         let round_window = tokio::time::sleep(Duration::from_millis(self.config.timeout_ms));
         tokio::pin!(round_window);
-        let period = Duration::from_millis(self.config.interval_ms);
-        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        // A round at most every millisecond: a zero interval rounds that often.
+        let period = Duration::from_millis(self.config.interval_ms.max(1));
+        #[expect(clippy::disallowed_methods, reason = "the period is at least 1 ms")]
+        let mut tick = tokio::time::interval_at(sip_clock::deadline::from_now(period), period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
@@ -284,7 +286,7 @@ impl HealthProbe {
                     // Timer F (32 s) backstop — the reap normally cancelled the
                     // transaction long before; count it only if still pending.
                     Some(TransactionEvent::Timeout { branch, .. }) => {
-                        if let Some(p) = state.pending.remove(&branch[..]) {
+                        if let Some(p) = state.pending.remove(branch.as_str()) {
                             self.count_miss(p, &mut state.misses);
                         }
                     }
@@ -307,7 +309,7 @@ impl HealthProbe {
             .map(|(b, _)| b.clone())
             .collect();
         for branch in expired {
-            let p = state.pending.remove(&branch[..]).expect("collected above");
+            let Some(p) = state.pending.remove(branch.as_str()) else { continue };
             self.txn.cancel_txns_for_call(&probe_call_ref(&branch)).await?;
             self.count_miss(p, &mut state.misses);
         }
@@ -354,7 +356,7 @@ impl HealthProbe {
             return;
         }
         let Some(branch) = resp.via().first().branch().map(str::to_owned) else { return };
-        let Some(p) = state.pending.remove(&branch[..]) else { return };
+        let Some(p) = state.pending.remove(branch.as_str()) else { return };
 
         // A reply proves liveness — retire any other in-flight probes to the
         // same worker so their later reap can't count a spurious miss against

@@ -58,7 +58,7 @@ impl ProxyCore {
         let reason = reason.label();
         // The shed fact precedes the 503 it explains: the refusal is itself an
         // emission site (the datagram it synthesizes).
-        emit::shed(&self.traces, req.call_id().as_str(), self.now_ms() as i64, reason);
+        emit::shed(&self.traces, req.call_id().as_str(), self.trace_ms(), reason);
         // A closed set: the gate's `ShedReason` labels.
         Err(self.refuse_new(req, src, retry_after_sec, reason).await)
     }

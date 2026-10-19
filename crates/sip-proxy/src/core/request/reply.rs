@@ -129,13 +129,7 @@ impl ProxyCore {
         // place a traced call's own 503 / 483 / 420 / 400 becomes a `sip.out`.
         // A shed call never reaches a downstream hop, so without this its span
         // would show the INVITE arriving and nothing leaving.
-        emit::responded(
-            &self.traces,
-            req.call_id().as_str(),
-            self.now_ms() as i64,
-            src,
-            resp.image(),
-        );
+        emit::responded(&self.traces, req.call_id().as_str(), self.trace_ms(), src, resp.image());
 
         // ── §16.7 / §17.1.1.3: absorb the ACK to our OWN non-2xx INVITE final ─
         // Generating a final response makes this proxy the UAS of that INVITE

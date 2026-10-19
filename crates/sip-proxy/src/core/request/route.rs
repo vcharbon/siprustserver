@@ -209,7 +209,7 @@ impl ProxyCore {
             self.metrics.record_call();
             // The proxy's own sampling decision — independent of the worker's,
             // taken once, on the call's first INVITE (ADR-0026).
-            self.activate_trace(req, src, self.now_ms() as i64);
+            self.activate_trace(req, src, self.trace_ms());
         }
 
         // ── Proxy-self gate (`admission`) ───────────────────────────────────

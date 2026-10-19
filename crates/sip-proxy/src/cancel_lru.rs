@@ -62,7 +62,9 @@ pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
 /// working set.
 pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 16_000;
 
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(DEFAULT_SWEEP_INTERVAL_MS <= RTX_ENTRY_TTL_MS);
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(RTX_ENTRY_TTL_MS <= INVITE_ENTRY_TTL_MS);
 
 /// The key of the INVITE transaction `via` opened upstream (§17.2.3): its
@@ -199,6 +201,7 @@ impl CancelBranchLru {
         }
         let lru = self.clone();
         observe::spawn_keeping_node(async move {
+            #[expect(clippy::disallowed_methods, reason = "DEFAULT_SWEEP_INTERVAL_MS is not zero")]
             let mut tick =
                 tokio::time::interval(std::time::Duration::from_millis(DEFAULT_SWEEP_INTERVAL_MS));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -211,7 +214,7 @@ impl CancelBranchLru {
     }
 
     fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
     /// Remember the downstream target + outbound branch used on a forward.

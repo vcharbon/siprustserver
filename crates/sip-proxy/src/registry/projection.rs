@@ -260,7 +260,7 @@ impl WorkerSet {
     }
 
     fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
     /// Recompute the projection from the **ready** members of the authoritative

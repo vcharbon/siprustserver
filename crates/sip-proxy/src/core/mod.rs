@@ -298,7 +298,12 @@ impl ProxyCore {
     }
 
     fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        u64::try_from(self.clock.now_ms()).unwrap_or(0)
+    }
+
+    /// [`now_ms`](Self::now_ms), signed as the per-call traces stamp it.
+    fn trace_ms(&self) -> i64 {
+        self.clock.now_ms().max(0)
     }
 
     /// Send raw bytes to a [`ProxyAddr`] target. An IP-literal host (the fast
@@ -382,6 +387,7 @@ impl ProxyCore {
             let ext_endpoint = self.external.as_ref().map(|e| e.endpoint.clone());
             let shard = self.shard;
             observe::spawn_keeping_node(async move {
+                #[expect(clippy::disallowed_methods, reason = "the sweep interval is not zero")]
                 let mut tick = tokio::time::interval(Duration::from_millis(
                     crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS,
                 ));

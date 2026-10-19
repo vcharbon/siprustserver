@@ -69,7 +69,7 @@ impl ProxyCore {
         self.metrics.record_response(cseq.method().as_str(), resp.status());
         // Per-call trace tier (ADR-0026): the parsed Call-ID, one predicted
         // branch while nothing is sampled.
-        let at_ms = self.now_ms() as i64;
+        let at_ms = self.trace_ms();
         let is_traced = emit::response_in(
             &self.traces,
             resp.call_id().as_str(),
@@ -87,11 +87,11 @@ impl ProxyCore {
 
         // §16.7.3: need ≥2 Via (ours + the next hop's).
         let hops: Vec<Via> = resp.via().iter().cloned().collect();
-        if hops.len() < 2 {
+        let [ours, next, ..] = hops.as_slice() else {
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
-        }
-        let (top_host, top_port) = hops[0].host_port();
+        };
+        let (top_host, top_port) = ours.host_port();
         // Dual-face: the proxy stamps its outbound Via with the EGRESS face's
         // advertise, so a response legitimately names either face here.
         if !self.is_self_addr(top_host, top_port) {
@@ -100,7 +100,6 @@ impl ProxyCore {
             return;
         }
 
-        let next = &hops[1];
         // The worker a response is for is named by its Via sent-by (see the
         // failover below); a response for a departed address, whatever its
         // method, re-arms that address's window (ADR-0031 D4).
@@ -109,7 +108,7 @@ impl ProxyCore {
         self.registry.rearm_departed(&sent_by);
         let by_via_cookie = if cseq.method() == Method::Invite {
             let named = self.registry.lookup_by_address(&sent_by);
-            self.via_cookie_route(&resp, &hops[0], named.as_ref().map(|w| w.id.as_str())).await
+            self.via_cookie_route(&resp, ours, named.as_ref().map(|w| w.id.as_str())).await
         } else {
             None
         };
@@ -171,7 +170,7 @@ impl ProxyCore {
             host = moved.address.host;
             port = moved.address.port;
         } else if let Some(dead) = dead_worker {
-            match self.own_cookie_for(&resp, &hops[0], &dead.id) {
+            match self.own_cookie_for(&resp, ours, &dead.id) {
                 Some(params) => match self
                     .strategy
                     .decode_stickiness(&params, &SipMessage::Response(resp.clone()))

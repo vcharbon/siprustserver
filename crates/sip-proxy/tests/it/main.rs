@@ -16,6 +16,7 @@ mod load_balancer_routing;
 mod no_panic_lane;
 mod options_e2e;
 mod per_call_trace;
+mod probe_period;
 mod refused_invite_copies;
 mod rfc_proxy_compliance;
 mod select_failure_503;
