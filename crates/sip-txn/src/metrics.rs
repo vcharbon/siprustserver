@@ -12,7 +12,9 @@ use tokio::sync::mpsc;
 use crate::event::{EventQueueClass, TransactionEvent};
 use crate::layer::InviteClass;
 
+mod by_class;
 mod retransmits;
+pub(crate) use by_class::ByClass;
 pub use retransmits::RetransmitRow;
 pub(crate) use retransmits::{method_slot, RetransmitFamily};
 
@@ -30,11 +32,11 @@ pub(crate) struct MetricsInner {
     pub retransmit_buf_bytes: AtomicU64,
     /// Ordinary events the full output queue dropped, by
     /// [`EventQueueClass::index`].
-    pub event_queue_drops: [AtomicU64; 6],
+    pub event_queue_drops: ByClass<{ EventQueueClass::ALL.len() }>,
     /// Critical events the full output queue deferred onto the retry deque, by
     /// [`EventQueueClass::index`]. A deferral is a delivery postponed, never a
     /// loss.
-    pub event_queue_deferrals: [AtomicU64; 6],
+    pub event_queue_deferrals: ByClass<{ EventQueueClass::ALL.len() }>,
     /// Critical events waiting on the retry deque right now (gauge), sampled
     /// at the end of every owner turn.
     pub event_queue_deferred: AtomicUsize,
@@ -48,7 +50,7 @@ pub(crate) struct MetricsInner {
     pub sweep_reaped: AtomicU64,
     /// INVITEs refused at a deferred-backlog ceiling, indexed by
     /// [`InviteClass::index`] (counter).
-    pub deferred_refused: [AtomicU64; 3],
+    pub deferred_refused: ByClass<{ InviteClass::ALL.len() }>,
     /// Copies of a refused INVITE answered that refusal again before any
     /// transaction held them (counter).
     pub refused_copies: AtomicU64,
@@ -130,12 +132,12 @@ impl MetricsInner {
             active_transactions: AtomicUsize::new(0),
             timer_queue_len: AtomicUsize::new(0),
             retransmit_buf_bytes: AtomicU64::new(0),
-            event_queue_drops: Default::default(),
-            event_queue_deferrals: Default::default(),
+            event_queue_drops: ByClass::new(),
+            event_queue_deferrals: ByClass::new(),
             event_queue_deferred: AtomicUsize::new(0),
             deferred_swept: AtomicU64::new(0),
             sweep_reaped: AtomicU64::new(0),
-            deferred_refused: Default::default(),
+            deferred_refused: ByClass::new(),
             refused_copies: AtomicU64::new(0),
             txn_orphaned_on_call_evict: AtomicU64::new(0),
             orphaned_transactions: AtomicUsize::new(0),
@@ -211,7 +213,7 @@ impl TransactionMetrics {
     /// wire copy — a dropped non-INVITE request's retransmission is admitted
     /// afresh and may be dropped again.
     pub fn event_queue_drops(&self, reason: EventQueueClass) -> u64 {
-        self.inner.event_queue_drops[reason.index()].load(Ordering::Relaxed)
+        self.inner.event_queue_drops.get(reason.index())
     }
 
     /// Critical events the full output queue deferred, by class: each is
@@ -219,7 +221,7 @@ impl TransactionMetrics {
     /// transaction leaves unanswered first
     /// ([`deferred_swept`](Self::deferred_swept)).
     pub fn event_queue_deferrals(&self, reason: EventQueueClass) -> u64 {
-        self.inner.event_queue_deferrals[reason.index()].load(Ordering::Relaxed)
+        self.inner.event_queue_deferrals.get(reason.index())
     }
 
     /// Critical events waiting for room in the output queue (gauge).
@@ -247,7 +249,7 @@ impl TransactionMetrics {
     /// refused INVITE, answered the same refusal, is not counted again
     /// (counter).
     pub fn deferred_refused(&self, class: InviteClass) -> u64 {
-        self.inner.deferred_refused[class.index()].load(Ordering::Relaxed)
+        self.inner.deferred_refused.get(class.index())
     }
 
     /// Copies of a refused INVITE — at this layer or a stage ahead of it —

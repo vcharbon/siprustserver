@@ -113,7 +113,7 @@ impl Owner {
             }
             Admission::Refuse => {
                 if let Some(class) = class {
-                    self.metrics.deferred_refused[class.index()].fetch_add(1, Relaxed);
+                    self.metrics.deferred_refused.add(class.index());
                 }
             }
         }

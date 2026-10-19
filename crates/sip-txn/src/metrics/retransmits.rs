@@ -63,16 +63,18 @@ const TRIGGER: &str = "trigger";
 /// `code`), the CANCEL sub-ladder, Timer G (`INVITE` and the final's status)
 /// — and the `trigger` replay of a server transaction's cached response to a
 /// retransmitted request (§17.2.1; the request's method and the response's
-/// status). A fixed set of atomics keyed by class and label slot: the owner
-/// task bumps one with no lock, and the scrape reads them off-thread.
+/// status). A fixed set of atomics keyed by class and label slot, on the
+/// heap: the owner task bumps one with no lock, and the scrape reads them
+/// off-thread.
 #[derive(Debug)]
 pub(crate) struct RetransmitFamily {
-    /// `[ladder][method]` for the request ladders.
-    requests: [[AtomicU64; METHOD_LABELS.len()]; REQUEST_LADDERS.len()],
-    /// `[status - 300]` for `InviteServerFinal`.
-    finals: [AtomicU64; FINAL_CODES],
-    /// `[method][status - 100]` for the cached-response replay.
-    triggers: [[AtomicU64; TRIGGER_CODES]; METHOD_LABELS.len()],
+    /// `ladder * METHODS + method` for the request ladders.
+    requests: Box<[AtomicU64]>,
+    /// `status - 300` for `InviteServerFinal`.
+    finals: Box<[AtomicU64]>,
+    /// `method * TRIGGER_CODES + (status - 100)` for the cached-response
+    /// replay.
+    triggers: Box<[AtomicU64]>,
     /// The rows of extension methods, `[ladder, token]` or `[ladder, token,
     /// code]`, under the family's cap ([`crate::catalogue::RETRANSMITS`]);
     /// past it a rung lands on its ladder's and code's row whose method is
@@ -90,12 +92,31 @@ pub struct RetransmitRow {
     pub count: u64,
 }
 
+/// The `method` label slots of a request ladder's or a replay's rows.
+const METHODS: usize = METHOD_LABELS.len();
+
+/// `n` counters at zero.
+fn counters(n: usize) -> Box<[AtomicU64]> {
+    (0..n).map(|_| AtomicU64::new(0)).collect()
+}
+
+/// Add one to the counter at `slot` of `cells`.
+fn bump(cells: &[AtomicU64], slot: usize) {
+    if let Some(cell) = cells.get(slot) {
+        cell.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn sum(cells: &[AtomicU64]) -> u64 {
+    cells.iter().map(|a| a.load(Ordering::Relaxed)).sum()
+}
+
 impl RetransmitFamily {
     pub(super) fn new() -> Self {
         Self {
-            requests: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
-            finals: std::array::from_fn(|_| AtomicU64::new(0)),
-            triggers: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            requests: counters(REQUEST_LADDERS.len() * METHODS),
+            finals: counters(FINAL_CODES),
+            triggers: counters(METHODS * TRIGGER_CODES),
             extensions: OpenRows::new(&crate::catalogue::RETRANSMITS),
         }
     }
@@ -110,7 +131,7 @@ impl RetransmitFamily {
         self.extensions
             .rows()
             .iter()
-            .filter(|(labels, _)| labels[0] == ladder)
+            .filter(|(labels, _)| labels.first().is_some_and(|l| l == ladder))
             .map(|(_, n)| n)
             .sum()
     }
@@ -120,19 +141,15 @@ impl RetransmitFamily {
     pub(crate) fn record_request(&self, ladder: Class, slot: MethodSlot) {
         let Some(row) = REQUEST_LADDERS.iter().position(|c| *c == ladder) else { return };
         match slot {
-            MethodSlot::Native(slot) => {
-                self.requests[row][slot].fetch_add(1, Ordering::Relaxed);
-            }
+            MethodSlot::Native(slot) => bump(&self.requests, row * METHODS + slot),
             MethodSlot::Extension(token) => self.extensions.add(&[ladder.as_str(), &token], 1),
         }
     }
 
     /// Count one Timer G rung re-sending an INVITE's non-2xx final of `code`.
     pub(crate) fn record_final(&self, code: u16) {
-        if let Some(slot) =
-            code.checked_sub(FIRST_FINAL_CODE).map(usize::from).filter(|s| *s < FINAL_CODES)
-        {
-            self.finals[slot].fetch_add(1, Ordering::Relaxed);
+        if let Some(slot) = code.checked_sub(FIRST_FINAL_CODE) {
+            bump(&self.finals, usize::from(slot));
         }
     }
 
@@ -145,9 +162,7 @@ impl RetransmitFamily {
             return;
         };
         match method_slot(method) {
-            MethodSlot::Native(row) => {
-                self.triggers[row][slot].fetch_add(1, Ordering::Relaxed);
-            }
+            MethodSlot::Native(row) => bump(&self.triggers, row * TRIGGER_CODES + slot),
             MethodSlot::Extension(token) => {
                 self.extensions.add(&[TRIGGER, &token, &code.to_string()], 1)
             }
@@ -156,28 +171,25 @@ impl RetransmitFamily {
 
     /// Every cached-response replay, whatever it repeated.
     pub(super) fn triggered(&self) -> u64 {
-        self.triggers.iter().flatten().map(|a| a.load(Ordering::Relaxed)).sum::<u64>()
-            + self.extension_total(TRIGGER)
+        sum(&self.triggers) + self.extension_total(TRIGGER)
     }
 
     pub(super) fn total(&self, ladder: Class) -> u64 {
         match REQUEST_LADDERS.iter().position(|c| *c == ladder) {
             Some(row) => {
-                self.requests[row].iter().map(|a| a.load(Ordering::Relaxed)).sum::<u64>()
+                self.requests.chunks(METHODS).nth(row).map_or(0, sum)
                     + self.extension_total(ladder.as_str())
             }
-            None if ladder == Class::InviteServerFinal => {
-                self.finals.iter().map(|a| a.load(Ordering::Relaxed)).sum()
-            }
+            None if ladder == Class::InviteServerFinal => sum(&self.finals),
             None => 0,
         }
     }
 
     pub(super) fn rows(&self) -> Vec<RetransmitRow> {
         let mut out = Vec::new();
-        for (row, ladder) in REQUEST_LADDERS.iter().enumerate() {
-            for (slot, method) in METHOD_LABELS.iter().enumerate() {
-                let count = self.requests[row][slot].load(Ordering::Relaxed);
+        for (ladder, cells) in REQUEST_LADDERS.iter().zip(self.requests.chunks(METHODS)) {
+            for (method, cell) in METHOD_LABELS.iter().zip(cells) {
+                let count = cell.load(Ordering::Relaxed);
                 if count > 0 {
                     out.push(RetransmitRow {
                         ladder: ladder.as_str(),
@@ -188,25 +200,25 @@ impl RetransmitFamily {
                 }
             }
         }
-        for (slot, cell) in self.finals.iter().enumerate() {
+        for (code, cell) in (FIRST_FINAL_CODE..).zip(self.finals.iter()) {
             let count = cell.load(Ordering::Relaxed);
             if count > 0 {
                 out.push(RetransmitRow {
                     ladder: Class::InviteServerFinal.as_str(),
                     method: "INVITE".to_string(),
-                    code: Some(FIRST_FINAL_CODE + slot as u16),
+                    code: Some(code),
                     count,
                 });
             }
         }
-        for (row, method) in METHOD_LABELS.iter().enumerate() {
-            for (slot, cell) in self.triggers[row].iter().enumerate() {
+        for (method, cells) in METHOD_LABELS.iter().zip(self.triggers.chunks(TRIGGER_CODES)) {
+            for (code, cell) in (FIRST_TRIGGER_CODE..).zip(cells) {
                 let count = cell.load(Ordering::Relaxed);
                 if count > 0 {
                     out.push(RetransmitRow {
                         ladder: TRIGGER,
                         method: method.to_string(),
-                        code: Some(FIRST_TRIGGER_CODE + slot as u16),
+                        code: Some(code),
                         count,
                     });
                 }
@@ -214,13 +226,13 @@ impl RetransmitFamily {
         }
         let ladders = REQUEST_LADDERS.map(Class::as_str);
         for (labels, count) in self.extensions.rows() {
-            let Some(ladder) = ladders.into_iter().chain([TRIGGER]).find(|l| *l == labels[0])
-            else {
+            let (Some(first), Some(method)) = (labels.first(), labels.get(1)) else { continue };
+            let Some(ladder) = ladders.into_iter().chain([TRIGGER]).find(|l| l == first) else {
                 continue;
             };
             out.push(RetransmitRow {
                 ladder,
-                method: labels[1].clone(),
+                method: method.clone(),
                 code: labels.get(2).and_then(|code| code.parse().ok()),
                 count,
             });

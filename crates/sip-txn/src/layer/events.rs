@@ -61,7 +61,7 @@ impl Owner {
                     self.defer(ev);
                 } else {
                     // Ordinary event: drop-newest, counted.
-                    self.metrics.event_queue_drops[class.index()].fetch_add(1, Relaxed);
+                    self.metrics.event_queue_drops.add(class.index());
                 }
                 critical
             }
@@ -78,7 +78,7 @@ impl Owner {
     /// Queue a critical event onto the retry deque, counted as a deferral.
     fn defer(&mut self, event: TransactionEvent) {
         let class = EventQueueClass::of(&event);
-        self.metrics.event_queue_deferrals[class.index()].fetch_add(1, Relaxed);
+        self.metrics.event_queue_deferrals.add(class.index());
         self.deferred_events.push_back(event);
         self.arm_event_retry();
     }

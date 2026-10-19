@@ -176,9 +176,8 @@ crates/sip-proxy/src/security/hmac.rs 1
 crates/sip-proxy/src/self_gate.rs 8
 crates/sip-proxy/src/strategies/load_balancer.rs 3
 crates/sip-proxy/src/trace/registry.rs 14
-crates/sip-txn/src/layer/backlog.rs 1
 crates/sip-txn/src/layer/client.rs 9
-crates/sip-txn/src/layer/events.rs 3
+crates/sip-txn/src/layer/events.rs 1
 crates/sip-txn/src/layer/handle.rs 2
 crates/sip-txn/src/layer/lifetime.rs 2
 crates/sip-txn/src/layer/owner.rs 1
@@ -186,8 +185,6 @@ crates/sip-txn/src/layer/refusals.rs 1
 crates/sip-txn/src/layer/run.rs 2
 crates/sip-txn/src/layer/seed.rs 2
 crates/sip-txn/src/layer/server.rs 2
-crates/sip-txn/src/metrics.rs 3
-crates/sip-txn/src/metrics/retransmits.rs 11
 crates/sip-txn/src/pulse.rs 2
 crates/sip-txn/src/rng.rs 6
 crates/topology/src/k8s/watch_health.rs 3
