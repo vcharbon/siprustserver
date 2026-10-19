@@ -6,6 +6,7 @@
 
 use call::helpers::{callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog};
 use call::{Call, Dialog, DialogState, EndingBy, LegState, PeerDialog, RetiredDialog};
+use sip_message::draft::HeaderList;
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
 
@@ -329,25 +330,24 @@ pub(super) fn contact_uri(
 /// The route set a UAC applies: the responder's recorded routes reversed
 /// (RFC 3261 §12.1.2). One entry per recorded route, so a comma-combined line —
 /// the front proxy's double record-route — yields both halves in wire order.
-/// Errs when a recorded route does not read; the caller decides, and an empty
-/// route set is never that decision (see `ActionExecutor::dialog_route_set`).
+/// Errs when a recorded route does not read or is no request's target; the
+/// caller decides, and an empty route set is never that decision (see
+/// `ActionExecutor::dialog_route_set`).
 pub(super) fn uac_route_set(resp: &sip_message::SipResponse) -> Result<Vec<String>, SipParseError> {
-    let mut set = route_texts(resp.list::<RecordRouteEntry>()?);
-    set.reverse();
-    Ok(set)
+    Ok(route_texts(resp.record_route_set()?.reversed()))
 }
 
 /// The route set a UAS applies: the requester's recorded routes in the order
 /// they were recorded (RFC 3261 §12.1.1). Fallible for the same reason as
 /// [`uac_route_set`].
 fn uas_route_set(req: &sip_message::SipRequest) -> Result<Vec<String>, SipParseError> {
-    Ok(route_texts(req.list::<RecordRouteEntry>()?))
+    Ok(route_texts(req.record_route_set()?))
 }
 
 /// Recorded routes as the text the `call` crate stores (it has no sip-message
 /// dependency, ADR-0008).
-fn route_texts(entries: Vec<RecordRouteEntry>) -> Vec<String> {
-    entries.into_iter().map(|e| e.to_wire()).collect()
+fn route_texts(entries: HeaderList<RecordRouteEntry>) -> Vec<String> {
+    entries.iter().map(HeaderValue::to_wire).collect()
 }
 
 #[cfg(test)]

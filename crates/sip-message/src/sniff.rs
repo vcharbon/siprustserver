@@ -8,9 +8,11 @@
 //! Strict, allocation-free pre-parse *classifiers* (overload brake, dispatcher fast-path) live
 //! in [`crate::preparse`] and its sibling modules.
 
+mod uri_facts;
 mod via_hops;
 mod via_stamp;
 use std::borrow::Cow;
+pub use uri_facts::UriFacts;
 pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
 pub use via_stamp::relay_stamp_spans;
 
@@ -531,28 +533,6 @@ pub fn address_user(value: &str) -> Option<String> {
         uri.user()?
     };
     (!user.is_empty()).then(|| crate::param_codec::decode_param(user))
-}
-
-/// What one URI states about where a message goes: the canonical text, the
-/// host and effective port RFC 3263 §4 resolves it to, and whether it is a
-/// loose route (`;lr`, RFC 3261 §19.1.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UriFacts {
-    /// The URI rendered from its parts — the spelling two URIs compare on, so
-    /// whitespace and the original layout never decide equality.
-    pub uri: String,
-    pub host: String,
-    /// The port the URI names, defaulted when it names none.
-    pub port: u16,
-    /// The URI carries `;lr`.
-    pub loose: bool,
-}
-
-impl UriFacts {
-    fn of(uri: &crate::header::Uri) -> Self {
-        let (host, port) = uri.host_port();
-        UriFacts { uri: uri.to_string(), host: host.to_string(), port, loose: uri.is_loose_route() }
-    }
 }
 
 /// The `Route` / `Record-Route` hops `raw` carries, in wire order and with

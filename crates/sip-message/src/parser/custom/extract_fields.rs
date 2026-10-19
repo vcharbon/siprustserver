@@ -10,11 +10,12 @@
 
 use super::contact_entries::{contact_entry_spans, read_contact_entry, ContactEntry};
 use super::header_index::HeaderIndex;
-use super::port_garbage::{has_uri_port_trailing_garbage, has_via_port_trailing_garbage};
+use super::port_garbage::has_via_port_trailing_garbage;
+use super::request_uri::request_uri_refusal;
 use super::scanner::{is_token_char, strict_non_negative_decimal};
 use super::structured_headers::{
-    parse_cseq, parse_name_addr, parse_sip_uri_string, parse_via, top_level_comma_entries,
-    validate_strict_host, validate_strict_sip_uri,
+    parse_cseq, parse_name_addr, parse_via, top_level_comma_entries, validate_strict_host,
+    validate_strict_sip_uri,
 };
 use crate::error::SipParseError;
 use crate::header::{self, HostPort, NameAddr, Uri};
@@ -54,7 +55,7 @@ pub struct RequestEager {
 }
 
 /// RFC 3261 / RFC 3986 §3.2.3: SIP ports are 1..=65535.
-fn is_valid_port(p: u64) -> bool {
+pub(super) fn is_valid_port(p: u64) -> bool {
     (1..=65535).contains(&p)
 }
 
@@ -77,67 +78,12 @@ fn to_contact(p: super::structured_headers::ParsedContact) -> header::Contact {
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Byte-scan strict gates. All structural bytes tested below are ASCII, so a
-// UTF-8 lead/continuation byte can never alias one — byte scans visit exactly
-// the positions a `Vec<char>` walk would, without a per-call collect.
-// ---------------------------------------------------------------------------
-
-/// True iff the URI carries unescaped control bytes (0x00-0x1F except HTAB,
-/// or 0x7F).
-fn has_unescaped_ctl_bytes(uri: &str) -> bool {
-    uri.bytes().any(|b| b != 0x09 && (b < 0x20 || b == 0x7f))
-}
-
-/// True iff `uri` contains `[` without a matching `]`.
-fn has_unbalanced_square_brackets(uri: &str) -> bool {
-    let mut open: i32 = 0;
-    for c in uri.bytes() {
-        if c == b'[' {
-            open += 1;
-        } else if c == b']' {
-            if open == 0 {
-                return true;
-            }
-            open -= 1;
-        }
-    }
-    open != 0
-}
-
-/// True iff the host portion has 2+ colons outside `[...]` — IPv6 without the
-/// required bracket delimiters (RFC 5118 §4.2).
-fn has_unbracketed_ipv6(uri: &str) -> bool {
-    let s = uri.as_bytes();
-    let scheme_colon = match s.iter().position(|&c| c == b':') {
-        Some(i) => i,
-        None => return false,
-    };
-    let after_scheme = scheme_colon + 1;
-    let host_start = s
-        .iter()
-        .skip(after_scheme)
-        .position(|&c| c == b'@')
-        .map_or(after_scheme, |at| after_scheme + at + 1);
-    let mut depth = 0i32;
-    let mut colons = 0i32;
-    for &c in s.iter().skip(host_start) {
-        if c == b'[' {
-            depth += 1;
-        } else if c == b']' && depth > 0 {
-            depth -= 1;
-        } else if depth == 0 {
-            if c == b':' {
-                colons += 1;
-                if colons >= 2 {
-                    return true;
-                }
-            } else if c == b';' || c == b'?' || c == b'>' {
-                break;
-            }
-        }
-    }
-    false
+/// True iff the name-addr's `<` opens an addr-spec no `>` closes (RFC 3261
+/// §25.1 `name-addr = [ display-name ] LAQUOT addr-spec RAQUOT`): a parameter
+/// written after it would read as part of the URI.
+fn has_unclosed_angle(value: &str) -> bool {
+    let s = value.as_bytes();
+    s.iter().rposition(|&b| b == b'<').is_some_and(|lt| !s.iter().skip(lt).any(|&b| b == b'>'))
 }
 
 /// Count `;tag=` occurrences outside quoted-strings (RFC 3261 permits one).
@@ -282,6 +228,9 @@ pub fn extract_common_fields(
                 from_parsed.uri
             )));
         }
+        if has_unclosed_angle(from_val) {
+            return Err(SipParseError::new("Strict From: unterminated \"<...>\""));
+        }
     }
 
     let to_val = idx.to.first.ok_or_else(|| SipParseError::new("Missing mandatory To header"))?;
@@ -298,6 +247,9 @@ pub fn extract_common_fields(
                 "Strict To URI: {reason} (\"{}\")",
                 to_parsed.uri
             )));
+        }
+        if has_unclosed_angle(to_val) {
+            return Err(SipParseError::new("Strict To: unterminated \"<...>\""));
         }
     }
 
@@ -567,34 +519,7 @@ pub fn extract_request_fields(
             )));
         }
     }
-    if has_unescaped_ctl_bytes(request_uri) {
-        return Err(SipParseError::new(format!("Control byte in Request-URI: \"{request_uri}\"")));
-    }
-    if has_unbalanced_square_brackets(request_uri) {
-        return Err(SipParseError::new(format!(
-            "Unbalanced IPv6 brackets in Request-URI: \"{request_uri}\""
-        )));
-    }
-    if has_uri_port_trailing_garbage(request_uri) {
-        return Err(SipParseError::new(format!(
-            "Trailing non-digit after Request-URI port: \"{request_uri}\""
-        )));
-    }
-    if has_unbracketed_ipv6(request_uri) {
-        return Err(SipParseError::new(format!(
-            "Unbracketed IPv6 in Request-URI: \"{request_uri}\""
-        )));
-    }
-    let request_uri_parsed = parse_sip_uri_string(request_uri)
-        .ok_or_else(|| SipParseError::new(format!("Malformed Request-URI: \"{request_uri}\"")))?;
-    if request_uri_parsed.host.is_empty() {
-        return Err(SipParseError::new(format!("Empty host in Request-URI: \"{request_uri}\"")));
-    }
-    if let Some(p) = request_uri_parsed.port {
-        if !is_valid_port(p) {
-            return Err(SipParseError::new(format!("Request-URI port out of range: {p}")));
-        }
-    }
+    request_uri_refusal(request_uri)?;
     Ok(RequestEager { common, request_uri: Uri::parse_or_verbatim(request_uri) })
 }
 

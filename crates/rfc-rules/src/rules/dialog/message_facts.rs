@@ -30,7 +30,14 @@ pub(super) fn set_if_empty(slot: &mut String, msg: &Msg, header: &str) {
 }
 
 /// The Record-Route stack `msg` carries, in wire order. A row no reader accepts
-/// contributes nothing: an unreadable header is the grammar rules' finding.
+/// contributes nothing: an unreadable header is the grammar rules' finding. A
+/// stack naming a hop no request can be addressed to is no route set at all
+/// (RFC 3261 §12.2.1.1 builds the Request-URI from a strict hop), so the
+/// dialog keeps none.
 pub(super) fn record_route_set(msg: &Msg) -> Vec<UriFacts> {
-    msg.head.as_deref().and_then(|h| sniff::route_uris(h, "Record-Route")).unwrap_or_default()
+    msg.head
+        .as_deref()
+        .and_then(|h| sniff::route_uris(h, "Record-Route"))
+        .filter(|set| set.iter().all(|hop| hop.addressable))
+        .unwrap_or_default()
 }
