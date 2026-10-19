@@ -24,6 +24,7 @@ mod invite_give_up;
 mod late_cancel_hold;
 mod lifetime;
 mod long_ring_holds;
+mod no_panic_lane;
 mod orphan_bye;
 mod owner_pulse;
 mod parser_panic;
