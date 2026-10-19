@@ -11,6 +11,7 @@
 //! - `CDR_PAYLOAD`         `json` or `opaque`       (default `json`; see `counting::Payload`)
 //! - `CDR_OBSERVATION_URL` `http://host:port` of the VictoriaLogs the observations go to (unset: none shipped)
 
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,10 +19,11 @@ use futures_util::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicConsumeOptions, QueueDeclareOptions},
     types::{AMQPValue, FieldTable, LongString},
-    Connection, ConnectionProperties,
+    uri::AMQPUri,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::time::Instant;
 
 use crate::counting::{Metrics, Payload};
 use crate::observation::ObservationView;
@@ -88,6 +90,14 @@ impl Consumer {
     }
 }
 
+/// How long one connect (resolution, TCP, TLS) may take before the pass fails.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// An ack the client refused: its channel failed or the delivery was already acked.
+fn ack_refused() -> io::Error {
+    io::Error::other("the CDR ack was refused: the channel failed or the acker was used")
+}
+
 /// One connect → declare → consume pass. Returns `Err` on any AMQP fault so the
 /// outer loop reconnects; runs forever on success (the consume stream is endless).
 async fn consume(
@@ -97,7 +107,9 @@ async fn consume(
     consumer: &Consumer,
 ) -> Result<(), lapin::Error> {
     tracing::info!(node = observe::node(), state = "connecting", %url, "AMQP connection");
-    let conn = Connection::connect(url, ConnectionProperties::default()).await?;
+    let uri: AMQPUri = url.parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let connected = amqp_connect::connect_uri(&uri, Instant::now() + CONNECT_TIMEOUT).await?;
+    let conn = amqp_connect::open_over(uri, connected.stream).await?;
     tracing::info!(node = observe::node(), state = "connected", %url, "AMQP connection");
     let chan = conn.create_channel().await?;
 
@@ -128,14 +140,21 @@ async fn consume(
         // so a consumer gone before then leaves its CDR to the broker.
         match consumer.deliver(&delivery.data) {
             None => {
-                delivery.ack(BasicAckOptions::default()).await?;
+                if !delivery.ack(BasicAckOptions::default()).await? {
+                    return Err(ack_refused().into());
+                }
             }
             Some(shipped) => {
                 let acker = delivery.acker;
                 tokio::spawn(async move {
                     let _ = shipped.await;
-                    if let Err(e) = acker.ack(BasicAckOptions::default()).await {
-                        tracing::warn!(error = %e, "CDR ack after its observation shipped failed");
+                    let failed = match acker.ack(BasicAckOptions::default()).await {
+                        Ok(true) => None,
+                        Ok(false) => Some(ack_refused().to_string()),
+                        Err(e) => Some(e.to_string()),
+                    };
+                    if let Some(error) = failed {
+                        tracing::warn!(%error, "CDR ack after its observation shipped failed");
                     }
                 });
             }

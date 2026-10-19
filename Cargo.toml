@@ -198,7 +198,9 @@ reqwest = { version = "0.13", default-features = false }
 # dedicated CDR metrics consumer (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client;
 # `async-rs` is the runtime seam it is built on, bound to the tokio runtime
 # everything else runs on (no second async runtime). TLS is rustls on `ring`,
-# the provider the kube client installs, with the system root store. Producer-side
+# the provider the kube client installs, with the system root store;
+# `rustls-native-certs` is load-bearing: it alone turns on the async TLS stream,
+# without which an `amqps` URI connects in plaintext. Producer-side
 # the existing `BufferedCdrWriter` bounded queue is preserved in front of the
 # sink (drop-on-overload), and the broker queue is additionally bounded with
 # `x-max-length` + drop-head overflow — the "max buffer" guarantee end to end.
