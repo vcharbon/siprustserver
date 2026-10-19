@@ -2352,6 +2352,7 @@ mod media_primitives {
     use b2bua::effects::OutboundBody;
     use b2bua::rules::MessageTransform;
     use sip_message::HeaderName;
+    mod unbuilt_relay;
 
     /// A confirmed b-leg of the given role; its single dialog carries the callee
     /// tag so in-dialog originators have a confirmed dialog to ride.
@@ -2365,8 +2366,7 @@ mod media_primitives {
         leg
     }
 
-    /// Give the a-leg a confirmed dialog so a relayed in-dialog request toward A
-    /// has a target dialog to ride.
+    /// The a-leg with a confirmed dialog, the target a relayed request toward A rides.
     fn give_a_leg_dialog(call: &mut call::Call) {
         confirm_a(call);
         call.a_leg.dialogs = vec![a_dialog(call, "a-svc", DialogState::Confirmed)].into();

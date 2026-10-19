@@ -160,3 +160,31 @@ fn an_owed_prack_on_a_dialog_the_leg_lacks_is_a_defect() {
     let mut fx = crate::effects::HandlerEffects::new();
     exec.settle_owed_pracks(&mut call, &mut fx, Owed::Call, Settle::TurnEnd);
 }
+
+/// A PRACK owed on a dialog whose state makes no request (its remote target
+/// fails the Request-URI checks) is not sent, and the call records nothing of
+/// it: the provisional stays owed and the dialog spends no number.
+#[test]
+fn an_unbuilt_prack_records_nothing() {
+    let mut call = call_with_a_ringing_callee(true);
+    let mut early = Dialog::new("svc", "bobtag", DialogState::Early, 1);
+    early.remote_target = "sip:bob@10.0.0.2:5070x".into();
+    call.b_legs[0].dialogs.insert(early);
+    let mut owed = recorded(1);
+    owed.responder = ResponderAck::Pending;
+    call.provisionals.push(owed);
+    let config = B2buaConfig::default();
+    let id_gen = sip_txn::IdGen::seeded(1);
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &crate::wire_faults::WireFaults::none(),
+    };
+    let mut fx = crate::effects::HandlerEffects::new();
+    exec.settle_owed_pracks(&mut call, &mut fx, Owed::Call, Settle::TurnEnd);
+    assert!(fx.outbound.is_empty(), "no PRACK leaves");
+    assert_eq!(call.provisionals[0].responder, ResponderAck::Pending, "the PRACK is still owed");
+    let spent = call.b_legs[0].dialogs.iter().map(|d| d.our_cseq).collect::<Vec<_>>();
+    assert_eq!(spent, vec![1], "the dialog spends no number");
+}
