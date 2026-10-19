@@ -199,6 +199,7 @@ mod service_timers;
 mod session_timer_transparency;
 mod setup_stall_global_duration_reap;
 mod setup_timeout;
+mod snapshot_lane;
 mod spiral_mid_dialog;
 mod spiral_through_a_forking_proxy;
 mod spiral_through_a_third_party_proxy;

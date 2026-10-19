@@ -39,6 +39,10 @@ call-limiter = { path = "../call-limiter" }
 observe = { path = "../observe", default-features = false }
 
 [dev-dependencies]
+# The no-panic property lane of the replicated call body: its runner and the
+# shared MessagePack mutations.
+proptest.workspace = true
+wire-mutations = { path = "../wire-mutations" }
 # The closed rule-token list the coverage doc's rows are checked against.
 rfc-rules = { path = "../rfc-rules" }
 # The call-shape catalog (forked establishments) driven through the SUT.

@@ -539,6 +539,7 @@ dependencies = [
  "media",
  "media-harness",
  "observe",
+ "proptest",
  "rfc-rules",
  "scenario-harness",
  "serde_json",
@@ -550,6 +551,7 @@ dependencies = [
  "sip-retransmit",
  "sip-txn",
  "tokio",
+ "wire-mutations",
 ]
 
 [[package]]
