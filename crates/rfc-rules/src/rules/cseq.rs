@@ -99,7 +99,7 @@
 //! emits.
 //!
 //! **§8.1.1.5 (CSeq < 2^31) is deliberately NOT a rule here:** the parser's
-//! registry-driven numeric pass (ADR-0007) rejects such a CSeq at ingest, so no
+//! registry-driven numeric pass rejects such a CSeq at ingest, so no
 //! observed message can carry one.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

@@ -2,8 +2,8 @@
 //! `src/sip/parsers/custom/structured-headers.ts`.
 //!
 //! Parses From/To, Via, Contact, CSeq and SIP URIs, plus the strict host /
-//! SIP-URI validators (ADR-0007). These are the exact functions the ABNF fuzz
-//! suite drives.
+//! SIP-URI validators of the wire-grammar gates. These are the exact functions
+//! the ABNF fuzz suite drives.
 //!
 //! We byte-scan the source `&str` directly: every structural delimiter in these
 //! grammars is ASCII, so a UTF-8 lead or continuation byte can never alias one,
@@ -600,7 +600,7 @@ fn read_one_param(base: &SipStr, mut i: usize, params: &mut Params) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Strict host validation (ADR-0007)
+// Strict host validation
 // ---------------------------------------------------------------------------
 
 /// Validate a host already extracted by `parse_host_port`. `None` when
@@ -671,7 +671,7 @@ pub fn detect_sent_by_multiple_colons(sent_by: &str) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// Strict SIP-URI grammar (ADR-0007)
+// Strict SIP-URI grammar
 // ---------------------------------------------------------------------------
 
 /// Validate a SIP/SIPS URI string. `None` on success, `Some(reason)` on

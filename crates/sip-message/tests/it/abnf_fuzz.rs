@@ -2,7 +2,7 @@
 //! Port of `scripts/abnf-fuzz-driver.ts` + `run-suite.sh`.
 //!
 //! The contract: for grammar-valid input the parsers must never *buggily*
-//! reject (a rejection that matches no documented ADR-0007 policy) and never
+//! reject (a rejection that matches no documented policy, [`POLICY_PATTERNS`]) and never
 //! *silently misparse* (accept but drop an obvious field). A clean run has
 //! `buggy == 0` and `silentMisparse == 0` across every target.
 //!

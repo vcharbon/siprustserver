@@ -79,7 +79,7 @@ fn initial_invite_is_not_in_dialog() {
     assert!(InDialogRequest::new(&req).is_err()); // no To-tag yet
 }
 
-// --- ADR-0007 strict-grammar rejections ---
+// --- strict wire-grammar rejections ---
 
 #[test]
 fn rejects_top_via_missing_magic_cookie() {

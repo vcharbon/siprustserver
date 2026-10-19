@@ -1,6 +1,6 @@
 //! Parser error type. Port of `src/sip/parsers/errors.ts`.
 //!
-//! ADR-0007 deliberately carries **no `kind` discriminator** — the `reason`
+//! The error deliberately carries **no `kind` discriminator** — the `reason`
 //! string carries the rule identity (e.g. "Top Via branch missing magic
 //! cookie ..."). The secusiptest/compliance classifier matches on substrings.
 //! We keep that shape: a single `reason` field.

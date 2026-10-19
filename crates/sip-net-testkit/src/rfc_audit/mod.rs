@@ -38,7 +38,7 @@ use crate::types::{all_ua_roles, UaRole};
 
 /// The **lenient** parser the audit layer uses (port of the TS
 /// `createCustomParser({ wireGrammar: false })`). The default [`CustomParser`]
-/// runs the ADR-0007 strict-grammar gates (`wire_grammar = true`), which *reject*
+/// runs the strict wire-grammar gates (`wire_grammar = true`), which *reject*
 /// a malformed-but-on-the-wire message (e.g. a `Via` branch lacking the magic
 /// cookie) before a rule could ever see it — so the grammar rules would silently
 /// never fire. Auditing the recorded bytes requires parsing them leniently, the

@@ -325,7 +325,7 @@ Severity = operational risk if the behaviour is wrong.
 | IDENT-4 | 6442 §4 | Geolocation transparency | Forward unless Routing:no; keep cid: body | med | 🟡 | parsed (lazy_headers); add transparency behaviour test |
 | TORTURE-1 | 4475 §3.1.1 | Valid weird grammar | Parse, don't 400 | high | ✅ | parser, compliance_matrix rfc4475-valid |
 | TORTURE-2 | 4475 §3.1.2 | Malformed message | 400/drop, never panic | high | ✅ | parser, compliance_matrix rfc4475-invalid |
-| TORTURE-4 | 4475 | Oversized header/URI | Bounded, 400/513 | high | ✅ | ADR-0007 long-value rejections |
+| TORTURE-4 | 4475 | Oversized header/URI | Bounded, 400/513 | high | ✅ | the parser's header and URI length caps (`SipParserLimits`) |
 | TORTURE-8 | 4475 | Bad in-dialog message on live call | Reject without tearing down healthy call | high | ❌ | add `torture_indialog_bad_msg_no_call_leak` |
 
 ---

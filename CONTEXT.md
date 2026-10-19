@@ -35,9 +35,10 @@ _Avoid_: "service" (Effect term), "interface" unqualified.
 ### Test porting
 
 **Parity oracle**:
-A second, independent implementation of a **layer interface** kept *only* for
-tests, to cross-check the production impl. For the message layer the oracle is
-`rvoip-sip-core`, read into the same fields as a `CustomParser` message and
+A second, independent implementation kept *only* for tests, to cross-check
+the production impl; it need not implement the **layer interface**. For the
+message layer the oracle is `rvoip-sip-core`, read into the same fields as a
+`CustomParser` message and
 compared seed by seed by a differential test that lists every expected
 difference with its RFC section.
 _Avoid_: "reference parser" (the production custom parser is the reference for
@@ -90,9 +91,9 @@ _Avoid_: "header registry" (there is no global mutable registry anymore).
 
 **Policy rejection** / **Buggy rejection**:
 The two classes a parser rejection of a grammar-valid input falls into.
-*Policy* = a documented ADR-0007 strictness rule (expected; the grammar is
-looser than the parser). *Buggy* = matches no known policy → a real parser
-bug. A clean ABNF run has zero buggy rejections and zero silent misparses.
+*Policy* = a documented strictness rule (the ABNF suite's policy patterns,
+the gates of ADR-0001; expected, the grammar is looser than the parser).
+*Buggy* = matches no known policy → a real parser bug. A clean ABNF run has zero buggy rejections and zero silent misparses.
 
 ## Retransmission vocabulary
 

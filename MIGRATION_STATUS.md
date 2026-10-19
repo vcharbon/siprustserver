@@ -102,7 +102,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | `parsers/custom/compact-forms.ts` | `parser/custom/compact_forms.rs` | ✅ ported |
 | `parsers/custom/headers.ts` | `parser/custom/headers.rs` | ✅ ported |
 | `parsers/custom/structured-headers.ts` | `parser/custom/structured_headers.rs` | ✅ ported |
-| `parsers/extract-fields.ts` (ADR-0007 gates) | `parser/custom/extract_fields.rs` | ✅ ported (wire+hydrate; finalize/hydrate wrappers fold into `CustomParser`) |
+| `parsers/extract-fields.ts` (wire-grammar gates) | `parser/custom/extract_fields.rs` | ✅ ported (wire+hydrate; finalize/hydrate wrappers fold into `CustomParser`) |
 | `parsers/custom/lazy-parsers.ts` | `parser/custom/optional_headers.rs` | ✅ ported as **eager + non-fatal** (`OptionalHeaders`) + `SipMessage::validate_strict()` ([ADR-0003 amendment](docs/adr/0003-typed-header-model.md)) |
 | `parsers/custom/index.ts` | `parser/custom/mod.rs` (`CustomParser`) | ✅ ported (full parse pipeline) |
 | `parsers/native-adapter.ts` (role) | `parser/rvoip.rs` (feature-gated) | ✅ ported — reads `rvoip-sip-core` 0.4 behind `rvoip-oracle` into the fields the differential test (`tests/it/rvoip_parity.rs`, `just parity-oracle`) compares |
@@ -132,7 +132,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | (no TS counterpart — `bufferHasToTag` byte scan) | `src/message_helpers.rs::buffer_has_to_tag_tests` | ✅ 14 (migration/21; no dedicated TS unit test exists — pins the byte-level `To`-tag contract directly: tag present/absent, line-start anchoring, case-sensitive `To`/compact `t`, first-To-line decides, header-terminator + unterminated-buffer stops, bounds-checked lookahead) |
 | ABNF fuzz suite (`scripts/abnf-fuzz`) | `tests/abnf_fuzz.rs` + `xtask abnf-regen` | 🟡 driver + classifier ported & `xtask` regen implemented; **corpus generation pending `abnfgen`** (not installed). Test skips-with-log until the corpus is generated |
 | Parser micro-benchmark (`bench/sip-parser-bench.ts`) | `benches/sip_parser.rs` | ✅ measuring (INVITE ~5.3µs, 200 OK ~4.9µs) |
-| (smoke) walking-skeleton parse + refined views + 5 ADR-0007 rejections | `tests/parser_smoke.rs` | ✅ 9 passing |
+| (smoke) walking-skeleton parse + refined views + 5 wire-grammar rejections | `tests/parser_smoke.rs` | ✅ 9 passing |
 
 ### Un-ported with justification
 - `parsers/jssip-adapter.ts` (`jssipParser`) — JsSIP JS-library adapter; no

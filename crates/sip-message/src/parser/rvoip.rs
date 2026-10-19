@@ -25,9 +25,10 @@ pub struct Reading {
     pub vias: Vec<Hop>,
     /// The Contact entries, none for the wildcard.
     pub contacts: usize,
-    /// The Route entries, `None` when a value does not read.
+    /// The Route entries. `None` when the production parser cannot read a
+    /// value; the oracle counts the entries it read, always `Some`.
     pub routes: Option<usize>,
-    /// The Record-Route entries, `None` when a value does not read.
+    /// The Record-Route entries, `None` as for [`routes`](Self::routes).
     pub record_routes: Option<usize>,
     pub body: Vec<u8>,
 }

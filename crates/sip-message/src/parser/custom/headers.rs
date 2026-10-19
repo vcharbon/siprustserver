@@ -1,7 +1,8 @@
 //! SIP header-block parser. Port of `src/sip/parsers/custom/headers.ts`.
 //! No regex. Handles folding, compact-form expansion, Content-Length
 //! extraction, case-preserving names, and the registry-driven strict numeric
-//! gate + CVE-regression quoted-string / Digest checks (ADR-0007).
+//! gate + CVE-regression quoted-string / Digest checks (the gates beyond the
+//! grammar are listed in ADR-0001).
 
 use super::compact_forms::expand_compact_form;
 use super::scanner::{
@@ -25,7 +26,8 @@ struct NumericHeaderRule {
 }
 
 /// Numeric-header registry — every header whose value must be a non-negative
-/// decimal integer within a defined range (see ADR-0007). `None` if not numeric.
+/// decimal integer within a defined range (ADR-0001, numeric headers). `None`
+/// if not numeric.
 fn numeric_header_rule(name: &HeaderName) -> Option<NumericHeaderRule> {
     let r = |max, allow_param_tail| Some(NumericHeaderRule { max, allow_param_tail });
     match name {
@@ -154,7 +156,7 @@ pub fn parse_headers(
         // just walked; every gate below dispatches on it instead of re-probing
         // the name against a candidate list.
         if let Some(known) = HeaderName::known(&name) {
-            // Registry-driven paranoid digit-only pass (ADR-0007).
+            // Registry-driven paranoid digit-only pass.
             if let Some(rule) = numeric_header_rule(&known) {
                 match extract_strict_numeric_prefix(&trimmed_value, &rule) {
                     Some(parsed) => {
