@@ -23,6 +23,9 @@ class Repo:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = self.tmp.name
         self.git("init", "-q")
+        # No detached auto-maintenance writes into .git while the directory is removed.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
         self.write("file-size.allow", allow)
 
     def git(self, *args):

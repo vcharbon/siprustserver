@@ -30,6 +30,9 @@ class Workspace:
         self.root = self.tmp.name
         self.crates = {}
         self.git("init", "-q")
+        # No detached auto-maintenance writes into .git while the directory is removed.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
 
     def git(self, *args):
         subprocess.run(["git", "-C", self.root, *args], check=True, capture_output=True)
