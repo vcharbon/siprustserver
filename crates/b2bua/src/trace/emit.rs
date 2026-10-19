@@ -16,11 +16,7 @@ use observe::TraceEvent;
 
 use super::registry::{traces, RoundTripSide};
 
-/// Whether this call is traced. The ONE guard every emission site uses.
-#[inline]
-pub fn sampled(call: &Call) -> bool {
-    call.sampled == Some(true)
-}
+pub use crate::turn_notes::sampled;
 
 /// A SIP message received for the call, with its raw wire bytes.
 pub fn sip_in(call: &Call, at_ms: i64, src: SocketAddr, wire: &[u8]) {

@@ -20,13 +20,13 @@ use super::peer_metrics::record_keepalive_timeout_peer;
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
-use super::rule_chain::{enforced, fired, rule_chain_turn};
 use super::stray_cancel::reject_stray_cancel;
-use super::superseded_relay::drop_superseded_relay;
 use super::unrecoverable::caller_or_discharge;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
+use crate::rule_chain::superseded_relay::drop_superseded_relay;
+use crate::rule_chain::{enforced, fired, rule_chain_turn, TurnInput};
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
@@ -99,11 +99,12 @@ pub(super) async fn process(
             return;
         };
         let before = call.clone();
-        let Some(res) = crate::limiter::call::apply_answer(&ctx.metrics, call, &answer, now_ms)
+        let Some(res) =
+            crate::limiter::refresh_turn::apply_answer(&ctx.metrics, call, &answer, now_ms)
         else {
             return;
         };
-        enforced(ctx, &before, res, now_ms, &caller)
+        enforced(&ctx.framework(), &before, res, now_ms, &caller)
     } else {
         if of_another_incarnation(ctx, &event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
@@ -150,7 +151,8 @@ pub(super) async fn process(
         // A timer fire reaches the call only while its ledger holds the fired
         // instance, which leaves the ledger as it is delivered.
         let mut call = call;
-        let screened = super::timer_screen::screen(&mut call, &event, now_ms, &mut turn.notes);
+        let screened =
+            crate::rule_chain::timer_screen::screen(&mut call, &event, now_ms, &mut turn.notes);
         super::notes::drain(ctx, &call_ref, &mut turn);
         if screened.is_err() {
             return;
@@ -208,14 +210,24 @@ pub(super) async fn process(
         // batch outside the rule chain; the call never waits on the limiter.
         if fired(&event, &TimerType::LimiterRefresh) {
             let before = call.clone();
-            let res = crate::limiter::call::on_refresh_due(&ctx.limiter, call, &call_ref, now_ms);
-            enforced(ctx, &before, res, now_ms, &caller)
+            let limiter = &ctx.limiter;
+            let res =
+                crate::limiter::refresh_turn::on_refresh_due(limiter, call, &call_ref, now_ms);
+            enforced(&ctx.framework(), &before, res, now_ms, &caller)
         } else {
             // A relay no node can finish is gone before the rules read the
             // call, so its request is relayed afresh.
             let call = drop_superseded_relay(call, &event);
-            let turn = &mut turn;
-            rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms, turn, &caller)
+            let input = TurnInput {
+                event: &event,
+                call_ref: &call_ref,
+                source_leg_id: &res.source_leg_id,
+                direction: res.direction,
+                resolved,
+                now_ms,
+                caller: &caller,
+            };
+            rule_chain_turn(&ctx.framework(), call, input, &mut turn)
         }
     };
     super::notes::drain(ctx, &call_ref, &mut turn);

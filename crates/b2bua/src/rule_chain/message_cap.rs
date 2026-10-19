@@ -5,7 +5,7 @@
 use b2bua_sdk::model::RuleAction;
 use call::{LegState, TerminationCause};
 
-use super::RouterCtx;
+use super::Framework;
 use crate::effects::HandlerResult;
 use crate::rules::{ActionExecutor, RuleCall, RuleContext};
 
@@ -17,7 +17,7 @@ use crate::rules::{ActionExecutor, RuleCall, RuleContext};
 /// limiter released, removed — in this turn. The RFC 3326 cause rides the
 /// reason (it must start with "SIP").
 pub(super) fn tear_down_runaway(
-    ctx: &RouterCtx,
+    fw: &Framework<'_>,
     exec: &mut ActionExecutor,
     mut result: HandlerResult,
     turn: &RuleContext<'_>,
@@ -68,12 +68,12 @@ pub(super) fn tear_down_runaway(
     result.effects.fire_and_forget.extend(cap.effects.fire_and_forget);
     exec.turn.notes.message_cap_terminated();
     result = crate::rules::invariants::enforce(
-        &ctx.obligations,
+        fw.obligations,
         &before,
         crate::rules::invariants::finalize(result),
         turn.now_ms,
         crate::rules::invariants::UnansweredCaller::Answer {
-            advertisement: &ctx.config.minted_final_advertisement,
+            advertisement: &fw.config.minted_final_advertisement,
             invite: turn.caller_invite,
         },
     );

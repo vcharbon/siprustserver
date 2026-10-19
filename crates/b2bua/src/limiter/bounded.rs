@@ -20,10 +20,7 @@ use crate::limiter::{
 };
 use crate::metrics::{B2buaMetrics, LimiterFailure, LimiterOp};
 
-/// How long past the limiter's admit budget the worker waits for any admit
-/// before it answers `unavailable`: a client's own timeout fires first and is
-/// counted. Well inside the answer deadline's margin (ADR-0039).
-pub const ADMIT_SLACK: Duration = Duration::from_millis(100);
+pub use super::ADMIT_SLACK;
 
 /// A [`CallLimiter`] whose admits are answered by the cap. See the module doc.
 pub struct BoundedLimiter {

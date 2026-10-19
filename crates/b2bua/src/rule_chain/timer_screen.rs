@@ -12,7 +12,7 @@ use b2bua_sdk::event::CallEvent;
 
 /// Why a fire reached no rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Dropped {
+pub enum Dropped {
     /// The ledger holds the key under a later generation.
     Superseded,
     /// The ledger holds no entry under the key.
@@ -21,7 +21,7 @@ pub(crate) enum Dropped {
 
 impl Dropped {
     /// The reason as the trace states it.
-    pub(crate) const fn reason(self) -> &'static str {
+    pub const fn reason(self) -> &'static str {
         match self {
             Dropped::Superseded => "superseded",
             Dropped::Disarmed => "disarmed",
@@ -33,7 +33,7 @@ impl Dropped {
 /// fire, and for a fire the ledger holds, whose entry leaves the ledger;
 /// `Err` for a stale fire, the call untouched. The fire's trace fact goes to
 /// `notes`.
-pub(crate) fn screen(
+pub fn screen(
     call: &mut Call,
     event: &CallEvent,
     now_ms: i64,

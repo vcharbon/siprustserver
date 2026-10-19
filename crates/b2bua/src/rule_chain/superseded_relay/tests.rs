@@ -5,7 +5,7 @@ use sip_message::SipParser;
 
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
-use crate::router::test_support;
+use crate::test_call as test_support;
 
 const BRANCH: &str = "z9hG4bK-info-1";
 const SENT_BY: &str = "10.0.0.5:5080";

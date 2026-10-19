@@ -17,7 +17,7 @@
 //! - [`lifecycle`] — the aggregated lifecycle-log vocabulary (ADR-0026).
 //! - [`trace`] — the per-call trace gate, root spans and guarded emission
 //!   vocabulary (ADR-0026).
-//! - [`b2bua_core`] — wires it all together.
+//! - [`node`] — wires it all together.
 //!
 //! Builds on the `call` data model (ADR-0010).
 
@@ -25,7 +25,6 @@ pub(crate) mod abort_on_drop;
 pub mod admission;
 pub mod answer_deadline;
 pub(crate) mod attempts;
-pub mod b2bua_core;
 pub mod capacity;
 pub mod cdr;
 pub mod config;
@@ -38,27 +37,35 @@ pub mod effects;
 pub(crate) mod failure_terminate;
 pub(crate) mod failure_unavailable;
 pub mod ingress_brake;
+pub mod initial_consult;
 pub mod initial_invite;
+pub mod landing;
 pub mod lifecycle;
 pub mod limiter;
 pub mod loops;
 pub(crate) mod message_ring;
 pub mod metrics;
+pub mod model_invariants;
 pub mod new_calls;
+pub mod node;
 pub mod obligations;
 pub mod overload;
 pub mod peer_failures;
 pub mod poison;
 pub mod reaper;
+pub mod reaper_verdict;
 pub mod release_all;
 pub mod repl;
 pub(crate) mod ring_deadline;
 pub mod router;
+pub mod rule_chain;
 pub mod rules;
 pub mod stack_identity;
 pub mod store;
 pub mod supervise;
 pub(crate) mod sweep;
+#[cfg(test)]
+pub(crate) mod test_call;
 pub(crate) mod timer_arm;
 pub mod timers;
 pub mod trace;
@@ -67,7 +74,7 @@ pub mod turn_scope;
 pub mod wire_fault_set;
 pub mod wire_faults;
 
-pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};
+pub use node::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use router::AdaptationHttpPort;
 
 pub use b2bua_sdk::event::CallEvent;

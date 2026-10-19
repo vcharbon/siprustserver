@@ -41,7 +41,6 @@ mod initial_turn;
 mod interpret;
 pub(crate) mod late_prack;
 mod materialise;
-mod message_cap;
 mod notes;
 mod owed;
 mod peer_metrics;
@@ -50,27 +49,22 @@ mod process;
 #[cfg(test)]
 mod provisional_turn_tests;
 mod quiesced;
-mod quiet_turn;
 mod reclaim;
 mod refer_result;
 mod release;
 mod resolve;
 #[cfg(test)]
 mod resolve_tests;
-mod response_facts;
 #[cfg(test)]
 mod response_facts_tests;
 mod responses;
 mod restore_hygiene;
 mod route_payload;
-mod rule_chain;
 mod stand_down;
 mod store_fault_gate;
 mod stray_cancel;
-mod superseded_relay;
 #[cfg(test)]
 pub(crate) mod test_support;
-pub(crate) mod timer_screen;
 mod turn;
 mod turn_label;
 pub(crate) mod txn_event;
@@ -232,6 +226,17 @@ pub struct RouterCtx {
     /// `None` → the `ServiceHttpRequest` dispatch arm folds an `outcome:"error"`
     /// re-entry instead of hitting a wire.
     pub adaptation_http: Option<Arc<AdaptationHttpPort>>,
+}
+
+impl RouterCtx {
+    /// The per-process values a turn reads (ADR-0052 §2).
+    pub(crate) fn framework(&self) -> crate::rule_chain::Framework<'_> {
+        crate::rule_chain::Framework {
+            config: &self.config,
+            rules: &self.rules,
+            obligations: &self.obligations,
+        }
+    }
 }
 
 /// Replication-driven commands the puller/supervisor inject into the router loop

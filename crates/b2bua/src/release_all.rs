@@ -26,11 +26,7 @@ use b2bua_sdk::event::CallEvent;
 /// of the worker ([`B2buaCore::release_all_handle`](crate::B2buaCore::release_all_handle)).
 pub type ReleaseAllFn = Arc<dyn Fn() -> ReleasedAll + Send + Sync>;
 
-/// The topic of the internal event that releases one call.
-pub const TOPIC: &str = "operator-release";
-
-/// The reason the closing CDR event of a released call carries.
-pub const REASON: &str = "operator_release";
+pub use crate::rules::operator_release::{REASON, TOPIC};
 
 /// What a release-all reached, counted as it is requested: the answered calls
 /// it releases and the calls in setup it aborts. A call whose state moves

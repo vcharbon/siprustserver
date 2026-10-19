@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use call::helpers::{seal_termination_seq, seal_turn};
 use call::CallModelState;
 use call::TxnKind;
 use sip_message::{Method, SipRequest};
@@ -50,50 +49,28 @@ pub(super) async fn process_result(
     turn: &(dyn std::fmt::Display + Sync),
     received: Option<&SipRequest>,
 ) {
-    // Every request sent off the call's turn has its answer's deadline on
-    // the record the turn lands (ADR-0039).
-    let result = crate::answer_deadline::arm(result, &answer_budgets(ctx), now_ms);
-    // A counted live call always has its refresh armed within one refresh
-    // period of the learnt lease, before the record lands: the one arming of
-    // the refresh, for the admitting turn, the refresh turn and every other.
-    let result = crate::limiter::call::arm_refresh(result, now_ms, ctx.limiter.refresh_period());
-    // Every message the turn sends takes the call's stated headers before the
-    // ring records it or the wire sees it.
-    let result = crate::rules::stated_headers::stamp_outbound(result);
-    // What the turn sends is on the record before the record lands, and a
-    // termination this turn began is cut after it: every ring entry with
-    // `seq <= termination.last_seq` was received or sent as part of
-    // beginning the termination, every later one came after (the peer's 200
-    // to the relayed BYE, the ACK to a 487). The turn is sealed with it, so
-    // the next turn's entries take the next number. With the ring off the
-    // cut stays `0`.
-    let result = match crate::message_ring::Ring::of(&ctx.config) {
-        Some(ring) => HandlerResult {
-            call: seal_turn(seal_termination_seq(ring.sent(
-                result.call,
-                &result.effects.outbound,
-                now_ms,
-            ))),
-            effects: result.effects,
-        },
-        None => result,
+    let landing = crate::landing::Landing {
+        config: &ctx.config,
+        budgets: answer_budgets(ctx),
+        refresh_period: ctx.limiter.refresh_period(),
     };
+    let result = crate::landing::land(result, &landing, now_ms);
     // The record this turn lands states the model invariants, against the
     // one the previous turn landed.
     if ctx.config.model_invariants {
         let before = ctx.state.peek(call_ref);
-        let turn_record = crate::rules::model_invariants::Turn {
+        let turn_record = crate::model_invariants::Turn {
             before: before.as_ref(),
             after: &result.call,
             received,
             sent: &result.effects.outbound,
         };
-        crate::rules::model_invariants::check(&turn_record, turn, &ctx.metrics);
+        crate::model_invariants::check(&turn_record, turn, &ctx.metrics);
     }
     // Persist first (state lands before effects run). A quiet turn replaces
     // the live copy without a bump and skips the flush gate below: the armed
     // rung advances, the backup keeps the last write that changed the call.
-    let quiet = super::quiet_turn::class(&result);
+    let quiet = crate::rule_chain::quiet_turn::class(&result);
     match quiet {
         Some(kind) => {
             ctx.state.update_quiet(result.call.clone());

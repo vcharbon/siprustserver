@@ -9,13 +9,12 @@ use call::{
     TimerKey, TimerType,
 };
 
-use super::resolve::Resolution;
-use super::rule_chain::rule_chain_turn;
 use super::test_support::{invite, node_serving, src, Node};
 use crate::config::B2buaConfig;
 use crate::effects::CriticalStateEffect;
 use crate::initial_invite::build_initial_call;
 use crate::limiter::report::LimiterAdmitResult;
+use crate::rule_chain::{rule_chain_turn, TurnInput};
 use b2bua_sdk::event::CallEvent;
 
 mod probe {
@@ -148,23 +147,24 @@ fn fired(call: &Call, timer_type: TimerType) -> CallEvent {
 /// then the rule chain: the handler result (the call it leaves and the
 /// effects).
 fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::HandlerResult {
-    if super::timer_screen::screen(&mut call, event, NOW, &mut Default::default()).is_err() {
+    if crate::rule_chain::timer_screen::screen(&mut call, event, NOW, &mut Default::default())
+        .is_err()
+    {
         return crate::effects::HandlerResult::new(call);
     }
-    let res = Resolution {
-        call_ref: Some(call.call_ref.clone()),
-        source_leg_id: call.a_leg.leg_id.clone(),
-        direction: Direction::FromA,
-        initial_invite: false,
-        incarnation: None,
-        indexed: None,
-    };
-    let call_ref = call.call_ref.clone();
-    let ctx = node.core.router_ctx();
+    let (call_ref, source_leg_id) = (call.call_ref.clone(), call.a_leg.leg_id.clone());
     let mut scope = super::test_support::turn(1);
     let caller = super::test_support::caller_of(&call);
-    let resolved = Default::default();
-    rule_chain_turn(ctx, call, event, &res, resolved, &call_ref, NOW, &mut scope, &caller)
+    let input = TurnInput {
+        event,
+        call_ref: &call_ref,
+        source_leg_id: &source_leg_id,
+        direction: Direction::FromA,
+        resolved: Default::default(),
+        now_ms: NOW,
+        caller: &caller,
+    };
+    rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)
 }
 
 /// The outcome the probe's rules read, if any rule read an answer.

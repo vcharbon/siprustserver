@@ -10,12 +10,11 @@ use call::{
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
-use super::resolve::Resolution;
-use super::rule_chain::rule_chain_turn;
 use super::test_support::{invite, node, src};
 use crate::config::B2buaConfig;
 use crate::effects::{HandlerResult, OutboundBody};
 use crate::initial_invite::build_initial_call;
+use crate::rule_chain::{rule_chain_turn, TurnInput};
 use crate::rules::actions::{Owed, Settle};
 use crate::rules::ActionExecutor;
 use crate::turn_scope::TurnScope;
@@ -72,20 +71,19 @@ Content-Length: 0\r\n\r\n"
 /// One real turn of `event` from `b-1` over `call`.
 async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
     let node = node("w0").await;
-    let res = Resolution {
-        call_ref: Some(call.call_ref.clone()),
-        source_leg_id: "b-1".into(),
-        direction: Direction::FromB,
-        initial_invite: false,
-        incarnation: None,
-        indexed: None,
-    };
     let call_ref = call.call_ref.clone();
     let mut scope = super::test_support::turn(1);
-    let ctx = node.core.router_ctx();
     let caller = super::test_support::caller_of(&call);
-    let resolved = Default::default();
-    rule_chain_turn(ctx, call, event, &res, resolved, &call_ref, 1_000, &mut scope, &caller)
+    let input = TurnInput {
+        event,
+        call_ref: &call_ref,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        resolved: Default::default(),
+        now_ms: 1_000,
+        caller: &caller,
+    };
+    rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)
 }
 
 /// The PRACKs `result` sends toward `b-1`, as their `RAck`.

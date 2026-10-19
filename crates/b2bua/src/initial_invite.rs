@@ -1,10 +1,8 @@
-//! Initial-INVITE handling. Builds the decision request from the INVITE, calls
-//! the decision engine, and applies the route (b-leg creation) or reject. This
-//! is an **async** handler (it calls the decision backend), so it lives outside
-//! the synchronous rule chain; the router invokes it for out-of-dialog INVITEs
-//! and runs the result through the same invariant finalization as a rule
-//! result. A setup its caller CANCELed before its turn ran asks the decision
-//! engine nothing ([`cancelled_setup`]).
+//! The initial INVITE's folds (ADR-0052 §7): the call built from it, the
+//! decision request built from it, the treatment the consult's answer states,
+//! the stack's own finals and the setup event services seed against. The
+//! consult, the trace intake and the clock readings around them are the
+//! shell's (`initial_consult`).
 
 use std::net::SocketAddr;
 
@@ -13,7 +11,6 @@ use call::{
     ALegInviteSnapshot, Call, CallLimiterState, CallModelState, CdrEvent, CdrEventType,
     DecisionKind, Leg, LegKind, RemoteInfo, TerminationCause,
 };
-use sip_clock::Clock;
 use sip_ids::TurnIds;
 use sip_message::emergency::is_emergency_request;
 use sip_message::generators::CapabilitySet;
@@ -24,16 +21,12 @@ use crate::config::B2buaConfig;
 use b2bua_sdk::reason_phrase::default_reason;
 
 use crate::decision::apply_reject::{apply_redirect, apply_reject};
-use crate::decision::apply_route::apply_route;
 use crate::decision::{
-    CallDecisionEngine, CallDecisionError, NewCallRequest, NewCallResponse, RedirectContact,
+    CallDecisionError, NewCallRequest, NewCallResponse, RedirectContact, RouteDecision,
     SipHeaderUpdates,
 };
 use crate::effects::{HandlerEffects, HandlerResult};
-use crate::limiter::LimiterWorker;
-use crate::rules::{relay, seed_services, ActionExecutor, ServiceDef};
-use crate::trace;
-use crate::turn_scope::TurnScope;
+use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 
 /// Headers sent as top-level decision-request fields (excluded from
@@ -44,7 +37,7 @@ use b2bua_sdk::event::CallEvent;
 /// `Max-Forwards` is deliberately NOT here: a decision that cannot see the hop
 /// count cannot answer a spent one. It rides `sip_headers` read-only — the stack
 /// owns what a leg it originates states ([`crate::rules::relay::build_b_leg`]).
-pub(crate) const STANDARD_HEADERS: &[HeaderName] = &[
+pub const STANDARD_HEADERS: &[HeaderName] = &[
     HeaderName::From,
     HeaderName::To,
     HeaderName::Via,
@@ -165,87 +158,28 @@ pub fn build_initial_call(
     }
 }
 
-/// The initial-INVITE turn of a setup its caller CANCELed before the turn ran:
-/// the call opens its trace (ADR-0026), and nothing else happens — no
-/// decision request, no limiter admit, no wire effect. The `Cancelled` turn
-/// queued behind it ends the call with its Cancel CDR.
-pub fn cancelled_setup(
-    mut call: Call,
-    a_invite: &SipRequest,
-    invite_wire: &[u8],
-    now_ms: i64,
-) -> HandlerResult {
-    trace::intake::activate(&mut call, a_invite, invite_wire, now_ms);
-    HandlerResult { call, effects: HandlerEffects::new() }
+/// What the initial consult's answer leaves.
+pub enum Initial {
+    /// A route, to apply ([`crate::decision::route_fold`]).
+    Route { call: Box<Call>, route: Box<RouteDecision> },
+    /// The call's final.
+    Final(Box<HandlerResult>),
 }
 
-/// Run the initial-INVITE decision + route/reject. `call` must already carry the
-/// a-leg (from [`build_initial_call`]), and `a_invite` is its snapshot rebuilt;
-/// `invite_wire` is the datagram it arrived as, which only the router holds
-/// (the call carries a header snapshot, not bytes). `now_ms` is the turn's timestamp — every CDR entry and timer deadline
-/// this handler mints reads it, so it is taken once; `clock` measures the
-/// decision round trip, whose two ends are by definition not the same instant.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_initial_invite(
-    mut call: Call,
+/// The treatment the initial consult's `response` states for `call`, whose
+/// caller's INVITE is `a_invite`: a route to apply, or the call's final.
+pub fn treatment(
+    call: Call,
+    response: Result<NewCallResponse, CallDecisionError>,
     a_invite: &SipRequest,
-    decision: &dyn CallDecisionEngine,
-    limiter: &LimiterWorker,
     config: &B2buaConfig,
-    turn: &mut TurnScope,
-    services: &[ServiceDef],
-    invite_wire: &[u8],
-    clock: &Clock,
+    ids: &mut TurnIds,
     now_ms: i64,
-) -> HandlerResult {
-    let req = build_request(a_invite);
-
-    // ── Trace intake (ADR-0026) ────────────────────────────────────────────
-    // The admission chain runs here, once, before the decision round trip, so a
-    // sampled call's story starts at its own INVITE. `apply_route` owns the
-    // other door (an engine force-enable, on this route or a later failover
-    // one), and it backfills what it missed.
-    trace::intake::activate(&mut call, a_invite, invite_wire, now_ms);
-    let mut request_json = trace::intake::request_body(&call, &req);
-
-    let sent_at_ms = clock.now_ms();
-    let response = decision.new_call(req).await;
-    let received_at_ms = clock.now_ms();
-    if let Ok(NewCallResponse::Route(route)) = &response {
-        // The route that turned the trace on arrived after its own request was
-        // sent, so rebuild that request: it is derived from the a-leg INVITE, so
-        // the rebuilt body IS the body that went out.
-        if route.trace && trace::intake::force_enable(&mut call, invite_wire, now_ms) {
-            request_json = Some(trace::intake::json_body(&build_request(a_invite)));
-        }
-    }
-    trace::intake::record_new_call(&call, request_json, &response, sent_at_ms, received_at_ms);
-
-    match response {
+) -> Initial {
+    let advertisement = &config.minted_final_advertisement;
+    let result = match response {
         Ok(NewCallResponse::Route(route)) => {
-            // The route built the Call; now run each service's `init` (ADR-0016
-            // X8), folding any seed (cursor + data + initial actions) through the
-            // normal executor.
-            // A dormant service (`init` → `None`) and the empty-service list
-            // both leave the result untouched.
-            let result = apply_route(
-                call,
-                route,
-                a_invite,
-                invite_wire,
-                decision,
-                limiter,
-                config,
-                &mut turn.ids,
-                clock,
-                now_ms,
-                0,
-            )
-            .await;
-            let mut exec = ActionExecutor { config, turn, now_ms, caller_invite: a_invite };
-            let setup_event = setup_event(&result.call, a_invite);
-            let from_a = call::Direction::FromA;
-            seed_services(result, services, &mut exec, &setup_event, "a", from_a)
+            return Initial::Route { call: Box::new(call), route: Box::new(route) }
         }
         Ok(NewCallResponse::Reject(reject)) => apply_reject(
             call,
@@ -253,8 +187,8 @@ pub async fn handle_initial_invite(
             DecisionKind::Reject,
             Some("a".into()),
             a_invite,
-            &config.minted_final_advertisement,
-            &mut turn.ids,
+            advertisement,
+            ids,
             now_ms,
         ),
         Ok(NewCallResponse::Redirect(rd)) => apply_redirect(
@@ -263,8 +197,8 @@ pub async fn handle_initial_invite(
             DecisionKind::Redirect,
             Some("a".into()),
             a_invite,
-            &config.minted_final_advertisement,
-            &mut turn.ids,
+            advertisement,
+            ids,
             now_ms,
         ),
         // `Relay` is a failover-only treatment; with no captured downstream
@@ -278,8 +212,8 @@ pub async fn handle_initial_invite(
                 Some("Temporarily Unavailable".into()),
                 None,
                 &[],
-                &config.minted_final_advertisement,
-                &mut turn.ids,
+                advertisement,
+                ids,
                 now_ms,
                 TerminationCause::DecisionReject,
             )
@@ -293,8 +227,8 @@ pub async fn handle_initial_invite(
             reason,
             update_headers.as_ref(),
             &[],
-            &config.minted_final_advertisement,
-            &mut turn.ids,
+            advertisement,
+            ids,
             now_ms,
             TerminationCause::Admission,
         ),
@@ -305,19 +239,20 @@ pub async fn handle_initial_invite(
             Some("Service Unavailable".into()),
             None,
             &[],
-            &config.minted_final_advertisement,
-            &mut turn.ids,
+            advertisement,
+            ids,
             now_ms,
             TerminationCause::Admission,
         ),
-    }
+    };
+    Initial::Final(Box::new(result))
 }
 
 /// Synthesize the setup `CallEvent` services' init actions resolve against (the
 /// original a-leg INVITE on the a-leg). The `src` is the caller's address from
 /// the a-leg, defaulting to `0.0.0.0:0` if it is not an `ip:port` (init actions
 /// resolve legs from the call, not the event source).
-fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
+pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
     let src =
         sip_message::ip_literal::ip_socket_addr(&call.a_leg.source.address, call.a_leg.source.port)
             .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
@@ -340,7 +275,7 @@ fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// deployment's `advertisement` for a minted final under the decision's
 /// statements.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn reject_call(
+pub fn reject_call(
     mut call: Call,
     a_invite: &SipRequest,
     status: u16,
@@ -428,7 +363,8 @@ pub(crate) fn reject_call(
     HandlerResult { call, effects }
 }
 
-fn build_request(invite: &SipRequest) -> NewCallRequest {
+/// The decision request the initial consult sends for `invite`.
+pub fn build_request(invite: &SipRequest) -> NewCallRequest {
     // One `(name, value)` per wire line, in wire order: the order of a multi-line
     // header is part of its meaning (RFC 7044 `History-Info` index chains), whatever
     // spelling each line wears.

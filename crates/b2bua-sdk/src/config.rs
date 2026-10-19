@@ -159,7 +159,7 @@ pub struct B2buaConfig {
     pub reaper_enabled: bool,
     /// Check the call model's invariants at the end of every turn, before
     /// the record lands, and panic with the call's dump on a violation
-    /// (`b2bua::rules::model_invariants`). On by default in debug builds, off
+    /// (`b2bua::model_invariants`). On by default in debug builds, off
     /// in release builds; every test harness turns it on.
     pub model_invariants: bool,
     /// Reaper sweep cadence, seconds (rides `tokio::time::interval` —

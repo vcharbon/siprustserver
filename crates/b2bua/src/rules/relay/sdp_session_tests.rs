@@ -9,7 +9,7 @@ use sip_message::{Method, SipMessage, SipParser, SipStr};
 use super::{adopt_confirmed_dialog, continue_on_leg, next_origin_in_dialog, Author, Carried};
 use crate::config::{AsWritten, B2buaConfig, SdpCrossing, SdpForm, SdpFormPolicy};
 use crate::initial_invite::build_initial_call;
-use crate::router::test_support::{invite, src};
+use crate::test_call::{invite, src};
 
 /// A service policy that re-serializes a peer's description once the call has
 /// a restatement: the test stand-in for a deployment's rule.

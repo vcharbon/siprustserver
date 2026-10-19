@@ -139,13 +139,13 @@ fn a_caller_rejected_with_a_non_2xx_final_gains_no_dialog() {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut scope = TurnScope::of(TurnIds::fixed(0xD4));
     let open = crate::initial_invite::build_initial_call(
-        &crate::router::test_support::invite("w0", "w1", "rejected-caller"),
-        crate::router::test_support::src(),
+        &crate::test_call::invite("w0", "w1", "rejected-caller"),
+        crate::test_call::src(),
         &config,
         &mut scope.ids,
         0,
     );
-    let caller = crate::router::test_support::caller_of(&open);
+    let caller = crate::test_call::caller_of(&open);
     let mut exec =
         ActionExecutor { config: &config, turn: &mut scope, now_ms: 0, caller_invite: &caller };
 

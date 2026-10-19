@@ -11,7 +11,7 @@ const BUDGETS: AnswerBudgets = AnswerBudgets {
 const NOW: i64 = 10_000;
 
 fn call() -> Call {
-    use crate::router::test_support::{invite, src};
+    use crate::test_call::{invite, src};
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let invite = invite("w0", "w1", "deadline");
     let mut ids = sip_ids::TurnIds::fixed(1);
@@ -95,7 +95,7 @@ fn deliver(
     let generation = armed(call, id).map_or(0, |t| t.generation);
     let key = armed(call, id).map_or(TimerKey::call(timer_type), |t| t.key);
     let event = CallEvent::Timer { key, generation, call_ref: "c".into(), incarnation: None };
-    crate::router::timer_screen::screen(call, &event, NOW, &mut Default::default()).ok()?;
+    crate::rule_chain::timer_screen::screen(call, &event, NOW, &mut Default::default()).ok()?;
     Some(screen(call, fx, &event))
 }
 

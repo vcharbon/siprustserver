@@ -1,6 +1,6 @@
 //! The model-invariant gate: a B2BUA turn that breaks a model invariant, or
 //! notes a defect, lands all the same and leaves the violation in the
-//! process's record ([`b2bua::rules::model_invariants::violations`]). The gate
+//! process's record ([`b2bua::model_invariants::violations`]). The gate
 //! reads that record from a [`Mark`] on, so a run fails on the first violation
 //! it met, whatever the scenario did next, and runs that follow one another in
 //! one process judge only their own. A test that provokes a violation on
@@ -19,7 +19,7 @@ impl Mark {
     /// Now: only the violations recorded from here on, the first of them
     /// with the call's dump.
     pub fn now() -> Mark {
-        Mark(b2bua::rules::model_invariants::mark())
+        Mark(b2bua::model_invariants::mark())
     }
 }
 
@@ -47,7 +47,7 @@ impl Since {
 
 /// The first model-invariant violation recorded since `since`, if any.
 pub fn first_violation(since: Mark) -> Option<String> {
-    b2bua::rules::model_invariants::violations().into_iter().nth(since.0)
+    b2bua::model_invariants::violations().into_iter().nth(since.0)
 }
 
 /// Panic with the first model-invariant violation recorded since `since`, if
@@ -77,7 +77,7 @@ impl crate::B2buaSut {
     /// purpose: taken, they no longer fail the run.
     pub fn take_model_violations(&mut self) -> Vec<String> {
         let since = self.since.mark().0;
-        let kept = b2bua::rules::model_invariants::violations().into_iter().skip(since).collect();
+        let kept = b2bua::model_invariants::violations().into_iter().skip(since).collect();
         self.since.restart();
         kept
     }

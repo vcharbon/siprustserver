@@ -7,7 +7,7 @@ use call::{Call, TimerKey, TimerType};
 use super::*;
 
 fn call() -> Call {
-    use crate::router::test_support::{invite, src};
+    use crate::test_call::{invite, src};
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let invite = invite("w0", "w1", "timer-screen");
     crate::initial_invite::build_initial_call(

@@ -169,7 +169,7 @@ mod tests {
     }
 
     fn call_holding_x() -> Call {
-        use crate::router::test_support::{invite, src};
+        use crate::test_call::{invite, src};
         let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
         let invite = invite("w0", "w1", "admit");
         let mut ids = sip_ids::TurnIds::fixed(1);

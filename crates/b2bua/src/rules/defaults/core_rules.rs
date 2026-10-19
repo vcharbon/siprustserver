@@ -1819,8 +1819,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             "reaper-stale",
             &[],
             Match::internal_event()
-                .topic(crate::reaper::REAPER_TOPIC)
-                .outcome(crate::reaper::OUTCOME_STALE),
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_STALE),
             reap_stale,
         )
         .runs_while_terminating(),
@@ -1828,8 +1828,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             "reaper-fatal-error",
             &[],
             Match::internal_event()
-                .topic(crate::reaper::REAPER_TOPIC)
-                .outcome(crate::reaper::OUTCOME_FATAL),
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_FATAL),
             reap_handler_panic,
         )
         .runs_while_terminating(),
@@ -1837,16 +1837,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             "reaper-overflow",
             &[],
             Match::internal_event()
-                .topic(crate::reaper::REAPER_TOPIC)
-                .outcome(crate::reaper::OUTCOME_OVERFLOW),
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_OVERFLOW),
             reap_overflow,
         ),
         rule(
             "reaper-message-cap",
             &[],
             Match::internal_event()
-                .topic(crate::reaper::REAPER_TOPIC)
-                .outcome(crate::reaper::OUTCOME_MESSAGE_CAP),
+                .topic(crate::reaper_verdict::REAPER_TOPIC)
+                .outcome(crate::reaper_verdict::OUTCOME_MESSAGE_CAP),
             reap_message_cap,
         )
         .runs_while_terminating(),

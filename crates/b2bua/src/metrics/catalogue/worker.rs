@@ -173,8 +173,8 @@ pub const REPEAT_GIVE_UPS: Family = Family::counter(
 );
 
 /// A model invariant a landing record broke, or a defect a turn reported
-/// (`rules::model_invariants::NAMES`).
-pub const MODEL_INVARIANT: Dim = Dim::new("invariant", &crate::rules::model_invariants::NAMES);
+/// (`model_invariants::NAMES`).
+pub const MODEL_INVARIANT: Dim = Dim::new("invariant", &crate::model_invariants::NAMES);
 
 pub const MODEL_DEFECTS: Family = Family::counter(
     "b2bua_model_defects_total",

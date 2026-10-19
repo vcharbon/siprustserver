@@ -11,7 +11,7 @@ use sip_message::SipRequest;
 /// b2bua reads `w_pri`/`w_bak` so the backup peer AGREES with the proxy's
 /// rendezvous (HRW 2nd-best) choice by construction rather than re-deriving it
 /// (the proxy keys HRW off the alive-set + Call-ID the b2bua cannot reproduce
-/// locally — see [`crate::repl::replication_target`]).
+/// locally — see the shell's `repl::replication_target`).
 ///
 /// The proxy double-record-routes (`ProxyCore` §16.6): it inserts BOTH a cookie
 /// RR and a direction-only `;outbound` RR, and on an inbound INVITE the
@@ -21,7 +21,7 @@ use sip_message::SipRequest;
 /// - Cookie present → [`CookieRead::Topology`] carrying `CallTopology { pri:
 ///   w_pri (or self_ordinal if the param is absent/empty), bak: w_bak (may be
 ///   empty), gen: 1 }`. A brand-new call starts at `gen = 1`; the b2bua's update
-///   path bumps it per mutation (see [`crate::store::CallState::update`]).
+///   path bumps it per mutation (the shell's `store::CallState::update`).
 /// - Every recorded route reads and none carries the stickiness grammar
 ///   (non-proxied / legacy INVITE) → [`CookieRead::NoCookie`].
 /// - A recorded route no reader accepts → [`CookieRead::Unreadable`]. The cookie

@@ -9,7 +9,7 @@
 //! reaches only its teardown rules there (`RuleDefinition::teardown`) and
 //! every other candidate is absorbed and counted.
 
-use std::collections::HashSet;
+use lookup_map::LookupSet;
 
 use call::{Call, CallModelState, TimerKey};
 
@@ -78,7 +78,7 @@ fn select<'a>(rules: &'a [RuleDefinition], call: &Call, ctx: &RuleContext) -> Se
         })
         .collect();
 
-    let overridden: HashSet<&str> =
+    let overridden: LookupSet<&str> =
         candidates.iter().flat_map(|(_, r)| r.overrides.iter().copied()).collect();
     candidates.retain(|(_, r)| !overridden.contains(r.id));
 
@@ -197,7 +197,7 @@ fn record_transitions(
     now_ms: i64,
     notes: &mut TurnNotes,
 ) {
-    if !crate::trace::sampled(after) {
+    if !crate::turn_notes::sampled(after) {
         return;
     }
     notes.trace(after, "rule.fired", now_ms, || rule.id.to_string());
@@ -218,7 +218,7 @@ pub(super) fn record_cursor_moves(
     now_ms: i64,
     notes: &mut TurnNotes,
 ) {
-    if !crate::trace::sampled(after) {
+    if !crate::turn_notes::sampled(after) {
         return;
     }
     let mut moved = |machine: &call::MachineId, from: &str, to: &str| {
@@ -303,7 +303,7 @@ pub(super) fn check_declared_effects(
     if rule.machine.is_none() {
         return;
     }
-    let declared: HashSet<EffectKind> = rule.effects.iter().map(|e| e.kind()).collect();
+    let declared: LookupSet<EffectKind> = rule.effects.iter().map(|e| e.kind()).collect();
     for action in emitted {
         let kind = action.effect_kind();
         let undeclared = if kind.is_tracked() && !declared.contains(&kind) {

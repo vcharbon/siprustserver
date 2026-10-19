@@ -13,7 +13,8 @@ use super::responses::{build_merged_482, build_retry_later_500, build_unborn_500
 use super::RouterCtx;
 use crate::admission::{class_of, Class};
 use crate::effects::{HandlerEffects, HandlerResult};
-use crate::initial_invite::{build_initial_call, handle_initial_invite};
+use crate::initial_consult::{cancelled_setup, handle_initial_invite};
+use crate::initial_invite::build_initial_call;
 use crate::new_calls::Refusal;
 use crate::repl::ReadinessState;
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
@@ -166,7 +167,7 @@ pub(super) async fn initial_invite_turn(
     // Created-then-rejected mirrors the decision-reject path so the Terminated
     // invariant reaps the call + propagates the delete.
     let mut handled = if cancelled {
-        crate::initial_invite::cancelled_setup(call.clone(), &caller, req.image(), now_ms)
+        cancelled_setup(call.clone(), &caller, req.image(), now_ms)
     } else if cordoned {
         refused_unavailable(ctx, call.clone(), &caller, now_ms, &mut turn.ids)
     } else if call.a_leg_invite.from_tag.is_empty() {

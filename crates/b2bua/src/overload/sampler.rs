@@ -38,7 +38,7 @@ use crate::poison::{locked, OVERLOAD_SAMPLER};
 /// [`Handle::try_current`](tokio::runtime::Handle::try_current). The production
 /// sampler is built inside the worker runtime
 /// ([`OverloadSignal::live`](super::OverloadSignal::live) →
-/// `b2bua_core::spawn_with_overload`, an async context), so the handle is
+/// `node::spawn_with_overload`, an async context), so the handle is
 /// present and points at the worker runtime. Built **outside** any runtime
 /// (e.g. a bare `#[test]` that only reads the zero-state header),
 /// `try_current` yields `None` and `elu()` reads a constant `0.0` — the

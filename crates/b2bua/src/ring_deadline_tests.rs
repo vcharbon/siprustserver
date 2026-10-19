@@ -14,7 +14,7 @@ const RING_MS: u64 = 2_345;
 /// A call whose leg `b-1`, its INVITE sent at 0, dialled for an attempt
 /// ringing `ring`, reads `state`.
 fn call(ring: Deadline, state: LegState) -> Call {
-    use crate::router::test_support::{invite, src};
+    use crate::test_call::{invite, src};
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let invite = invite("w0", "w1", "ring-deadline");
     let call = crate::initial_invite::build_initial_call(

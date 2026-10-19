@@ -37,7 +37,7 @@ pub(super) fn name_candidate(
 /// A rule that reaches the re-ACK beside anything else — a BYE, a CDR event, a
 /// timer — is a write, as is a re-ACK on a terminating call, whose flush the
 /// teardown needs.
-pub(super) fn class(result: &HandlerResult) -> Option<QuietTurn> {
+pub fn class(result: &HandlerResult) -> Option<QuietTurn> {
     let kind = result.effects.quiet?;
     let fx = &result.effects;
     let repeat = |eff: &OutboundSipEffect| matches!(eff.body, OutboundBody::Datagram(_));

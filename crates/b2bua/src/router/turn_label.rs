@@ -1,5 +1,5 @@
 //! The label a turn's model-invariant violation names it by
-//! ([`crate::rules::model_invariants::check`]): one line stating the event
+//! ([`crate::model_invariants::check`]): one line stating the event
 //! the turn handled and its call.
 
 use std::fmt;

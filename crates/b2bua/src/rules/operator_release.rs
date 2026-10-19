@@ -1,6 +1,6 @@
 //! `operator-release` (ADR-0050 §10): the turn of one call an operator's
-//! release-all reached ([`crate::release_all`]). A call already ending is left
-//! to its teardown: the rule does not run while terminating.
+//! release-all reached, sent as a [`TOPIC`] event. A call already ending is
+//! left to its teardown: the rule does not run while terminating.
 //!
 //! - An answered call ends with no BYE: a 2xx whose ACK this stack can compose
 //!   is ACKed (RFC 3261 §13.2.2.4), a leg still ringing is CANCELled
@@ -16,8 +16,13 @@ use b2bua_sdk::model::{
     LegEnd, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, CORE_LAYER,
 };
 
-use crate::release_all::{REASON, TOPIC};
 use crate::rules::defaults::still_owed_bare_ack;
+
+/// The topic of the internal event that releases one call.
+pub const TOPIC: &str = "operator-release";
+
+/// The reason the closing CDR event of a released call carries.
+pub const REASON: &str = "operator_release";
 
 /// The operator-release rule family: CORE, its match unique to its topic.
 pub fn operator_release_rules() -> Vec<RuleDefinition> {

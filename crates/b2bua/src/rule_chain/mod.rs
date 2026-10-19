@@ -1,22 +1,51 @@
 //! The rule chain's turn on one in-dialog event: the framework's ladders and
 //! screens before the rules, the rules, and the passes after them, with the
-//! message-cap defense wrapped around the whole.
+//! message-cap defense wrapped around the whole. A turn reads the per-process
+//! values it is handed ([`Framework`]) and the event as the shell resolved it
+//! ([`TurnInput`]), and nothing else (ADR-0052 §2).
 
-use std::sync::Arc;
+pub mod message_cap;
+pub mod quiet_turn;
+pub mod response_facts;
+pub mod superseded_relay;
+pub mod timer_screen;
 
-use call::helpers::Arrival;
-use call::{Call, CallModelState, Obligation, TimerType};
+use call::helpers::{Arrival, Resolved};
+use call::{Call, CallModelState, Direction, Obligation, TimerType};
 use sip_message::{Method, SipMessage, SipRequest};
 
-use super::resolve::Resolution;
-use super::RouterCtx;
 use crate::answer_deadline::Screened;
+use crate::config::B2buaConfig;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
+use crate::obligations::ObligationSet;
 use crate::rules::actions::{Owed, Settle};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
-use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext};
+use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
+
+/// The per-process values every turn reads, borrowed from the shell.
+#[derive(Clone, Copy)]
+pub struct Framework<'a> {
+    pub config: &'a B2buaConfig,
+    /// The composed rule list (ADR-0016).
+    pub rules: &'a [RuleDefinition],
+    pub obligations: &'a ObligationSet,
+}
+
+/// The event a turn runs on, as the shell resolved it, with the turn's clock
+/// reading and the caller's INVITE (ADR-0052 §11).
+pub struct TurnInput<'a> {
+    pub event: &'a CallEvent,
+    pub call_ref: &'a str,
+    /// The leg the event arrived on, and its direction.
+    pub source_leg_id: &'a str,
+    pub direction: Direction,
+    /// What the dialog gate resolved the event's message to.
+    pub resolved: Resolved,
+    pub now_ms: i64,
+    pub caller: &'a SipRequest,
+}
 
 /// The branch of a BYE client transaction `event` ends: a final to it, or a
 /// transaction timeout (whose branch names it alone).
@@ -51,18 +80,13 @@ fn bye_transaction_end(event: &CallEvent) -> Option<&str> {
 /// capture `cap_exceeded` BEFORE the handler runs, terminate AFTER, so the
 /// in-flight event (e.g. relaying this re-INVITE's response) is still serviced
 /// before teardown; a turn that trips the cap is the teardown, never quiet.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn rule_chain_turn(
-    ctx: &Arc<RouterCtx>,
+pub fn rule_chain_turn(
+    fw: &Framework<'_>,
     mut call: Call,
-    event: &CallEvent,
-    res: &Resolution,
-    resolved: call::helpers::Resolved,
-    call_ref: &str,
-    now_ms: i64,
+    input: TurnInput<'_>,
     turn: &mut TurnScope,
-    caller: &SipRequest,
 ) -> HandlerResult {
+    let TurnInput { event, call_ref, source_leg_id, direction, resolved, now_ms, caller } = input;
     // The cap budget is a PER-LIVENESS-INTERVAL rate, not a lifetime total: the
     // keepalive tick RESETS the counter, opening a fresh window. A runaway
     // dialog still lands >cap events inside one window and is torn down; a
@@ -78,10 +102,9 @@ pub(super) fn rule_chain_turn(
         call.message_count.unwrap_or(0) + 1
     };
     call.message_count = Some(bumped);
-    let cap_exceeded = i64::try_from(ctx.config.max_messages_per_call)
-        .is_ok_and(|cap| bumped > cap)
+    let cap_exceeded = i64::try_from(fw.config.max_messages_per_call).is_ok_and(|cap| bumped > cap)
         && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms, caller_invite: caller };
+    let mut exec = ActionExecutor { config: fw.config, turn, now_ms, caller_invite: caller };
     // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
     // repeated here and never reaches a rule; the discharging ACK or PRACK
     // retires its ladder before the rules run and they read the fact; a
@@ -108,7 +131,7 @@ pub(super) fn rule_chain_turn(
         exec.repeat(&mut call, &mut ladder_fx, obligation);
         ladder_fx.quiet = Some(QuietTurn::OwnRung);
         let repeated = HandlerResult { call, effects: ladder_fx };
-        return enforced(ctx, &before, repeated, now_ms, caller);
+        return enforced(fw, &before, repeated, now_ms, caller);
     }
     // The end of the wait behind this stack's own NOTIFY is the framework's:
     // the requests held there leave, and no rule sees the fire.
@@ -116,21 +139,21 @@ pub(super) fn rule_chain_turn(
         let before = call.clone();
         exec.release_at_cap(&mut call, &mut ladder_fx);
         let released = HandlerResult { call, effects: ladder_fx };
-        return enforced(ctx, &before, released, now_ms, caller);
+        return enforced(fw, &before, released, now_ms, caller);
     }
     let start = TurnStart::of(&call);
     // A reliable provisional is the engine's before it is any rule's (RFC
     // 3262): recorded with its early dialog and offer, or — a repeat, or out
     // of `RSeq` order — dropped unread, its turn a write of nothing else.
-    let arrival = exec.take_reliable_provisional(&mut call, event, &res.source_leg_id);
+    let arrival = exec.take_reliable_provisional(&mut call, event, source_leg_id);
     let screened = matches!(arrival, Some(Arrival::Repeat | Arrival::OutOfOrder));
     let rules_read = rules_read && !screened;
-    let discharged = exec.discharge(&mut call, &mut ladder_fx, event, &res.source_leg_id);
+    let discharged = exec.discharge(&mut call, &mut ladder_fx, event, source_leg_id);
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
-            let leg = res.source_leg_id.as_str();
+            let leg = source_leg_id;
             let fx = &mut ladder_fx;
-            super::response_facts::record(&mut exec, &mut call, fx, leg, resp, screened);
+            response_facts::record(&mut exec, &mut call, fx, leg, resp, screened);
             exec.release_answered_notify(&mut call, &mut ladder_fx, leg, resp);
         }
     }
@@ -144,7 +167,7 @@ pub(super) fn rule_chain_turn(
     // carries that transaction's one final before the rules read it, over a
     // 2xx this stack built too late for the completed transaction to send.
     if let CallEvent::Cancelled { in_dialog: false, .. } = event {
-        call = call::helpers::record_cancelled_invite(call, &res.source_leg_id);
+        call = call::helpers::record_cancelled_invite(call, source_leg_id);
     }
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         exec.turn.notes.repeat_give_up(obligation.kind());
@@ -152,18 +175,11 @@ pub(super) fn rule_chain_turn(
     }
     // The record names the message before the rules read it, so what the
     // turn sends follows what it received.
-    if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
+    if let Some(ring) = crate::message_ring::Ring::of(fw.config) {
         let dialog = resolved.dialog.as_ref();
         let repeat = arrival == Some(Arrival::Repeat);
-        call = ring.received(
-            call,
-            &res.source_leg_id,
-            event,
-            repeat,
-            discharged.as_ref(),
-            dialog,
-            now_ms,
-        );
+        call =
+            ring.received(call, source_leg_id, event, repeat, discharged.as_ref(), dialog, now_ms);
     }
     // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
     // opens an exchange on that leg, counted once as it is received, before
@@ -171,7 +187,7 @@ pub(super) fn rule_chain_turn(
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
             let source = resolved.dialog.as_ref();
-            crate::rules::relay::note_request(&mut call, &res.source_leg_id, req, source);
+            crate::rules::relay::note_request(&mut call, source_leg_id, req, source);
         }
     }
     // A decision folding back while its consult is awaited records the routes
@@ -193,15 +209,15 @@ pub(super) fn rule_chain_turn(
         caller_invite: caller,
         call_ref,
         event,
-        source_leg_id: &res.source_leg_id,
-        direction: res.direction,
+        source_leg_id,
+        direction,
         now_ms,
-        config: &ctx.config,
+        config: fw.config,
         discharged: discharged.as_ref(),
         resolved: &resolved,
     };
     let mut result = if rules_read {
-        execute_rules(&ctx.rules, &call, &rule_ctx, &mut exec, &ctx.obligations)
+        execute_rules(fw.rules, &call, &rule_ctx, &mut exec, fw.obligations)
     } else {
         HandlerResult { call: call.clone(), effects: HandlerEffects::new() }
     };
@@ -213,58 +229,58 @@ pub(super) fn rule_chain_turn(
             if resp.status() >= 200 && resp.cseq().method() == Method::Invite {
                 result.call = call::helpers::record_dialled_invite_final(
                     result.call,
-                    &res.source_leg_id,
+                    source_leg_id,
                     i64::from(resp.cseq().seq()),
                     resp.status(),
                 );
             }
         }
     }
-    super::quiet_turn::name_candidate(&mut result, &call, event, discharged.as_ref());
+    quiet_turn::name_candidate(&mut result, &call, event, discharged.as_ref());
     // The ladder's own effects (its cancels) precede the rule's.
     ladder_fx.extend(std::mem::take(&mut result.effects));
     result.effects = ladder_fx;
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         let before = result.call.clone();
         let settled = exec.settle_give_up(result, obligation, &rule_ctx);
-        result = enforced(ctx, &before, settled, now_ms, caller);
+        result = enforced(fw, &before, settled, now_ms, caller);
     }
     if cap_exceeded
         && !matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated)
     {
-        result = super::message_cap::tear_down_runaway(ctx, &mut exec, result, &rule_ctx);
+        result = message_cap::tear_down_runaway(fw, &mut exec, result, &rule_ctx);
     }
     // A reliable provisional shown to no one, or whose INVITE, leg or dialog
     // the turn ended, is PRACKed by the engine whatever the rules made of it
     // (RFC 3262 §4).
     exec.settle_owed_pracks(&mut result.call, &mut result.effects, Owed::Call, Settle::TurnEnd);
     // The turn's lifecycle closes over what every layer above made of it.
-    close_turn(&ctx.rules, &start, result, &mut exec)
+    close_turn(fw.rules, &start, result, &mut exec)
 }
 
 /// `result`, the turn's outcome on `before`, finalized and held to the
 /// invariants the framework enforces.
-pub(super) fn enforced(
-    ctx: &RouterCtx,
+pub fn enforced(
+    fw: &Framework<'_>,
     before: &Call,
     result: HandlerResult,
     now_ms: i64,
     caller: &SipRequest,
 ) -> HandlerResult {
     crate::rules::invariants::enforce(
-        &ctx.obligations,
+        fw.obligations,
         before,
         crate::rules::invariants::finalize(result),
         now_ms,
         crate::rules::invariants::UnansweredCaller::Answer {
-            advertisement: &ctx.config.minted_final_advertisement,
+            advertisement: &fw.config.minted_final_advertisement,
             invite: caller,
         },
     )
 }
 
 /// Whether `event` is a fire of a timer of type `timer_type`.
-pub(super) fn fired(event: &CallEvent, timer_type: &TimerType) -> bool {
+pub fn fired(event: &CallEvent, timer_type: &TimerType) -> bool {
     matches!(event, CallEvent::Timer { key, .. } if &key.timer_type == timer_type)
 }
 

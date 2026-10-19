@@ -30,8 +30,8 @@ use call::{Call, CallModelState, TimerKey, TimerType};
 use crate::config::B2buaConfig;
 use crate::decision_log::FAILURE_TOPIC;
 use crate::effects::{CriticalStateEffect, FireAndForgetEffect, HandlerEffects, HandlerResult};
-use crate::limiter::bounded::ADMIT_SLACK;
 use crate::limiter::report::LimiterAdmitResult;
+use crate::limiter::ADMIT_SLACK;
 use b2bua_sdk::event::CallEvent;
 
 /// How long past its budget a request's answer is still awaited: the answer's
@@ -44,7 +44,7 @@ const _: () = assert!(ADMIT_SLACK.as_millis() * 4 <= MARGIN.as_millis());
 
 /// The `/call/failure` consults one failover chain may send: the first, and
 /// one per limiter refusal it re-consults on.
-pub const FAILURE_CHAIN: u32 = crate::decision::apply_route::MAX_LIMITER_FAILOVER + 1;
+pub const FAILURE_CHAIN: u32 = crate::decision::MAX_LIMITER_FAILOVER + 1;
 
 /// The budget a `/call/failure` consult is answered in, `decision` being the
 /// decision engine's per-consult deadline and `admit` the limiter's admit

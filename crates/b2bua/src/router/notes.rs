@@ -19,6 +19,6 @@ pub(super) fn drain(ctx: &RouterCtx, call_ref: &str, turn: &mut TurnScope) {
         ctx.metrics.bump_message_cap_terminated();
     }
     for defect in notes.defects() {
-        crate::rules::model_invariants::defect(&ctx.metrics, defect);
+        crate::model_invariants::defect(&ctx.metrics, defect);
     }
 }

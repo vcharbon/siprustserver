@@ -4,6 +4,13 @@
 
 use call::Call;
 
+/// Whether this call is traced. The ONE guard every trace fact and emission
+/// site uses (ADR-0026).
+#[inline]
+pub fn sampled(call: &Call) -> bool {
+    call.sampled == Some(true)
+}
+
 /// One fact of a traced call's story (ADR-0026): its kind, the instant it
 /// happened, and what happened in words.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +71,7 @@ impl TurnNotes {
         at_ms: i64,
         detail: impl FnOnce() -> String,
     ) {
-        if crate::trace::sampled(call) {
+        if sampled(call) {
             self.trace.push(TraceFact { kind, at_ms, detail: detail() });
         }
     }

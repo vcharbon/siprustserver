@@ -22,7 +22,7 @@ use sip_message::{Method, SipMessage, SipRequest, SipStr};
 /// CSeq, received on the same Call-ID with the same top-Via branch and
 /// sent-by (RFC 3261 §17.2.3). Any other event, or a request no relay
 /// snapshots, leaves `call` as it is.
-pub(super) fn drop_superseded_relay(call: Call, event: &CallEvent) -> Call {
+pub fn drop_superseded_relay(call: Call, event: &CallEvent) -> Call {
     let CallEvent::Sip { message, .. } = event else { return call };
     let SipMessage::Request(req) = message.as_ref() else { return call };
     if matches!(req.method(), Method::Invite | Method::Ack | Method::Cancel) {

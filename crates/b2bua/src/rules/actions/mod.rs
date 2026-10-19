@@ -72,7 +72,7 @@ use b2bua_sdk::model::{RuleAction, RuleContext};
 
 pub(crate) use own_notify::holds_requests;
 pub use prack::{Owed, Settle};
-pub(crate) use provisional_arrival::invite_open;
+pub use provisional_arrival::invite_open;
 
 /// Executes rule actions against a working copy of the call, drawing every
 /// identifier it mints from its turn and noting there what it reports.

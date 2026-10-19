@@ -500,6 +500,7 @@ dependencies = [
  "http-net-testkit",
  "load-shed",
  "lock-poison",
+ "lookup-map",
  "metric-catalogue",
  "metric-values",
  "observe",

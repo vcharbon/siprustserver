@@ -1,6 +1,6 @@
 use super::*;
 use crate::effects::{HandlerEffects, OutboundTxnMode, Provenance};
-use crate::router::test_support::{invite, src};
+use crate::test_call::{caller_of, invite, src};
 
 fn lines(v: &[&str]) -> Vec<String> {
     v.iter().map(|l| l.to_string()).collect()
@@ -119,7 +119,7 @@ fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
         &mut ids,
         0,
     );
-    let a_invite = crate::router::test_support::caller_of(&call);
+    let a_invite = caller_of(&call);
     let ack = a_invite.clone();
     let (emission, _) = call::RetainedEmission::paced(
         ack.image().to_vec(),
@@ -177,7 +177,7 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
         &mut ids,
         0,
     );
-    let a_invite = crate::router::test_support::caller_of(&call);
+    let a_invite = caller_of(&call);
     let (leg, effect) = crate::rules::relay::build_b_leg(
         crate::rules::relay::CallMarks::of(&call),
         "b-1",
@@ -234,7 +234,7 @@ fn an_ended_legs_own_set_stays_with_the_call() {
         &mut ids,
         0,
     );
-    let a_invite = crate::router::test_support::caller_of(&call);
+    let a_invite = caller_of(&call);
     let (mut leg, effect) = crate::rules::relay::build_b_leg(
         crate::rules::relay::CallMarks::of(&call),
         "b-1",

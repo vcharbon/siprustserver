@@ -89,7 +89,7 @@ fn reliable_provisional(resp: &SipResponse, leg_id: &str) -> Option<ProvisionalI
 /// awaiting its final, or this stack's own, the round its client-transaction
 /// handle holds still open (no 2xx taken). The one reading the screen, the
 /// PRACK step and the model invariants share.
-pub(crate) fn invite_open(call: &Call, id: &ProvisionalId) -> bool {
+pub fn invite_open(call: &Call, id: &ProvisionalId) -> bool {
     let Some(leg) = call::helpers::find_leg(call, &id.leg) else { return false };
     let cseq = id.invite_cseq.as_i64();
     if let Some(invite) = leg.outbound_invite.as_ref().filter(|i| i.cseq == cseq) {

@@ -470,22 +470,5 @@ pub fn default_platform_features() -> FeatureActivations {
 }
 
 #[cfg(test)]
-mod tests {
-    use call::LimiterEntry;
-
-    /// A route decision's `call_limiter` encodes as `[{"id":…,"limit":…}]` in
-    /// stated order, and that encoding decodes back to the same entries.
-    #[test]
-    fn route_call_limiter_json_is_id_then_limit_in_stated_order() {
-        let mut r = crate::decision::test_adapter::route_to("127.0.0.1", 5060);
-        r.call_limiter = vec![
-            LimiterEntry { id: "trunk-A".into(), limit: 3 },
-            LimiterEntry { id: "site-B".into(), limit: 100 },
-        ];
-        let encoded = serde_json::to_string(&r).unwrap();
-        let pinned = r#"[{"id":"trunk-A","limit":3},{"id":"site-B","limit":100}]"#;
-        assert!(encoded.contains(&format!(r#""call_limiter":{pinned}"#)), "{encoded}");
-        let decoded: Vec<LimiterEntry> = serde_json::from_str(pinned).unwrap();
-        assert_eq!(decoded, r.call_limiter);
-    }
-}
+#[path = "schemas_tests.rs"]
+mod tests;

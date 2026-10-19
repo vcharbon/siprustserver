@@ -1,30 +1,25 @@
 //! The limiter refused a route on the call's own turn: the `/call/failure`
-//! consult it raises, and the treatment that answers it — a failover route
-//! applied as the route was, or the call's final.
+//! consult it raises, awaited, and the treatment that answers it applied
+//! ([`failover_fold`]) — a failover route applied as the route was, or the
+//! call's final.
 
-use call::helpers::mark_decision;
-use call::{Call, DecisionKind, TerminationCause};
+use call::Call;
 use sip_clock::Clock;
 use sip_ids::TurnIds;
 use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
-use crate::decision::{
-    CallDecisionEngine, CallDecisionError, CallFailureRequest, CallTreatment, FailureInfo,
-};
+use crate::decision::failover_fold::{self, Consult, Failover};
+use crate::decision::{CallDecisionEngine, CallTreatment};
 use crate::effects::HandlerResult;
 use crate::limiter::LimiterWorker;
 
-use super::apply_route::MAX_LIMITER_FAILOVER;
-
 /// The limiter refused this route: consult `/call/failure` for a failover
-/// treatment and apply it, or answer `486 Busy Here` when the call has no
-/// callback context to fail over with — or has already burned
-/// [`MAX_LIMITER_FAILOVER`] hops, so a plan that keeps returning limited
-/// destinations terminates instead of looping.
+/// treatment and apply it, or answer the call's final
+/// ([`failover_fold::consult_or_busy`]).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn limiter_reject_failover(
-    mut call: Call,
+    call: Call,
     limiter_id: String,
     a_invite: &SipRequest,
     invite_wire: &[u8],
@@ -36,21 +31,12 @@ pub(super) async fn limiter_reject_failover(
     now_ms: i64,
     depth: u32,
 ) -> HandlerResult {
-    if call.callback_context.is_none() || depth >= MAX_LIMITER_FAILOVER {
-        return crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            486,
-            Some("Busy Here".into()),
-            None,
-            &[],
-            &config.minted_final_advertisement,
-            ids,
-            now_ms,
-            TerminationCause::Admission,
-        );
-    }
-    let req = limiter_failure_request(&call, &limiter_id);
+    let consult =
+        failover_fold::consult_or_busy(call, &limiter_id, a_invite, config, ids, now_ms, depth);
+    let (mut call, req) = match consult {
+        Consult::Final(result) => return *result,
+        Consult::Raise { call, request } => (*call, *request),
+    };
     let mut request_json = crate::trace::intake::request_body(&call, &req);
     let sent_at_ms = clock.now_ms();
     let response = decision.call_failure(req).await;
@@ -61,19 +47,21 @@ pub(super) async fn limiter_reject_failover(
     // so it IS the body that went out.
     if let Ok(CallTreatment::Route(route2)) = &response {
         if route2.trace && !crate::trace::sampled(&call) {
-            let rebuilt =
-                crate::trace::intake::json_body(&limiter_failure_request(&call, &limiter_id));
+            let rebuilt = crate::trace::intake::json_body(&failover_fold::limiter_failure_request(
+                &call,
+                &limiter_id,
+            ));
             if crate::trace::intake::force_enable(&mut call, invite_wire, now_ms) {
                 request_json = Some(rebuilt);
             }
         }
     }
     record_failure_round_trip(&call, request_json, &response, sent_at_ms, received_at_ms);
-    match response {
-        Ok(CallTreatment::Route(route2)) => {
+    match failover_fold::treatment(call, response, a_invite, config, ids, now_ms) {
+        Failover::Route { call, route } => {
             Box::pin(super::apply_route::apply_route(
-                call,
-                route2,
+                *call,
+                *route,
                 a_invite,
                 invite_wire,
                 decision,
@@ -86,90 +74,7 @@ pub(super) async fn limiter_reject_failover(
             ))
             .await
         }
-        // A limiter refusal names no failed leg: these marks carry none.
-        Ok(CallTreatment::Reject(rj)) => super::apply_reject::apply_reject(
-            call,
-            rj,
-            DecisionKind::FailoverReject,
-            None,
-            a_invite,
-            &config.minted_final_advertisement,
-            ids,
-            now_ms,
-        ),
-        Ok(CallTreatment::Redirect(rd)) => super::apply_reject::apply_redirect(
-            call,
-            rd,
-            DecisionKind::FailoverRedirect,
-            None,
-            a_invite,
-            &config.minted_final_advertisement,
-            ids,
-            now_ms,
-        ),
-        // Relay with no captured failure (a limiter reject is pre-leg) → 480
-        // fallback (ADR-0017 X5).
-        Ok(CallTreatment::Relay { label }) => {
-            let call = mark_decision(call, now_ms, DecisionKind::FailoverTerminate, None, label);
-            crate::initial_invite::reject_call(
-                call,
-                a_invite,
-                480,
-                Some("Temporarily Unavailable".into()),
-                None,
-                &[],
-                &config.minted_final_advertisement,
-                ids,
-                now_ms,
-                TerminationCause::DecisionReject,
-            )
-        }
-        // The engine's own refusal: the final it stated; no answer: a bare
-        // 503 (ADR-0043). Either is the stack's own, no decision and no mark.
-        Err(CallDecisionError::Refused { code, reason, update_headers }) => {
-            crate::initial_invite::reject_call(
-                call,
-                a_invite,
-                code,
-                reason,
-                update_headers.as_ref(),
-                &[],
-                &config.minted_final_advertisement,
-                ids,
-                now_ms,
-                TerminationCause::Admission,
-            )
-        }
-        Err(CallDecisionError::Unavailable(_)) => crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            503,
-            None,
-            None,
-            &[],
-            &config.minted_final_advertisement,
-            ids,
-            now_ms,
-            TerminationCause::Admission,
-        ),
-    }
-}
-
-/// The `/call/failure` consult a limiter reject raises: origin `call_limiter`,
-/// the refusing limiter, and the call's context snapshot. Pure — the trace path
-/// rebuilds it after a late activation, and the rebuild must equal what was sent.
-fn limiter_failure_request(call: &Call, limiter_id: &str) -> CallFailureRequest {
-    CallFailureRequest {
-        callback_context: call.callback_context.clone(),
-        failure: FailureInfo {
-            origin: "call_limiter".to_string(),
-            status_code: None,
-            limiter_id: Some(limiter_id.to_string()),
-            failed_leg_id: None,
-            timeout_kind: None,
-            sip_headers: Vec::new(),
-        },
-        snapshot: crate::decision::CallSnapshot::of(call),
+        Failover::Final(result) => *result,
     }
 }
 
