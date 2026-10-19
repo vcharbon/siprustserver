@@ -99,6 +99,9 @@ mod s12_tests;
 mod s13_tests;
 
 #[cfg(test)]
+mod frame_cap_tests;
+
+#[cfg(test)]
 mod puller_restart_tests;
 
 #[cfg(test)]

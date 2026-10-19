@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::frame::{Frame, Partition, Watermark};
-use repl_net::transport::{AcceptError, ReplicationConnection, ReplicationListener};
+use repl_net::transport::{AcceptError, ReplicationConnection, ReplicationListener, SendError};
 
 use super::changelog::{BodySource, Changelog};
 use crate::abort_on_drop::AbortOnDrop;
@@ -97,6 +97,9 @@ enum Unsent {
     Closed,
     /// The send stayed blocked past [`ServeConfig::send_stall`].
     Stalled,
+    /// The transport refused the frame, or a frame of the batch, unsent: it
+    /// does not encode or passes the frame cap. The stream stays usable.
+    Refused(String),
 }
 
 /// Serves a node's changelog to pulling peers over a [`ReplicationListener`].
@@ -287,7 +290,7 @@ impl ReplServer {
                     Frame::Data { at, .. } => Some(*at),
                     _ => None,
                 };
-                if self.send(conn, frame, caller, flow).await.is_err() {
+                if self.send_or_skip(conn, frame, caller, flow).await.is_err() {
                     return;
                 }
                 if let Some(at) = at {
@@ -339,8 +342,9 @@ impl ReplServer {
     /// `Data{ op: Put, partition, at: W }` in [`BOOTSTRAP_CHUNK`] batches (one
     /// `send_batch` per chunk — never holding a lock across the socket), and
     /// returns `W` so the tail resumes warm. A key whose body vanished between
-    /// the snapshot and the read is skipped (the call ended). `Err` if the
-    /// socket dropped or a send stalled mid-pass.
+    /// the snapshot and the read is skipped (the call ended), and so is a body
+    /// the transport refuses ([`Self::send_or_skip`]). `Err` if the socket
+    /// dropped or a send stalled mid-pass.
     async fn serve_bootstrap(
         &self,
         conn: &dyn ReplicationConnection,
@@ -367,32 +371,87 @@ impl ReplServer {
         };
 
         for group in keys.chunks(BOOTSTRAP_CHUNK) {
-            let mut frames = Vec::with_capacity(group.len());
-            for key in group {
-                // Send-time origin stamp for skew re-anchoring on the receiver
-                // (mirrors `drain_since`); one clock reading per bootstrap frame.
-                let origin_now_ms = self.changelog.now_ms();
-                match self.source.read_entry(role, primary, key).await {
-                    Some((body, meta)) => frames.push(Frame::Data {
-                        at: w,
-                        op: repl_net::frame::Op::Put,
-                        partition,
-                        call_ref: key.clone(),
-                        call_gen: meta.call_gen,
-                        call_bgen: meta.call_bgen,
-                        body_ttl_ms: meta.body_ttl_ms,
-                        origin_now_ms,
-                        indexes: meta.indexes,
-                        body: Some(body),
-                        answered: false,
-                        incarnation: meta.incarnation,
-                    }),
-                    _ => continue,
+            let frames = self.bootstrap_frames(group, w, partition, role, primary).await;
+            match self.bounded(conn.send_batch(frames), caller, flow).await {
+                // A refused frame refuses its whole batch unsent: the chunk is
+                // read again and sent frame by frame, the refused one skipped.
+                Err(Unsent::Refused(_)) => {
+                    for frame in self.bootstrap_frames(group, w, partition, role, primary).await {
+                        self.send_or_skip(conn, frame, caller, flow).await?;
+                    }
                 }
+                sent => sent?,
             }
-            self.bounded(conn.send_batch(frames), caller, flow).await?;
         }
         Ok(w)
+    }
+
+    /// The bootstrap frames of the keys `group`, each a `Put` at `w`; a key
+    /// whose body vanished is left out.
+    async fn bootstrap_frames(
+        &self,
+        group: &[String],
+        w: Watermark,
+        partition: Partition,
+        role: PartitionRole,
+        primary: &str,
+    ) -> Vec<Frame> {
+        let mut frames = Vec::with_capacity(group.len());
+        for key in group {
+            // Send-time origin stamp for skew re-anchoring on the receiver
+            // (mirrors `drain_since`); one clock reading per bootstrap frame.
+            let origin_now_ms = self.changelog.now_ms();
+            match self.source.read_entry(role, primary, key).await {
+                Some((body, meta)) => frames.push(Frame::Data {
+                    at: w,
+                    op: repl_net::frame::Op::Put,
+                    partition,
+                    call_ref: key.clone(),
+                    call_gen: meta.call_gen,
+                    call_bgen: meta.call_bgen,
+                    body_ttl_ms: meta.body_ttl_ms,
+                    origin_now_ms,
+                    indexes: meta.indexes,
+                    body: Some(body),
+                    answered: false,
+                    incarnation: meta.incarnation,
+                }),
+                _ => continue,
+            }
+        }
+        frames
+    }
+
+    /// Send `frame`; one the transport refuses is logged, counted and skipped,
+    /// so the stream goes on past it.
+    async fn send_or_skip(
+        &self,
+        conn: &dyn ReplicationConnection,
+        frame: Frame,
+        caller: &str,
+        flow: &'static str,
+    ) -> Result<(), Unsent> {
+        let call_ref = match &frame {
+            Frame::Data { call_ref, .. } => call_ref.clone(),
+            _ => String::new(),
+        };
+        match self.send(conn, frame, caller, flow).await {
+            Err(Unsent::Refused(why)) => {
+                if let Some(m) = &self.metrics {
+                    m.bump_repl_frame_refused();
+                }
+                tracing::error!(
+                    node = observe::node(),
+                    peer = %caller,
+                    flow,
+                    call_ref,
+                    why,
+                    "replication frame refused unsent; the stream goes on past it"
+                );
+                Ok(())
+            }
+            sent => sent,
+        }
     }
 
     /// Send `frame`, bounded by [`ServeConfig::send_stall`].
@@ -416,6 +475,7 @@ impl ReplServer {
     ) -> Result<(), Unsent> {
         match tokio::time::timeout(self.config.send_stall, send).await {
             Ok(Ok(())) => Ok(()),
+            Ok(Err(SendError::Unencodable(why))) => Err(Unsent::Refused(why)),
             Ok(Err(_)) => Err(Unsent::Closed),
             Err(_) => {
                 tracing::info!(

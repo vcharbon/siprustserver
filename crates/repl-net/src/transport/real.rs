@@ -17,8 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-use crate::{decode_frame, encode_frame, frame_with_len_prefix, try_read_framed, Frame};
+use crate::{decode_frame, try_read_framed, Frame};
 
+use super::wire_bytes;
 use super::{
     AcceptError, ConnectError, ListenError, ReplicationConnection, ReplicationListener,
     ReplicationNetwork, SendError, SocketSettings,
@@ -232,13 +233,6 @@ impl ReplicationConnection for RealConnection {
     fn local_addr(&self) -> SocketAddr {
         self.local
     }
-}
-
-/// `frame` encoded and length-prefixed; one that does not encode or frame is
-/// [`SendError::Unencodable`], and nothing of it is written.
-fn wire_bytes(frame: &Frame) -> Result<Vec<u8>, SendError> {
-    let payload = encode_frame(frame).map_err(|e| SendError::Unencodable(e.to_string()))?;
-    frame_with_len_prefix(&payload).map_err(|e| SendError::Unencodable(e.to_string()))
 }
 
 fn classify_write(e: &std::io::Error) -> SendError {

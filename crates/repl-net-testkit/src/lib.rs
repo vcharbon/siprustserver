@@ -20,7 +20,7 @@ use repl_net::transport::{
     AcceptError, ConnectError, ListenError, ReplicationConnection, ReplicationListener,
     ReplicationNetwork, SendError,
 };
-use repl_net::{decode_frame, encode_frame, transport, Frame};
+use repl_net::{decode_frame, transport, Frame};
 #[cfg(test)]
 use repl_net::{Op, Partition, Watermark};
 

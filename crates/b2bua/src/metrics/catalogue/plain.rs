@@ -194,6 +194,10 @@ plain_counters! {
         "b2bua_reaper_sweep_panics_total",
         "reaper sweep steps that panicked; the next pass runs one interval later — expected 0",
     ) => reaper_sweep_panics, bump_reaper_sweep_panic, reaper_sweep_panics_total;
+    REPL_FRAMES_REFUSED = (
+        "b2bua_repl_frames_refused_total",
+        "replication frames the transport refused unsent (past the frame cap); each is skipped and the stream goes on — expected 0",
+    ) => repl_frames_refused, bump_repl_frame_refused, repl_frames_refused_total;
     DEPARTURE_TAKEOVER_PANICS = (
         "b2bua_departure_takeover_panics_total",
         "departed-peer calls whose takeover panicked; the sweep goes on with the next call — expected 0",

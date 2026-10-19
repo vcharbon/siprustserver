@@ -29,6 +29,8 @@ use std::net::SocketAddr;
 
 use async_trait::async_trait;
 
+use crate::codec::encode_frame;
+use crate::framing::{frame_with_len_prefix, MAX_FRAME_LEN};
 use crate::Frame;
 
 pub use real::RealReplicationNetwork;
@@ -88,10 +90,28 @@ pub enum SendError {
     /// Underlying I/O failure (real transport only).
     #[error("send io error: {0}")]
     Io(String),
-    /// The frame does not encode or exceeds the frame cap; nothing was sent
-    /// and the connection stays usable.
+    /// The frame, or a frame of a batch, does not encode or exceeds the frame
+    /// cap ([`crate::framing::MAX_FRAME_LEN`]): nothing of the frame or of the
+    /// batch was sent, and the connection stays usable.
     #[error("frame not sent: {0}")]
     Unencodable(String),
+}
+
+/// `frame` encoded, within the frame cap; one that does not encode or passes
+/// [`MAX_FRAME_LEN`] is [`SendError::Unencodable`].
+pub fn payload(frame: &Frame) -> Result<Vec<u8>, SendError> {
+    let payload = encode_frame(frame).map_err(|e| SendError::Unencodable(e.to_string()))?;
+    if u32::try_from(payload.len()).map_or(true, |len| len > MAX_FRAME_LEN) {
+        let len = payload.len();
+        return Err(SendError::Unencodable(format!("{len} bytes past the {MAX_FRAME_LEN} cap")));
+    }
+    Ok(payload)
+}
+
+/// `frame` encoded and length-prefixed, as a connection writes it; one that
+/// does not encode or frame is [`SendError::Unencodable`].
+pub fn wire_bytes(frame: &Frame) -> Result<Vec<u8>, SendError> {
+    frame_with_len_prefix(&payload(frame)?).map_err(|e| SendError::Unencodable(e.to_string()))
 }
 
 /// A connection-oriented, reliable, ordered, framed replication network.
@@ -148,8 +168,13 @@ pub trait ReplicationConnection: Send + Sync {
     /// loops [`send`](Self::send) (correct, unoptimised); the real TCP transport
     /// overrides it to coalesce. Used by the bulk bootstrap scan, where
     /// hundreds–thousands of small bodies stream back-to-back and a per-frame
-    /// flush collapses throughput on any non-loopback link.
+    /// flush collapses throughput on any non-loopback link. A batch holding a
+    /// frame that does not encode is [`SendError::Unencodable`] and nothing of
+    /// it is sent: the default checks every frame before the first send.
     async fn send_batch(&self, frames: Vec<Frame>) -> Result<(), SendError> {
+        for frame in &frames {
+            wire_bytes(frame)?;
+        }
         for frame in frames {
             self.send(frame).await?;
         }

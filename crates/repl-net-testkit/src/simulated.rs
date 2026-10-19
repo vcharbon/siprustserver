@@ -86,7 +86,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
-use crate::{decode_frame, encode_frame, Frame};
+use crate::{decode_frame, Frame};
 
 use super::{
     ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
@@ -949,7 +949,7 @@ impl ReplicationConnection for SimConnection {
         }
 
         // The codec plays through every path: encode to bytes, move bytes.
-        let bytes = encode_frame(&frame).map_err(|e| SendError::Unencodable(e.to_string()))?;
+        let bytes = repl_net::transport::payload(&frame)?;
         // Account the frame against the flow-control window (released by the
         // peer's `recv`). Always tracked so `block` can be armed mid-stream.
         self.out_dir.inflight.fetch_add(1, Ordering::SeqCst);
