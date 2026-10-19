@@ -104,6 +104,9 @@ pub(super) enum Reason {
     Decode,
     /// A terminal body: refused on a takeover, discharged on a reclaim.
     Terminated,
+    /// A body that does not rebuild its caller's INVITE, discharged
+    /// (ADR-0052 §11).
+    Unrecoverable,
 }
 
 /// The disposition of one [`materialise`] call.
@@ -153,6 +156,9 @@ pub(super) async fn materialise(
             return Materialised::Refused(Reason::Terminated);
         }
         _ => {}
+    }
+    if !super::unrecoverable::copy_recoverable(ctx, call_ref, &call, origin.into(), now_ms).await {
+        return Materialised::Refused(Reason::Unrecoverable);
     }
     let smoothing = match origin {
         Origin::Takeover => None,

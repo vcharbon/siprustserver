@@ -15,12 +15,9 @@ crates/b2bua/src/rules/actions/prack.rs 2
 crates/b2bua/src/rules/actions/relay_request.rs 4
 crates/b2bua/src/rules/actions/select.rs 1
 crates/b2bua/src/rules/defaults/core_rules.rs 4
-crates/b2bua/src/rules/executor.rs 2
 crates/b2bua/src/rules/invariants.rs 1
-crates/b2bua/src/rules/lifecycle_delivery.rs 2
-crates/b2bua/src/rules/model_invariants.rs 6
+crates/b2bua/src/rules/lifecycle_delivery.rs 1
 crates/b2bua/src/rules/refer_transfer/machine/authorizing.rs 1
-crates/b2bua/src/rules/relay/a_leg_invite.rs 1
 crates/b2bua/src/rules/relay/ack.rs 2
 crates/b2bua/src/rules/relay/dialog.rs 2
 crates/b2bua/src/rules/relay/passthrough.rs 1

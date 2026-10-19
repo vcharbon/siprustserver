@@ -14,6 +14,7 @@ use crate::effects::{
 };
 use crate::obligations::ObligationSet;
 use sip_message::generators::CapabilitySet;
+use sip_message::SipRequest;
 
 /// The always-on global call machine (ADR-0016 X2). Its cursor is a uniform,
 /// read-only **projection** of the authoritative `CallModelState` — the engine,
@@ -58,9 +59,11 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
 /// unanswered.
 #[derive(Clone, Copy, Debug)]
 pub enum UnansweredCaller<'a> {
-    /// Answer her 503 under the deployment's advertisement for a minted final.
-    Answer(&'a CapabilitySet),
-    /// Leave the wire alone: an already-terminal reclaimed or folded body.
+    /// Answer her INVITE `invite` 503 under the deployment's `advertisement`
+    /// for a minted final.
+    Answer { advertisement: &'a CapabilitySet, invite: &'a SipRequest },
+    /// Leave the wire alone: an already-terminal reclaimed or folded body, or
+    /// an unrecoverable call (ADR-0052 §11).
     Leave,
 }
 
@@ -76,7 +79,8 @@ pub enum UnansweredCaller<'a> {
 /// (`discharge_materialized_terminal` / `discharge_folded_terminal`): those
 /// bodies were answered by whichever node served them to terminal — or their
 /// caller's transaction died with that node ≥ `reboot_budget` ago — and the HA
-/// contract keeps reclaim-discharge OFF the SIP wire.
+/// contract keeps reclaim-discharge OFF the SIP wire. An unrecoverable call
+/// (ADR-0052 §11) takes `Leave` too: it has no INVITE to answer.
 pub fn enforce(
     obligations: &ObligationSet,
     before: &Call,
@@ -101,8 +105,8 @@ pub fn enforce(
         tracing::error!(call_ref = %result.call.call_ref, "terminated without a termination record");
         result.effects.buffered.push(BufferedObservabilityEffect::TerminationUnrecorded);
     }
-    if let UnansweredCaller::Answer(advertisement) = unanswered {
-        answer_a_leg_if_unanswered(before, &mut result, now_ms, advertisement);
+    if let UnansweredCaller::Answer { advertisement, invite } = unanswered {
+        answer_a_leg_if_unanswered(before, &mut result, now_ms, advertisement, invite);
     }
     let crit = &mut result.effects.critical;
     if !crit.iter().any(|e| matches!(e, CriticalStateEffect::CancelAllTimers)) {
@@ -148,27 +152,29 @@ fn answer_a_leg_if_unanswered(
     result: &mut HandlerResult,
     now_ms: i64,
     advertisement: &CapabilitySet,
+    a_invite: &SipRequest,
 ) {
     if matches!(before.a_leg.state(), LegState::Trying | LegState::Early) {
-        answer_unanswered_caller(&mut result.call, &mut result.effects, now_ms, advertisement);
+        let (call, effects) = (&mut result.call, &mut result.effects);
+        answer_unanswered_caller(call, effects, now_ms, advertisement, a_invite);
     }
 }
 
-/// Answer the caller's INVITE `503` when it carries no final yet and a
-/// snapshot to answer exists, recording it on the CDR: the funnel above, and
-/// a teardown whose release waits on a callee's CANCEL (the caller is owed
+/// Answer the caller's INVITE `a_invite` `503` when it carries no final yet
+/// and a snapshot to answer exists, recording it on the CDR: the funnel above,
+/// and a teardown whose release waits on a callee's CANCEL (the caller is owed
 /// nothing from it).
 pub(crate) fn answer_unanswered_caller(
     call: &mut Call,
     effects: &mut HandlerEffects,
     now_ms: i64,
     advertisement: &CapabilitySet,
+    a_invite: &SipRequest,
 ) {
     if call.a_leg_invite.headers.is_empty() || call.a_leg.invite_final_sent.is_some() {
         return;
     }
     let a_leg_id = call.a_leg.leg_id.clone();
-    let a_invite = super::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     // Reuse the a-leg's own tag when an 18x already pinned one (Early);
     // otherwise `generate_response`'s deterministic fallback tag applies.
     let to_tag = call.a_leg.own_tag.clone().filter(|t| !t.is_empty());
@@ -177,7 +183,7 @@ pub(crate) fn answer_unanswered_caller(
     let Some(mut effect) = super::relay::response_to_a_leg(
         call,
         effects,
-        &a_invite,
+        a_invite,
         503,
         "Service Unavailable",
         to_tag,

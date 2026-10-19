@@ -234,6 +234,10 @@ plain_counters! {
         "b2bua_reaper_discharged_total",
         "strike-2 discharges: the rules path itself failed for a call and the snapshot was forced terminal directly (ALARM: expected ~0)",
     ) => reaper_discharged, bump_reaper_discharged, reaper_discharged_total;
+    UNRECOVERABLE_CALLS = (
+        "b2bua_unrecoverable_calls_total",
+        "calls whose record does not rebuild their caller's INVITE, discharged with nothing on the wire (ADR-0052 §11; ALARM: expected 0)",
+    ) => unrecoverable_calls, bump_unrecoverable_call, unrecoverable_calls_total;
     // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
     // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
     // proves it is attempting to replicate (the proxy cookie stamped

@@ -162,7 +162,9 @@ fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::Handl
     let call_ref = call.call_ref.clone();
     let ctx = node.core.router_ctx();
     let mut scope = super::test_support::turn(1);
-    rule_chain_turn(ctx, call, event, &res, Default::default(), &call_ref, NOW, &mut scope)
+    let caller = super::test_support::caller_of(&call);
+    let resolved = Default::default();
+    rule_chain_turn(ctx, call, event, &res, resolved, &call_ref, NOW, &mut scope, &caller)
 }
 
 /// The outcome the probe's rules read, if any rule read an answer.

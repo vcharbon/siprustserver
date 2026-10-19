@@ -62,8 +62,8 @@ impl ActionExecutor<'_> {
             return self.refuse_leg(call, fx, ctx);
         }
         let leg_id = call::helpers::next_b_leg_id(call);
-        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let offers_sdp = relay::mints_offer(&a_invite, body_override);
+        let a_invite = self.caller_invite;
+        let offers_sdp = relay::mints_offer(a_invite, body_override);
         // The originator's `Accept` states what she takes; a media leg answers
         // the service that dialled it, so that line stays behind unless an
         // update states one.
@@ -82,7 +82,7 @@ impl ActionExecutor<'_> {
         let (mut leg, mut effect) = match relay::build_b_leg(
             relay::CallMarks::of(call),
             &leg_id,
-            &a_invite,
+            a_invite,
             destination.clone(),
             new_ruri,
             new_from,

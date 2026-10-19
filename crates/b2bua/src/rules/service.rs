@@ -70,6 +70,7 @@ pub fn seed_services(
             let sub = {
                 let ctx = RuleContext {
                     call: RuleCall::new(&result.call),
+                    caller_invite: exec.caller_invite,
                     call_ref: &result.call.call_ref,
                     event: setup_event,
                     source_leg_id,

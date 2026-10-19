@@ -54,9 +54,13 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
         }
     };
 
-    if call.a_leg.invite_final_sent.is_none() {
+    // A record that does not rebuild the caller's INVITE is never served
+    // (ADR-0052 §11): it seeds none.
+    let unanswered = call.a_leg.invite_final_sent.is_none();
+    let caller = unanswered.then(|| rebuild_a_leg_invite(&call.a_leg_invite));
+    if let Some(Ok(request)) = caller {
         push(TxnSeed::ServerInvite {
-            request: rebuild_a_leg_invite(&call.a_leg_invite),
+            request,
             // The tag the a-leg's own responses carry (`ensure_a_dialog`);
             // none while nothing above a 100 went out.
             to_tag: call.a_leg.own_tag.clone().filter(|t| !t.is_empty()),

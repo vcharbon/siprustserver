@@ -11,7 +11,7 @@ use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
 use crate::rules::refer_transfer::ok;
-use crate::rules::{relay, Terminal};
+use crate::rules::Terminal;
 use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use call::TimerKey;
 
@@ -81,7 +81,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             // Capture C's 200 SDP (drives the a-realign re-INVITE).
             let c_initial_sdp = resp.sdp().map(<[u8]>::to_vec);
             // A's SDP for the c-realign re-INVITE-C offer.
-            let a_leg = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
+            let a_leg = ctx.caller_invite;
             let a_sdp = a_leg.sdp().unwrap_or_default();
             // A's lines describe the offer only where it is her whole body.
             let a_offer = Body::from_leg(a_sdp.to_vec(), ctx.call.a_leg().leg_id.to_string());

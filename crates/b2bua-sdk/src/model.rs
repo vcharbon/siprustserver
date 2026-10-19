@@ -1026,12 +1026,12 @@ impl RuleAction {
     }
 }
 
-/// The resolved context a rule sees. Built by the executor/router from the
-/// event + call (the source's match-narrowed `RuleContext`, flattened). The
-/// call is exposed as the narrow [`RuleCall`] view — the framework keeps the
-/// full `Call` on its side of the seam (ADR-0020 X8).
+/// The context a rule sees, built from the event and the call: the call through the
+/// narrow [`RuleCall`] view, the full `Call` staying on the framework's side (ADR-0020 X8).
 pub struct RuleContext<'a> {
     pub call: RuleCall<'a>,
+    /// The caller's INVITE, rebuilt by the shell from the call's snapshot (ADR-0052 §11).
+    pub caller_invite: &'a SipRequest,
     pub call_ref: &'a str,
     pub event: &'a CallEvent,
     pub source_leg_id: &'a str,

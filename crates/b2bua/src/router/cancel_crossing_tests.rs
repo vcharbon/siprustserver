@@ -85,6 +85,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         indexed: None,
     };
     let call_ref = call.call_ref.clone();
+    let caller = super::test_support::caller_of(&call);
     let result = rule_chain_turn(
         node.core.router_ctx(),
         call,
@@ -94,6 +95,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         &call_ref,
         1_000,
         &mut super::test_support::turn(1),
+        &caller,
     );
 
     let requests_to = |leg: &str| -> Vec<String> {

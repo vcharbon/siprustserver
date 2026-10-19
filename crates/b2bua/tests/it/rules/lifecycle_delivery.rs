@@ -113,7 +113,9 @@ fn run_bye_noting(rules: &[RuleDefinition], call: &call::Call) -> (HandlerResult
     let event = bye_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let caller = crate::caller_of(call);
+    let mut exec =
+        ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0, caller_invite: &caller };
     let ctx = ctx_for(call, &event, &config);
     let claimed = execute_rules(rules, call, &ctx, &mut exec, &ObligationSet::core());
     let result = close_turn(rules, &TurnStart::of(call), claimed, &mut exec);
@@ -328,7 +330,9 @@ fn run_watching_noting(
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let caller = crate::caller_of(&call);
+    let mut exec =
+        ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0, caller_invite: &caller };
     let rules = vec![RuleDefinition { effects: &WATCH_EFFECTS, ..sm_rule(handle) }];
     let ctx = ctx_for(&call, &event, &config);
     let result = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());

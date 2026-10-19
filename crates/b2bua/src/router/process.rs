@@ -23,6 +23,7 @@ use super::resolve::Resolution;
 use super::rule_chain::{enforced, fired, rule_chain_turn};
 use super::stray_cancel::reject_stray_cancel;
 use super::superseded_relay::drop_superseded_relay;
+use super::unrecoverable::caller_or_discharge;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
@@ -94,12 +95,15 @@ pub(super) async fn process(
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;
         };
+        let Some(caller) = caller_or_discharge(ctx, &call_ref, &call, now_ms).await else {
+            return;
+        };
         let before = call.clone();
         let Some(res) = crate::limiter::call::apply_answer(&ctx.metrics, call, &answer, now_ms)
         else {
             return;
         };
-        enforced(ctx, &before, res, now_ms)
+        enforced(ctx, &before, res, now_ms, &caller)
     } else {
         if of_another_incarnation(ctx, &event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
@@ -138,6 +142,11 @@ pub(super) async fn process(
             answer_vanished(ctx, &event, &mut turn.ids).await;
             return;
         }
+        // Every turn reads the caller's INVITE, rebuilt here from the record
+        // (ADR-0052 §11).
+        let Some(caller) = caller_or_discharge(ctx, &call_ref, &call, now_ms).await else {
+            return;
+        };
         // A timer fire reaches the call only while its ledger holds the fired
         // instance, which leaves the ledger as it is delivered.
         let mut call = call;
@@ -200,12 +209,13 @@ pub(super) async fn process(
         if fired(&event, &TimerType::LimiterRefresh) {
             let before = call.clone();
             let res = crate::limiter::call::on_refresh_due(&ctx.limiter, call, &call_ref, now_ms);
-            enforced(ctx, &before, res, now_ms)
+            enforced(ctx, &before, res, now_ms, &caller)
         } else {
             // A relay no node can finish is gone before the rules read the
             // call, so its request is relayed afresh.
             let call = drop_superseded_relay(call, &event);
-            rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms, &mut turn)
+            let turn = &mut turn;
+            rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms, turn, &caller)
         }
     };
     super::notes::drain(ctx, &call_ref, &mut turn);

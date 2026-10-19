@@ -75,6 +75,7 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         indexed: None,
     };
     let call_ref = call.call_ref.clone();
+    let caller = super::test_support::caller_of(&call);
     rule_chain_turn(
         node.core.router_ctx(),
         call,
@@ -84,6 +85,7 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         &call_ref,
         NOW_MS,
         &mut super::test_support::turn(1),
+        &caller,
     )
 }
 

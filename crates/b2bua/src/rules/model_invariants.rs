@@ -104,12 +104,13 @@ pub const NAMES: [&str; 21] = [
 ];
 
 /// Check every invariant on `turn`, reporting each one violated, named with
-/// `label`, on `metrics` ([`report`]).
+/// `label`: kept in the record ([`violations`]), logged and counted on
+/// `metrics`.
 pub fn check(turn: &Turn<'_>, label: &(dyn fmt::Display + Sync), metrics: &B2buaMetrics) {
     for (name, check) in INVARIANTS {
         if let Err(detail) = check(turn) {
             let head = format!("model invariant {name} violated after {label}: {detail}");
-            report(metrics, *name, &turn.after.call_ref, head, &detail, || {
+            report(metrics, name, &turn.after.call_ref, head, &detail, || {
                 format!("{:#?}", turn.after)
             });
         }
@@ -118,7 +119,8 @@ pub fn check(turn: &Turn<'_>, label: &(dyn fmt::Display + Sync), metrics: &B2bua
 
 /// Report a model defect a turn's notes carried — a step that found the
 /// record unable to carry what it must do, or a rule outside what it declared
-/// ([`report`]).
+/// — as a violation is: kept in the record ([`violations`]), logged and
+/// counted on `metrics`.
 pub fn defect(metrics: &B2buaMetrics, defect: &Defect) {
     let head = format!("model defect {}: {}", defect.name, defect.detail);
     report(metrics, defect.name, &defect.call.call_ref, head, &defect.detail, || {

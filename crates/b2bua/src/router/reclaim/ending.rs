@@ -52,7 +52,15 @@ pub(super) async fn discharge_folded_terminal(
     }
     let mut result = HandlerResult::new(raise_sequences(terminal, before));
     let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
-    answer_the_records_rounds(ctx, call_ref, before, ours, &mut result, now_ms, &mut turn);
+    // A record whose caller INVITE does not rebuild is discharged with its
+    // rounds unanswered, as an unrecoverable call is (ADR-0052 §11).
+    match crate::rules::relay::rebuild_a_leg_invite(&before.a_leg_invite) {
+        Ok(caller) => {
+            let rounds = Rounds { record: before, caller: &caller, rounds: ours };
+            answer_the_records_rounds(ctx, call_ref, rounds, &mut result, now_ms, &mut turn);
+        }
+        Err(_) => ctx.metrics.bump_unrecoverable_call(),
+    }
     super::super::notes::drain(ctx, call_ref, &mut turn);
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
@@ -67,17 +75,25 @@ pub(super) async fn discharge_folded_terminal(
         .await;
 }
 
-/// The effects answering the record's re-INVITE relays `rounds` — `(leg,
-/// outbound CSeq)` — 487 to the originator and CANCEL to the target.
+/// The re-INVITE relays `rounds` — `(leg, outbound CSeq)` — of `record`,
+/// whose caller's INVITE is `caller`.
+struct Rounds<'a> {
+    record: &'a Call,
+    caller: &'a sip_message::SipRequest,
+    rounds: Vec<(String, i64)>,
+}
+
+/// The effects answering the record's re-INVITE relays — 487 to the
+/// originator and CANCEL to the target.
 fn answer_the_records_rounds(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    record: &Call,
-    rounds: Vec<(String, i64)>,
+    rounds: Rounds<'_>,
     result: &mut HandlerResult,
     now_ms: i64,
     turn: &mut TurnScope,
 ) {
+    let Rounds { record, caller, rounds } = rounds;
     let actions: Vec<RuleAction> = rounds
         .into_iter()
         .map(|(leg_id, outbound_cseq)| RuleAction::RejectPendingReinvite {
@@ -100,6 +116,7 @@ fn answer_the_records_rounds(
     };
     let rule_ctx = RuleContext {
         call: RuleCall::new(record),
+        caller_invite: caller,
         call_ref,
         event: &event,
         source_leg_id: "",
@@ -109,7 +126,7 @@ fn answer_the_records_rounds(
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
+    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms, caller_invite: caller };
     let answered = exec.execute(&actions, record, &rule_ctx).effects;
     result.effects.critical.extend(answered.critical);
     result.effects.outbound.extend(answered.outbound);

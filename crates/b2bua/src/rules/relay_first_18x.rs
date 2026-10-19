@@ -385,7 +385,7 @@ define_service! {
                         .or_else(|| relay::dialling_invite(l))
                 });
                 let origin = b_leg.and_then(|l| relay::next_origin_in_dialog(l, &b_tag));
-                let caller = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
+                let caller = ctx.caller_invite;
                 let both = sent
                     .as_ref()
                     .and_then(|r| r.sdp())

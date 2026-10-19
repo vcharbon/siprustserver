@@ -5,9 +5,12 @@
 //! module per action family:
 //!
 //! - `dispatch` — the `RuleAction` → handler table (+ inline state mutations)
+//! - `record_write` — the actions that write the record or hand a request to a
+//!   service or the limiter, with no SIP leaving
 //! - `ack_leg` — the ACK of a 2xx toward a leg, relayed or this stack's own
 //! - `lost_round` — the ACK of an INVITE final for a round the record lost
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
+//! - `relay_pending_response` — a response to a request this stack relayed
 //! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
 //! - `dialog_end` — a leg's dialogs moving to the state its teardown records
 //! - `create_leg` — the new leg's INVITE, opening the attempt it dials
@@ -43,7 +46,9 @@ mod originate;
 mod own_notify;
 mod prack;
 mod provisional_arrival;
+mod record_write;
 mod reinvite_cancel;
+mod relay_pending_response;
 mod relay_request;
 mod relay_response;
 mod relayed_teardown;
@@ -77,6 +82,9 @@ pub struct ActionExecutor<'a> {
     /// wire faults its guarded emissions read.
     pub turn: &'a mut TurnScope,
     pub now_ms: i64,
+    /// The caller's INVITE, rebuilt by the shell from the call's snapshot of
+    /// it (ADR-0052 §11).
+    pub caller_invite: &'a sip_message::SipRequest,
 }
 
 impl ActionExecutor<'_> {

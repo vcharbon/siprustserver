@@ -1,36 +1,131 @@
 //! Relaying an inbound SIP **response** toward the peer (normally the a-leg):
-//! pending-correlated transparent relay, the per-fork caller-facing dialog on
-//! b-leg INVITE 1xx/2xx, the a-leg server-txn regeneration default, and the
-//! bare-180 downgrade (`relayFirst18xTo180`). Request relay does NOT live
-//! here — see [`super::relay_request`].
+//! the per-fork caller-facing dialog on b-leg INVITE 1xx/2xx, the a-leg
+//! server-txn regeneration default, and the bare-180 downgrade
+//! (`relayFirst18xTo180`). A response to a relayed request is relayed by
+//! [`super::relay_pending_response`]; request relay does NOT live here — see
+//! [`super::relay_request`].
 
-use call::helpers::{PendingHolder, Scope};
-use call::{Call, RSeq};
-use sip_message::generators::{self, RelayDirection, RelayScope, RelaySituation, SourceBody};
-use sip_message::header::{From, HeaderName, HeaderValue, MediaType};
-use sip_message::{Method, SipHeader, SipStr};
+use call::helpers::Scope;
+use call::Call;
+use sip_message::generators::{RelayDirection, RelayScope, RelaySituation, SourceBody};
+use sip_message::header::{HeaderName, MediaType};
+use sip_message::{SipHeader, SipResponse, SipStr};
 
-use crate::effects::{
-    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
-};
+use crate::effects::{HandlerEffects, Provenance};
 use crate::rules::capabilities::{self, Face};
 use crate::rules::relay;
 use b2bua_sdk::model::{MessageTransform, RuleContext};
 use b2bua_sdk::relayed_final::invite_timestamp;
 
 use super::select::resolve_peer;
-use super::show_provisional::shown_tag_of;
-use super::snapshot_answer::{snapshot_response_opts, via_sent_by};
-use super::{ActionExecutor, Owed, Settle};
+use super::ActionExecutor;
+
+/// A response on its way to `target_leg`, as every relay path reads it.
+pub(super) struct Relaying<'a> {
+    pub resp: &'a SipResponse,
+    pub transform: &'a MessageTransform,
+    pub target_leg: &'a str,
+    /// The leg the response arrived on.
+    pub source_leg_id: String,
+    pub status: u16,
+    pub reason: String,
+    /// The body relayed toward alice: dropped (bare-180 downgrade), replaced
+    /// by a staged policy body (fake-prack cached SDP on the 200 OK), or the
+    /// response's own body verbatim.
+    pub body: Vec<u8>,
+    pub content_type: Option<MediaType>,
+    /// What the relayed message carries where THIS response had a body, which
+    /// decides how much of the set describing it travels (§16.6): a staged
+    /// body of the same role keeps the header stating that role, a dropped
+    /// body keeps none.
+    pub source_body: SourceBody,
+    /// Whether the relayed message carries a description: on a reliable
+    /// provisional, the description its INVITE's sender holds (RFC 3311 §5.1).
+    pub carried_sdp: bool,
+    pub cseq_num: i64,
+    pub cseq_method: String,
+    pub to_tag: String,
+}
+
+impl<'a> Relaying<'a> {
+    /// `resp`, arrived on `source_leg_id`, relayed toward `target_leg` under
+    /// `transform`. The staged body is ONE-SHOT: armed per 2xx by the staging
+    /// rule and taken here, so it never substitutes itself into a later
+    /// relayed response. `ConfirmDialog` runs before this relay, so the
+    /// retransmit copy it stashes still sees it.
+    fn of(
+        call: &mut Call,
+        source_leg_id: &str,
+        target_leg: &'a str,
+        transform: &'a MessageTransform,
+        resp: &'a SipResponse,
+    ) -> Self {
+        let (body, content_type, source_body) = if transform.drop_body {
+            (vec![], None, SourceBody::Dropped)
+        } else if let Some(call::PolicyUpdateBody::Bytes(b)) = call.policy_update_body.take() {
+            (b, Some(relay::sdp()), SourceBody::Replaced)
+        } else {
+            (
+                resp.body().to_vec(),
+                resp.raw(HeaderName::ContentType).next().and_then(relay::media_type),
+                SourceBody::Verbatim,
+            )
+        };
+        let carried_sdp = content_type
+            .as_ref()
+            .is_some_and(|ct| sip_message::multipart::sdp_range(ct, &body).is_some());
+        let cseq = resp.cseq();
+        let cseq_method = if cseq.method().as_str().is_empty() {
+            "INVITE".to_string()
+        } else {
+            cseq.method().to_string()
+        };
+        Relaying {
+            resp,
+            transform,
+            target_leg,
+            source_leg_id: source_leg_id.to_string(),
+            status: transform.status.unwrap_or(resp.status()),
+            reason: transform.reason.clone().unwrap_or_else(|| resp.reason().to_string()),
+            body,
+            content_type,
+            source_body,
+            carried_sdp,
+            cseq_num: cseq.seq() as i64,
+            cseq_method,
+            to_tag: resp.to().tag().unwrap_or_default().to_string(),
+        }
+    }
+
+    /// Passthrough headers minus any the transform suppresses (e.g.
+    /// Require/RSeq on a bare-180 downgrade), plus any the transform stamps
+    /// with replace semantics (Allow/Supported on the synthetic 200 / resync
+    /// re-INVITE, `promote18xPemTo200`).
+    pub(super) fn passthrough(&self, hs: Vec<SipHeader>) -> Vec<SipHeader> {
+        let add_headers = &self.transform.add_headers;
+        let mut out: Vec<SipHeader> = hs
+            .into_iter()
+            .filter(|h| {
+                !self.transform.remove_headers.iter().any(|r| r.matches(&h.name))
+                    && !add_headers.iter().any(|e| e.name().matches(&h.name))
+            })
+            .collect();
+        for entry in add_headers {
+            out.push(SipHeader {
+                name: SipStr::owned(entry.name().as_wire_str()),
+                value: entry.text(),
+            });
+        }
+        out
+    }
+}
 
 impl ActionExecutor<'_> {
     /// Relay an inbound SIP response toward `target_leg` (normally the a-leg).
     /// Two paths, mirroring the source:
     ///   - **pending-correlated** (any relayed in-dialog request: re-INVITE/
     ///     PRACK/OPTIONS/INFO/UPDATE/…): rebuild from the snapshot captured
-    ///     when the request was relayed, so the response echoes the
-    ///     originator's Via/From/To/CSeq; a reliable provisional leaves under
-    ///     this stack's own `RSeq` where RFC 3262 admits one at all.
+    ///     when the request was relayed ([`Self::relay_pending_response`]).
     ///   - **default** (initial-INVITE 1xx/2xx): regenerate on the a-leg server
     ///     transaction, establishing the b-leg early dialog + the caller-facing
     ///     dialog fronting it on a reliable 1xx so a later PRACK can target the callee.
@@ -43,69 +138,7 @@ impl ActionExecutor<'_> {
         transform: &MessageTransform,
         resp: &sip_message::SipResponse,
     ) {
-        let status = transform.status.unwrap_or(resp.status());
-        let reason = transform.reason.clone().unwrap_or_else(|| resp.reason().to_string());
-        // The body relayed toward alice: dropped (bare-180 downgrade), replaced
-        // by a staged policy body (fake-prack cached SDP on the 200 OK), or the
-        // response's own body verbatim.
-        // The staged body is ONE-SHOT: armed per 2xx by the staging rule and taken
-        // here, so it never substitutes itself into a later relayed response.
-        // `ConfirmDialog` runs before this relay, so the retransmit copy it
-        // stashes still sees it.
-        // `relay_source_body` — what the relayed message carries where THIS
-        // response had a body, which decides how much of the set describing it
-        // travels (§16.6): a staged body of the same role keeps the header
-        // stating that role, a dropped body keeps none.
-        let (relay_body, relay_content_type, relay_source_body): (
-            Vec<u8>,
-            Option<MediaType>,
-            SourceBody,
-        ) = if transform.drop_body {
-            (vec![], None, SourceBody::Dropped)
-        } else if let Some(call::PolicyUpdateBody::Bytes(b)) = call.policy_update_body.take() {
-            (b, Some(relay::sdp()), SourceBody::Replaced)
-        } else {
-            (
-                resp.body().to_vec(),
-                resp.raw(HeaderName::ContentType).next().and_then(relay::media_type),
-                SourceBody::Verbatim,
-            )
-        };
-        // Whether the relayed message carries a description: on a reliable
-        // provisional, the description its INVITE's sender holds (RFC 3311 §5.1).
-        let carried_sdp = relay_content_type
-            .as_ref()
-            .is_some_and(|ct| sip_message::multipart::sdp_range(ct, &relay_body).is_some());
-        // Passthrough headers minus any the transform suppresses (e.g.
-        // Require/RSeq on a bare-180 downgrade), plus any the transform stamps
-        // with replace semantics (Allow/Supported on the synthetic 200 / resync
-        // re-INVITE, `promote18xPemTo200`).
-        let add_headers = transform.add_headers.clone();
-        let filter_passthrough = move |hs: Vec<SipHeader>| -> Vec<SipHeader> {
-            let mut out: Vec<SipHeader> = hs
-                .into_iter()
-                .filter(|h| {
-                    !transform.remove_headers.iter().any(|r| r.matches(&h.name))
-                        && !add_headers.iter().any(|e| e.name().matches(&h.name))
-                })
-                .collect();
-            for entry in &add_headers {
-                out.push(SipHeader {
-                    name: SipStr::owned(entry.name().as_wire_str()),
-                    value: entry.text(),
-                });
-            }
-            out
-        };
-        let cseq = resp.cseq();
-        let cseq_num = cseq.seq() as i64;
-        let cseq_method = if cseq.method().as_str().is_empty() {
-            "INVITE".to_string()
-        } else {
-            cseq.method().to_string()
-        };
-        let to_tag = resp.to().tag().unwrap_or_default().to_string();
-        let source_leg_id = ctx.source_leg_id.to_string();
+        let r = Relaying::of(call, ctx.source_leg_id, target_leg, transform, resp);
 
         // ── Pending transparent-relay correlation (§8.1.3.3) ──
         // The relay this response answers, as the engine's dialog gate
@@ -115,222 +148,24 @@ impl ActionExecutor<'_> {
         // may carry the same CSeq, and a final delivered to a transaction it
         // does not answer — or regenerated below as an INVITE response —
         // would turn a `200 (PRACK)` into a spurious `200 (INVITE)`.
-        let relayed = ctx.resolved.relay.as_deref().cloned();
-        if let Some((holder, pending)) = relayed {
-            // §18.2.2: a relayed response goes to the originator's top Via
-            // sent-by, and the snapshot holds that Via verbatim. A Via no
-            // reader accepts names no address — drop the relay and say so
-            // (the originator retransmits, then times out its own request).
-            // Answering it toward a fabricated destination would post the
-            // caller's response to whatever that address happens to be; a
-            // loopback fallback would swallow it silently.
-            let Some(dest) = pending.source_vias.first().and_then(|v| via_sent_by(v)) else {
-                tracing::warn!(
-                    call_ref = %call.call_ref,
-                    leg_id = %source_leg_id,
-                    status,
-                    "relayed response dropped — the originator's top Via does not read, so it \
-                     names no destination"
-                );
-                return;
-            };
-            // The B2BUA's Contact rides only where it establishes a dialog
-            // or answers a target refresh (`response_states_own_contact`) —
-            // a relayed 200 to PRACK/OPTIONS/INFO/MESSAGE states none, and a
-            // relayed 3xx / 485 carries the peer's targets in passthrough.
-            let contact =
-                generators::response_states_own_contact(&Method::from_wire(&cseq_method), status)
-                    .then(|| {
-                        relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg)
-                    });
-            let mut transparent_headers =
-                filter_passthrough(relay::relay_response_passthrough_headers(
-                    resp,
-                    self.config
-                        .relay_scope(
-                            RelayScope::response_carrying(relay_source_body),
-                            RelaySituation::response(
-                                status,
-                                cseq.method(),
-                                relay::toward_leg(target_leg),
-                            ),
-                        )
-                        .stamped(pending.source_timestamp.as_deref()),
-                ));
-            // A 2xx answer to a B2BUA-relayed re-INVITE advertises this
-            // face's capability set (RFC 3261 §13.2.1/§20.37) — the source
-            // response's own, carried through, unless the call declares one;
-            // a 2xx to OPTIONS states this UA's own set (§11.2). Other
-            // responses keep verbatim passthrough.
-            if cseq_method == "INVITE" && (200..300).contains(&status) {
-                let caps = capabilities::relaying_for_leg(call, target_leg, &transparent_headers);
-                relay::stamp_advertisement(&mut transparent_headers, &transform.add_headers, &caps);
-            }
-            if cseq_method == "OPTIONS" && (200..300).contains(&status) {
-                relay::stamp_options_advertisement(
-                    &mut transparent_headers,
-                    &transform.add_headers,
-                    &self.config.node_capabilities,
-                );
-            }
-            // A reliable provisional leaves toward the originator under
-            // THIS stack's number — it is the UAS of that face, and RFC
-            // 3262 §3 makes the sequence the sender's, per transaction —
-            // recorded so the PRACK naming it translates back, and only
-            // where §3 admits one at all (`admits_reliable_provisional`:
-            // an INVITE whose originator offered `100rel`). Otherwise it
-            // leaves as an ordinary provisional, shown to no one, and the
-            // engine PRACKs the responder: it offered the extension there,
-            // the originator did not.
-            let mut ladder: Option<(String, RSeq)> = None;
-            if relay::reliable_rseq(resp).is_some() && (101..200).contains(&status) {
-                let shown_tag = call::helpers::admits_reliable_provisional(&pending)
-                    .then(|| shown_tag_of(&pending))
-                    .flatten();
-                match shown_tag {
-                    Some(shown_tag) => {
-                        ladder = self
-                            .own_relayed_rseq(
-                                call,
-                                true,
-                                &shown_tag,
-                                pending.inbound_cseq,
-                                &source_leg_id,
-                                resp,
-                                &mut transparent_headers,
-                                carried_sdp,
-                            )
-                            .map(|rseq| (shown_tag, rseq));
-                    }
-                    None => relay::strip_reliability(&mut transparent_headers),
-                }
-            }
-            // The dialog the answered request came in on: its sender's tag. A
-            // relay of a dialog the answer retired leaves as written: its
-            // description belongs to no session this stack keeps, and never
-            // moves the answered one's (RFC 3264 §8).
-            let dialog = From::parse(&SipStr::owned(&pending.source_from))
-                .ok()
-                .and_then(|from| from.tag().map(str::to_string));
-            let relay_body = match &holder {
-                PendingHolder::Retired(_) => relay_body.clone(),
-                PendingHolder::Dialog(_) => relay::continue_on_leg(
-                    call,
-                    target_leg,
-                    dialog.as_deref(),
-                    relay::Author::Leg(&source_leg_id),
-                    relay::Carried::answering(&Method::from_wire(&cseq_method), status),
-                    relay_body.clone(),
-                    relay_content_type.as_ref(),
-                    self.config.sdp_form.as_ref(),
-                ),
-            };
-            let opts = snapshot_response_opts(
-                &pending,
-                &cseq_method,
-                relay_body,
-                relay_content_type.clone(),
-                transparent_headers,
-                contact,
-            );
-            let Ok(mut relayed) = generators::generate_relayed_response(status, &reason, &opts)
-            else {
-                tracing::warn!(
-                    call_ref = %call.call_ref,
-                    leg_id = %source_leg_id,
-                    status,
-                    "relayed response dropped — the originator's request lines make no response"
-                );
-                return;
-            };
-            // §8.1.3.3 / §14.1: the snapshot correlates EVERY response of the
-            // transaction back to the originator, so it must outlive a relayed
-            // provisional (1xx) — a re-INVITE may send 18x THEN a non-2xx final,
-            // and dropping the snapshot on the 18x would orphan the final
-            // (it would miss `relay-reinvite-response`, fall through to
-            // `route-failure`, and wrongly tear the call down). Remove it only
-            // on the FINAL (>= 200); the transaction has no later response then.
-            if status >= 200 {
-                // The final ends this transaction: the PRACKs its responder
-                // is owed leave first, a 2xx leaving the offer of the dialog
-                // it confirms to the ACK (RFC 3262 §4, §5), and its
-                // provisionals stop repeating on the face they were shown
-                // (§3, RFC 3261 §17.2.1). This transaction's alone — a
-                // re-INVITE's final is not the setup's.
-                if cseq_method == "INVITE" {
-                    let confirmed = (200..300).contains(&status).then_some(to_tag.as_str());
-                    self.settle_owed_pracks(
-                        call,
-                        fx,
-                        Owed::Invite { leg: &source_leg_id, cseq: cseq_num },
-                        Settle::AtFinal { confirmed },
-                    );
-                    self.retire(
-                        call,
-                        fx,
-                        Scope::Transaction { leg_id: &source_leg_id, cseq: cseq_num },
-                    );
-                }
-                *call = call::helpers::close_relay(call.clone(), &source_leg_id, &holder, cseq_num);
-            }
-            // RFC 3261 §13.3.1.4 (in-dialog): a **2xx to a re-INVITE the
-            // originator (either face) issued** was relayed via that face's
-            // server txn, which goes `Completed` on this final and will NOT
-            // retransmit it — so a lost originator ACK strands the
-            // renegotiation. Retain the exact outbound bytes on the
-            // originator's dialog + arm its ladder (`retain_reinvite_2xx`),
-            // keyed by the CSeq the relayed 2xx echoes — the originator's
-            // re-INVITE CSeq, which only its own ACK carries. Only a
-            // genuine originator re-INVITE reaches here: the initial 2xx
-            // carries no relay snapshot (it takes the per-fork branch
-            // below), and a B2BUA-originated re-INVITE (realign / reroute /
-            // promote, whose 2xx is ACKed by the B2BUA itself) leaves no
-            // snapshot either — so a reclaim/realign leg never arms this.
-            if cseq_method == "INVITE" && (200..300).contains(&status) {
-                // RFC 3261 §13.2.2.4 on the ANSWERING leg — `confirm_dialog`'s
-                // in-dialog twin: the ACK this 2xx owes is the originator's
-                // own, relayed end-to-end when it arrives, so arm the
-                // obligation for the CSeq it carries (the originator's own
-                // re-INVITE CSeq). Its emission mints the ACK's client
-                // transaction and retains the branch every later copy of the
-                // 2xx is re-ACKed on. The ladder below is discharged by
-                // RECEIVING that ACK (the engine matches it on the
-                // originator's dialog), never by relaying it.
-                *call = call::helpers::set_awaited_ack_cseq(
-                    call.clone(),
-                    &source_leg_id,
-                    Some(pending.inbound_cseq),
-                );
-                self.retain_reinvite_2xx(call, fx, &mut relayed, dest.clone(), target_leg);
-            }
-            let mut effect = OutboundSipEffect {
-                body: OutboundBody::Response(relayed),
-                mode: OutboundTxnMode::ServerResponse,
-                destination: dest,
-                label: format!("{status} {cseq_method} → {target_leg}"),
-                leg_id: Some(target_leg.to_string()),
-                provenance: Provenance::Relayed,
-            };
-            // A reliable provisional leaving under our own number is ours
-            // to repeat until PRACKed (RFC 3262 §3): retain it + arm the
-            // ladder on the face it left on.
-            if let Some((shown_tag, rseq)) = ladder {
-                self.arm_reliable_provisional_ladder(call, fx, &mut effect, &shown_tag, rseq);
-            }
-            fx.outbound.push(effect);
+        if let Some((holder, pending)) = ctx.resolved.relay.as_deref().cloned() {
+            self.relay_pending_response(call, fx, &r, holder, pending);
             return;
         }
+        let status = r.status;
+        let source_leg_id = r.source_leg_id.as_str();
+        let to_tag = r.to_tag.as_str();
 
         // A provisional to the originator's initial INVITE after its final:
         // the seam refuses it before any a-facing tag or RSeq is minted for
         // it (RFC 3261 §17.2.1), and the ringing leg keeps its early dialog;
         // a reliable one, shown to no one, the engine PRACKs (RFC 3262 §4).
-        if cseq_method == "INVITE"
+        if r.cseq_method == "INVITE"
             && status < 200
             && relay::provisional_after_final(call, fx, status)
         {
-            if !to_tag.is_empty() && call::helpers::find_b_leg(call, &source_leg_id).is_some() {
-                self.ensure_b_early_dialog(call, ctx, &source_leg_id, &to_tag);
+            if !to_tag.is_empty() && call::helpers::find_b_leg(call, source_leg_id).is_some() {
+                self.ensure_b_early_dialog(call, ctx, source_leg_id, to_tag);
             }
             return;
         }
@@ -346,26 +181,26 @@ impl ActionExecutor<'_> {
         // The range IS the split: the answering fork's tag on a 2xx, the leg's
         // primary on a non-2xx final — which ends the transaction and
         // establishes nothing, so it names no dialog the caller keeps.
-        if cseq_method == "INVITE"
+        if r.cseq_method == "INVITE"
             && (100..300).contains(&resp.status())
             && !to_tag.is_empty()
-            && call::helpers::find_b_leg(call, &source_leg_id).is_some()
+            && call::helpers::find_b_leg(call, source_leg_id).is_some()
         {
-            self.track_b_early_dialog(call, &source_leg_id, resp, &to_tag);
+            self.track_b_early_dialog(call, source_leg_id, resp, to_tag);
             let answering = (200..300).contains(&status);
-            let a_face = self.a_face_tag(call, &source_leg_id, &to_tag, answering);
-            call::helpers::note_shown(call, &source_leg_id, &to_tag);
-            let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+            let a_face = self.a_face_tag(call, source_leg_id, to_tag, answering);
+            call::helpers::note_shown(call, source_leg_id, to_tag);
+            let a_invite = self.caller_invite;
             let contact =
                 relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
-            let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(
+            let mut passthrough = r.passthrough(relay::relay_response_passthrough_headers(
                 resp,
                 self.config
                     .relay_scope(
-                        RelayScope::response_carrying(relay_source_body),
+                        RelayScope::response_carrying(r.source_body),
                         RelaySituation::response(
                             status,
-                            cseq.method(),
+                            resp.cseq().method(),
                             RelayDirection::TowardCaller,
                         ),
                     )
@@ -386,25 +221,25 @@ impl ActionExecutor<'_> {
                 a_invite.offers_100rel(),
                 &a_face,
                 i64::from(a_invite.cseq().seq()),
-                &source_leg_id,
+                source_leg_id,
                 resp,
                 &mut passthrough,
-                carried_sdp,
+                r.carried_sdp,
             );
             let Some(mut effect) = relay::response_to_a_leg(
                 call,
                 fx,
-                &a_invite,
+                a_invite,
                 status,
-                &reason,
+                &r.reason,
                 Some(a_face.clone()),
                 Some(contact),
-                relay_body,
-                relay_content_type,
+                r.body,
+                r.content_type,
                 None,
                 passthrough,
                 Provenance::Relayed,
-                relay::Author::Leg(&source_leg_id),
+                relay::Author::Leg(source_leg_id),
             ) else {
                 return;
             };
@@ -429,7 +264,7 @@ impl ActionExecutor<'_> {
         // an INVITE response would emit a spurious `200 (INVITE)` toward the
         // caller (the exact forking corruption above). Drop it instead — only an
         // INVITE response legitimately regenerates on the a-leg server txn.
-        if cseq_method != "INVITE" {
+        if r.cseq_method != "INVITE" {
             return;
         }
 
@@ -438,18 +273,22 @@ impl ActionExecutor<'_> {
         // early dialog is answered under that same tag (§8.2.6.2), including the
         // owned bare 180's under `relayFirst18xTo180`.
         let a_tag = self.ensure_a_dialog(call);
-        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let a_invite = self.caller_invite;
         let contact =
             relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
         // Reliable-provisional negotiation (Require/Supported) passes through
         // transparently so end-to-end PRACK keeps working (RFC 3262); the RSeq
         // it rides on is this transaction's own (`own_relayed_rseq`).
-        let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(
+        let mut passthrough = r.passthrough(relay::relay_response_passthrough_headers(
             resp,
             self.config
                 .relay_scope(
-                    RelayScope::response_carrying(relay_source_body),
-                    RelaySituation::response(status, cseq.method(), RelayDirection::TowardCaller),
+                    RelayScope::response_carrying(r.source_body),
+                    RelaySituation::response(
+                        status,
+                        resp.cseq().method(),
+                        RelayDirection::TowardCaller,
+                    ),
                 )
                 .stamped(invite_timestamp(&call.a_leg_invite)),
         ));
@@ -468,25 +307,25 @@ impl ActionExecutor<'_> {
             a_invite.offers_100rel(),
             &a_tag,
             i64::from(a_invite.cseq().seq()),
-            &source_leg_id,
+            source_leg_id,
             resp,
             &mut passthrough,
-            carried_sdp,
+            r.carried_sdp,
         );
         let Some(mut effect) = relay::response_to_a_leg(
             call,
             fx,
-            &a_invite,
+            a_invite,
             status,
-            &reason,
+            &r.reason,
             Some(a_tag.clone()),
             Some(contact),
-            relay_body,
-            relay_content_type,
+            r.body,
+            r.content_type,
             None,
             passthrough,
             Provenance::Relayed,
-            relay::Author::Leg(&source_leg_id),
+            relay::Author::Leg(source_leg_id),
         ) else {
             return;
         };

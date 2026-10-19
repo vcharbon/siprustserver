@@ -187,14 +187,14 @@ pub(crate) fn build_options_health_response(
 }
 
 /// Build the fail-closed **500 Server Internal Error** for an initial INVITE
-/// whose dialog-existence store lookup failed (ADR-0023). Call-layer
+/// no call is born for: one whose dialog-existence store lookup failed
+/// (ADR-0023), or whose snapshot does not rebuild it (ADR-0052 §11). Call-layer
 /// stateless like an admission refusal: sent through the INVITE server txn (`send_response` supersedes the cached 100, retransmits the final
 /// and absorbs the ACK) with **no** call/dialog/CDR/limiter state born. Fresh
 /// To-tag — this codebase enforces a tag on every non-100 final (RFC 3261
-/// §8.2.6.2). No Reason header: the bare canonical reject (ADR-0022 X3 shape);
-/// the fault is observable via `b2bua_store_fault_rejected_total`. The
-/// deployment's `advertisement` for a minted final rides.
-pub(super) fn build_store_fault_500(
+/// §8.2.6.2). No Reason header: the bare canonical reject (ADR-0022 X3 shape).
+/// The deployment's `advertisement` for a minted final rides.
+pub(super) fn build_unborn_500(
     ids: &mut TurnIds,
     req: &sip_message::SipRequest,
     advertisement: &CapabilitySet,
@@ -236,14 +236,14 @@ Content-Length: 0\r\n\r\n";
         CapabilitySet::stating(None, None, Some(vec![AcceptRange::new("application/sdp")]))
     }
 
-    /// The merged-request 482 and the store-fault 500 are finals minted in the
-    /// worker's own name: each carries the deployment's advertisement.
+    /// The merged-request 482 and the unborn call's 500 are finals minted in
+    /// the worker's own name: each carries the deployment's advertisement.
     #[test]
     fn the_stateless_minted_finals_carry_the_advertisement() {
         let mut ids = TurnIds::new(&sip_ids::IdKey::new(&[1u8; 32]), 0);
         for resp in [
             build_merged_482(&mut ids, &invite(), &policy()).unwrap(),
-            build_store_fault_500(&mut ids, &invite(), &policy()).unwrap(),
+            build_unborn_500(&mut ids, &invite(), &policy()).unwrap(),
         ] {
             let accept: Vec<&str> = resp.raw(HeaderName::Accept).collect();
             assert_eq!(accept, ["application/sdp"], "{}", resp.status());

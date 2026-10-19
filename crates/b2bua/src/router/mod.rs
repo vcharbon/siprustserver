@@ -76,6 +76,7 @@ mod turn_label;
 pub(crate) mod txn_event;
 mod unaddressable;
 mod undecided;
+mod unrecoverable;
 mod unroutable;
 
 pub(crate) use reclaim::reap_expired_replicas;

@@ -283,6 +283,41 @@ async fn reclaim_discharges_a_terminal_body_instead_of_serving_it() {
     assert_eq!(ctx.state.active_count(), 0);
 }
 
+/// A body whose record does not rebuild its caller's INVITE is unrecoverable
+/// (ADR-0052 §11), as a takeover copy and as a reclaim: discharged — one CDR,
+/// counted, nothing re-armed — and never served.
+#[tokio::test(start_paused = true)]
+async fn a_body_whose_caller_invite_does_not_rebuild_is_discharged_not_served() {
+    let n = node("w1").await;
+    let ctx = n.core.router_ctx();
+    let unrebuildable = |mut call: Call| {
+        call.a_leg_invite.headers.clear();
+        call
+    };
+    let theirs = unrebuildable(call_in("w0", "w1", "cid-taken", CallModelState::Active, &n.clock));
+    let ours =
+        unrebuildable(call_in("w1", "w0", "cid-reclaimed", CallModelState::Active, &n.clock));
+    put(&n.store, BAK, "w0", &theirs).await;
+    put(&n.store, PRI, "w1", &ours).await;
+
+    for (call, origin) in [(&theirs, Origin::Takeover), (&ours, Origin::Reclaim(None))] {
+        let _guard = ctx.state.lock(&call.call_ref).await;
+        let disposition = materialise(ctx, &call.call_ref, origin).await;
+        assert!(
+            matches!(disposition, Materialised::Refused(Reason::Unrecoverable)),
+            "{origin:?}: {disposition:?}"
+        );
+        sip_clock::testkit::settle().await;
+        assert!(ctx.state.peek(&call.call_ref).is_none(), "{origin:?}: the body is not live");
+    }
+    assert_eq!(n.cdr.snapshot().len(), 2, "each discharged call writes its CDR");
+    assert_eq!(n.metrics.unrecoverable_calls_total(), 2);
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 0, "no copy is served");
+    assert_eq!(n.metrics.repl_reclaimed_total(), 0, "no call is re-served");
+    assert_eq!(n.metrics.timer_queue_len(), 0, "nothing is re-armed");
+    assert_eq!(ctx.state.active_count(), 0);
+}
+
 /// Every reclaim miss is typed: a ref this node backs up, a ref with no body.
 #[tokio::test(start_paused = true)]
 async fn reclaim_misses_are_typed() {

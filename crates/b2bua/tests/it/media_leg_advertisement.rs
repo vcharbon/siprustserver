@@ -69,9 +69,11 @@ fn originate(
         matched_client_txn: false,
     };
     let mut id_gen = TurnScope::of(TurnIds::fixed(2));
-    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 0 };
+    let caller = crate::caller_of(&call);
+    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 0, caller_invite: &caller };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
+        caller_invite: &caller,
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",

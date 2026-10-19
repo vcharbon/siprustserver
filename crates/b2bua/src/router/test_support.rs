@@ -151,6 +151,13 @@ pub fn turn(turn_seq: u64) -> crate::turn_scope::TurnScope {
     crate::turn_scope::TurnScope::of(sip_ids::TurnIds::fixed(turn_seq))
 }
 
+/// The caller's INVITE `call`'s record rebuilds: what the shell hands each
+/// of its turns (ADR-0052 §11).
+pub fn caller_of(call: &call::Call) -> SipRequest {
+    crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite)
+        .expect("the test call's record rebuilds its caller's INVITE")
+}
+
 /// The caller's source address on the simulated fabric.
 pub fn src() -> SocketAddr {
     SocketAddr::from(([10, 0, 0, 9], 5060))

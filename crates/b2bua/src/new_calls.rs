@@ -64,11 +64,14 @@ pub enum Refusal {
     /// An operator cordoned the worker: answered the bare 503 before any
     /// decision. Its call is born only to write its record.
     Cordoned,
+    /// The call's record of the INVITE does not rebuild it (ADR-0052 §11):
+    /// answered 500 from the INVITE itself, and no call is born.
+    Unrecoverable,
 }
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 12] = [
+    pub const ALL: [Refusal; 13] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -81,6 +84,7 @@ impl Refusal {
         Refusal::DispatchDiscard,
         Refusal::IdentityInUse,
         Refusal::Cordoned,
+        Refusal::Unrecoverable,
     ];
 
     /// Stable `reason` label.
@@ -98,6 +102,7 @@ impl Refusal {
             Refusal::DispatchDiscard => "dispatch_discard",
             Refusal::IdentityInUse => "identity_in_use",
             Refusal::Cordoned => "cordoned",
+            Refusal::Unrecoverable => "unrecoverable",
         }
     }
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use call::helpers::Arrival;
 use call::{Call, CallModelState, Obligation, TimerType};
-use sip_message::{Method, SipMessage};
+use sip_message::{Method, SipMessage, SipRequest};
 
 use super::resolve::Resolution;
 use super::RouterCtx;
@@ -61,6 +61,7 @@ pub(super) fn rule_chain_turn(
     call_ref: &str,
     now_ms: i64,
     turn: &mut TurnScope,
+    caller: &SipRequest,
 ) -> HandlerResult {
     // The cap budget is a PER-LIVENESS-INTERVAL rate, not a lifetime total: the
     // keepalive tick RESETS the counter, opening a fresh window. A runaway
@@ -80,7 +81,7 @@ pub(super) fn rule_chain_turn(
     let cap_exceeded = i64::try_from(ctx.config.max_messages_per_call)
         .is_ok_and(|cap| bumped > cap)
         && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
+    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms, caller_invite: caller };
     // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
     // repeated here and never reaches a rule; the discharging ACK or PRACK
     // retires its ladder before the rules run and they read the fact; a
@@ -107,7 +108,7 @@ pub(super) fn rule_chain_turn(
         exec.repeat(&mut call, &mut ladder_fx, obligation);
         ladder_fx.quiet = Some(QuietTurn::OwnRung);
         let repeated = HandlerResult { call, effects: ladder_fx };
-        return enforced(ctx, &before, repeated, now_ms);
+        return enforced(ctx, &before, repeated, now_ms, caller);
     }
     // The end of the wait behind this stack's own NOTIFY is the framework's:
     // the requests held there leave, and no rule sees the fire.
@@ -115,7 +116,7 @@ pub(super) fn rule_chain_turn(
         let before = call.clone();
         exec.release_at_cap(&mut call, &mut ladder_fx);
         let released = HandlerResult { call, effects: ladder_fx };
-        return enforced(ctx, &before, released, now_ms);
+        return enforced(ctx, &before, released, now_ms, caller);
     }
     let start = TurnStart::of(&call);
     // A reliable provisional is the engine's before it is any rule's (RFC
@@ -189,6 +190,7 @@ pub(super) fn rule_chain_turn(
     }
     let rule_ctx = RuleContext {
         call: RuleCall::new(&call),
+        caller_invite: caller,
         call_ref,
         event,
         source_leg_id: &res.source_leg_id,
@@ -225,7 +227,7 @@ pub(super) fn rule_chain_turn(
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         let before = result.call.clone();
         let settled = exec.settle_give_up(result, obligation, &rule_ctx);
-        result = enforced(ctx, &before, settled, now_ms);
+        result = enforced(ctx, &before, settled, now_ms, caller);
     }
     if cap_exceeded
         && !matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated)
@@ -247,13 +249,17 @@ pub(super) fn enforced(
     before: &Call,
     result: HandlerResult,
     now_ms: i64,
+    caller: &SipRequest,
 ) -> HandlerResult {
     crate::rules::invariants::enforce(
         &ctx.obligations,
         before,
         crate::rules::invariants::finalize(result),
         now_ms,
-        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
+        crate::rules::invariants::UnansweredCaller::Answer {
+            advertisement: &ctx.config.minted_final_advertisement,
+            invite: caller,
+        },
     )
 }
 

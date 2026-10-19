@@ -131,7 +131,10 @@ pub fn execute_rules(
             &before,
             result,
             exec.now_ms,
-            invariants::UnansweredCaller::Answer(&exec.config.minted_final_advertisement),
+            invariants::UnansweredCaller::Answer {
+                advertisement: &exec.config.minted_final_advertisement,
+                invite: exec.caller_invite,
+            },
         );
         // Recorded from the FINAL call, so the trace carries what finalize
         // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503

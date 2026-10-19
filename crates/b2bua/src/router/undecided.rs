@@ -46,11 +46,13 @@ pub(super) async fn settle_undecided(
     let mut turn = turn.with_faults(ctx.wire_faults.snapshot());
     let before = call.clone();
     let advertisement = &ctx.config.minted_final_advertisement;
-    let (handled, unanswered) = if seeded > 0 {
-        let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
+    // The materialisation proved the record rebuilds the caller's INVITE
+    // (ADR-0052 §11).
+    let caller = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite).ok();
+    let (handled, unanswered) = if let Some(a_invite) = caller.as_ref().filter(|_| seeded > 0) {
         let refused = crate::initial_invite::reject_call(
             call,
-            &a_invite,
+            a_invite,
             503,
             Some("Service Unavailable".into()),
             None,
@@ -60,7 +62,7 @@ pub(super) async fn settle_undecided(
             now_ms,
             TerminationCause::Admission,
         );
-        (refused, UnansweredCaller::Answer(advertisement))
+        (refused, UnansweredCaller::Answer { advertisement, invite: a_invite })
     } else {
         let mut ended =
             call::helpers::record_termination(call, now_ms, TerminationCause::Admission, None);

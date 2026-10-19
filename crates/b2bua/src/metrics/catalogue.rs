@@ -57,6 +57,7 @@ assert_exposition_order!(
     DispatchDiscard,
     IdentityInUse,
     Cordoned,
+    Unrecoverable,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 

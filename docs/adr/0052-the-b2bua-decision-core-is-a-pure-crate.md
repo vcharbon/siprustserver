@@ -238,21 +238,27 @@ where order reaches output the core uses a `BTreeMap`.
 
 ### 11. The caller's INVITE, and an unrecoverable call
 
-The shell rebuilds the caller's INVITE from the call's snapshot once, where the
-call enters the node, keeps it beside the resident call (it is not replicated),
-and passes it into every turn. No core function rebuilds it, so no turn fails
-on it.
+The shell rebuilds the caller's INVITE from the call's snapshot once per turn,
+before the core runs, and passes it into the turn (`RuleContext::caller_invite`,
+the executor's, `UnansweredCaller::Answer`). No core function rebuilds it, so
+no turn fails on it. The rebuilt request is not kept beside the resident call:
+it would double the memory every live call holds for its INVITE.
 
 - **At creation** the shell rebuilds it from the snapshot it just took. When
   that fails, the caller is refused with a final built from the live INVITE
-  still in hand.
+  still in hand, and no call is born (new-call refusal `unrecoverable`).
 - **At materialisation** a copy whose snapshot does not rebuild is
   unrecoverable: the shell discharges it silently, as the reaper's second
   strike does (ADR-0020 X6). Its legs are abandoned, its CDR and its limiter
   release go through the one enforcement path, the call is removed, and the
-  discharge is counted. Nothing is sent on the wire. The enforcement skips the
-  unanswered caller's final (`UnansweredCaller::Leave`), which would need the
-  INVITE the snapshot could not give.
+  discharge is counted (`b2bua_unrecoverable_calls_total`). Nothing is sent on
+  the wire. The enforcement skips the unanswered caller's final
+  (`UnansweredCaller::Leave`), which would need the INVITE the snapshot could
+  not give.
+
+The snapshot is never written after creation, so a call that entered the node
+by either path rebuilds at every later turn; a turn whose rebuild fails all
+the same takes the same discharge.
 
 ### 12. The panic set
 

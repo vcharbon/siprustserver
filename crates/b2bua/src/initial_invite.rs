@@ -169,21 +169,26 @@ pub fn build_initial_call(
 /// the call opens its trace (ADR-0026), and nothing else happens — no
 /// decision request, no limiter admit, no wire effect. The `Cancelled` turn
 /// queued behind it ends the call with its Cancel CDR.
-pub fn cancelled_setup(mut call: Call, invite_wire: &[u8], now_ms: i64) -> HandlerResult {
-    let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-    trace::intake::activate(&mut call, &a_invite, invite_wire, now_ms);
+pub fn cancelled_setup(
+    mut call: Call,
+    a_invite: &SipRequest,
+    invite_wire: &[u8],
+    now_ms: i64,
+) -> HandlerResult {
+    trace::intake::activate(&mut call, a_invite, invite_wire, now_ms);
     HandlerResult { call, effects: HandlerEffects::new() }
 }
 
 /// Run the initial-INVITE decision + route/reject. `call` must already carry the
-/// a-leg (from [`build_initial_call`]); `invite_wire` is the datagram it arrived
-/// as, which only the router holds (the call carries a header snapshot, not
-/// bytes). `now_ms` is the turn's timestamp — every CDR entry and timer deadline
+/// a-leg (from [`build_initial_call`]), and `a_invite` is its snapshot rebuilt;
+/// `invite_wire` is the datagram it arrived as, which only the router holds
+/// (the call carries a header snapshot, not bytes). `now_ms` is the turn's timestamp — every CDR entry and timer deadline
 /// this handler mints reads it, so it is taken once; `clock` measures the
 /// decision round trip, whose two ends are by definition not the same instant.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_initial_invite(
     mut call: Call,
+    a_invite: &SipRequest,
     decision: &dyn CallDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
@@ -193,15 +198,14 @@ pub async fn handle_initial_invite(
     clock: &Clock,
     now_ms: i64,
 ) -> HandlerResult {
-    let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-    let req = build_request(&a_invite);
+    let req = build_request(a_invite);
 
     // ── Trace intake (ADR-0026) ────────────────────────────────────────────
     // The admission chain runs here, once, before the decision round trip, so a
     // sampled call's story starts at its own INVITE. `apply_route` owns the
     // other door (an engine force-enable, on this route or a later failover
     // one), and it backfills what it missed.
-    trace::intake::activate(&mut call, &a_invite, invite_wire, now_ms);
+    trace::intake::activate(&mut call, a_invite, invite_wire, now_ms);
     let mut request_json = trace::intake::request_body(&call, &req);
 
     let sent_at_ms = clock.now_ms();
@@ -212,7 +216,7 @@ pub async fn handle_initial_invite(
         // sent, so rebuild that request: it is derived from the a-leg INVITE, so
         // the rebuilt body IS the body that went out.
         if route.trace && trace::intake::force_enable(&mut call, invite_wire, now_ms) {
-            request_json = Some(trace::intake::json_body(&build_request(&a_invite)));
+            request_json = Some(trace::intake::json_body(&build_request(a_invite)));
         }
     }
     trace::intake::record_new_call(&call, request_json, &response, sent_at_ms, received_at_ms);
@@ -227,7 +231,7 @@ pub async fn handle_initial_invite(
             let result = apply_route(
                 call,
                 route,
-                &a_invite,
+                a_invite,
                 invite_wire,
                 decision,
                 limiter,
@@ -238,8 +242,8 @@ pub async fn handle_initial_invite(
                 0,
             )
             .await;
-            let mut exec = ActionExecutor { config, turn, now_ms };
-            let setup_event = setup_event(&result.call, &a_invite);
+            let mut exec = ActionExecutor { config, turn, now_ms, caller_invite: a_invite };
+            let setup_event = setup_event(&result.call, a_invite);
             let from_a = call::Direction::FromA;
             seed_services(result, services, &mut exec, &setup_event, "a", from_a)
         }
@@ -248,7 +252,7 @@ pub async fn handle_initial_invite(
             reject,
             DecisionKind::Reject,
             Some("a".into()),
-            &a_invite,
+            a_invite,
             &config.minted_final_advertisement,
             &mut turn.ids,
             now_ms,
@@ -258,7 +262,7 @@ pub async fn handle_initial_invite(
             rd,
             DecisionKind::Redirect,
             Some("a".into()),
-            &a_invite,
+            a_invite,
             &config.minted_final_advertisement,
             &mut turn.ids,
             now_ms,
@@ -269,7 +273,7 @@ pub async fn handle_initial_invite(
             let call = mark_decision(call, now_ms, DecisionKind::Relay, Some("a".into()), label);
             reject_call(
                 call,
-                &a_invite,
+                a_invite,
                 480,
                 Some("Temporarily Unavailable".into()),
                 None,
@@ -284,7 +288,7 @@ pub async fn handle_initial_invite(
         // the one the engine stated, else 503.
         Err(CallDecisionError::Refused { code, reason, update_headers }) => reject_call(
             call,
-            &a_invite,
+            a_invite,
             code,
             reason,
             update_headers.as_ref(),
@@ -296,7 +300,7 @@ pub async fn handle_initial_invite(
         ),
         Err(CallDecisionError::Unavailable(_)) => reject_call(
             call,
-            &a_invite,
+            a_invite,
             503,
             Some("Service Unavailable".into()),
             None,

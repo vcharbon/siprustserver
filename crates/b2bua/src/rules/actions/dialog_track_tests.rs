@@ -64,7 +64,9 @@ fn proxied_config() -> B2buaConfig {
 fn an_unreadable_record_route_never_yields_an_empty_route_set() {
     let config = proxied_config();
     let mut scope = TurnScope::of(TurnIds::fixed(0xD1));
-    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
+    let caller = invite(PROXY_ROUTE);
+    let mut exec =
+        ActionExecutor { config: &config, turn: &mut scope, now_ms: 0, caller_invite: &caller };
 
     let resp = ok_200(UNREADABLE_RR);
     assert!(uac_route_set(&resp).is_err(), "the fixture's recorded route must not read");
@@ -90,7 +92,9 @@ fn an_unreadable_record_route_never_yields_an_empty_route_set() {
 fn without_a_front_proxy_the_fallback_is_empty_but_the_read_still_fails() {
     let config = B2buaConfig::default();
     let mut scope = TurnScope::of(TurnIds::fixed(0xD2));
-    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
+    let caller = invite(PROXY_ROUTE);
+    let mut exec =
+        ActionExecutor { config: &config, turn: &mut scope, now_ms: 0, caller_invite: &caller };
     let resp = ok_200(UNREADABLE_RR);
     assert!(uac_route_set(&resp).is_err());
     assert!(exec.dialog_route_set(uac_route_set(&resp), "call-1", "b-1").is_empty());
@@ -103,7 +107,9 @@ fn without_a_front_proxy_the_fallback_is_empty_but_the_read_still_fails() {
 fn readable_recorded_routes_keep_their_dialog_order() {
     let config = proxied_config();
     let mut scope = TurnScope::of(TurnIds::fixed(0xD3));
-    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
+    let caller = invite(PROXY_ROUTE);
+    let mut exec =
+        ActionExecutor { config: &config, turn: &mut scope, now_ms: 0, caller_invite: &caller };
     let combined = "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;target=1;lr>";
 
     let resp = ok_200(combined);
@@ -132,14 +138,16 @@ fn readable_recorded_routes_keep_their_dialog_order() {
 fn a_caller_rejected_with_a_non_2xx_final_gains_no_dialog() {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut scope = TurnScope::of(TurnIds::fixed(0xD4));
-    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
     let open = crate::initial_invite::build_initial_call(
         &crate::router::test_support::invite("w0", "w1", "rejected-caller"),
         crate::router::test_support::src(),
         &config,
-        &mut exec.turn.ids,
+        &mut scope.ids,
         0,
     );
+    let caller = crate::router::test_support::caller_of(&open);
+    let mut exec =
+        ActionExecutor { config: &config, turn: &mut scope, now_ms: 0, caller_invite: &caller };
 
     let mut rejected = open.clone();
     rejected.a_leg.invite_final_sent = Some(487);

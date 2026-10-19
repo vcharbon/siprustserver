@@ -168,7 +168,7 @@ impl ActionExecutor<'_> {
         // (RFC 3261 §17.2.1 — no 1xx after the transaction's final).
         self.retire(call, fx, Scope::Provisionals);
         let a_tag = self.ensure_a_dialog(call);
-        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let a_invite = self.caller_invite;
         let contact =
             relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
         // Guard: the status relayed here is the failing peer's own, so the
@@ -188,7 +188,7 @@ impl ActionExecutor<'_> {
         if let Some(effect) = relay::response_to_a_leg(
             call,
             fx,
-            &a_invite,
+            a_invite,
             status,
             reason,
             Some(a_tag),
@@ -230,7 +230,7 @@ impl ActionExecutor<'_> {
         // it (RFC 3261 §17.2.1 — no 1xx after the transaction's final).
         self.retire(call, fx, Scope::Provisionals);
         let a_tag = self.ensure_a_dialog(call);
-        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let a_invite = self.caller_invite;
         // A redirect target that does not read is refused, not invented: the
         // caller dials what a 3xx Contact names. The caller still gets a
         // final — the plain server error, with no Contact list.
@@ -279,7 +279,7 @@ impl ActionExecutor<'_> {
         if let Some(effect) = relay::response_to_a_leg(
             call,
             fx,
-            &a_invite,
+            a_invite,
             status,
             &reason,
             Some(a_tag),
@@ -386,7 +386,7 @@ impl ActionExecutor<'_> {
         let content_type = content_type
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
-        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let a_invite = self.caller_invite;
         let contact =
             relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
         let mut extra_headers = Vec::new();
@@ -400,7 +400,7 @@ impl ActionExecutor<'_> {
         if let Some(effect) = relay::response_to_a_leg(
             call,
             fx,
-            &a_invite,
+            a_invite,
             status,
             reason,
             Some(to_tag),
@@ -473,7 +473,7 @@ impl ActionExecutor<'_> {
         let content_type = content_type
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
-        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let a_invite = self.caller_invite;
         let contact =
             relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
         // §16.6: the delivered final's lines ride as received, except the names
@@ -518,7 +518,7 @@ impl ActionExecutor<'_> {
         let Some(effect) = relay::response_to_a_leg(
             call,
             fx,
-            &a_invite,
+            a_invite,
             status,
             reason,
             Some(a2.clone()),

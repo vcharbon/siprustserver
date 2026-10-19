@@ -9,6 +9,7 @@ use sip_message::SipHeader;
 
 use crate::effects::{HandlerEffects, OutboundBody, Provenance, QuietTurn};
 use crate::rules::relay;
+use b2bua_sdk::model::Body;
 
 use super::ActionExecutor;
 
@@ -116,6 +117,30 @@ impl ActionExecutor<'_> {
         }
     }
 
+    /// ACK `leg_id`'s confirmed dialog as a rule authors it
+    /// ([`b2bua_sdk::model::RuleAction::AckLeg`]): a body-bearing ACK carries a
+    /// delayed-offer answer (RFC 3261 §13.2.2.4), its type `application/sdp`
+    /// when none is given; an empty ACK stays a bare ACK — no body, no
+    /// Content-Type.
+    pub(super) fn ack_authored(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        body: &Option<Body>,
+    ) {
+        let (bytes, content_type, author, descriptors) = super::dispatch::parts(body);
+        if bytes.is_empty() {
+            self.ack_own_bare(call, fx, leg_id);
+            return;
+        }
+        let ct = content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp);
+        let mut own = Vec::new();
+        relay::describe_body(&mut own, bytes, descriptors);
+        let body = bytes.to_vec();
+        self.ack_leg(call, fx, leg_id, body, Some(ct), own, Provenance::Authored, author);
+    }
+
     /// ACK `leg_id`'s confirmed dialog on this stack's own account, bare
     /// (RFC 3261 §13.2.2.4): an offer of the dialog a reliable provisional
     /// carried is answered first, rejecting every stream, in the PRACK still
@@ -154,7 +179,7 @@ impl ActionExecutor<'_> {
             call::OwedAnswer::InAck { ack_cseq: owed, offer } if *owed == ack_cseq => offer.clone(),
             _ => return None,
         };
-        let caller = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let caller = self.caller_invite;
         let own = caller.sdp().and_then(|own| {
             sip_message::sdp_answer::answer_from_own(
                 &offer,

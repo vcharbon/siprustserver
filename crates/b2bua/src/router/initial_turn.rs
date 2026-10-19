@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use call::{Call, TerminationCause};
 use sip_ids::TurnIds;
+use sip_message::SipRequest;
 
 use super::admit::UnbornCall;
-use super::responses::{build_merged_482, build_retry_later_500, build_store_fault_500};
+use super::responses::{build_merged_482, build_retry_later_500, build_unborn_500};
 use super::RouterCtx;
 use crate::admission::{class_of, Class};
 use crate::effects::{HandlerEffects, HandlerResult};
@@ -62,8 +63,7 @@ pub(super) async fn initial_invite_turn(
     // call (`super::admit`).
     let copy = unborn.is_none();
     if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
-        let resp =
-            build_store_fault_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
+        let resp = build_unborn_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(resp) = resp {
             let _ = ctx.txn.send_response(resp, src).await;
         }
@@ -110,6 +110,20 @@ pub(super) async fn initial_invite_turn(
         return Turn::Consumed;
     }
 
+    let mut call = build_initial_call(req, src, &ctx.config, &mut turn.ids, now_ms);
+    // Every turn reads the caller's INVITE as the call's record rebuilds it
+    // (ADR-0052 §11): an INVITE whose record does not is refused from the
+    // INVITE itself, and no call is born.
+    let Ok(caller) = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite) else {
+        let resp = build_unborn_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
+        if let Ok(resp) = resp {
+            let _ = ctx.txn.send_response(resp, src).await;
+        }
+        ctx.metrics.new_calls().reject(Refusal::Unrecoverable, class);
+        ctx.state.clear_setup_cancelled(call_ref, cseq);
+        return Turn::Shed;
+    };
+
     // The caller CANCELed while this turn waited (marked at ingress): the
     // transaction layer already answered 487. The call is born so the queued
     // `Cancelled` turn ends it with its Cancel CDR; it is neither accepted nor
@@ -130,7 +144,6 @@ pub(super) async fn initial_invite_turn(
         }
     }
 
-    let mut call = build_initial_call(req, src, &ctx.config, &mut turn.ids, now_ms);
     if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
         let a_leg = call.a_leg.leg_id.clone();
         call = ring.invite_received(call, &a_leg, req, now_ms);
@@ -153,14 +166,13 @@ pub(super) async fn initial_invite_turn(
     // Created-then-rejected mirrors the decision-reject path so the Terminated
     // invariant reaps the call + propagates the delete.
     let mut handled = if cancelled {
-        crate::initial_invite::cancelled_setup(call.clone(), req.image(), now_ms)
+        crate::initial_invite::cancelled_setup(call.clone(), &caller, req.image(), now_ms)
     } else if cordoned {
-        refused_unavailable(ctx, call.clone(), now_ms, &mut turn.ids)
+        refused_unavailable(ctx, call.clone(), &caller, now_ms, &mut turn.ids)
     } else if call.a_leg_invite.from_tag.is_empty() {
-        let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
         crate::initial_invite::reject_call(
             call.clone(),
-            &a_invite,
+            &caller,
             400,
             Some("Bad Request - missing From tag".into()),
             None,
@@ -176,6 +188,7 @@ pub(super) async fn initial_invite_turn(
         // trace activation backfills its `sip.in` from.
         handle_initial_invite(
             call.clone(),
+            &caller,
             ctx.decision.as_ref(),
             &ctx.limiter,
             &ctx.config,
@@ -213,16 +226,20 @@ pub(super) async fn initial_invite_turn(
         // flight, so the decision is not applied: the callee is never dialled
         // for a call its backups took over (ADR-0047). The caller is refused
         // here whether or not a backup answered it too.
-        handled = refused_after_leaving_the_slice(ctx, &call, handled, now_ms, &mut turn.ids);
+        let ids = &mut turn.ids;
+        handled = refused_after_leaving_the_slice(ctx, &call, &caller, handled, now_ms, ids);
     }
     let enforced = crate::rules::invariants::enforce(
         &ctx.obligations,
         &call,
         crate::rules::invariants::finalize(handled),
         now_ms,
-        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
+        crate::rules::invariants::UnansweredCaller::Answer {
+            advertisement: &ctx.config.minted_final_advertisement,
+            invite: &caller,
+        },
     );
-    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
+    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms, caller_invite: &caller };
     Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)))
 }
 
@@ -231,25 +248,27 @@ pub(super) async fn initial_invite_turn(
 fn refused_after_leaving_the_slice(
     ctx: &RouterCtx,
     pre: &Call,
+    caller: &SipRequest,
     handled: HandlerResult,
     now_ms: i64,
     ids: &mut TurnIds,
 ) -> HandlerResult {
-    refused_unavailable(ctx, discarded_turn(pre, handled), now_ms, ids)
+    refused_unavailable(ctx, discarded_turn(pre, handled), caller, now_ms, ids)
 }
 
-/// `call` refused 503 with no Retry-After, as for an unavailable decision
-/// (ADR-0022 X3): the record of a call no decision reached.
+/// `call`, whose caller's INVITE is `caller`, refused 503 with no
+/// Retry-After, as for an unavailable decision (ADR-0022 X3): the record of a
+/// call no decision reached.
 fn refused_unavailable(
     ctx: &RouterCtx,
     call: Call,
+    caller: &SipRequest,
     now_ms: i64,
     ids: &mut TurnIds,
 ) -> HandlerResult {
-    let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     crate::initial_invite::reject_call(
         call,
-        &a_invite,
+        caller,
         503,
         Some("Service Unavailable".into()),
         None,

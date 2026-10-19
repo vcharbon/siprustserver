@@ -120,7 +120,7 @@ pub(super) async fn reclaim_into_live(
             }
             true
         }
-        Materialised::Refused(Reason::Terminated) => true,
+        Materialised::Refused(Reason::Terminated | Reason::Unrecoverable) => true,
         _ => false,
     }
 }

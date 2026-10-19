@@ -180,7 +180,7 @@ fn retire_losers(call: &mut Call, promoted: Promoted) -> Retired {
 /// offer that ACK answers ([`OwedAnswer::InAck`]).
 fn arm_ack_obligation(call: &mut Call, resp: &SipResponse, retired: Retired) {
     let Retired { leg_id, winner, .. } = retired;
-    let awaited_ack_cseq = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
+    let awaited_ack_cseq = i64::from(call.a_leg_invite.cseq);
     let invite_cseq = i64::from(resp.cseq().seq());
     let offered_reliably = relay::offered_reliably(call, &leg_id, &winner, invite_cseq);
     let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) else { return };

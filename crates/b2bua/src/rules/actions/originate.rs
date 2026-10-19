@@ -157,7 +157,7 @@ impl ActionExecutor<'_> {
         // The INVITE that created this leg's dialog: the originator's own on
         // hers, the one the stack sent on a leg it dialled.
         let creating = if leg_id == call.a_leg.leg_id {
-            Some(relay::rebuild_a_leg_invite(&call.a_leg_invite))
+            Some(self.caller_invite.clone())
         } else {
             relay::dialling_invite(leg_at(call, idx))
         };
