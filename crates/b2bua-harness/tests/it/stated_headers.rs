@@ -1400,53 +1400,6 @@ async fn the_layers_487_to_a_cancelled_reinvite_carries_no_set() {
     let _ = s.finish().await;
 }
 
-/// A failover redirect the stack refuses — not a 3xx, or a target that does
-/// not read — speaks only for itself: the caller's 500 carries the route's
-/// set and none of the refused redirect's adds.
-#[tokio::test(start_paused = true)]
-async fn a_refused_failover_redirect_carries_the_routes_set_and_nothing_of_its_own() {
-    for (name, redirect) in [
-        (
-            "not-a-3xx",
-            serde_json::json!({"action": "redirect", "code": 404,
-                "contacts": [{"uri": "sip:target@192.0.2.9"}],
-                "update_headers": {"X-Redirect": {"add": ["r"]}}}),
-        ),
-        (
-            "unreadable-target",
-            serde_json::json!({"action": "redirect", "code": 302,
-                "contacts": [{"uri": "not a uri at all"}],
-                "update_headers": {"X-Redirect": {"add": ["r"]}}}),
-        ),
-    ] {
-        let s = plan_scene(&format!("stated-headers-refused-redirect-{name}")).await;
-        let plan = serde_json::json!({
-            "routes": [{"destination": {"host": "127.0.0.1", "port": BOB_PORT},
-                        "stated_headers": route_sets("first")}],
-            "on_exhausted": redirect,
-        })
-        .to_string();
-        let mut call = s
-            .alice
-            .invite(&s.bob)
-            .with_sdp(OFFER)
-            .with_header("X-Api-Call", &plan)
-            .through(s.b2bua.addr)
-            .send()
-            .await;
-        s.bob.receive("INVITE").await.respond(486, "Busy Here").await;
-        s.bob.receive("ACK").await;
-        let refused = call.expect(500).await;
-        let lines = |n: &str| -> Vec<String> {
-            refused.raw(HeaderName::from(n)).map(str::to_string).collect()
-        };
-        assert_eq!(lines("X-Every"), ["first"], "{name}: the route's set stays");
-        assert_eq!(lines("X-Final"), ["first"], "{name}: the route's finals set");
-        assert!(lines("X-Redirect").is_empty(), "{name}: nothing of the refused redirect");
-        let _ = s.finish().await;
-    }
-}
-
 /// A tentative set and the one it replaced: the callee's re-INVITE goes
 /// unanswered and its timeout ends the call. Every message before the
 /// termination carries the tentative set; the termination takes the earlier

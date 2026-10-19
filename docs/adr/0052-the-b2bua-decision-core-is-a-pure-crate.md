@@ -198,6 +198,13 @@ route's folds. The admit's trace fact is recorded by the shell after the admit's
 stamped with the turn's `now_ms`. Consulting the decision engine as an effect
 re-entering the call is not part of this decision.
 
+A decided final the stack refuses (a reject that is no non-2xx final, a
+redirect that is not a 3xx or whose target does not read) draws the plain
+server error `500`. The refusal keeps the decision's headers, its updates and
+its adds, as its decided final would have, and carries none of the failing
+peer's lines; it is the same on the initial consult's path and the failover
+consult's.
+
 ### 8. The model invariant oracle
 
 The model invariant check and the defect report stay in the shell, in every

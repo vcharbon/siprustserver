@@ -187,9 +187,19 @@ fn failover_reject() -> RuleDefinition {
                 cause,
                 by_leg: None,
             };
+            let header_updates = parse_header_updates(payload);
+            // A decided reject applies no route: the failed route's stated
+            // headers leave the call, and the reject's own adds ride its
+            // final, yielding to the lines the final carries. The stack's
+            // own refusal is no decision: the route's headers stay.
+            if !stack_authored {
+                actions.push(RuleAction::SetStatedHeaders {
+                    headers: final_adds(payload.get("update_headers")),
+                });
+            }
             // The initial path's guard: a code that is no non-2xx final
-            // rejects nothing and draws the plain server error, which
-            // speaks only for itself as the not-a-3xx redirect's does.
+            // rejects nothing and draws the plain server error, which keeps
+            // the decision's headers and none of the failing peer's lines.
             let stated = payload.get("code").and_then(|v| v.as_u64());
             let Some(status) = stated
                 .map_or(Some(500), |code| u16::try_from(code).ok())
@@ -201,7 +211,7 @@ fn failover_reject() -> RuleDefinition {
                     RuleAction::RespondToALeg {
                         status: 500,
                         reason: crate::decision::apply_reject::REFUSED_DECISION_REASON.to_string(),
-                        header_updates: Vec::new(),
+                        header_updates,
                         contacts: Vec::new(),
                     },
                     ending,
@@ -215,16 +225,6 @@ fn failover_reject() -> RuleDefinition {
                 .and_then(|v| v.as_str())
                 .unwrap_or_else(|| b2bua_sdk::reason_phrase::default_reason(status))
                 .to_string();
-            let header_updates = parse_header_updates(payload);
-            // A decided reject applies no route: the failed route's stated
-            // headers leave the call, and the reject's own adds ride its
-            // final, yielding to the lines the final carries. The stack's
-            // own refusal is no decision: the route's headers stay.
-            if !stack_authored {
-                actions.push(RuleAction::SetStatedHeaders {
-                    headers: final_adds(payload.get("update_headers")),
-                });
-            }
             actions.extend([
                 RuleAction::RespondToALeg { status, reason, header_updates, contacts: vec![] },
                 ending,
@@ -281,19 +281,14 @@ fn failover_redirect() -> RuleDefinition {
             if !service_ext.is_empty() {
                 actions.push(RuleAction::MergeCallExt { ext: service_ext });
             }
+            // A redirect applies no route: as a reject's, its adds replace
+            // the route's set, refused or not.
+            actions.push(RuleAction::SetStatedHeaders {
+                headers: final_adds(payload.get("update_headers")),
+            });
             if crate::decision::apply_reject::is_redirect_code(status) {
-                // A redirect applies no route: as a reject's. One whose
-                // target does not read is refused at the seam with the
-                // plain server error, which speaks only for itself: it
-                // keeps the route's set, as the not-a-3xx refusal does.
-                let readable = contacts
-                    .iter()
-                    .all(|(uri, q)| crate::rules::relay::redirect_contact(uri, *q).is_ok());
-                if readable {
-                    actions.push(RuleAction::SetStatedHeaders {
-                        headers: final_adds(payload.get("update_headers")),
-                    });
-                }
+                // One whose target does not read is refused at the seam with
+                // the plain server error, keeping the decision's headers.
                 actions.push(RuleAction::RespondToALeg {
                     status,
                     reason,
@@ -302,17 +297,16 @@ fn failover_redirect() -> RuleDefinition {
                 });
             } else {
                 // A redirect that is not a 3xx is refused with the plain
-                // server error, which speaks only for itself as an
-                // unreadable target's refusal does: the failing peer's
-                // image is cleared, the decision's statements dropped, the
-                // route's stated headers kept.
+                // server error, as an unreadable target's refusal is: the
+                // failing peer's image is cleared, the decision's headers
+                // kept.
                 tracing::warn!(call_ref = %ctx.call_ref, code = status, "redirect refused: not a 3xx");
                 actions.extend([
                     RuleAction::MergeCallExt { ext: b2bua_sdk::failure_image::no_failure_image() },
                     RuleAction::RespondToALeg {
                         status: 500,
                         reason: crate::decision::apply_reject::REFUSED_DECISION_REASON.to_string(),
-                        header_updates: Vec::new(),
+                        header_updates,
                         contacts: Vec::new(),
                     },
                 ]);

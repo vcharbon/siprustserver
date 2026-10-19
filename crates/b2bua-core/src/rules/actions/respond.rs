@@ -232,8 +232,8 @@ impl ActionExecutor<'_> {
         let a_tag = self.ensure_a_dialog(call);
         let Some(a_invite) = self.caller_invite(call) else { return };
         // A redirect target that does not read is refused, not invented: the
-        // caller dials what a 3xx Contact names. The caller still gets a
-        // final — the plain server error, with no Contact list.
+        // caller dials what a 3xx Contact names. The caller gets the plain
+        // server error, with the decision's headers and no Contact list.
         let (status, reason, mut extra, refused) =
             match build_a_leg_response_headers(header_updates, contacts) {
                 Ok(headers) => (status, reason.to_string(), headers, false),
@@ -243,7 +243,7 @@ impl ActionExecutor<'_> {
                         detail = %err.detail(),
                         "redirect refused"
                     );
-                    (500, err.to_string(), Vec::new(), true)
+                    (500, err.to_string(), header_update_lines(header_updates), true)
                 }
             };
         // A 3xx is a new instruction, not a relayed refusal: RFC 3261 §20.33
