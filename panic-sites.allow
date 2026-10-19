@@ -14,7 +14,7 @@ crates/b2bua-core/src/rules/actions/originate.rs 6
 crates/b2bua-core/src/rules/actions/prack.rs 2
 crates/b2bua-core/src/rules/actions/relay_request.rs 4
 crates/b2bua-core/src/rules/actions/select.rs 1
-crates/b2bua-core/src/rules/defaults/core_rules.rs 4
+crates/b2bua-core/src/rules/defaults/failover_rules.rs 4
 crates/b2bua-core/src/rules/invariants.rs 1
 crates/b2bua-core/src/rules/lifecycle_delivery.rs 1
 crates/b2bua-core/src/rules/refer_transfer/machine/authorizing.rs 1
