@@ -32,14 +32,28 @@ pub const UNDECLARED_EFFECT: &str = "rule-declares-its-effects";
 /// A lifecycle handler took an action outside call ext, its own cursor and
 /// its own timers; the action is dropped.
 pub const LIFECYCLE_OUT_OF_SCOPE: &str = "lifecycle-handler-keeps-its-scope";
+/// The call's record does not rebuild the caller's INVITE a step read
+/// (ADR-0052 §11): the turn's call is unrecoverable.
+pub const CALLER_INVITE_REBUILDS: &str = "caller-invite-rebuilds";
+/// A call reached `Terminated` with no termination record naming its cause.
+pub const TERMINATION_RECORDED: &str = "terminal-call-records-its-termination";
+/// A `Keepalive` was armed beyond one keepalive interval; it is held to one.
+pub const KEEPALIVE_WITHIN_CADENCE: &str = "keepalive-armed-within-one-cadence";
+/// The leg an in-dialog request was being built for left the record while
+/// it was built; the request is not sent.
+pub const REQUEST_KEEPS_ITS_LEG: &str = "request-keeps-its-leg";
 
 /// Every defect a turn reports, by name.
-pub const DEFECTS: [&str; 5] = [
+pub const DEFECTS: [&str; 9] = [
     PRACK_HAS_A_LEG,
     PRACK_HAS_A_DIALOG,
     UNDECLARED_TRANSITION,
     UNDECLARED_EFFECT,
     LIFECYCLE_OUT_OF_SCOPE,
+    CALLER_INVITE_REBUILDS,
+    TERMINATION_RECORDED,
+    KEEPALIVE_WITHIN_CADENCE,
+    REQUEST_KEEPS_ITS_LEG,
 ];
 
 /// A defect a turn met mid-way: a step that found the record unable to carry
@@ -114,5 +128,12 @@ impl TurnNotes {
     /// The defects, in the order the turn met them.
     pub fn defects(&self) -> &[Defect] {
         &self.defects
+    }
+
+    /// Whether the turn met a record that does not rebuild its caller's
+    /// INVITE ([`CALLER_INVITE_REBUILDS`]): the shell drops the turn's result
+    /// and discharges the call silently.
+    pub fn unrecoverable(&self) -> bool {
+        self.defects.iter().any(|d| d.name == CALLER_INVITE_REBUILDS)
     }
 }

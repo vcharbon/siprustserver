@@ -48,7 +48,7 @@ mod unbuilt;
 mod originate_tests;
 
 // Originating a leg + answering/acknowledging on an existing one.
-pub use a_leg_invite::rebuild_a_leg_invite;
+pub use a_leg_invite::{caller_invite, note_unrebuilt, rebuild_a_leg_invite};
 pub use a_leg_response::{provisional_after_final, response_to_a_leg};
 pub use ack::{ack_b_leg, ack_lost_non_2xx};
 pub(crate) use ack::{acked_invite, acked_invite_carries_offer, acked_invite_cseq};

@@ -96,7 +96,7 @@ pub async fn handle_initial_invite(
                 0,
             )
             .await;
-            let mut exec = ActionExecutor { config, turn, now_ms, caller_invite: a_invite };
+            let mut exec = ActionExecutor { config, turn, now_ms };
             let setup_event = setup_event(&result.call, a_invite);
             seed_services(result, services, &mut exec, &setup_event, "a", Direction::FromA)
         }

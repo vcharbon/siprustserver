@@ -149,7 +149,7 @@ impl ActionExecutor<'_> {
         // The INVITE that created this leg's dialog: the originator's own on
         // hers, the one the stack sent on a leg it dialled.
         let creating = if leg_id == call.a_leg.leg_id {
-            Some(self.caller_invite.clone())
+            self.caller_invite(call)
         } else {
             relay::dialling_invite(leg)
         };
@@ -162,6 +162,7 @@ impl ActionExecutor<'_> {
         let branch = self.turn.ids.new_branch();
         let Some(leg) = leg_at(call, leg_id) else {
             *call = unsent;
+            self.leg_gone(call, leg_id, "re-INVITE");
             return;
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
@@ -343,6 +344,7 @@ impl ActionExecutor<'_> {
         let branch = self.turn.ids.new_branch();
         let Some(leg) = leg_at(call, leg_id) else {
             *call = unsent;
+            self.leg_gone(call, leg_id, method);
             return;
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);

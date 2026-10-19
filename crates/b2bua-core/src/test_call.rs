@@ -12,8 +12,7 @@ pub fn turn(turn_seq: u64) -> crate::turn_scope::TurnScope {
     crate::turn_scope::TurnScope::of(sip_ids::TurnIds::fixed(turn_seq))
 }
 
-/// The caller's INVITE `call`'s record rebuilds: what the shell hands each
-/// of its turns (ADR-0052 §11).
+/// The caller's INVITE `call`'s record rebuilds.
 #[expect(clippy::expect_used, reason = "test support: a test call's record rebuilds its INVITE")]
 pub fn caller_of(call: &call::Call) -> SipRequest {
     crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite)

@@ -40,6 +40,18 @@ pub struct Node {
     since: usize,
 }
 
+impl Node {
+    /// The violations kept since the node's start or the last take, which the
+    /// node then no longer fails its test with: a test that builds a defect
+    /// takes the ones it expects.
+    pub fn take_violations(&mut self) -> Vec<String> {
+        let kept = crate::model_invariants::violations();
+        let taken = kept.get(self.since..).unwrap_or_default().to_vec();
+        self.since = kept.len();
+        taken
+    }
+}
+
 impl Drop for Node {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -144,4 +156,4 @@ pub async fn node_on(
     }
 }
 
-pub use crate::test_call::{caller_of, invite, src, turn};
+pub use crate::test_call::{invite, src, turn};

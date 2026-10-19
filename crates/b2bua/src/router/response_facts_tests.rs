@@ -66,7 +66,6 @@ Content-Length: 0\r\n\r\n"
 async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
     let node = node("w0").await;
     let call_ref = call.call_ref.clone();
-    let caller = super::test_support::caller_of(&call);
     let input = TurnInput {
         event,
         call_ref: &call_ref,
@@ -74,7 +73,6 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         direction: Direction::FromB,
         resolved: Default::default(),
         now_ms: NOW_MS,
-        caller: &caller,
     };
     let fw = node.core.router_ctx().framework();
     rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1))

@@ -82,9 +82,6 @@ pub struct ActionExecutor<'a> {
     /// wire faults its guarded emissions read.
     pub turn: &'a mut TurnScope,
     pub now_ms: i64,
-    /// The caller's INVITE, rebuilt by the shell from the call's snapshot of
-    /// it (ADR-0052 §11).
-    pub caller_invite: &'a sip_message::SipRequest,
 }
 
 impl ActionExecutor<'_> {
@@ -114,8 +111,21 @@ impl ActionExecutor<'_> {
     /// ([`cap_keepalive_fire_at`]) — the arming half of the invariant
     /// `router::restore_hygiene` enforces on hydrated deadlines.
     fn schedule(&mut self, call: &mut Call, fx: &mut HandlerEffects, key: TimerKey, delay_ms: i64) {
-        let fire_at = self.capped_fire_at(&key.timer_type, self.now_ms + delay_ms);
+        let fire_at = self.capped_fire_at(call, &key.timer_type, self.now_ms + delay_ms);
         crate::timer_arm::arm(call, fx, key, fire_at);
+    }
+
+    /// The caller's INVITE, rebuilt from `call`'s record for the step that
+    /// reads it ([`crate::rules::relay::caller_invite`]).
+    fn caller_invite(&mut self, call: &Call) -> Option<sip_message::SipRequest> {
+        crate::rules::relay::caller_invite(call, &mut self.turn.notes)
+    }
+
+    /// Note that the leg `leg_id` an in-dialog `what` was being built for left
+    /// `call` while it was built: the request is not sent.
+    fn leg_gone(&mut self, call: &Call, leg_id: &str, what: &str) {
+        let detail = format!("{what} on leg {leg_id}: the leg left the record");
+        self.turn.notes.defect(crate::turn_notes::REQUEST_KEEPS_ITS_LEG, detail, call);
     }
 
     /// Disarm `key`: off the replicated ledger and the live driver. A key the
@@ -142,21 +152,20 @@ impl ActionExecutor<'_> {
 
     /// `fire_at` for a minted timer, with a `Keepalive` held to one keepalive
     /// interval (the configured cadence — every arming site re-arms at exactly
-    /// that, so a farther deadline is a defect at the caller and trips here in
-    /// debug builds). Non-keepalive deadlines pass through: a policy timer
+    /// that, so a farther deadline is a defect at the caller, noted on the
+    /// turn). Non-keepalive deadlines pass through: a policy timer
     /// legitimately outlives a probe cadence.
-    fn capped_fire_at(&mut self, timer_type: &TimerType, fire_at: i64) -> i64 {
+    fn capped_fire_at(&mut self, call: &Call, timer_type: &TimerType, fire_at: i64) -> i64 {
         if !matches!(timer_type, TimerType::Keepalive) {
             return fire_at;
         }
         let interval_ms = self.config.keepalive_interval_sec * 1000;
         let capped = cap_keepalive_fire_at(fire_at, self.now_ms, interval_ms);
-        debug_assert_eq!(
-            capped,
-            fire_at,
-            "Keepalive armed beyond one interval: {} ms out of a {interval_ms} ms cadence",
-            fire_at - self.now_ms,
-        );
+        if capped != fire_at {
+            let out = fire_at - self.now_ms;
+            let detail = format!("Keepalive armed {out} ms out of a {interval_ms} ms cadence");
+            self.turn.notes.defect(crate::turn_notes::KEEPALIVE_WITHIN_CADENCE, detail, call);
+        }
         capped
     }
 }

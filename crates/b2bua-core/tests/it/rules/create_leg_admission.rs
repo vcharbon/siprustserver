@@ -47,12 +47,10 @@ fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult 
         matched_client_txn: false,
     };
     let mut id_gen = scope(1);
-    let caller = crate::caller_of(&call);
     let now_ms = 1_700_000_000_000;
-    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms, caller_invite: &caller };
+    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &caller,
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",

@@ -24,7 +24,6 @@ pub(super) fn tear_down_runaway(
 ) -> HandlerResult {
     let cap_ctx = RuleContext {
         call: RuleCall::new(&result.call),
-        caller_invite: turn.caller_invite,
         call_ref: turn.call_ref,
         event: turn.event,
         source_leg_id: turn.source_leg_id,
@@ -72,10 +71,8 @@ pub(super) fn tear_down_runaway(
         &before,
         crate::rules::invariants::finalize(result),
         turn.now_ms,
-        crate::rules::invariants::UnansweredCaller::Answer {
-            advertisement: &fw.config.minted_final_advertisement,
-            invite: turn.caller_invite,
-        },
+        crate::rules::invariants::UnansweredCaller::Answer(&fw.config.minted_final_advertisement),
+        &mut exec.turn.notes,
     );
     result
 }

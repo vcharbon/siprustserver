@@ -350,6 +350,30 @@ async fn a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it()
     assert_eq!(live_pb(&n, &call_ref), (3, 2), "both counters adopted, ours not bumped");
 }
 
+/// **A fold never lands a body that does not rebuild the caller's INVITE**
+/// (ADR-0052 §11): the live copy, which does, keeps serving the call, the
+/// refused fold is counted, and the version it names is still seen.
+#[tokio::test(start_paused = true)]
+async fn a_fold_carrying_an_unrebuildable_replica_keeps_the_live_call_serving() {
+    let n = node("w1").await;
+    let ctx = n.core.router_ctx();
+    let live = unanswered(1, 2, CallModelState::Active);
+    let call_ref = live.call_ref.clone();
+    assert!(ctx.state.materialize_if_absent(live.clone(), MaterialiseOrigin::Reclaim));
+
+    let mut replica = answered(3, 1, CallModelState::Active);
+    replica.a_leg_invite.headers.clear();
+    let body = MsgpackCodec::new().encode(&replica).unwrap();
+    fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
+    sip_clock::testkit::settle().await;
+
+    let after = ctx.state.peek(&call_ref).expect("the live copy still serves the call");
+    assert_eq!(after.a_leg_invite, live.a_leg_invite, "the caller's INVITE is the live one");
+    assert!(!call::helpers::caller_answered(&after), "nothing of the refused body landed");
+    assert_eq!(n.metrics.unrecoverable_folds_total(), 1);
+    assert_eq!(live_pb(&n, &call_ref), (3, 2), "the version it names is seen");
+}
+
 /// A `Terminating` body ends no call in either direction — it is a teardown
 /// still in flight — but the version it names is still seen, so the counter
 /// is adopted and this node's next flush is not refused in its turn.

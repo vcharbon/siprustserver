@@ -163,7 +163,7 @@ impl ActionExecutor<'_> {
             return call.a_leg.own_tag.clone().or(preferred).unwrap_or_default();
         }
         let tag = preferred.unwrap_or_else(|| self.turn.ids.new_tag());
-        let a_invite = self.caller_invite;
+        let Some(a_invite) = self.caller_invite(call) else { return tag };
         let from = a_invite.from();
         let a_leg_id = call.a_leg.leg_id.clone();
         let remote_target =
@@ -173,7 +173,7 @@ impl ActionExecutor<'_> {
         // Record-Route entries in forward order, one entry per recorded route (a
         // comma-combined header — the proxy's double-record-route halves — is
         // two), same as the b-leg path above.
-        let route_set = self.dialog_route_set(uas_route_set(a_invite), &call.call_ref, &a_leg_id);
+        let route_set = self.dialog_route_set(uas_route_set(&a_invite), &call.call_ref, &a_leg_id);
         let invite_cseq = i64::from(a_invite.cseq().seq());
         let mut dialog = caller_facing_dialog(&tag, &call.a_leg_invite.from_tag, invite_cseq);
         dialog.remote_target = remote_target;

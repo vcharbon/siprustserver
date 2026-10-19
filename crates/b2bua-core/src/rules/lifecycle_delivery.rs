@@ -149,7 +149,6 @@ fn deliver(
         let sub = {
             let ctx = RuleContext {
                 call: RuleCall::new(&result.call),
-                caller_invite: exec.caller_invite,
                 call_ref: &result.call.call_ref,
                 event: &event,
                 source_leg_id: &source_leg,

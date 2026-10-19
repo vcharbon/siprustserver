@@ -112,9 +112,9 @@ pub(super) async fn initial_invite_turn(
     }
 
     let mut call = build_initial_call(req, src, &ctx.config, &mut turn.ids, now_ms);
-    // Every turn reads the caller's INVITE as the call's record rebuilds it
+    // A call is born only with a record that rebuilds its caller's INVITE
     // (ADR-0052 §11): an INVITE whose record does not is refused from the
-    // INVITE itself, and no call is born.
+    // INVITE itself.
     let Ok(caller) = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite) else {
         let resp = build_unborn_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(resp) = resp {
@@ -235,12 +235,10 @@ pub(super) async fn initial_invite_turn(
         &call,
         crate::rules::invariants::finalize(handled),
         now_ms,
-        crate::rules::invariants::UnansweredCaller::Answer {
-            advertisement: &ctx.config.minted_final_advertisement,
-            invite: &caller,
-        },
+        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
+        &mut turn.notes,
     );
-    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms, caller_invite: &caller };
+    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
     Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)))
 }
 

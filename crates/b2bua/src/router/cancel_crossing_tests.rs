@@ -76,7 +76,6 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         to_tag: Some("a1".into()),
     };
     let (call_ref, source_leg_id) = (call.call_ref.clone(), call.a_leg.leg_id.clone());
-    let caller = super::test_support::caller_of(&call);
     let input = TurnInput {
         event: &event,
         call_ref: &call_ref,
@@ -84,7 +83,6 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         direction: Direction::FromA,
         resolved: Default::default(),
         now_ms: 1_000,
-        caller: &caller,
     };
     let fw = node.core.router_ctx().framework();
     let result = rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1));

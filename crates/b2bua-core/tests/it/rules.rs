@@ -12,6 +12,7 @@ use b2bua_core::rules::{
     default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Effect, Match,
     RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, SERVICE_LAYER,
 };
+use b2bua_core::turn_notes::TurnNotes;
 use b2bua_core::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{Body, BodyAuthor, LegEnd};
@@ -132,7 +133,6 @@ fn timer_global_duration_selects_max_duration() {
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -173,7 +173,6 @@ fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
     };
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &crate::caller_of(call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: fired_leg_id,
@@ -253,7 +252,6 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &crate::caller_of(call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -264,12 +262,7 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: ctx.caller_invite,
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     exec.execute(actions, call, &ctx)
 }
 
@@ -312,7 +305,6 @@ fn handle_timeout_result(call: &call::Call, leg_id: &str) -> Vec<RuleAction> {
     };
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &crate::caller_of(call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: leg_id,
@@ -364,7 +356,6 @@ fn a_leg_timeout_result(call: &call::Call, method: &str) -> Vec<RuleAction> {
     };
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &crate::caller_of(call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -499,7 +490,6 @@ fn setup_timeout_fire_on_a_terminating_call_is_absorbed() {
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -527,7 +517,6 @@ fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
     };
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &crate::caller_of(call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -752,7 +741,6 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -763,12 +751,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: ctx.caller_invite,
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let result = exec.execute(
         &[RuleAction::BeginTermination {
             reason: Some("CANCEL".into()),
@@ -838,7 +821,6 @@ fn in_dialog_bye_selects_relay_bye() {
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -870,7 +852,6 @@ fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination()
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -924,7 +905,6 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -970,7 +950,6 @@ fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -1022,7 +1001,6 @@ Content-Length: 0\r\n\r\n";
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -1051,6 +1029,23 @@ Content-Length: 0\r\n\r\n";
     }
 }
 
+/// A terminal that names no cause is a writer the funnel does not know: a
+/// defect noted on the turn, counted, and the call still cleaned up.
+#[test]
+fn a_terminal_with_no_termination_record_is_a_defect() {
+    let mut call = test_call();
+    let before = call.clone();
+    call.state = CallModelState::Terminated;
+    let mut notes = TurnNotes::default();
+    let leave = invariants::UnansweredCaller::Leave;
+    let core = ObligationSet::core();
+    let result =
+        invariants::enforce(&core, &before, HandlerResult::new(call), 0, leave, &mut notes);
+    let defects: Vec<_> = notes.defects().iter().map(|d| d.name).collect();
+    assert_eq!(defects, [b2bua_core::turn_notes::TERMINATION_RECORDED]);
+    assert!(result.effects.critical.iter().any(|e| matches!(e, CriticalStateEffect::RemoveCall)));
+}
+
 #[test]
 fn invariants_append_cleanup_on_terminated() {
     let mut call = test_call();
@@ -1063,10 +1058,8 @@ fn invariants_append_cleanup_on_terminated() {
         &before,
         HandlerResult::new(call),
         0,
-        invariants::UnansweredCaller::Answer {
-            advertisement: &CapabilitySet::silent(),
-            invite: &crate::caller_of(&before),
-        },
+        invariants::UnansweredCaller::Answer(&CapabilitySet::silent()),
+        &mut TurnNotes::default(),
     );
 
     assert!(
@@ -1118,10 +1111,8 @@ fn the_unanswered_callers_503_carries_the_deployment_advertisement() {
         &before,
         HandlerResult::new(call),
         0,
-        invariants::UnansweredCaller::Answer {
-            advertisement: &policy,
-            invite: &crate::caller_of(&before),
-        },
+        invariants::UnansweredCaller::Answer(&policy),
+        &mut TurnNotes::default(),
     );
     let accept: Vec<String> = result
         .effects
@@ -1172,10 +1163,8 @@ fn no_synthesized_final_when_the_turn_already_answered() {
         &before,
         result,
         0,
-        invariants::UnansweredCaller::Answer {
-            advertisement: &CapabilitySet::silent(),
-            invite: &crate::caller_of(&before),
-        },
+        invariants::UnansweredCaller::Answer(&CapabilitySet::silent()),
+        &mut TurnNotes::default(),
     );
     let finals_to_a = result
         .effects
@@ -1206,10 +1195,8 @@ fn no_synthesized_final_when_the_txn_layer_answered_the_cancel() {
         &before,
         HandlerResult::new(call),
         0,
-        invariants::UnansweredCaller::Answer {
-            advertisement: &CapabilitySet::silent(),
-            invite: &crate::caller_of(&before),
-        },
+        invariants::UnansweredCaller::Answer(&CapabilitySet::silent()),
+        &mut TurnNotes::default(),
     );
     assert!(
         result.effects.outbound.is_empty(),
@@ -1244,7 +1231,6 @@ fn execute_with(config: &B2buaConfig, call: &call::Call, actions: &[RuleAction])
     };
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &crate::caller_of(call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -1255,8 +1241,7 @@ fn execute_with(config: &B2buaConfig, call: &call::Call, actions: &[RuleAction])
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec =
-        ActionExecutor { config, turn: &mut id_gen, now_ms: 0, caller_invite: ctx.caller_invite };
+    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 0 };
     exec.execute(actions, call, &ctx)
 }
 
@@ -1467,7 +1452,6 @@ Contact: <{CALLEE_RINGING_CONTACT}>\r\n\
 fn handle_from(call: &call::Call, event: &CallEvent, leg: &str) -> (&'static str, Vec<RuleAction>) {
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &crate::caller_of(call),
         call_ref: &call.call_ref,
         event,
         source_leg_id: leg,
@@ -1495,7 +1479,6 @@ fn execute_from_b1(call: &call::Call, event: &CallEvent, actions: &[RuleAction])
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &crate::caller_of(call),
         call_ref: &call.call_ref,
         event,
         source_leg_id: "b-1",
@@ -1506,12 +1489,7 @@ fn execute_from_b1(call: &call::Call, event: &CallEvent, actions: &[RuleAction])
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: ctx.caller_invite,
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     exec.execute(actions, call, &ctx)
 }
 
@@ -1664,7 +1642,6 @@ fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
     let event = b_leg_ringing_event(false);
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -1840,7 +1817,6 @@ fn ctx_for<'a>(
 ) -> RuleContext<'a> {
     RuleContext {
         call: RuleCall::new(call),
-        caller_invite: crate::leaked_caller_of(call),
         call_ref: &call.call_ref,
         event,
         source_leg_id: "a",
@@ -1891,12 +1867,7 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule(handle_to_s1)];
 
     let result = {
@@ -1926,12 +1897,7 @@ fn undeclared_transition_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule(handle_to_s2_undeclared)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1954,12 +1920,7 @@ fn undeclared_effect_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     // `sm_rule` declares `effects: &[]`, but the handler emits a `LegMessage`.
     let rules = vec![sm_rule(handle_emits_leg_message)];
 
@@ -1977,12 +1938,7 @@ fn declared_effect_passes_the_drift_check() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule_with_effects(handle_emits_leg_message, &SM_EFFECTS_LEG_MESSAGE)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -2000,12 +1956,7 @@ fn declared_terminal_clear_state_deactivates_machine() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule_with_transitions(handle_clears_state, &SM_TRANSITIONS_TERMINAL)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -2023,12 +1974,7 @@ fn undeclared_terminal_clear_state_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let rules = vec![sm_rule(handle_clears_state)]; // transitions: S0 => S1 only
 
     let ctx = ctx_for(&call, &event, &config);
@@ -2103,7 +2049,6 @@ Content-Length: 0\r\n\r\n";
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -2114,12 +2059,7 @@ Content-Length: 0\r\n\r\n";
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: ctx.caller_invite,
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -2173,7 +2113,6 @@ Content-Length: 0\r\n\r\n";
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -2184,12 +2123,7 @@ Content-Length: 0\r\n\r\n";
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: ctx.caller_invite,
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
     let rs = &result.call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog").route_set;
@@ -2230,7 +2164,6 @@ Content-Length: 0\r\n\r\n";
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -2241,12 +2174,7 @@ Content-Length: 0\r\n\r\n";
         resolved: &call::helpers::UNRESOLVED,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: ctx.caller_invite,
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -2331,7 +2259,6 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -2341,12 +2268,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let result = exec.execute(&[RuleAction::CancelLeg { leg_id: "b-1".into() }], &call, &ctx);
 
     let cancel_effect = result
@@ -2436,15 +2358,9 @@ mod media_primitives {
         id_gen: &'a mut TurnScope,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let mut exec = ActionExecutor {
-            config,
-            turn: id_gen,
-            now_ms: 0,
-            caller_invite: &crate::caller_of(call),
-        };
+        let mut exec = ActionExecutor { config, turn: id_gen, now_ms: 0 };
         let ctx = RuleContext {
             call: RuleCall::new(call),
-            caller_invite: &crate::caller_of(call),
             call_ref: &call.call_ref,
             event,
             source_leg_id,
@@ -2801,15 +2717,9 @@ mod answer_a_leg_new_dialog {
         id_gen: &'a mut TurnScope,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let mut exec = ActionExecutor {
-            config,
-            turn: id_gen,
-            now_ms: 0,
-            caller_invite: &crate::caller_of(call),
-        };
+        let mut exec = ActionExecutor { config, turn: id_gen, now_ms: 0 };
         let ctx = RuleContext {
             call: RuleCall::new(call),
-            caller_invite: &crate::caller_of(call),
             call_ref: &call.call_ref,
             event,
             source_leg_id,
@@ -3333,7 +3243,6 @@ mod ack_leg_body {
         };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
-            caller_invite: &crate::caller_of(&call),
             call_ref: &call.call_ref,
             event: &event,
             source_leg_id: "b-1",
@@ -3344,12 +3253,7 @@ mod ack_leg_body {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: ctx.caller_invite,
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let result = exec.execute(
             &[RuleAction::AckLeg {
                 leg_id: "b-1".into(),
@@ -3432,7 +3336,6 @@ mod ack_leg_body {
         };
         let ctx = RuleContext {
             call: RuleCall::new(call),
-            caller_invite: &crate::caller_of(call),
             call_ref: &call.call_ref,
             event: &event,
             source_leg_id: "b-1",
@@ -3443,12 +3346,7 @@ mod ack_leg_body {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: ctx.caller_invite,
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         exec.execute(
             &[RuleAction::AckLeg {
                 leg_id: "b-1".into(),
@@ -3599,7 +3497,6 @@ mod default_sdp_create_leg {
         };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
-            caller_invite: &crate::caller_of(&call),
             call_ref: &call.call_ref,
             event: &event,
             source_leg_id: "a",
@@ -3610,12 +3507,7 @@ mod default_sdp_create_leg {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: &crate::caller_of(&call),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
 
         // The service sources the fake offer from the config parameter — the whole
         // opt-in wiring. (A normal reroute passes `body_override: None` here, which
@@ -3707,7 +3599,6 @@ mod header_update_removal_withholds_a_relayed_name {
         };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
-            caller_invite: &crate::caller_of(&call),
             call_ref: &call.call_ref,
             event: &event,
             source_leg_id: "a",
@@ -3718,12 +3609,7 @@ mod header_update_removal_withholds_a_relayed_name {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: &crate::caller_of(&call),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let create = RuleAction::CreateLeg {
             destination: ("10.0.1.5".into(), 5070), // IP literal → admission passes
             new_ruri: None,
@@ -3936,6 +3822,7 @@ mod enforce_equivalence {
                 result,
                 0,
                 invariants::UnansweredCaller::Leave,
+                &mut TurnNotes::default(),
             );
 
             prop_assert_eq!(
@@ -4037,12 +3924,7 @@ mod limiter_settle {
         let config = B2buaConfig::default();
         let ctx = ctx_for(call, &event, &config);
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: ctx.caller_invite,
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let result = exec.execute(actions, call, &ctx);
         invariants::enforce(
             &ObligationSet::core(),
@@ -4050,6 +3932,7 @@ mod limiter_settle {
             result,
             0,
             invariants::UnansweredCaller::Leave,
+            &mut TurnNotes::default(),
         )
     }
 
@@ -4195,12 +4078,7 @@ mod service_timers {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
         let call = test_call();
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 1_000,
-            caller_invite: &crate::caller_of(&call),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 1_000 };
         let event = info_like_event(&call);
         let ctx = ctx_at(&call, &event, &config);
 
@@ -4310,7 +4188,6 @@ mod service_timers {
     ) -> RuleContext<'a> {
         RuleContext {
             call: RuleCall::new(call),
-            caller_invite: crate::leaked_caller_of(call),
             call_ref: &call.call_ref,
             event,
             source_leg_id: "a",
@@ -4412,7 +4289,6 @@ fn timer_ctx<'a>(
 ) -> RuleContext<'a> {
     RuleContext {
         call: RuleCall::new(call),
-        caller_invite: crate::leaked_caller_of(call),
         call_ref: &call.call_ref,
         event,
         source_leg_id: "a",
@@ -4449,12 +4325,7 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
         .push(RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::secs(3600)));
 
     let mut id_gen = scope(0x65);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms };
     let result = exec.execute(&actions, &call, &ctx);
 
     let armed = result
@@ -4497,12 +4368,12 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
 }
 
 /// An arming site that computes a `Keepalive` deadline beyond one cadence is a
-/// defect at that site: the ledger invariant trips in debug builds instead of
-/// letting a foreign-frame deadline be persisted and replicated.
-#[cfg(debug_assertions)]
+/// defect at that site, noted on the turn, and the deadline is clamped to one
+/// interval out: an early probe costs nothing, a probe a cadence late costs
+/// the call its peer's keepalive tolerance, and a foreign-frame deadline is
+/// never persisted and replicated.
 #[test]
-#[should_panic(expected = "Keepalive armed beyond one interval")]
-fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
+fn arming_a_keepalive_beyond_one_cadence_is_a_defect_and_is_clamped() {
     let now_ms = 1_000_000;
     let config = B2buaConfig::default();
     let call = test_call();
@@ -4514,46 +4385,7 @@ fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let mut id_gen = scope(0x65);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms,
-        caller_invite: &crate::caller_of(&call),
-    };
-    exec.execute(
-        &[RuleAction::arm(
-            TimerKey::call(TimerType::Keepalive),
-            TimerDelay::secs(config.keepalive_interval_sec * 2),
-        )],
-        &call,
-        &ctx,
-    );
-}
-
-/// In release the same over-cadence deadline is clamped rather than fatal: an
-/// early probe costs nothing, a probe a cadence late costs the call its peer's
-/// keepalive tolerance.
-#[cfg(not(debug_assertions))]
-#[test]
-#[ignore = "release-profile clamp — slow lane (just test-slow)"]
-fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
-    let now_ms = 1_000_000;
-    let config = B2buaConfig::default();
-    let call = test_call();
-    let event = CallEvent::Timer {
-        key: TimerKey::call(TimerType::Keepalive),
-        generation: 0,
-        call_ref: call.call_ref.clone(),
-        incarnation: None,
-    };
-    let ctx = timer_ctx(&call, &event, &config, now_ms);
-    let mut id_gen = scope(0x65);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms,
-        caller_invite: &crate::caller_of(&call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms };
     let result = exec.execute(
         &[RuleAction::arm(
             TimerKey::call(TimerType::Keepalive),
@@ -4573,6 +4405,8 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
         now_ms + config.keepalive_interval_sec * 1000,
         "the over-cadence deadline is clamped to one interval out",
     );
+    let defects: Vec<_> = id_gen.notes.defects().iter().map(|d| d.name).collect();
+    assert_eq!(defects, [b2bua_core::turn_notes::KEEPALIVE_WITHIN_CADENCE]);
 }
 
 // ── §13.3.1.4 answered-2xx discharge (the engine's, before the rules) ────────
@@ -4630,12 +4464,7 @@ fn discharge_ack(
     };
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let mut call = call.clone();
     let mut fx = b2bua_core::effects::HandlerEffects::new();
     let discharged = exec.discharge(&mut call, &mut fx, &event, source_leg_id);
@@ -4704,7 +4533,6 @@ fn relay_ack_pushes_no_ladder_plumbing() {
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: &crate::caller_of(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -4803,19 +4631,13 @@ mod ladder_give_up {
     ) -> (HandlerResult, HandlerResult) {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: &crate::caller_of(call),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let event = give_up_of(call, obligation);
         let mut call = call.clone();
         let mut fx = b2bua_core::effects::HandlerEffects::new();
         exec.give_up(&mut call, &mut fx, obligation);
         let ctx = RuleContext {
             call: RuleCall::new(&call),
-            caller_invite: &crate::caller_of(&call),
             call_ref: &call.call_ref,
             event: &event,
             source_leg_id: "a",
@@ -5023,12 +4845,7 @@ mod going_away_gate {
     fn run(rules: &[RuleDefinition], call: &call::Call, event: &CallEvent) -> HandlerResult {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: &crate::caller_of(call),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let ctx = ctx_for(call, event, &config);
         execute_rules(rules, call, &ctx, &mut exec, &ObligationSet::core())
     }
@@ -5139,12 +4956,7 @@ mod going_away_gate {
         let config = B2buaConfig::default();
         let ctx = ctx_for(&call, &event, &config);
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: &crate::caller_of(&call),
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let result = exec.execute(
             &[RuleAction::BeginTermination {
                 reason: Some("CANCEL".into()),
@@ -5307,12 +5119,7 @@ fn on_verdict(call: &call::Call, outcome: &str) -> HandlerResult {
     let event = reaper_verdict(call, outcome);
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(call),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let ctx = ctx_for(call, &event, &config);
     execute_rules(&default_rules(), call, &ctx, &mut exec, &ObligationSet::core())
 }
@@ -5445,7 +5252,6 @@ mod sdp_body_author {
         };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
-            caller_invite: &crate::caller_of(&call),
             call_ref: &call.call_ref,
             event: &event,
             source_leg_id: "b-1",
@@ -5456,12 +5262,7 @@ mod sdp_body_author {
             resolved: &call::helpers::UNRESOLVED,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor {
-            config: &config,
-            turn: &mut id_gen,
-            now_ms: 0,
-            caller_invite: ctx.caller_invite,
-        };
+        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
         let reinvite = RuleAction::SendReinvite {
             leg_id: "a".into(),
             body: Some(Body::new(BOB_V5.as_bytes().to_vec(), None, author)),
@@ -5546,7 +5347,6 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
         };
         let ctx = RuleContext {
             call: RuleCall::new(call),
-            caller_invite: &crate::caller_of(call),
             call_ref: &call.call_ref,
             event: &event,
             source_leg_id: "a",

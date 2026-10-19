@@ -250,7 +250,6 @@ pub fn run(dialled: &Dialled, script: &[Step], mutated_at: usize, mutations: &[M
         if timer_screen::screen(&mut call, &event, NOW, &mut turn.notes).is_err() {
             continue;
         }
-        let caller = crate::caller_of(&call);
         let input = TurnInput {
             event: &event,
             call_ref: &call.call_ref.clone(),
@@ -258,7 +257,6 @@ pub fn run(dialled: &Dialled, script: &[Step], mutated_at: usize, mutations: &[M
             direction: if leg == "a" { Direction::FromA } else { Direction::FromB },
             resolved: Default::default(),
             now_ms: NOW,
-            caller: &caller,
         };
         if let CallEvent::Sip { message, .. } = &event {
             raws.push((n, message.image().to_vec()));

@@ -73,7 +73,6 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
     let node = node("w0").await;
     let call_ref = call.call_ref.clone();
     let mut scope = super::test_support::turn(1);
-    let caller = super::test_support::caller_of(&call);
     let input = TurnInput {
         event,
         call_ref: &call_ref,
@@ -81,7 +80,6 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         direction: Direction::FromB,
         resolved: Default::default(),
         now_ms: 1_000,
-        caller: &caller,
     };
     rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)
 }
@@ -153,9 +151,7 @@ fn an_owed_prack_on_a_dialog_the_leg_lacks_is_a_defect() {
     call.provisionals.push(owed);
     let config = B2buaConfig::default();
     let mut scope = TurnScope::of(sip_ids::TurnIds::fixed(1));
-    let caller = super::test_support::caller_of(&call);
-    let mut exec =
-        ActionExecutor { config: &config, turn: &mut scope, now_ms: 0, caller_invite: &caller };
+    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
     let mut fx = crate::effects::HandlerEffects::new();
     exec.settle_owed_pracks(&mut call, &mut fx, Owed::Call, Settle::TurnEnd);
     let defects: Vec<_> = scope.notes.defects().iter().map(|d| d.name).collect();
@@ -177,9 +173,7 @@ fn an_unbuilt_prack_records_nothing() {
     call.provisionals.push(owed);
     let config = B2buaConfig::default();
     let mut scope = TurnScope::of(sip_ids::TurnIds::fixed(1));
-    let caller = super::test_support::caller_of(&call);
-    let mut exec =
-        ActionExecutor { config: &config, turn: &mut scope, now_ms: 0, caller_invite: &caller };
+    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
     let mut fx = crate::effects::HandlerEffects::new();
     exec.settle_owed_pracks(&mut call, &mut fx, Owed::Call, Settle::TurnEnd);
     assert!(fx.outbound.is_empty(), "no PRACK leaves");

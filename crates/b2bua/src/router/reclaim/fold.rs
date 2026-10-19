@@ -60,6 +60,18 @@ pub(in crate::router) async fn fold_quietly(
     skew_offset_ms: i64,
     now_ms: i64,
 ) {
+    // A live copy is never replaced by a body that does not rebuild its
+    // caller's INVITE (ADR-0052 §11): the fold is refused and counted, and
+    // the version it names is still seen. A rounds fold keeps the live
+    // copy's snapshot.
+    if fold == Fold::Whole {
+        if let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&replica.a_leg_invite) {
+            ctx.metrics.bump_unrecoverable_fold();
+            tracing::error!(%call_ref, error = %err, "a folded body does not rebuild the caller's INVITE: the live copy stays");
+            super::adopt_seen_counter(ctx, direction, live, &replica);
+            return;
+        }
+    }
     let mut folded = match fold {
         Fold::Whole => raise_sequences(replica, live),
         Fold::Rounds => {

@@ -134,10 +134,8 @@ fn on_bobs_dialog() -> call::helpers::Resolved {
 fn turn(call: &call::Call, event: &CallEvent) -> (Option<&'static str>, Option<HandlerResult>) {
     let config = B2buaConfig::default();
     let resolved = on_bobs_dialog();
-    let caller = crate::caller_of(call);
     let ctx = RuleContext {
         call: RuleCall::new(call),
-        caller_invite: &caller,
         call_ref: &call.call_ref,
         event,
         source_leg_id: "b-1",
@@ -153,8 +151,7 @@ fn turn(call: &call::Call, event: &CallEvent) -> (Option<&'static str>, Option<H
     };
     let actions: Vec<RuleAction> = (rule.handle)(&ctx).map(|r| r.actions).unwrap_or_default();
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec =
-        ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0, caller_invite: &caller };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     (Some(rule.id), Some(exec.execute(&actions, call, &ctx)))
 }
 

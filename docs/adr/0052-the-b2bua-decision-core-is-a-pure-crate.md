@@ -98,7 +98,6 @@ The core takes:
 - the per-process values, borrowed: the configuration, the composed rule list,
   the obligation set;
 - the call, by value, and the event, by reference;
-- the caller's INVITE as a request, rebuilt by the shell (§11);
 - the event's resolution as plain values: the source leg's id, the direction,
   the dialog it resolved to, the `callRef`;
 - `now_ms`, the turn's one clock reading;
@@ -112,8 +111,8 @@ limiter's refresh period, and, on the initial INVITE, the instant the b-leg's
 INVITE leaves. The core never sees a handle, a lock, a channel or a clock.
 
 The action executor holds the configuration, `now_ms`, the fault set, the
-caller's INVITE, the `&mut TurnIds` and the `&mut TurnNotes` of its turn; every
-action that draws or reports takes it by `&mut`.
+`&mut TurnIds` and the `&mut TurnNotes` of its turn; every action that draws or
+reports takes it by `&mut`.
 
 ### 3. Identifiers
 
@@ -238,27 +237,37 @@ where order reaches output the core uses a `BTreeMap`.
 
 ### 11. The caller's INVITE, and an unrecoverable call
 
-The shell rebuilds the caller's INVITE from the call's snapshot once per turn,
-before the core runs, and passes it into the turn (`RuleContext::caller_invite`,
-the executor's, `UnansweredCaller::Answer`). No core function rebuilds it, so
-no turn fails on it. The rebuilt request is not kept beside the resident call:
-it would double the memory every live call holds for its INVITE.
+The core rebuilds the caller's INVITE from the call's snapshot only in a step
+that reads it, through one fallible accessor (`relay::caller_invite`; a rule
+reads it through `RuleContext::caller_invite`). A turn that reads nothing of it
+rebuilds nothing. The rebuilt request is not kept beside the resident call: it
+would double the memory every live call holds for its INVITE.
+
+Every entry that makes a body resident checks that its snapshot rebuilds:
 
 - **At creation** the shell rebuilds it from the snapshot it just took. When
   that fails, the caller is refused with a final built from the live INVITE
   still in hand, and no call is born (new-call refusal `unrecoverable`).
-- **At materialisation** a copy whose snapshot does not rebuild is
-  unrecoverable: the shell discharges it silently, as the reaper's second
-  strike does (ADR-0020 X6). Its legs are abandoned, its CDR and its limiter
-  release go through the one enforcement path, the call is removed, and the
-  discharge is counted (`b2bua_unrecoverable_calls_total`). Nothing is sent on
-  the wire. The enforcement skips the unanswered caller's final
-  (`UnansweredCaller::Leave`), which would need the INVITE the snapshot could
-  not give.
+- **At materialisation** (a takeover, a reclaim) a copy whose snapshot does
+  not rebuild is unrecoverable: the shell discharges it silently, as the
+  reaper's second strike does (ADR-0020 X6). Its legs are abandoned, its CDR
+  and its limiter release go through the one enforcement path, the call is
+  removed, and the discharge is counted (`b2bua_unrecoverable_calls_total`).
+  Nothing is sent on the wire for the call: the enforcement skips the
+  unanswered caller's final (`UnansweredCaller::Leave`), which would need the
+  INVITE the snapshot could not give. The request that asked for the copy is
+  answered as one for a vanished call.
+- **At a fold** the snapshot is written: a whole fold lands the other owner's
+  body, its snapshot with it. A fold whose body does not rebuild is refused
+  and counted (`b2bua_unrecoverable_folds_total`); the live copy, which
+  rebuilds, keeps serving, and the version the body names is still seen. A
+  rounds fold keeps the live copy's snapshot.
 
-The snapshot is never written after creation, so a call that entered the node
-by either path rebuilds at every later turn; a turn whose rebuild fails all
-the same takes the same discharge.
+Nothing else writes the snapshot, so a resident call rebuilds its caller's
+INVITE at every step that reads it. A step that fails all the same is a defect:
+the core notes it (`caller-invite-rebuilds`) and the step does nothing; the
+shell drops the turn's result, discharges the call as above, and answers the
+request that opened the turn as one for a vanished call.
 
 ### 12. The panic set
 

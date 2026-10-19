@@ -179,7 +179,7 @@ impl ActionExecutor<'_> {
             call::OwedAnswer::InAck { ack_cseq: owed, offer } if *owed == ack_cseq => offer.clone(),
             _ => return None,
         };
-        let caller = self.caller_invite;
+        let caller = self.caller_invite(call)?;
         let own = caller.sdp().and_then(|own| {
             sip_message::sdp_answer::answer_from_own(
                 &offer,

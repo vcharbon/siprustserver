@@ -192,6 +192,7 @@ impl ActionExecutor<'_> {
         let branch = self.turn.ids.new_branch();
         let Some(target) = leg_at(call, target_leg) else {
             *call = unrelayed;
+            self.leg_gone(call, target_leg, req.method().as_str());
             return;
         };
         let gen_dialog = relay::to_gen_dialog(target, &target_dialog);

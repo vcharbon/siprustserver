@@ -167,7 +167,9 @@ pub(super) fn http_allow() -> RuleDefinition {
 
             // Held SDP from A's INVITE snapshot (preserves codecs, port 0,
             // a=inactive). No profile → drop the body.
-            let a_invite = ctx.caller_invite;
+            let Some(a_invite) = ctx.caller_invite() else {
+                return Some(RuleHandleResult::unrecoverable());
+            };
             let held = a_invite.sdp().and_then(sip_message::extract_codec_profile).map(|profile| {
                 sip_message::build_held_sdp_from_profile(
                     &profile,

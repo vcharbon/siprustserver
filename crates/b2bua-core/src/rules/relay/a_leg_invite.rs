@@ -1,33 +1,28 @@
-//! [`rebuild_a_leg_invite`]: the caller's INVITE, rebuilt from the call's
-//! snapshot of it.
+//! The caller's INVITE of a call, rebuilt from its record by the step that
+//! reads it (ADR-0052 §11).
 
-use sip_message::draft::{IncompleteDraft, RequestDraft};
-use sip_message::header::{HeaderName, MaxForwards, Uri};
-use sip_message::{Method, SipRequest, SipStr};
+use call::Call;
+use sip_message::SipRequest;
 
-/// Rebuild the a-leg's original INVITE as a `SipRequest`. Every header rides
-/// as an unparsed line, so the rebuilt message carries the caller's bytes
-/// exactly as they arrived. A caller that omitted `Max-Forwards` gets RFC 3261
-/// §8.1.1.6's default, which is the count [`super::build_b_leg`] then carries
-/// onto the transfer leg it originates from this rebuild.
-///
-/// The Request-URI is read verbatim, not refused: this is a round-trip of text
-/// the inbound parser's own strict gates already admitted. Nothing routes on
-/// it — the b-leg's Request-URI comes from the decision, through
-/// [`super::build_b_leg`]'s reader. The shell rebuilds it where the call
-/// enters the node and hands it to every turn (ADR-0052 §11); a snapshot that
-/// does not rebuild (a replicated one from a peer) makes the call
-/// unrecoverable.
-pub fn rebuild_a_leg_invite(
-    snap: &call::ALegInviteSnapshot,
-) -> Result<SipRequest, IncompleteDraft> {
-    let mut draft =
-        RequestDraft::new(Method::Invite, Uri::parse_or_verbatim(&SipStr::owned(&snap.uri)));
-    for h in &snap.headers {
-        draft = draft.push_raw(HeaderName::from(h.name.as_str()), SipStr::owned(&h.value));
+use crate::turn_notes::{TurnNotes, CALLER_INVITE_REBUILDS};
+
+pub use b2bua_sdk::caller_invite::rebuild as rebuild_a_leg_invite;
+
+/// The caller's INVITE of `call`, rebuilt from its record. Every call is
+/// checked to rebuild it where it becomes resident, so a record that does not
+/// is a defect: noted on `notes`, and the turn's call is unrecoverable
+/// ([`TurnNotes::unrecoverable`]).
+pub fn caller_invite(call: &Call, notes: &mut TurnNotes) -> Option<SipRequest> {
+    match rebuild_a_leg_invite(&call.a_leg_invite) {
+        Ok(invite) => Some(invite),
+        Err(err) => {
+            note_unrebuilt(call, notes, &err);
+            None
+        }
     }
-    if !draft.has(&HeaderName::MaxForwards) {
-        draft = draft.push(MaxForwards::DEFAULT);
-    }
-    draft.with_body(snap.body.clone().into()).freeze()
+}
+
+/// Note on `notes` that `call`'s record does not rebuild its caller's INVITE.
+pub fn note_unrebuilt(call: &Call, notes: &mut TurnNotes, why: &dyn std::fmt::Display) {
+    notes.defect(CALLER_INVITE_REBUILDS, format!("the caller's INVITE: {why}"), call);
 }

@@ -13,8 +13,8 @@ use crate::effects::{
     BufferedObservabilityEffect, CriticalStateEffect, HandlerEffects, HandlerResult,
 };
 use crate::obligations::ObligationSet;
+use crate::turn_notes::{TurnNotes, TERMINATION_RECORDED};
 use sip_message::generators::CapabilitySet;
-use sip_message::SipRequest;
 
 /// The always-on global call machine (ADR-0016 X2). Its cursor is a uniform,
 /// read-only **projection** of the authoritative `CallModelState` — the engine,
@@ -59,9 +59,8 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
 /// unanswered.
 #[derive(Clone, Copy, Debug)]
 pub enum UnansweredCaller<'a> {
-    /// Answer her INVITE `invite` 503 under the deployment's `advertisement`
-    /// for a minted final.
-    Answer { advertisement: &'a CapabilitySet, invite: &'a SipRequest },
+    /// Answer her 503 under the deployment's advertisement for a minted final.
+    Answer(&'a CapabilitySet),
     /// Leave the wire alone: an already-terminal reclaimed or folded body, or
     /// an unrecoverable call (ADR-0052 §11).
     Leave,
@@ -80,13 +79,15 @@ pub enum UnansweredCaller<'a> {
 /// bodies were answered by whichever node served them to terminal — or their
 /// caller's transaction died with that node ≥ `reboot_budget` ago — and the HA
 /// contract keeps reclaim-discharge OFF the SIP wire. An unrecoverable call
-/// (ADR-0052 §11) takes `Leave` too: it has no INVITE to answer.
+/// (ADR-0052 §11) takes `Leave` too: it has no INVITE to answer. What the
+/// funnel meets that it cannot carry is noted on `notes`.
 pub fn enforce(
     obligations: &ObligationSet,
     before: &Call,
     mut result: HandlerResult,
     now_ms: i64,
     unanswered: UnansweredCaller<'_>,
+    notes: &mut TurnNotes,
 ) -> HandlerResult {
     let became_terminated = before.state != CallModelState::Terminated
         && result.call.state == CallModelState::Terminated;
@@ -96,17 +97,13 @@ pub fn enforce(
     // Every path to terminal names its cause: the record is the CDR's
     // statement of who ended the call, and a terminal without one is a
     // writer this funnel does not know.
-    debug_assert!(
-        result.call.termination.is_some(),
-        "{}: terminated without a termination record",
-        result.call.call_ref
-    );
     if result.call.termination.is_none() {
-        tracing::error!(call_ref = %result.call.call_ref, "terminated without a termination record");
+        let detail = "terminated without a termination record".to_string();
+        notes.defect(TERMINATION_RECORDED, detail, &result.call);
         result.effects.buffered.push(BufferedObservabilityEffect::TerminationUnrecorded);
     }
-    if let UnansweredCaller::Answer { advertisement, invite } = unanswered {
-        answer_a_leg_if_unanswered(before, &mut result, now_ms, advertisement, invite);
+    if let UnansweredCaller::Answer(advertisement) = unanswered {
+        answer_a_leg_if_unanswered(before, &mut result, now_ms, advertisement, notes);
     }
     let crit = &mut result.effects.critical;
     if !crit.iter().any(|e| matches!(e, CriticalStateEffect::CancelAllTimers)) {
@@ -154,28 +151,29 @@ fn answer_a_leg_if_unanswered(
     result: &mut HandlerResult,
     now_ms: i64,
     advertisement: &CapabilitySet,
-    a_invite: &SipRequest,
+    notes: &mut TurnNotes,
 ) {
     if matches!(before.a_leg.state(), LegState::Trying | LegState::Early) {
         let (call, effects) = (&mut result.call, &mut result.effects);
-        answer_unanswered_caller(call, effects, now_ms, advertisement, a_invite);
+        answer_unanswered_caller(call, effects, now_ms, advertisement, notes);
     }
 }
 
-/// Answer the caller's INVITE `a_invite` `503` when it carries no final yet
-/// and a snapshot to answer exists, recording it on the CDR: the funnel above,
-/// and a teardown whose release waits on a callee's CANCEL (the caller is owed
+/// Answer the caller's INVITE `503` when it carries no final yet and a
+/// snapshot to answer exists, recording it on the CDR: the funnel above, and
+/// a teardown whose release waits on a callee's CANCEL (the caller is owed
 /// nothing from it).
 pub(crate) fn answer_unanswered_caller(
     call: &mut Call,
     effects: &mut HandlerEffects,
     now_ms: i64,
     advertisement: &CapabilitySet,
-    a_invite: &SipRequest,
+    notes: &mut TurnNotes,
 ) {
     if call.a_leg_invite.headers.is_empty() || call.a_leg.invite_final_sent.is_some() {
         return;
     }
+    let Some(a_invite) = super::relay::caller_invite(call, notes) else { return };
     let a_leg_id = call.a_leg.leg_id.clone();
     // Reuse the a-leg's own tag when an 18x already pinned one (Early);
     // otherwise `generate_response`'s deterministic fallback tag applies.
@@ -185,7 +183,7 @@ pub(crate) fn answer_unanswered_caller(
     let Some(mut effect) = super::relay::response_to_a_leg(
         call,
         effects,
-        a_invite,
+        &a_invite,
         503,
         "Service Unavailable",
         to_tag,

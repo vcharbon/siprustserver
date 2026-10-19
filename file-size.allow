@@ -16,7 +16,7 @@ crates/b2bua-core/src/rules/defaults/core_rules.rs 1654
 crates/b2bua-core/src/rules/relay_first_18x.rs 526
 crates/b2bua-core/src/rules/relay/originate_tests.rs 849
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 963
-crates/b2bua-core/tests/it/rules.rs 5568
+crates/b2bua-core/tests/it/rules.rs 5368
 crates/b2bua-harness/src/lib.rs 1025
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810

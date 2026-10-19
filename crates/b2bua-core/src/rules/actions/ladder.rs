@@ -225,7 +225,6 @@ impl ActionExecutor<'_> {
         };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
-            caller_invite: turn.caller_invite,
             call_ref: turn.call_ref,
             event: turn.event,
             source_leg_id: turn.source_leg_id,

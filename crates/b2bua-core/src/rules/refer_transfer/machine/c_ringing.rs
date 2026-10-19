@@ -12,7 +12,9 @@ use crate::rules::refer_transfer::notify::{
 };
 use crate::rules::refer_transfer::ok;
 use crate::rules::Terminal;
-use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
+use b2bua_sdk::model::{
+    Body, Effect, Match, RuleAction, RuleDefinition, RuleHandleResult, TimerDelay,
+};
 use call::TimerKey;
 
 /// transfer-c-1xx-absorb — C 1xx. The referrer's peer is answered, so C's
@@ -81,7 +83,9 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             // Capture C's 200 SDP (drives the a-realign re-INVITE).
             let c_initial_sdp = resp.sdp().map(<[u8]>::to_vec);
             // A's SDP for the c-realign re-INVITE-C offer.
-            let a_leg = ctx.caller_invite;
+            let Some(a_leg) = ctx.caller_invite() else {
+                return Some(RuleHandleResult::unrecoverable());
+            };
             let a_sdp = a_leg.sdp().unwrap_or_default();
             // A's lines describe the offer only where it is her whole body.
             let a_offer = Body::from_leg(a_sdp.to_vec(), ctx.call.a_leg().leg_id.to_string());

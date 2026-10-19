@@ -154,7 +154,6 @@ fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::Handl
     }
     let (call_ref, source_leg_id) = (call.call_ref.clone(), call.a_leg.leg_id.clone());
     let mut scope = super::test_support::turn(1);
-    let caller = super::test_support::caller_of(&call);
     let input = TurnInput {
         event,
         call_ref: &call_ref,
@@ -162,7 +161,6 @@ fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::Handl
         direction: Direction::FromA,
         resolved: Default::default(),
         now_ms: NOW,
-        caller: &caller,
     };
     rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)
 }

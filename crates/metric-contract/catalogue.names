@@ -36,6 +36,7 @@ b2bua-runner b2bua_replica_reap_panics_total counter fixed {}
 b2bua-runner b2bua_reaper_verdicts_total counter fixed {}
 b2bua-runner b2bua_reaper_discharged_total counter fixed {}
 b2bua-runner b2bua_unrecoverable_calls_total counter fixed {}
+b2bua-runner b2bua_unrecoverable_folds_total counter fixed {}
 b2bua-runner b2bua_repl_flush_propagated_total counter fixed {}
 b2bua-runner b2bua_repl_flush_unencodable_total counter fixed {}
 b2bua-runner b2bua_repl_body_undecodable_total counter fixed {}

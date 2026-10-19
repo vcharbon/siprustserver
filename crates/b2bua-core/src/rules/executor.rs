@@ -110,6 +110,11 @@ pub fn execute_rules(
         let Some(outcome) = (rule.handle)(ctx) else {
             continue;
         };
+        if outcome.unrecoverable {
+            let why = format!("read by rule {}", rule.id);
+            crate::rules::relay::note_unrebuilt(call, &mut exec.turn.notes, &why);
+            return HandlerResult::new(call.clone());
+        }
         let before = call.clone();
         report_diagnostics(rule, call, &outcome);
         check_declared_effects(rule, &outcome.actions, call, &mut exec.turn.notes);
@@ -131,10 +136,8 @@ pub fn execute_rules(
             &before,
             result,
             exec.now_ms,
-            invariants::UnansweredCaller::Answer {
-                advertisement: &exec.config.minted_final_advertisement,
-                invite: exec.caller_invite,
-            },
+            invariants::UnansweredCaller::Answer(&exec.config.minted_final_advertisement),
+            &mut exec.turn.notes,
         );
         // Recorded from the FINAL call, so the trace carries what finalize
         // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503

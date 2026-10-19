@@ -21,7 +21,7 @@ use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::stray_cancel::reject_stray_cancel;
-use super::unrecoverable::caller_or_discharge;
+use super::unrecoverable::discharge_after_turn;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
@@ -95,16 +95,13 @@ pub(super) async fn process(
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;
         };
-        let Some(caller) = caller_or_discharge(ctx, &call_ref, &call, now_ms).await else {
-            return;
-        };
         let before = call.clone();
         let Some(res) =
             crate::limiter::refresh_turn::apply_answer(&ctx.metrics, call, &answer, now_ms)
         else {
             return;
         };
-        enforced(&ctx.framework(), &before, res, now_ms, &caller)
+        enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
     } else {
         if of_another_incarnation(ctx, &event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
@@ -143,11 +140,6 @@ pub(super) async fn process(
             answer_vanished(ctx, &event, &mut turn.ids).await;
             return;
         }
-        // Every turn reads the caller's INVITE, rebuilt here from the record
-        // (ADR-0052 §11).
-        let Some(caller) = caller_or_discharge(ctx, &call_ref, &call, now_ms).await else {
-            return;
-        };
         // A timer fire reaches the call only while its ledger holds the fired
         // instance, which leaves the ledger as it is delivered.
         let mut call = call;
@@ -213,7 +205,7 @@ pub(super) async fn process(
             let limiter = &ctx.limiter;
             let res =
                 crate::limiter::refresh_turn::on_refresh_due(limiter, call, &call_ref, now_ms);
-            enforced(&ctx.framework(), &before, res, now_ms, &caller)
+            enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
         } else {
             // A relay no node can finish is gone before the rules read the
             // call, so its request is relayed afresh.
@@ -225,12 +217,20 @@ pub(super) async fn process(
                 direction: res.direction,
                 resolved,
                 now_ms,
-                caller: &caller,
             };
             rule_chain_turn(&ctx.framework(), call, input, &mut turn)
         }
     };
+    let unrecoverable = turn.notes.unrecoverable();
     super::notes::drain(ctx, &call_ref, &mut turn);
+    if unrecoverable {
+        let ids = &mut turn.ids;
+        if !discharge_after_turn(ctx, &call_ref, &event, now_ms, ids).await {
+            drop(_guard);
+            release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
+        }
+        return;
+    }
 
     record_keepalive_timeout_peer(ctx, &event, &result.call);
 

@@ -190,7 +190,7 @@ impl ActionExecutor<'_> {
             let answering = (200..300).contains(&status);
             let a_face = self.a_face_tag(call, source_leg_id, to_tag, answering);
             call::helpers::note_shown(call, source_leg_id, to_tag);
-            let a_invite = self.caller_invite;
+            let Some(a_invite) = self.caller_invite(call) else { return };
             let contact =
                 relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
             let mut passthrough = r.passthrough(relay::relay_response_passthrough_headers(
@@ -229,7 +229,7 @@ impl ActionExecutor<'_> {
             let Some(mut effect) = relay::response_to_a_leg(
                 call,
                 fx,
-                a_invite,
+                &a_invite,
                 status,
                 &r.reason,
                 Some(a_face.clone()),
@@ -273,7 +273,7 @@ impl ActionExecutor<'_> {
         // early dialog is answered under that same tag (§8.2.6.2), including the
         // owned bare 180's under `relayFirst18xTo180`.
         let a_tag = self.ensure_a_dialog(call);
-        let a_invite = self.caller_invite;
+        let Some(a_invite) = self.caller_invite(call) else { return };
         let contact =
             relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
         // Reliable-provisional negotiation (Require/Supported) passes through
@@ -315,7 +315,7 @@ impl ActionExecutor<'_> {
         let Some(mut effect) = relay::response_to_a_leg(
             call,
             fx,
-            a_invite,
+            &a_invite,
             status,
             &r.reason,
             Some(a_tag.clone()),

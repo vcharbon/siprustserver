@@ -124,7 +124,6 @@ fn info_event() -> CallEvent {
 fn ctx_for<'a>(call: &'a Call, event: &'a CallEvent, config: &'a B2buaConfig) -> RuleContext<'a> {
     RuleContext {
         call: RuleCall::new(call),
-        caller_invite: crate::leaked_caller_of(call),
         call_ref: &call.call_ref,
         event,
         source_leg_id: "a",
@@ -143,12 +142,7 @@ fn stub_service_init_seeds_then_rule_advances_then_declines() {
 
     let config = B2buaConfig::default();
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&test_call()),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let event = info_event();
     let services = vec![stub::service_def()];
 
@@ -202,12 +196,7 @@ fn dormant_service_leaves_call_untouched() {
 
     let config = B2buaConfig::default();
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&test_call()),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let event = info_event();
 
     fn dormant_init(_: &RuleCall) -> Option<ServiceSeed> {
@@ -257,12 +246,7 @@ fn a_configured_seed_reads_the_service_parameters() {
     let mut config = B2buaConfig::default();
     config.service_params.insert(Marker("from-config"));
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-        caller_invite: &crate::caller_of(&test_call()),
-    };
+    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
     let event = info_event();
     let seeded = seed_services(
         HandlerResult::new(test_call()),

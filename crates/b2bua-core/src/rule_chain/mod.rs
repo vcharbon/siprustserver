@@ -12,7 +12,7 @@ pub mod timer_screen;
 
 use call::helpers::{Arrival, Resolved};
 use call::{Call, CallModelState, Direction, Obligation, TimerType};
-use sip_message::{Method, SipMessage, SipRequest};
+use sip_message::{Method, SipMessage};
 
 use crate::answer_deadline::Screened;
 use crate::config::B2buaConfig;
@@ -21,6 +21,7 @@ use crate::obligations::ObligationSet;
 use crate::rules::actions::{Owed, Settle};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
+use crate::turn_notes::TurnNotes;
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
@@ -34,7 +35,7 @@ pub struct Framework<'a> {
 }
 
 /// The event a turn runs on, as the shell resolved it, with the turn's clock
-/// reading and the caller's INVITE (ADR-0052 §11).
+/// reading.
 pub struct TurnInput<'a> {
     pub event: &'a CallEvent,
     pub call_ref: &'a str,
@@ -44,7 +45,6 @@ pub struct TurnInput<'a> {
     /// What the dialog gate resolved the event's message to.
     pub resolved: Resolved,
     pub now_ms: i64,
-    pub caller: &'a SipRequest,
 }
 
 /// The branch of a BYE client transaction `event` ends: a final to it, or a
@@ -86,7 +86,7 @@ pub fn rule_chain_turn(
     input: TurnInput<'_>,
     turn: &mut TurnScope,
 ) -> HandlerResult {
-    let TurnInput { event, call_ref, source_leg_id, direction, resolved, now_ms, caller } = input;
+    let TurnInput { event, call_ref, source_leg_id, direction, resolved, now_ms } = input;
     // The cap budget is a PER-LIVENESS-INTERVAL rate, not a lifetime total: the
     // keepalive tick RESETS the counter, opening a fresh window. A runaway
     // dialog still lands >cap events inside one window and is torn down; a
@@ -104,7 +104,7 @@ pub fn rule_chain_turn(
     call.message_count = Some(bumped);
     let cap_exceeded = i64::try_from(fw.config.max_messages_per_call).is_ok_and(|cap| bumped > cap)
         && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    let mut exec = ActionExecutor { config: fw.config, turn, now_ms, caller_invite: caller };
+    let mut exec = ActionExecutor { config: fw.config, turn, now_ms };
     // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
     // repeated here and never reaches a rule; the discharging ACK or PRACK
     // retires its ladder before the rules run and they read the fact; a
@@ -131,7 +131,7 @@ pub fn rule_chain_turn(
         exec.repeat(&mut call, &mut ladder_fx, obligation);
         ladder_fx.quiet = Some(QuietTurn::OwnRung);
         let repeated = HandlerResult { call, effects: ladder_fx };
-        return enforced(fw, &before, repeated, now_ms, caller);
+        return enforced(fw, &before, repeated, now_ms, &mut exec.turn.notes);
     }
     // The end of the wait behind this stack's own NOTIFY is the framework's:
     // the requests held there leave, and no rule sees the fire.
@@ -139,7 +139,7 @@ pub fn rule_chain_turn(
         let before = call.clone();
         exec.release_at_cap(&mut call, &mut ladder_fx);
         let released = HandlerResult { call, effects: ladder_fx };
-        return enforced(fw, &before, released, now_ms, caller);
+        return enforced(fw, &before, released, now_ms, &mut exec.turn.notes);
     }
     let start = TurnStart::of(&call);
     // A reliable provisional is the engine's before it is any rule's (RFC
@@ -206,7 +206,6 @@ pub fn rule_chain_turn(
     }
     let rule_ctx = RuleContext {
         call: RuleCall::new(&call),
-        caller_invite: caller,
         call_ref,
         event,
         source_leg_id,
@@ -243,7 +242,7 @@ pub fn rule_chain_turn(
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         let before = result.call.clone();
         let settled = exec.settle_give_up(result, obligation, &rule_ctx);
-        result = enforced(fw, &before, settled, now_ms, caller);
+        result = enforced(fw, &before, settled, now_ms, &mut exec.turn.notes);
     }
     if cap_exceeded
         && !matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated)
@@ -259,23 +258,21 @@ pub fn rule_chain_turn(
 }
 
 /// `result`, the turn's outcome on `before`, finalized and held to the
-/// invariants the framework enforces.
+/// invariants the framework enforces, what it meets noted on `notes`.
 pub fn enforced(
     fw: &Framework<'_>,
     before: &Call,
     result: HandlerResult,
     now_ms: i64,
-    caller: &SipRequest,
+    notes: &mut TurnNotes,
 ) -> HandlerResult {
     crate::rules::invariants::enforce(
         fw.obligations,
         before,
         crate::rules::invariants::finalize(result),
         now_ms,
-        crate::rules::invariants::UnansweredCaller::Answer {
-            advertisement: &fw.config.minted_final_advertisement,
-            invite: caller,
-        },
+        crate::rules::invariants::UnansweredCaller::Answer(&fw.config.minted_final_advertisement),
+        notes,
     )
 }
 

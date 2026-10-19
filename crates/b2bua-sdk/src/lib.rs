@@ -42,6 +42,7 @@
 )]
 
 pub mod body;
+pub mod caller_invite;
 pub mod config;
 pub mod effect;
 pub mod event;

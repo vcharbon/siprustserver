@@ -71,6 +71,8 @@ pub(crate) mod txn_event;
 mod unaddressable;
 mod undecided;
 mod unrecoverable;
+#[cfg(test)]
+mod unrecoverable_tests;
 mod unroutable;
 
 pub(crate) use reclaim::reap_expired_replicas;

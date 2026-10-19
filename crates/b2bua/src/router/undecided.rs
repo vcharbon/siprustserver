@@ -46,10 +46,9 @@ pub(super) async fn settle_undecided(
     let mut turn = turn.with_faults(ctx.wire_faults.snapshot());
     let before = call.clone();
     let advertisement = &ctx.config.minted_final_advertisement;
-    // The materialisation proved the record rebuilds the caller's INVITE
-    // (ADR-0052 §11).
-    let caller = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite).ok();
-    let (handled, unanswered) = if let Some(a_invite) = caller.as_ref().filter(|_| seeded > 0) {
+    let caller =
+        (seeded > 0).then(|| crate::rules::relay::caller_invite(&call, &mut turn.notes)).flatten();
+    let (handled, unanswered) = if let Some(a_invite) = caller.as_ref() {
         let refused = crate::initial_invite::reject_call(
             call,
             a_invite,
@@ -62,7 +61,7 @@ pub(super) async fn settle_undecided(
             now_ms,
             TerminationCause::Admission,
         );
-        (refused, UnansweredCaller::Answer { advertisement, invite: a_invite })
+        (refused, UnansweredCaller::Answer(advertisement))
     } else {
         let mut ended =
             call::helpers::record_termination(call, now_ms, TerminationCause::Admission, None);
@@ -76,7 +75,9 @@ pub(super) async fn settle_undecided(
         answered = seeded > 0,
         "undecided call settled"
     );
-    let result = enforce(&ctx.obligations, &before, finalize(handled), now_ms, unanswered);
+    let notes = &mut turn.notes;
+    let result = enforce(&ctx.obligations, &before, finalize(handled), now_ms, unanswered, notes);
+    super::notes::drain(ctx, call_ref, &mut turn);
     process_result(ctx, call_ref, result, now_ms, &"the settle of an undecided call", None).await;
 }
 

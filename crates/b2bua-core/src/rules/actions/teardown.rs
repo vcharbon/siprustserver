@@ -153,7 +153,7 @@ impl ActionExecutor<'_> {
                 fx,
                 self.now_ms,
                 &self.config.minted_final_advertisement,
-                self.caller_invite,
+                &mut self.turn.notes,
             );
         }
         // Nothing awaits an answer, no service makes progress and nothing is

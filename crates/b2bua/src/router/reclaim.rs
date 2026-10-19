@@ -165,6 +165,7 @@ pub(super) async fn discharge_materialized_terminal(
     } else {
         crate::effects::HandlerResult::new(terminal)
     };
+    let mut notes = crate::turn_notes::TurnNotes::default();
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
         &before,
@@ -174,7 +175,9 @@ pub(super) async fn discharge_materialized_terminal(
         // answered on the wire (or its caller died with the crashed node).
         // Reclaim-discharge stays OFF the SIP wire (ADR-0022 / ADR-0014).
         crate::rules::invariants::UnansweredCaller::Leave,
+        &mut notes,
     );
+    super::notes::drain_notes(ctx, call_ref, notes);
     process_result(
         ctx,
         call_ref,
@@ -429,24 +432,18 @@ fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
 pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
     let Some(call) = ctx.state.peek(call_ref) else { return };
     let before = call.clone();
-    // LIVE call the rules path failed on twice — if its a-leg is still
-    // unanswered the caller is waiting on OUR server txn: answer it, from the
-    // INVITE its record rebuilds (ADR-0052 §11).
-    let caller = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite).ok();
-    let unanswered = match &caller {
-        Some(invite) => crate::rules::invariants::UnansweredCaller::Answer {
-            advertisement: &ctx.config.minted_final_advertisement,
-            invite,
-        },
-        None => crate::rules::invariants::UnansweredCaller::Leave,
-    };
+    let mut notes = crate::turn_notes::TurnNotes::default();
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
         &before,
         crate::rules::invariants::finalize(crate::reaper::discharge_result(call, now_ms)),
         now_ms,
-        unanswered,
+        // LIVE call the rules path failed on twice — if its a-leg is still
+        // unanswered the caller is waiting on OUR server txn: answer it.
+        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
+        &mut notes,
     );
+    super::notes::drain_notes(ctx, call_ref, notes);
     process_result(ctx, call_ref, result, now_ms, &"the reaper discharge", None).await;
 }
 

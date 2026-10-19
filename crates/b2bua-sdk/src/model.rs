@@ -408,11 +408,13 @@ pub struct RuleHandleResult {
     /// refusal it owns. The engine logs and counts these; they emit no wire
     /// traffic of their own, so a rule can never route on one.
     pub diagnostics: Vec<RuleDiagnostic>,
+    /// The call's record does not rebuild the caller's INVITE the rule read.
+    pub unrecoverable: bool,
 }
 
 impl RuleHandleResult {
     pub fn new(actions: Vec<RuleAction>) -> Self {
-        Self { actions, diagnostics: Vec::new() }
+        Self { actions, diagnostics: Vec::new(), unrecoverable: false }
     }
 
     /// The same actions, carrying `diagnostic` — what a rule returns when an
@@ -1030,8 +1032,6 @@ impl RuleAction {
 /// narrow [`RuleCall`] view, the full `Call` staying on the framework's side (ADR-0020 X8).
 pub struct RuleContext<'a> {
     pub call: RuleCall<'a>,
-    /// The caller's INVITE, rebuilt by the shell from the call's snapshot (ADR-0052 §11).
-    pub caller_invite: &'a SipRequest,
     pub call_ref: &'a str,
     pub event: &'a CallEvent,
     pub source_leg_id: &'a str,

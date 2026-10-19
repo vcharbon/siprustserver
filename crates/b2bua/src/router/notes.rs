@@ -4,11 +4,17 @@
 //! (ADR-0052 §8), in the order the turn met them.
 
 use super::RouterCtx;
+use crate::turn_notes::TurnNotes;
 use crate::turn_scope::TurnScope;
 
 /// Drain what `turn` has reported on `call_ref`.
 pub(super) fn drain(ctx: &RouterCtx, call_ref: &str, turn: &mut TurnScope) {
-    let notes = turn.notes.take();
+    drain_notes(ctx, call_ref, turn.notes.take());
+}
+
+/// Drain `notes`, reported on `call_ref` by a core call the shell makes
+/// outside a turn's scope.
+pub(super) fn drain_notes(ctx: &RouterCtx, call_ref: &str, notes: TurnNotes) {
     for fact in notes.trace_facts() {
         crate::trace::emit::turn_fact(call_ref, fact);
     }
