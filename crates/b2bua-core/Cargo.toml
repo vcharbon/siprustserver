@@ -41,3 +41,5 @@ sip-ids = { path = "../sip-ids", features = ["testkit"] }
 # ADR-0020 X7 refactor gate: the obligation extraction must be effect-multiset
 # equivalent to the pre-extraction `enforce` over arbitrary snapshots.
 proptest = { workspace = true }
+# The property lane's SIP text mutations and runner (ADR-0051 §8).
+wire-mutations = { path = "../wire-mutations" }
