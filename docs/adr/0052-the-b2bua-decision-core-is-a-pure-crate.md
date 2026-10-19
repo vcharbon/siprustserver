@@ -1,6 +1,6 @@
 # The B2BUA's decision core is a pure crate; a turn is a function of its inputs
 
-**Status:** proposed (2026-10-19)
+**Status:** accepted (2026-10-19)
 
 **Owner:** `crates/b2bua-core` (the core: rules, the turn, the folds, the effect
 vocabulary), `crates/b2bua` (the shell: router, interpreter, store, replication,
@@ -88,10 +88,12 @@ crates.
 ### 2. A turn and its inputs
 
 A turn is one run of the core over one call under the call's lock. The shell
-opens it before the per-turn gates, since their refusals draw identifiers, and
-every shell call into the core's `enforce` runs inside one: the per-call
-handler body, the refresh answer, the reaper's discharge, the reclaim
-discharges and the folded terminal, an undecided call's settle.
+opens it before the per-turn gates, since their refusals draw identifiers: the
+per-call handler body (the refresh answer among its turns), the discharge of a
+folded terminal body, an undecided call's settle. Three discharges open no
+turn, as they draw no identifier: the reaper's discharge, the discharge of a
+materialised terminal body, and an unrecoverable call's (§11). What the core's
+`enforce` notes in them is drained as it returns.
 
 The core takes:
 
@@ -152,7 +154,10 @@ and writes `TurnNotes`, the data that were side effects inside the turn:
   obligation kind, a message-cap teardown;
 - the defects met mid-turn, each with its name and detail: a model defect, a
   rule's undeclared machine transition or side effect, a lifecycle handler's
-  action outside what a lifecycle handler may do.
+  action outside what a lifecycle handler may do, a record that does not
+  rebuild the caller's INVITE (§11), a terminal call naming no cause, a
+  keepalive armed beyond one cadence, a request whose leg left the record as
+  it was built. None of them panics, in any build.
 
 The shell drains the notes as each core call returns, before it records or
 sends anything else of the turn: trace facts go into the registry, counts onto
@@ -240,8 +245,8 @@ says so and reads it itself.
 
 `b2bua-core` depends on `call`, `sip-message`, `b2bua-sdk`, `sip-ids`,
 `sip-retransmit` and `lookup-map`, and on `serde`, `serde_json`, `thiserror` and
-`tracing`. `tracing` brings `tracing-core`, `once_cell` and `pin-project-lite`
-into the pure dependency allowlist. A `LookupMap` / `LookupSet` serves a
+`tracing`. `tracing` brings `tracing-core`, `once_cell`, `pin-project-lite` and
+`log` (its facade) into the pure dependency allowlist. A `LookupMap` / `LookupSet` serves a
 function's local lookups only and never appears in `Call` or in an effect;
 where order reaches output the core uses a `BTreeMap`.
 
