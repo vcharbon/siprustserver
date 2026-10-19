@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 # Ingress hands the receive buffer to the parser as a refcounted `Bytes`, so
 # the parsed message shares it rather than copying the datagram.
 bytes.workspace = true

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 # The Send agent factory + fallible try_* choreography + best-effort teardown
 # helpers live here (the load-bearing reuse of the functional harness).
 scenario-harness = { path = "../scenario-harness" }

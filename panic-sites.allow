@@ -109,12 +109,8 @@ crates/jemalloc-stats/src/lib.rs 3
 crates/load-shed/src/retry_after.rs 1
 crates/load-shed/src/sampler.rs 5
 crates/load-shed/src/token_bucket.rs 2
-crates/metric-catalogue/src/check.rs 9
-crates/metric-catalogue/src/fixed.rs 9
-crates/metric-catalogue/src/labels.rs 10
-crates/metric-catalogue/src/lib.rs 3
-crates/metric-catalogue/src/open.rs 20
-crates/metric-catalogue/src/render.rs 8
+crates/metric-values/src/fixed.rs 6
+crates/metric-values/src/open.rs 14
 crates/observe/src/admission.rs 2
 crates/observe/src/attr.rs 4
 crates/observe/src/rate_draw.rs 1

@@ -11,6 +11,7 @@ members = [
     "crates/sip-retransmit",
     "crates/load-shed",
     "crates/metric-catalogue",
+    "crates/metric-values",
     "crates/metric-contract",
     "crates/layer-harness",
     "crates/sip-net",

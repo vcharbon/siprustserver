@@ -47,6 +47,7 @@ load-shed = { path = "../load-shed" }
 # Declared Prometheus families: the catalogue the worker renders its
 # admission and dispatch counts from (metrics/catalogue.rs).
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 repl-net = { path = "../repl-net" }
 topology = { path = "../topology" }
 # Limiter client: the transport SEAM only (real impl injected by the runner; sim

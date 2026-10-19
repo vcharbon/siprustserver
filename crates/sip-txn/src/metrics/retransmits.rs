@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use metric_catalogue::OpenRows;
+use metric_values::OpenRows;
 use sip_message::Method;
 use sip_retransmit::Class;
 

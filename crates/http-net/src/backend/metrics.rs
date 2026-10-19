@@ -7,7 +7,8 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use metric_catalogue::{Dim, Family, Labels, OpenRows};
+use metric_catalogue::{Dim, Family, Labels};
+use metric_values::OpenRows;
 
 /// Requests that found every in-flight slot taken and waited for one.
 pub const SLOT_WAITS: Family = Family::counter(

@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::family::{Family, Kind};
+use metric_catalogue::{Family, Kind};
+
 use crate::open::{key, with_key};
 
 /// A fixed family's counts, one per declared label set, written at 0 before
@@ -68,7 +69,7 @@ impl FixedCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Dim, Labels};
+    use metric_catalogue::{Dim, Labels};
 
     const KIND: Dim = Dim::new("kind", &["a", "b"]);
     const F: Family = Family::counter("k_total", Labels::Product(&[KIND]), "by kind");

@@ -15,7 +15,8 @@
 
 use std::sync::OnceLock;
 
-use metric_catalogue::{label_values, Dim, Family, Labels, OpenRows};
+use metric_catalogue::{label_values, Dim, Family, Labels};
+use metric_values::OpenRows;
 
 /// The classified cause of a failed request. Everything the reqwest/hyper error
 /// chain can tell us apart, and nothing invented.

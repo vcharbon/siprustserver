@@ -111,7 +111,7 @@ impl Family {
     /// This family, semi-open and capped at `max` label sets with an
     /// undeclared value of one of `labels`, counting the excess on
     /// `overflow`.
-    pub(crate) const fn capped_at(
+    pub const fn capped_at(
         self,
         max: usize,
         overflow: &'static Family,

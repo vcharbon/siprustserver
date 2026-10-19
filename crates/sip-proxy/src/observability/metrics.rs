@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use metric_catalogue::{FixedCounts, HistogramValue, OpenRows};
+use metric_catalogue::HistogramValue;
+use metric_values::{FixedCounts, OpenRows};
 use sip_message::method::Method;
 
 use super::catalogue;
-use pool::PoolGauges;
 
 mod face;
 mod no_target;
@@ -224,7 +224,7 @@ pub struct ProxyMetrics {
     /// written every sweep tick, read at render.
     udp_shards: Mutex<BTreeMap<usize, UdpShardStats>>,
     /// The worker pool: health counts, empty, discovery health.
-    pool: PoolGauges,
+    pool: pool::PoolGauges,
     /// Recv shards currently past the stall threshold (see `liveness`).
     recv_shards_stalled: AtomicU64,
     /// Per-face traffic counters (dual-face mode): `[face][direction]` where

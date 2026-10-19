@@ -25,10 +25,11 @@ impl Family {
     /// sample per declared label set in exposition order, valued by `value`.
     /// Every declared label set is written, whatever its value.
     ///
-    /// Panics for a histogram: render it with
-    /// [`render_histogram`](Self::render_histogram).
+    /// A histogram renders with [`render_histogram`](Self::render_histogram).
     pub fn render<V: Display>(&self, out: &mut String, mut value: impl FnMut(&Series<'_>) -> V) {
-        assert!(self.kind != Kind::Histogram, "{} is a histogram", self.name);
+        if !self.renders_as(false) {
+            return;
+        }
         self.render_header(out);
         self.labels.for_each_series(|series| {
             let labels: Vec<(&str, &str)> = series.labels().collect();
@@ -36,17 +37,25 @@ impl Family {
         });
     }
 
-    /// Append a family without labels, valued `value`.
-    ///
-    /// Panics when the family declares labels.
+    /// Append a family without labels, valued `value`. A family declaring
+    /// labels renders per series.
     pub fn render_value(&self, out: &mut String, value: impl Display) {
-        assert!(
-            matches!(self.labels, Labels::None),
-            "{} declares labels: render it per series",
-            self.name
-        );
-        let mut value = Some(value);
-        self.render(out, |_| value.take().expect("one series"));
+        let unlabelled = matches!(self.labels, Labels::None);
+        debug_assert!(unlabelled, "{} declares labels: render it per series", self.name);
+        if !unlabelled || !self.renders_as(false) {
+            return;
+        }
+        self.render_header(out);
+        write_sample(out, self.name, "", &[], None, value);
+    }
+
+    /// Whether this family is a histogram exactly when `histogram`: a render
+    /// of the other kind is refused.
+    fn renders_as(&self, histogram: bool) -> bool {
+        let fits = (self.kind == Kind::Histogram) == histogram;
+        let not = if histogram { "not " } else { "" };
+        debug_assert!(fits, "{} is {not}a histogram", self.name);
+        fits
     }
 
     /// The text of the family alone, as [`render`](Self::render) appends it.
@@ -60,16 +69,17 @@ impl Family {
     /// label values in the dimension order of its block, with its value:
     /// every declared label set first, in exposition order, valued from its
     /// row or `V::default()` without one; then every other row, in the order
-    /// given, under the labels of the block with as many dimensions.
-    ///
-    /// Panics for a histogram, and for an undeclared row of a fixed family.
+    /// given, under the labels of the block with as many dimensions. An
+    /// undeclared row of a fixed family is not written.
     pub fn render_rows<R, S, V>(&self, out: &mut String, rows: impl IntoIterator<Item = (R, V)>)
     where
         R: IntoIterator<Item = S>,
         S: AsRef<str>,
         V: Display + Default,
     {
-        assert!(self.kind != Kind::Histogram, "{} is a histogram", self.name);
+        if !self.renders_as(false) {
+            return;
+        }
         self.render_header(out);
         self.each_row(rows, |labels, value| write_sample(out, self.name, "", labels, None, value));
     }
@@ -81,7 +91,9 @@ impl Family {
         out: &mut String,
         mut value: impl FnMut(&Series<'_>) -> HistogramValue,
     ) {
-        assert!(self.kind == Kind::Histogram, "{} is not a histogram", self.name);
+        if !self.renders_as(true) {
+            return;
+        }
         self.render_header(out);
         self.labels.for_each_series(|series| {
             let labels: Vec<(&str, &str)> = series.labels().collect();
@@ -100,7 +112,9 @@ impl Family {
         R: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        assert!(self.kind == Kind::Histogram, "{} is not a histogram", self.name);
+        if !self.renders_as(true) {
+            return;
+        }
         self.render_header(out);
         self.each_row(rows, |labels, value| write_histogram(out, self.name, labels, &value));
     }
@@ -126,13 +140,16 @@ impl Family {
         self.labels.for_each_series(|series| {
             key.clear();
             key.extend(series.labels().map(|(_, v)| v.to_owned()));
-            let value = index.get(&key).and_then(|&i| rows[i].1.take()).unwrap_or_default();
+            let row = index.get(&key).and_then(|&i| rows.get_mut(i)).and_then(|r| r.1.take());
             let labels: Vec<(&str, &str)> = series.labels().collect();
-            write(&labels, value);
+            write(&labels, row.unwrap_or_default());
         });
         for (values, value) in rows.iter_mut() {
             let Some(value) = value.take() else { continue };
-            assert!(self.is_semi_open(), "{} is fixed: {values:?} is not declared", self.name);
+            if !self.is_semi_open() {
+                debug_assert!(false, "{} is fixed: {values:?} is not declared", self.name);
+                continue;
+            }
             let dims: &[Dim] = self.labels.block_of_arity(values.len());
             let labels: Vec<(&str, &str)> =
                 dims.iter().map(|d| d.name).zip(values.iter().map(String::as_str)).collect();

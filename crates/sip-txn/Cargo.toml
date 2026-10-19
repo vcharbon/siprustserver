@@ -23,6 +23,7 @@ sip-message = { path = "../sip-message" }
 # The transaction kinds and timeouts its events name, shared with the TU.
 call = { path = "../call" }
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 sip-net = { path = "../sip-net" }
 # Every timer arms and every deadline is computed within range (ADR-0051 §2).
 sip-clock = { path = "../sip-clock" }

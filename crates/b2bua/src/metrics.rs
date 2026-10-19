@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use metric_catalogue::{FixedCounts, HistogramValue, OpenRows};
+use metric_catalogue::HistogramValue;
+use metric_values::{FixedCounts, OpenRows};
 
 use crate::dispatch::{Discard, PastBound};
 use crate::drain::DrainExit;
-use catalogue::worker::DRAIN_BUCKETS;
 
 pub mod catalogue;
 mod limiter;
@@ -42,7 +42,7 @@ struct Inner {
     drain_exits: [AtomicU64; DrainExit::ALL.len()],
     // Time-in-drain: fixed-bucket cumulative counts (`le` in seconds), the sum in
     // milliseconds and the observation count.
-    drain_seconds_buckets: [AtomicU64; DRAIN_BUCKETS.len()],
+    drain_seconds_buckets: [AtomicU64; catalogue::worker::DRAIN_BUCKETS.len()],
     drain_seconds_sum_ms: AtomicU64,
     drain_seconds_count: AtomicU64,
     // What every operator release-all reached, by kind (ADR-0050 §10).
@@ -416,7 +416,7 @@ impl B2buaMetrics {
         self.inner.drain_exits[outcome.exit as usize].fetch_add(1, Ordering::Relaxed);
         self.inner.limiter.count_release_flush(&outcome.release_flush);
         let secs = elapsed.as_secs_f64();
-        for (i, le) in DRAIN_BUCKETS.iter().enumerate() {
+        for (i, le) in catalogue::worker::DRAIN_BUCKETS.iter().enumerate() {
             if secs <= *le {
                 self.inner.drain_seconds_buckets[i].fetch_add(1, Ordering::Relaxed);
             }
@@ -731,7 +731,7 @@ impl B2buaMetrics {
             i.drain_exits[exit as usize].load(Ordering::Relaxed)
         });
         catalogue::worker::DRAIN_SECONDS.render_histogram(&mut s, |_| HistogramValue {
-            buckets: DRAIN_BUCKETS
+            buckets: catalogue::worker::DRAIN_BUCKETS
                 .iter()
                 .zip(&i.drain_seconds_buckets)
                 .map(|(le, n)| (*le, n.load(Ordering::Relaxed)))

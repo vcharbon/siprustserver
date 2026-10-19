@@ -48,26 +48,33 @@ impl Series<'_> {
     }
 
     /// The index, in `dims[dim].values`, of this series' value of the
-    /// dimension at position `dim` of its block. Panics when the block has no
-    /// such position.
+    /// dimension at position `dim` of its block. A position the block lacks
+    /// is a caller's bug: refused in a debug build, the first value's index.
     pub fn at(&self, dim: usize) -> usize {
-        self.at[dim]
+        let at = self.at.get(dim).copied();
+        debug_assert!(at.is_some(), "block {} has no position {dim}", self.block);
+        at.unwrap_or_default()
     }
 
     /// The index, in `dim.values`, of this series' value of `dim`, wherever
-    /// `dim` sits in the series' block. Panics when the block has no
-    /// dimension of that name and values.
+    /// `dim` sits in the series' block. A dimension the block lacks is a
+    /// caller's bug: refused in a debug build, the first value's index.
     pub fn index(&self, dim: &Dim) -> usize {
         let pos = self.dims.iter().position(|d| d.name == dim.name && d.values == dim.values);
-        let pos = pos.unwrap_or_else(|| {
-            panic!("block {} has no dimension {:?} {:?}", self.block, dim.name, dim.values)
-        });
-        self.at[pos]
+        let at = pos.and_then(|pos| self.at.get(pos).copied());
+        debug_assert!(
+            at.is_some(),
+            "block {} has no dimension {:?} {:?}",
+            self.block,
+            dim.name,
+            dim.values
+        );
+        at.unwrap_or_default()
     }
 
     /// The `(name, value)` pairs of this series, in dimension order.
     pub fn labels(&self) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
-        self.dims.iter().zip(self.at).map(|(d, &i)| (d.name, d.values[i]))
+        self.dims.iter().zip(self.at).filter_map(|(d, &i)| Some((d.name, *d.values.get(i)?)))
     }
 }
 
@@ -90,14 +97,17 @@ impl Labels {
     }
 
     /// The first block of `arity` dimensions: the one a semi-open family's
-    /// label set of that many values is named by. Panics when no block has
-    /// that many dimensions, or two such blocks name them differently.
-    pub(crate) fn block_of_arity(&self, arity: usize) -> &'static [Dim] {
+    /// label set of that many values is named by. No block of that many
+    /// dimensions, or two naming them differently, is a declaration's bug:
+    /// refused in a debug build, an empty block.
+    pub fn block_of_arity(&self, arity: usize) -> &'static [Dim] {
         let mut found = self.blocks().into_iter().filter(|dims| dims.len() == arity);
-        let block = found.next().unwrap_or_else(|| panic!("no block of {arity} labels"));
+        let block = found.next();
+        debug_assert!(block.is_some(), "no block of {arity} labels");
+        let block = block.unwrap_or_default();
         for other in found {
             let same = block.iter().zip(other).all(|(a, b)| a.name == b.name);
-            assert!(same, "two blocks of {arity} labels name them differently");
+            debug_assert!(same, "two blocks of {arity} labels name them differently");
         }
         block
     }
@@ -119,20 +129,18 @@ impl Labels {
             let mut at = vec![0usize; dims.len()];
             loop {
                 f(&Series { block, dims, at: &at });
-                // Odometer step: the last dimension varies fastest.
-                let mut d = dims.len();
-                loop {
-                    if d == 0 {
+                // Odometer step: the last dimension varies fastest; a carry
+                // out of the first ends the block.
+                let mut carried = true;
+                for (i, d) in at.iter_mut().zip(dims).rev() {
+                    *i += 1;
+                    if *i < d.values.len() {
+                        carried = false;
                         break;
                     }
-                    d -= 1;
-                    at[d] += 1;
-                    if at[d] < dims[d].values.len() {
-                        break;
-                    }
-                    at[d] = 0;
+                    *i = 0;
                 }
-                if at.iter().all(|&i| i == 0) {
+                if carried {
                     break;
                 }
             }

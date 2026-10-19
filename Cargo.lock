@@ -501,6 +501,7 @@ dependencies = [
  "load-shed",
  "lock-poison",
  "metric-catalogue",
+ "metric-values",
  "observe",
  "proptest",
  "repl-net",
@@ -2054,6 +2055,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "metric-catalogue",
+ "metric-values",
  "reqwest",
  "sip-clock",
  "socket2",
@@ -2700,6 +2702,7 @@ dependencies = [
  "futures",
  "layer-harness",
  "metric-catalogue",
+ "metric-values",
  "regex",
  "scenario-harness",
  "serde_json",
@@ -2837,6 +2840,13 @@ dependencies = [
  "metric-catalogue",
  "serde_json",
  "sip-proxy-runner",
+]
+
+[[package]]
+name = "metric-values"
+version = "0.1.0"
+dependencies = [
+ "metric-catalogue",
 ]
 
 [[package]]
@@ -4597,6 +4607,7 @@ dependencies = [
  "load-shed",
  "lock-poison",
  "metric-catalogue",
+ "metric-values",
  "observe",
  "proptest",
  "scenario-harness",
@@ -4669,6 +4680,7 @@ dependencies = [
  "getrandom 0.4.3",
  "lock-poison",
  "metric-catalogue",
+ "metric-values",
  "proptest",
  "sip-clock",
  "sip-ids",

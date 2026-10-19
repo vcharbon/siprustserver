@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use metric_catalogue::OpenRows;
+use metric_values::OpenRows;
 use serde_json::Value;
 
 use crate::catalogue::{

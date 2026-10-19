@@ -4,8 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use crate::family::{Cap, Family, OVERFLOW};
-use crate::labels::Dim;
+use metric_catalogue::{Cap, Dim, Family, OVERFLOW};
 
 /// Separates label values in a row key; no label value carries it.
 const SEP: char = '\u{1f}';
@@ -205,7 +204,7 @@ pub(crate) fn key<'a>(values: impl Iterator<Item = &'a str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Dim, Labels};
+    use metric_catalogue::{Dim, Labels};
 
     const METHOD: Dim = Dim::new("method", &["INVITE", "BYE"]);
     const OPEN: Family =

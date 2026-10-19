@@ -15,31 +15,47 @@
 //! - [`Presence`] — a family is fixed (its declared label sets, at 0 before
 //!   their first event) or semi-open (those, then any label set nobody
 //!   declared from its first observation, under a [`Cap`] where the values
-//!   are unbounded); [`OpenRows`] holds a semi-open family's rows,
-//!   [`FixedCounts`] a fixed family's counts keyed by label values.
+//!   are unbounded).
 //! - [`Catalogue`] — the families of one binary's `/metrics` body, checked
 //!   whole; [`export::to_json`] states every catalogue for readers.
 //!
-//! Pure: no clock, no I/O, no global registry. A process owns its values and
-//! hands them to the renderer at scrape time.
+//! Pure: no clock, no I/O, no global registry, no shared state. A process
+//! holds its values (the `metric-values` crate) and hands them to the
+//! renderer at scrape time. A declaration a caller uses against its kind or
+//! its label sets is a caller's bug: refused in a debug build, rendered as
+//! nothing.
 
 #![forbid(unsafe_code)]
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::iter_over_hash_type,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 
 mod catalogue;
 mod check;
 pub mod export;
 mod family;
-mod fixed;
 mod labels;
-mod open;
 mod render;
 
 pub use catalogue::Catalogue;
 pub use check::Mismatch;
 pub use family::{Cap, Family, Kind, Presence, DEFAULT_CAP, OVERFLOW};
-pub use fixed::FixedCounts;
 pub use labels::{Dim, Labels, Series};
-pub use open::OpenRows;
 pub use render::HistogramValue;
 
 /// The values of a label dimension, from an array of `Copy` enum variants in
@@ -111,10 +127,13 @@ macro_rules! assert_exposition_order {
             match listed[0] {
                 $($ty::$variant)|+ => {}
             }
+            #[expect(clippy::disallowed_macros, reason = "evaluated at compile time")]
             assert!($ty::ALL.len() == listed.len(), "ALL does not list every variant");
             let mut i = 0;
             while i < listed.len() {
+                #[expect(clippy::disallowed_macros, reason = "evaluated at compile time")]
                 assert!($ty::ALL[i] as usize == i, "ALL is not in declaration order");
+                #[expect(clippy::disallowed_macros, reason = "evaluated at compile time")]
                 assert!(listed[i] as usize == i, "the listed variants are not in declaration order");
                 i += 1;
             }

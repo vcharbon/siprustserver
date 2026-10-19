@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use metric_catalogue::OpenRows;
+use metric_values::OpenRows;
 use sip_message::sniff::{cseq_method_token, cseq_value, first_line};
 
 use super::MuxCore;
