@@ -100,9 +100,9 @@ fn events(
         let was = start.attempts.iter().find(|(id, _)| *id == attempt.id);
         if was.is_none() {
             let route = opened
-                .iter()
-                .position(|(id, _)| *id == attempt.id)
-                .map(|at| opened.swap_remove(at).1)
+                .iter_mut()
+                .find(|(id, _)| *id == attempt.id)
+                .map(|(_, route)| std::mem::take(route))
                 .unwrap_or_default();
             events.push(LifecycleEvent::AttemptStarted { attempt: attempt.id, route });
         }

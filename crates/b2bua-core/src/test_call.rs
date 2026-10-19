@@ -14,6 +14,7 @@ pub fn turn(turn_seq: u64) -> crate::turn_scope::TurnScope {
 
 /// The caller's INVITE `call`'s record rebuilds: what the shell hands each
 /// of its turns (ADR-0052 §11).
+#[expect(clippy::expect_used, reason = "test support: a test call's record rebuilds its INVITE")]
 pub fn caller_of(call: &call::Call) -> SipRequest {
     crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite)
         .expect("the test call's record rebuilds its caller's INVITE")
@@ -26,6 +27,7 @@ pub fn src() -> SocketAddr {
 
 /// A proxied INVITE carrying the `w_pri`/`w_bak` cookie, keyed by Call-ID so
 /// each call gets a distinct `callRef` (`{pri}|{cid}@…|alicetag`).
+#[expect(clippy::unwrap_used, clippy::panic, reason = "test support: a fixed INVITE parses")]
 pub fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
     let raw = format!(
         "INVITE sip:bob@example.com SIP/2.0\r\n\

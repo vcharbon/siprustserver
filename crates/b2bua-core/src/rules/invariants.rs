@@ -110,7 +110,9 @@ pub fn enforce(
     }
     let crit = &mut result.effects.critical;
     if !crit.iter().any(|e| matches!(e, CriticalStateEffect::CancelAllTimers)) {
-        crit.insert(0, CriticalStateEffect::CancelAllTimers);
+        let rest = std::mem::take(crit);
+        crit.push(CriticalStateEffect::CancelAllTimers);
+        crit.extend(rest);
     }
     result.call.timers.clear();
 

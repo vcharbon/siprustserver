@@ -47,6 +47,11 @@ fn let_stand_final(payload: &serde_json::Value) -> RuleAction {
     }
 }
 
+/// A redirect Contact's stated q-value, read as written (RFC 3261 §20.10).
+fn q_value(q: &serde_json::Value) -> Option<f32> {
+    q.to_string().parse().ok()
+}
+
 /// The failover resolution rules, in registration (priority) order.
 pub(super) fn failover_rules() -> [RuleDefinition; 4] {
     [failover_create_leg(), failover_terminate(), failover_reject(), failover_redirect()]
@@ -117,14 +122,15 @@ fn failover_terminate() -> RuleDefinition {
                 _ => return None,
             };
             let mut actions = Vec::new();
-            match payload.get("status").and_then(|v| v.as_u64()) {
+            match payload.get("status").and_then(|v| v.as_u64()).and_then(|s| u16::try_from(s).ok())
+            {
                 Some(status) => {
                     let reason = payload
                         .get("reason")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Server Internal Error")
                         .to_string();
-                    actions.push(RuleAction::RelayFailureToALeg { status: status as u16, reason });
+                    actions.push(RuleAction::RelayFailureToALeg { status, reason });
                 }
                 // A timeout let stand: the caller's final is this turn's,
                 // under the termination record's cut.
@@ -245,7 +251,11 @@ fn failover_redirect() -> RuleDefinition {
                 b2bua_sdk::event::CallEvent::InternalEvent { payload, .. } => payload,
                 _ => return None,
             };
-            let status = payload.get("code").and_then(|v| v.as_u64()).unwrap_or(302) as u16;
+            // A code no 16-bit status holds is no 3xx: refused below.
+            let status = payload
+                .get("code")
+                .and_then(|v| v.as_u64())
+                .map_or(302, |code| u16::try_from(code).unwrap_or(0));
             let reason = payload
                 .get("reason")
                 .and_then(|v| v.as_str())
@@ -259,7 +269,7 @@ fn failover_redirect() -> RuleDefinition {
                     arr.iter()
                         .filter_map(|c| {
                             let uri = c.get("uri")?.as_str()?.to_string();
-                            let q = c.get("q").and_then(|v| v.as_f64()).map(|q| q as f32);
+                            let q = c.get("q").filter(|v| v.is_number()).and_then(q_value);
                             Some((uri, q))
                         })
                         .collect()

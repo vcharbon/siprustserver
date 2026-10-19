@@ -42,20 +42,9 @@ pub(super) fn resolve_peer(call: &Call, ctx: &RuleContext) -> call::helpers::Rel
     call::helpers::resolve_relay_peer(call, ctx.source_leg_id, ctx.request_dialog_id())
 }
 
-pub(super) fn leg_index(call: &Call, leg_id: &str) -> Option<usize> {
-    if leg_id == call.a_leg.leg_id {
-        Some(usize::MAX)
-    } else {
-        call.b_legs.iter().position(|l| l.leg_id == leg_id)
-    }
-}
-
-pub(super) fn leg_at(call: &Call, idx: usize) -> &call::Leg {
-    if idx == usize::MAX {
-        &call.a_leg
-    } else {
-        &call.b_legs[idx]
-    }
+/// The leg `leg_id` names on `call`: the a-leg or one of its b-legs.
+pub(super) fn leg_at<'a>(call: &'a Call, leg_id: &str) -> Option<&'a call::Leg> {
+    call::helpers::find_leg(call, leg_id)
 }
 
 /// Project a canonical [`Method`] onto the in-dialog admissibility view the

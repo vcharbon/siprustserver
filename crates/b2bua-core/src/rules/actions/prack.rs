@@ -20,7 +20,7 @@ use crate::effects::{
 };
 use crate::rules::relay;
 
-use super::select::{leg_at, leg_index};
+use super::select::leg_at;
 use super::ActionExecutor;
 
 /// Which owed PRACKs a settlement covers.
@@ -124,7 +124,7 @@ impl ActionExecutor<'_> {
         id: &ProvisionalId,
         answer: Option<Vec<u8>>,
     ) {
-        let Some(idx) = leg_index(call, &id.leg) else {
+        let Some(leg) = leg_at(call, &id.leg) else {
             self.turn.notes.defect(
                 crate::turn_notes::PRACK_HAS_A_LEG,
                 format!("an owed PRACK names leg {}, which the call does not hold", id.leg),
@@ -132,9 +132,7 @@ impl ActionExecutor<'_> {
             );
             return;
         };
-        let Some(dialog) =
-            call::helpers::dialog_with_peer(leg_at(call, idx), &id.responder_tag).cloned()
-        else {
+        let Some(dialog) = call::helpers::dialog_with_peer(leg, &id.responder_tag).cloned() else {
             self.turn.notes.defect(
                 crate::turn_notes::PRACK_HAS_A_DIALOG,
                 format!(
@@ -149,14 +147,14 @@ impl ActionExecutor<'_> {
         // Per-dialog CSeq (RFC 3261 §12.2.1.1): each forked early dialog has
         // its own sequence.
         let outbound_cseq = dialog.our_cseq + 1;
+        let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let branch = self.turn.ids.new_branch();
-        let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let marks = relay::CallMarks::of(call);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, marks, &id.leg, branch.clone())),
             contact: Some(relay::leg_contact(self.config, marks, &id.leg)),
             rack: Some(RAck::new(id.rseq.0, id.invite_cseq.0, Method::Invite)),
-            cseq: Some(outbound_cseq as u32),
+            cseq: Some(relay::wire_cseq(outbound_cseq)),
             content_type: answer.is_some().then(relay::sdp),
             body: answer.unwrap_or_default(),
             ..Default::default()

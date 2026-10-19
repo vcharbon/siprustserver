@@ -65,7 +65,7 @@ pub fn own_the_rseq(headers: &mut [MsgHeader], shown: call::RSeq) {
 pub fn strip_reliability(headers: &mut Vec<MsgHeader>) {
     headers.retain(|h| !HeaderName::RSeq.matches(&h.name));
     let mut kept = Vec::with_capacity(headers.len());
-    for h in headers.drain(..) {
+    for h in std::mem::take(headers) {
         if !HeaderName::Require.matches(&h.name) {
             kept.push(h);
             continue;

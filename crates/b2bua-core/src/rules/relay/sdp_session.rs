@@ -193,7 +193,9 @@ fn continue_session(
     let Some(range) = content_type.and_then(|ct| sdp_range(ct, &body)) else {
         return body;
     };
-    let sdp = &body[range.clone()];
+    let Some(sdp) = body.get(range.clone()) else {
+        return body;
+    };
     let Some(session_id) = parse_origin(sdp).map(|o| o.session_id) else {
         return body;
     };
@@ -282,7 +284,11 @@ fn continue_session(
     if matches!(out, Cow::Borrowed(_)) && reordered.is_none() {
         return body;
     }
-    [&body[..range.start], &out, &body[range.end..]].concat()
+    let mut joined = Vec::with_capacity(body.len().saturating_sub(range.len()) + out.len());
+    joined.extend(body.iter().take(range.start));
+    joined.extend_from_slice(&out);
+    joined.extend(body.iter().skip(range.end));
+    joined
 }
 
 /// The session state the early dialog with peer tag `peer_tag` carries, handed
@@ -313,7 +319,7 @@ pub fn next_origin_in_dialog(leg: &Leg, remote_tag: &str) -> Option<String> {
         .and_then(|d| d.sdp_session.as_ref());
     let stated = early.unwrap_or(&leg.sdp_session).sent_origin.as_deref()?;
     let line = origin_of(stated)?.next_version_line()?;
-    Some(line["o=".len()..].to_string())
+    Some(line.strip_prefix("o=")?.to_string())
 }
 
 /// Count the offer/answer exchange `req`, received from `leg_id`'s peer,

@@ -67,7 +67,8 @@ fn reject_code_reason(ctx: &RuleContext) -> (u16, String) {
     };
     if is_reject {
         let code =
-            payload.get("reject_code").and_then(|v| v.as_u64()).map(|c| c as u16).unwrap_or(603);
+            payload.get("reject_code").and_then(|v| v.as_u64()).and_then(|c| u16::try_from(c).ok());
+        let code = code.unwrap_or(603);
         let reason =
             payload.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("Declined").to_string();
         (code, reason)

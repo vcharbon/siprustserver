@@ -16,6 +16,23 @@
 //! - [`effects`] — the effect vocabulary a turn returns;
 //! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`] — a turn's inputs and
 //!   what it reports.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::iter_over_hash_type,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 
 pub mod answer_deadline;
 pub mod attempts;

@@ -69,7 +69,10 @@ impl ActionExecutor<'_> {
         fx: &mut HandlerEffects,
     ) {
         match action {
-            RuleAction::CreateLeg { .. } => unreachable!("a CreateLeg is stepped, never applied"),
+            // A leg the stepping refuses ends the list only when stepped.
+            RuleAction::CreateLeg { .. } => {
+                let _ = self.step(action, ctx, call, fx);
+            }
             RuleAction::RelayToPeer { transform } => match resolve_peer(call, ctx) {
                 RelayPeer::Leg { leg_id, dialog } => {
                     self.relay_to(call, fx, ctx, &leg_id, transform, dialog);

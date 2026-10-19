@@ -69,7 +69,7 @@ pub fn ack_b_leg(
     // running `our_cseq`, which an intervening early PRACK/UPDATE (or a later
     // in-dialog request) has advanced past the INVITE. Recover it from the cached
     // INVITE transaction handle.
-    let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| dialog.our_cseq.max(0) as u32);
+    let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| super::wire_cseq(dialog.our_cseq));
     let opts = GenerateAckFor2xxOpts {
         via: Some(leg_via(config, marks, &leg.leg_id, branch.clone())),
         cseq: Some(ack_cseq),

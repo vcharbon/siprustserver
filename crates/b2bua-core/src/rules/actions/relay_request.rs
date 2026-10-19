@@ -20,7 +20,7 @@ use crate::rules::capabilities;
 use crate::rules::relay;
 use b2bua_sdk::model::RuleContext;
 
-use super::select::{in_dialog_method, invite_cseq_from_handle, leg_at, leg_index};
+use super::select::{in_dialog_method, invite_cseq_from_handle, leg_at};
 use super::unrelayed::Unrelayed;
 use super::ActionExecutor;
 
@@ -57,8 +57,7 @@ impl ActionExecutor<'_> {
         // 2xx. A repeated 2xx re-ACKs via `re-ack-retransmitted-2xx`, which never
         // consults this obligation.
         if req.method() == Method::Ack {
-            let owed = leg_index(call, target_leg)
-                .map(|i| leg_at(call, i))
+            let owed = leg_at(call, target_leg)
                 .and_then(|leg| leg.dialogs.established())
                 .is_some_and(|d| d.awaited_ack_cseq == Some(req.cseq().seq() as i64));
             if !owed {
@@ -126,12 +125,12 @@ impl ActionExecutor<'_> {
         // caller-facing dialog toward the a-leg (RFC 3261 §12.2.1.1: each
         // early dialog is independent). One that carries requests takes it;
         // with none, the sender is told to retry (`Unrelayed::NotNow`).
-        let picked = leg_index(call, target_leg).and_then(|t_idx| {
+        let picked = leg_at(call, target_leg).and_then(|leg| {
             let id = target_dialog.as_ref()?;
-            let d = leg_at(call, t_idx).dialogs.by_tags(&id.our_tag, &id.peer_tag)?;
-            d.carries_requests().then(|| (t_idx, d.clone()))
+            let d = leg.dialogs.by_tags(&id.our_tag, &id.peer_tag)?;
+            d.carries_requests().then(|| d.clone())
         });
-        let Some((t_idx, target_dialog)) = picked else {
+        let Some(target_dialog) = picked else {
             self.refuse_unrelayed(call, fx, ctx, Unrelayed::NotNow);
             return;
         };
@@ -174,7 +173,7 @@ impl ActionExecutor<'_> {
                     }
                     None => r.rseq(),
                 };
-                RAck::new(rseq, target_invite_cseq.max(0) as u32, r.method().clone())
+                RAck::new(rseq, relay::wire_cseq(target_invite_cseq), r.method().clone())
             })
         } else {
             None
@@ -191,7 +190,11 @@ impl ActionExecutor<'_> {
             self.config.sdp_form.as_ref(),
         );
         let branch = self.turn.ids.new_branch();
-        let gen_dialog = relay::to_gen_dialog(leg_at(call, t_idx), &target_dialog);
+        let Some(target) = leg_at(call, target_leg) else {
+            *call = unrelayed;
+            return;
+        };
+        let gen_dialog = relay::to_gen_dialog(target, &target_dialog);
         let target_face = capabilities::Face::of_leg(target_leg);
         let (extra_headers, advertised) =
             relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
@@ -205,7 +208,7 @@ impl ActionExecutor<'_> {
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg)),
             body,
             content_type,
-            cseq: Some(outbound_cseq as u32),
+            cseq: Some(relay::wire_cseq(outbound_cseq)),
             // §16.6 step 3: the relayed request continues the sender's hop
             // budget. The stack's OWN in-dialog requests (teardown BYE,
             // keepalive, a re-offer it authors) state the §8.1.1.6 default —

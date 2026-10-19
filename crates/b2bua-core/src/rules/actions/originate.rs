@@ -16,7 +16,7 @@ use crate::effects::{
 use crate::rules::capabilities;
 use crate::rules::relay;
 
-use super::select::{in_dialog_method, leg_at, leg_index};
+use super::select::{in_dialog_method, leg_at};
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -36,9 +36,8 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
         body: &[u8],
     ) {
-        let Some(id) = leg_index(call, leg_id)
-            .and_then(|i| call::helpers::carrying_dialog(leg_at(call, i)))
-            .map(|d| d.id())
+        let Some(id) =
+            leg_at(call, leg_id).and_then(call::helpers::carrying_dialog).map(|d| d.id())
         else {
             return;
         };
@@ -69,20 +68,19 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
         body: &[u8],
     ) {
-        let Some(idx) = leg_index(call, leg_id) else { return };
-        let Some(dialog) = leg_at(call, idx).dialogs.by_tags(&id.our_tag, &id.peer_tag).cloned()
-        else {
+        let Some(leg) = leg_at(call, leg_id) else { return };
+        let Some(dialog) = leg.dialogs.by_tags(&id.our_tag, &id.peer_tag).cloned() else {
             return;
         };
         let outbound_cseq = dialog.our_cseq + 1;
+        let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let branch = self.turn.ids.new_branch();
-        let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
             body: body.to_vec(),
             content_type: content_type.and_then(relay::media_type),
-            cseq: Some(outbound_cseq as u32),
+            cseq: Some(relay::wire_cseq(outbound_cseq)),
             // A value the reader rejects still reaches the peer as the policy
             // stated it — this stack does not invent an event package.
             event: Some(
@@ -145,21 +143,15 @@ impl ActionExecutor<'_> {
         add_headers: &[sip_message::draft::Entry],
         author: relay::Author<'_>,
     ) {
-        let idx = match leg_index(call, leg_id) {
-            Some(i) => i,
-            None => return,
-        };
-        let dialog = match call::helpers::carrying_dialog(leg_at(call, idx)) {
-            Some(d) => d.clone(),
-            None => return,
-        };
+        let Some(leg) = leg_at(call, leg_id) else { return };
+        let Some(dialog) = call::helpers::carrying_dialog(leg).cloned() else { return };
         let t_id = dialog.id();
         // The INVITE that created this leg's dialog: the originator's own on
         // hers, the one the stack sent on a leg it dialled.
         let creating = if leg_id == call.a_leg.leg_id {
             Some(self.caller_invite.clone())
         } else {
-            relay::dialling_invite(leg_at(call, idx))
+            relay::dialling_invite(leg)
         };
         let outbound_cseq = dialog.our_cseq + 1;
         // The call as it stands before the re-INVITE records anything: one
@@ -168,7 +160,11 @@ impl ActionExecutor<'_> {
         *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
 
         let branch = self.turn.ids.new_branch();
-        let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
+        let Some(leg) = leg_at(call, leg_id) else {
+            *call = unsent;
+            return;
+        };
+        let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let mut extra: Vec<sip_message::SipHeader> = add_headers
             .iter()
             .map(|e| sip_message::SipHeader {
@@ -208,7 +204,7 @@ impl ActionExecutor<'_> {
                 self.config.sdp_form.as_ref(),
             ),
             content_type,
-            cseq: Some(outbound_cseq as u32),
+            cseq: Some(relay::wire_cseq(outbound_cseq)),
             extra_headers: extra,
             capabilities: Some(capabilities::for_reinvite(call, leg_id, creating.as_ref())),
             ..Default::default()
@@ -279,20 +275,16 @@ impl ActionExecutor<'_> {
             Some(m) => m,
             None => return,
         };
-        let idx = match leg_index(call, leg_id) {
-            Some(i) => i,
-            None => return,
-        };
+        let Some(leg) = leg_at(call, leg_id) else { return };
         // Probe the dialog the leg's requests ride ([`call::helpers::carrying_dialog`]).
         // Skip when the leg holds none (nothing to probe).
-        let dialog = match call::helpers::carrying_dialog(leg_at(call, idx)) {
+        let dialog = match call::helpers::carrying_dialog(leg) {
             Some(d) => d.clone(),
             None => {
                 // An early/mid-confirm leg legitimately has no confirmed dialog
                 // yet — skip quietly. A CONFIRMED leg with none is a broken
                 // invariant that silently drops every in-dialog request to
                 // this leg — never swallow it.
-                let leg = leg_at(call, idx);
                 if leg.state() == call::LegState::Confirmed {
                     tracing::error!(
                         call_ref = %call.call_ref,
@@ -349,11 +341,15 @@ impl ActionExecutor<'_> {
             .collect();
         relay::describe_body(&mut extra_headers, body, descriptors);
         let branch = self.turn.ids.new_branch();
-        let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
+        let Some(leg) = leg_at(call, leg_id) else {
+            *call = unsent;
+            return;
+        };
+        let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
-            cseq: Some(outbound_cseq as u32),
+            cseq: Some(relay::wire_cseq(outbound_cseq)),
             body: relay::continue_on_leg(
                 call,
                 leg_id,

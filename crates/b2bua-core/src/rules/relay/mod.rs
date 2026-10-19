@@ -82,7 +82,7 @@ pub use provisional_withhold::withhold_from_relayed_provisional;
 // Reading text back into typed values (decision fields, dialog state, bodies).
 pub use address::{redirect_contact, UnreadableAddress};
 pub use body::{carries_sdp, describe_body, media_type, mints_offer, sdp};
-pub use dialog::{target_dest, to_gen_dialog, uas_addresses};
+pub use dialog::{target_dest, to_gen_dialog, uas_addresses, wire_cseq};
 
 // The relayed-failure-headers Call.ext slot.
 pub use failure_ext::{

@@ -98,13 +98,13 @@ impl ActionExecutor<'_> {
             call,
             fx,
             TimerKey::obligation(TimerType::Rung, obligation.clone()),
-            first.as_millis() as i64,
+            ::call::millis_i64(first),
         );
         self.schedule(
             call,
             fx,
             TimerKey::obligation(TimerType::RepeatGiveUp, obligation),
-            self.ack_give_up_deadline().as_millis() as i64,
+            ::call::millis_i64(self.ack_give_up_deadline()),
         );
     }
 
@@ -142,7 +142,7 @@ impl ActionExecutor<'_> {
             call,
             fx,
             TimerKey::obligation(TimerType::Rung, obligation),
-            first.as_millis() as i64,
+            ::call::millis_i64(first),
         );
     }
 
@@ -177,7 +177,7 @@ impl ActionExecutor<'_> {
         let (updated, next) = call::helpers::advance_ladder(call.clone(), obligation, give_up);
         *call = updated;
         match next {
-            Some(next) => self.schedule(call, fx, rung, next.as_millis() as i64),
+            Some(next) => self.schedule(call, fx, rung, ::call::millis_i64(next)),
             None => {
                 // The last rung inside the bound has been sent: re-asking stops
                 // here. A 2xx's give-up stands — its silence is answered at the

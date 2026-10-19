@@ -19,9 +19,16 @@ pub fn to_gen_dialog(leg: &Leg, d: &Dialog) -> generators::StackDialog {
         local_uri: leg.local_uri.clone().unwrap_or_default(),
         remote_uri: leg.remote_uri.clone().unwrap_or_default(),
         remote_target: d.remote_target.clone(),
-        local_cseq: d.our_cseq.max(0) as u32,
+        local_cseq: wire_cseq(d.our_cseq),
         route_set: d.route_set.clone(),
     }
+}
+
+/// A dialog sequence number `call` keeps as an `i64`, as a CSeq header
+/// carries it: RFC 3261 §8.1.1.5 keeps a CSeq below 2³¹, which a `u32` holds;
+/// a number outside it saturates at the nearer end.
+pub fn wire_cseq(seq: i64) -> u32 {
+    u32::try_from(seq.max(0)).unwrap_or(u32::MAX)
 }
 
 /// The local and remote address of the UAS dialog `invite` creates: its To and
