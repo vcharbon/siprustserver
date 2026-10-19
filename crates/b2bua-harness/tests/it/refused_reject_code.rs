@@ -23,7 +23,7 @@ fn reject(code: u16) -> CallTreatment {
 
 /// A new call the decision rejects with `code`; the caller's final is `expected`.
 async fn initial_reject(code: u16, expected: u16) {
-    let h = Harness::new(&format!("initial-reject-{code}"));
+    let h = Harness::new(format!("initial-reject-{code}"));
     let alice = h.agent("alice", "127.0.0.1:7150").await;
     let bob = h.agent("bob", "127.0.0.1:7151").await;
     let engine = ScriptedDecisionEngine::builder().fallback(move |_req| reject(code)).build();
