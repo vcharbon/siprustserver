@@ -80,6 +80,9 @@ class Repo:
         self.fetched(hours_ago=1)
         self.answer(report())
         self.git("init", "-q", "-b", "develop")
+        # No detached auto-maintenance writes into .git while the directory is removed.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
         self.write("Cargo.lock", EMPTY_LOCK)
         self.commit()
 
