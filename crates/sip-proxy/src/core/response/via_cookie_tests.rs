@@ -94,7 +94,7 @@ fn fixture() -> Fixture {
         clock.clone(),
     ));
     let wire = Arc::new(Wire::default());
-    let core = ProxyCoreBuilder::new(
+    let core = ProxyCoreBuilder::for_test(
         ProxyAddr::new(PROXY_VIP, 5060),
         strategy.clone(),
         Arc::new(registry.clone()),

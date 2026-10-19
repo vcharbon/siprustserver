@@ -39,9 +39,9 @@ async fn spawn_proxy(
     let (ep, sock) = h.bind_sut("proxy", PROXY).await;
     let metrics = Arc::new(ProxyMetrics::new());
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
+    let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
+    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
         .clock(Clock::test_at(0))
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
         .metrics(metrics.clone());
     if let Some(gate) = gate {
         builder = builder.self_gate(gate);

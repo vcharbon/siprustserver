@@ -41,7 +41,7 @@ pub use backlog::{ceilings, deferred_bound};
 pub use ladder::{
     class_of, first_refusal, judge, Class, Refused, RouterReadings, Rung, Step, Verdict, LADDER,
 };
-pub use render::{secret_apart_from, Refusals};
+pub use render::Refusals;
 
 #[cfg(test)]
 mod tests;

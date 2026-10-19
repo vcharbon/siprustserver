@@ -73,9 +73,9 @@ async fn spawn_proxy(
         Clock::test_at(0),
     ));
     let (ep, sock) = h.bind_sut(lane, PROXY).await;
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
+    let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
+    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
         .clock(Clock::test_at(0))
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
         .metrics(metrics.clone())
         .first_view(view)
         .build(ep);

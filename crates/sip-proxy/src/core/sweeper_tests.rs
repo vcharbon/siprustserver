@@ -69,7 +69,7 @@ async fn run_sweeps_expired_pending_invite_entries() {
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
         .clock(clock)
         .cancel_lru(lru.clone())
         .metrics(metrics.clone())
@@ -158,7 +158,7 @@ async fn run_records_packet_age_at_dequeue() {
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
         .clock(clock)
         .intake_age(recorder.clone())
         .build(Box::new(ep));
@@ -202,7 +202,7 @@ async fn intake_age_is_immune_to_wall_versus_monotonic_divergence() {
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-    ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
+    ProxyCoreBuilder::for_test(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
         .clock(clock)
         .intake_age(recorder.clone())
         .build(Box::new(DrainOnceEndpoint(Mutex::new(vec![pkt]))))
@@ -231,7 +231,7 @@ fn classify_peer_internal_iff_known_worker() {
             worker.clone(),
         )]));
     let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(worker.clone()));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
         .build(Box::new(PendingEndpoint));
 
     assert_eq!(core.classify_peer(&worker), PeerScope::Internal, "a known worker is internal");

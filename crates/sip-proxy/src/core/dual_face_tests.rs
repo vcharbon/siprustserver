@@ -110,7 +110,7 @@ fn dual_face_core() -> Fixture {
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
         .external_face(ExternalFaceParts {
@@ -508,7 +508,7 @@ async fn single_face_rr_format_is_unchanged() {
         )]));
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
         .clock(Clock::test_at(0))
         .build(Box::new(int_ep));
 

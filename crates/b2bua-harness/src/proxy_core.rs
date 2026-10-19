@@ -115,9 +115,9 @@ pub fn spawn_proxy_core_with(
     ));
 
     let metrics = Arc::new(ProxyMetrics::new());
-    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn)
+    let id_gen = Arc::new(IdGen::seeded(id_seed));
+    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn, id_gen)
         .clock(clock)
-        .id_gen(Arc::new(IdGen::seeded(id_seed)))
         .metrics(metrics.clone());
     if let Some(ext) = external {
         builder = builder.external_face(sip_proxy::ExternalFaceParts {

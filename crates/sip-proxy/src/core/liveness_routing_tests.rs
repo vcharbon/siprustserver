@@ -64,7 +64,7 @@ async fn fixture_with(health: WorkerHealth) -> Fixture {
         .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
         .await
         .unwrap();
-    let core = ProxyCoreBuilder::new(
+    let core = ProxyCoreBuilder::for_test(
         ProxyAddr::new(PROXY_VIP, 5060),
         strategy.clone(),
         Arc::new(registry.clone()),

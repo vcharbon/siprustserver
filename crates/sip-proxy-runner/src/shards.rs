@@ -45,19 +45,23 @@ pub struct SharedRouting {
 impl SharedRouting {
     /// The builder of recv shard `shard`'s core over the shared state.
     pub fn shard(&self, shard: usize) -> ProxyCoreBuilder {
-        ProxyCoreBuilder::new(self.advertised.clone(), self.strategy.clone(), self.registry.clone())
-            .clock(self.clock.clone())
-            .id_gen(self.id_gen.clone())
-            .metrics(self.metrics.clone())
-            .cancel_lru(self.cancel_lru.clone())
-            .refusals(self.refusals.clone())
-            .self_gate(self.self_gate.clone())
-            .intake_age(self.intake_age.clone())
-            .resolver_config(self.resolver)
-            .traces(self.traces.clone())
-            .pulse(self.pulse.clone())
-            .first_view(self.first_view.clone())
-            .shard(shard)
+        ProxyCoreBuilder::new(
+            self.advertised.clone(),
+            self.strategy.clone(),
+            self.registry.clone(),
+            self.id_gen.clone(),
+        )
+        .clock(self.clock.clone())
+        .metrics(self.metrics.clone())
+        .cancel_lru(self.cancel_lru.clone())
+        .refusals(self.refusals.clone())
+        .self_gate(self.self_gate.clone())
+        .intake_age(self.intake_age.clone())
+        .resolver_config(self.resolver)
+        .traces(self.traces.clone())
+        .pulse(self.pulse.clone())
+        .first_view(self.first_view.clone())
+        .shard(shard)
     }
 
     /// The OPTIONS health probe over the worker pool on `endpoint`, writing

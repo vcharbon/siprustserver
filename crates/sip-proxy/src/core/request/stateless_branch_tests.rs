@@ -71,7 +71,7 @@ impl Fabric {
             )]));
         let strategy: Arc<dyn RoutingStrategy> =
             Arc::new(ForwardAllStrategy::new(ProxyAddr::new(WORKER, 5060)));
-        ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+        ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
             .clock(Clock::test_at(0))
             .build(ep)
     }

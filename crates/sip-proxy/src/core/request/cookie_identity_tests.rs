@@ -73,7 +73,7 @@ async fn fixture() -> Fixture {
             "w1",
             ProxyAddr::new(W1_POD, 5060),
         )]));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
         .clock(Clock::test_at(0))
         .build(ep);
     Fixture { core, strategy }

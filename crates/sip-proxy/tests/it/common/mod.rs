@@ -52,9 +52,9 @@ pub async fn spawn_proxy(
 ) -> ProxySut {
     let (ep, sock) = h.bind_sut("proxy", addr).await;
     let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
+    let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
+    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
         .clock(Clock::test_at(0))
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
         .metrics(metrics.clone())
         .build(ep);
     let task = tokio::spawn(core.run());
@@ -72,9 +72,9 @@ pub async fn spawn_proxy_with_traces(
 ) -> ProxySut {
     let (ep, sock) = h.bind_sut("proxy", addr).await;
     let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
+    let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
+    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
         .clock(Clock::test_at(0))
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
         .metrics(metrics.clone())
         .traces(traces)
         .build(ep);

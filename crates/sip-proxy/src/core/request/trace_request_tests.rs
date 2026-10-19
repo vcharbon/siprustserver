@@ -117,7 +117,7 @@ fn core_with(
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-    let mut builder = ProxyCoreBuilder::new(ProxyAddr::new(PROXY, 5060), strategy, registry)
+    let mut builder = ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY, 5060), strategy, registry)
         .clock(Clock::test_at(0))
         .traces(traces);
     if let Some(gate) = gate {

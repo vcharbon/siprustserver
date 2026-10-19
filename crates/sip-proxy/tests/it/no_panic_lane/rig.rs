@@ -95,9 +95,10 @@ impl Rig {
             metrics.clone(),
             clock.clone(),
         ));
-        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY.0, PROXY.1), strategy, registry)
+        let id_gen = Arc::new(IdGen::seeded(0x1a5e));
+        let advertised = ProxyAddr::new(PROXY.0, PROXY.1);
+        let core = ProxyCoreBuilder::new(advertised, strategy, registry, id_gen)
             .clock(clock)
-            .id_gen(Arc::new(IdGen::seeded(0x1a5e)))
             .metrics(metrics.clone())
             .build(endpoint);
         Rig { task: tokio::spawn(core.run()), metrics, peers }

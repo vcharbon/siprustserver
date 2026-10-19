@@ -612,9 +612,9 @@ async fn spawn_lb_proxy(
             std::collections::HashSet::from([sip_net::UaRole::Proxy]),
         )
         .await;
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
+    let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
+    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
         .clock(Clock::test_at(0))
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
         .metrics(Arc::new(ProxyMetrics::new()))
         .build(ep);
     let task = tokio::spawn(core.run());

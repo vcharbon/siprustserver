@@ -117,7 +117,7 @@ fn core_over(
     clock: Clock,
 ) -> (ProxyCore, Arc<CapturingEndpoint>) {
     let ep = Arc::new(CapturingEndpoint::default());
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(clock)
         .build(Box::new(CapturingEndpointHandle(ep.clone())));
     (core, ep)

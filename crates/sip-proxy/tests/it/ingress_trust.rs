@@ -83,6 +83,11 @@ impl Drop for Lab {
     }
 }
 
+/// A generator drawing identifiers deterministically from `seed`.
+fn id_gen(seed: u64) -> Arc<sip_txn::IdGen> {
+    Arc::new(sip_txn::IdGen::seeded(seed))
+}
+
 fn sa(host: &str, port: u16) -> SocketAddr {
     format!("{host}:{port}").parse().unwrap()
 }
@@ -124,7 +129,7 @@ async fn proxy_lab(dual: bool, admit: bool) -> Lab {
     let core = if dual {
         let int_ep = bind(int_vip()).await;
         let ext_ep = bind(ext_vip()).await;
-        ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
+        ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg, id_gen(1))
             .clock(Clock::test_at(0))
             .metrics(metrics.clone())
             .self_gate(gate.clone())
@@ -136,7 +141,7 @@ async fn proxy_lab(dual: bool, admit: bool) -> Lab {
             .build(int_ep)
     } else {
         let ep = bind(ext_vip()).await;
-        ProxyCoreBuilder::new(ProxyAddr::new(EXT_VIP, EXT_PORT), strategy, reg)
+        ProxyCoreBuilder::new(ProxyAddr::new(EXT_VIP, EXT_PORT), strategy, reg, id_gen(2))
             .clock(Clock::test_at(0))
             .metrics(metrics.clone())
             .self_gate(gate.clone())

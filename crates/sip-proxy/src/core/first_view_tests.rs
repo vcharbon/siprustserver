@@ -66,7 +66,7 @@ async fn starting() -> Fixture {
         .await
         .unwrap();
     let view = FirstView::pending();
-    let core = ProxyCoreBuilder::new(
+    let core = ProxyCoreBuilder::for_test(
         ProxyAddr::new(PROXY_VIP, 5060),
         strategy.clone(),
         Arc::new(registry.clone()),

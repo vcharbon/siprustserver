@@ -61,15 +61,6 @@ impl Render {
     }
 }
 
-/// The generator refusals draw their To-tag secret from, keyed apart from
-/// `core`'s: from the OS RNG, from `core` when the OS RNG does not answer.
-pub fn secret_apart_from(core: &Arc<IdGen>) -> Arc<IdGen> {
-    IdGen::from_entropy().map(Arc::new).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "refusal To-tag secret drawn from the core's generator");
-        core.clone()
-    })
-}
-
 impl Refusals {
     /// Refusals under the configured `Retry-After` base and jitter,
     /// remembering at most `memo_capacity` refused INVITEs. The To-tag secret

@@ -147,7 +147,7 @@ impl B2buaCore {
                 config.retry_after_base_sec,
                 config.retry_after_jitter_sec,
                 sip_txn::REFUSED_MEMO_MAX,
-                &crate::admission::secret_apart_from(&id_gen),
+                &id_gen,
             )
         });
         refusals.advertise(&config.minted_final_advertisement);

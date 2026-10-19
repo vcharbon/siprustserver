@@ -35,7 +35,7 @@ async fn core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore {
         .unwrap();
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
-    ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+    ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(Clock::test_at(0))
         .metrics(Arc::new(ProxyMetrics::new()))
         .build(ep)
@@ -127,7 +127,7 @@ async fn named_target_resolution_never_blocks_routing() {
         .unwrap();
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(Clock::test_at(0))
         .resolver(Arc::new(PendingResolver))
         .build(ep);
@@ -217,7 +217,7 @@ async fn dual_face_core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore 
     let ext_ep = bind(&format!("{EXT_VIP}:5060")).await;
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
-    ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+    ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(Clock::test_at(0))
         .metrics(Arc::new(ProxyMetrics::new()))
         .external_face(ExternalFaceParts {

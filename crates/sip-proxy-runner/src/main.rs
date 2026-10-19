@@ -117,6 +117,7 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod entropy;
 use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -134,7 +135,6 @@ use sip_proxy::{ExternalFaceParts, RoutingStrategy};
 use sip_proxy_runner::binds::{bind_sockets, Sockets};
 use sip_proxy_runner::config::{refuse_to_start, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
-use sip_proxy_runner::entropy::keyed_id_gen;
 use sip_proxy_runner::health_sampler::HealthSampler;
 use sip_proxy_runner::shards::SharedRouting;
 use sip_proxy_runner::signal::sigterm;
@@ -233,7 +233,7 @@ async fn serve() {
     );
     let observer = Arc::new(WorkerLoadObserver::new(cfg.observer));
     let metrics = Arc::new(ProxyMetrics::new());
-    let id_gen = Arc::new(keyed_id_gen());
+    let id_gen = Arc::new(entropy::keyed_id_gen());
 
     // Proxy-self ELU/CPS admission gate. On by default; the ELU
     // arm observes intake saturation — every recv shard records each packet's

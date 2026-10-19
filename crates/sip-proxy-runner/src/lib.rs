@@ -5,7 +5,6 @@
 pub mod binds;
 pub mod config;
 pub mod discovery;
-pub mod entropy;
 pub mod health_sampler;
 pub mod intake_shed;
 pub mod metrics_body;

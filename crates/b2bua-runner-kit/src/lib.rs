@@ -65,7 +65,6 @@ use b2bua::admission::Refusals;
 use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrWriter};
 use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
-use b2bua::destination_allowlist::{classify_admission, AdmissionVerdict};
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::limiter::CallLimiter;
 use b2bua::metrics::{B2buaMetrics, LiveGauge, UdpTransportMetrics};
@@ -92,6 +91,7 @@ mod replication;
 pub mod runtime;
 mod shutdown;
 mod socket_buffers;
+mod validate;
 mod worker_metrics;
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
@@ -102,6 +102,7 @@ pub use null_cdr::NullCdrWriter;
 pub use outbound_proxy_env::{parse_outbound_proxy, validate_outbound_proxy_requirement};
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
 use socket_buffers::log_socket_buffers;
+pub use validate::{validate_default_dest, validate_ingress_brake_pct};
 pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
 
 /// Env var with a default when unset.
@@ -181,46 +182,6 @@ pub fn split_host_port(s: &str) -> (String, u16) {
         Some((h, p)) => (h.to_string(), p.parse().unwrap_or(5060)),
         None => (s.to_string(), 5060),
     }
-}
-
-/// The ingress brake percentage must keep the brake meaningful: it fires at
-/// ingress depth >= queue_max × pct/100, so 0 would shed every packet and >100
-/// would never fire. Checked at [`RunnerEnv::bind`]; exported for runners that
-/// override the field and want the same boot refusal.
-pub fn validate_ingress_brake_pct(udp_ingress_brake_pct: u32) -> Result<(), String> {
-    if !(1..=100).contains(&udp_ingress_brake_pct) {
-        return Err(format!(
-            "B2BUA_UDP_INGRESS_BRAKE_PCT={udp_ingress_brake_pct} out of range 1..=100: the ingress \
-             brake fires at ingress depth >= queue_max × pct/100, so 0 would shed \
-             every packet and >100 would never fire. Use 1..=100 (100 = brake only \
-             when the queue is full)"
-        ));
-    }
-    Ok(())
-}
-
-/// Boot-time coherence check for runners with a **static default callee**: the
-/// b-leg admission gate (`apply_route`) classifies the callee's
-/// `destination.host`, so a default the worker's own destination allow-list
-/// rejects means EVERY default-routed call is 503'd before the b-leg and the
-/// worker can never serve one. Per-call destinations are runtime and not
-/// checkable here, but a self-rejecting default is an unambiguous
-/// misconfiguration to refuse boot on. Pure (no env / IO) so it is
-/// unit-testable.
-pub fn validate_default_dest(
-    dest_host: &str,
-    worker_allowed_target_suffixes: &[String],
-) -> Result<(), String> {
-    if classify_admission(dest_host, worker_allowed_target_suffixes) == AdmissionVerdict::Reject {
-        return Err(format!(
-            "B2BUA_DEST host {dest_host:?} is rejected by its own destination \
-             allow-list WORKER_ALLOWED_TARGET_SUFFIXES={worker_allowed_target_suffixes:?}: \
-             every default-routed call would be 503'd before the b-leg. Add a \
-             matching suffix (e.g. \".svc.cluster.local\"), use an IP literal, or \
-             set \"*\" to disable the gate"
-        ));
-    }
-    Ok(())
 }
 
 /// Every generic runner knob, parsed once from env by [`RunnerEnv::from_env`].
@@ -553,14 +514,16 @@ impl RunnerEnv {
             queue_max: self.queue_max,
             threshold_pct: self.udp_ingress_brake_pct,
         };
+        // The worker's identifier generator, keyed from the OS RNG once: the
+        // core's, and the To-tag secret of its refusals.
+        let id_gen = Arc::new(entropy::keyed_id_gen());
         // The worker's one answer and memo for refused new INVITEs, shared by
-        // the brake and, through `deps`, the core's transaction layer. Its
-        // To-tag secret is drawn from entropy, apart from the core's generator.
+        // the brake and, through `deps`, the core's transaction layer.
         let refusals = Refusals::new(
             self.retry_after_base_sec,
             self.retry_after_jitter_sec,
             brake_config.memo_capacity(),
-            &entropy::keyed_id_gen(),
+            &id_gen,
         );
         let brake_hook =
             build_ingress_brake_hook(brake_config, brake_counters.clone(), refusals.clone());
@@ -719,6 +682,7 @@ impl RunnerEnv {
             local,
             config,
             udp_metrics,
+            id_gen,
             refusals,
             // The shared registry, built BEFORE any deps so components a runner
             // constructs pre-spawn (notably CDR writers) record into the SAME
@@ -754,6 +718,9 @@ pub struct RunnerBase {
     pub config: B2buaConfig,
     /// The `UdpTransport` metrics facade over [`Self::endpoint`].
     pub udp_metrics: UdpTransportMetrics,
+    /// The worker's identifier generator, keyed from the OS RNG at bind;
+    /// [`deps`](Self::deps) hands it to the core.
+    pub id_gen: Arc<sip_txn::IdGen>,
     /// The worker's refusals of new INVITEs, held by the ingress brake on
     /// [`Self::endpoint`]; [`deps`](Self::deps) hands the core the same
     /// instance, so a runner swapping one swaps both.
@@ -874,7 +841,7 @@ impl RunnerBase {
             store_faults: Default::default(),
             wire_faults: Default::default(),
             clock: self.clock.clone(),
-            id_gen: Arc::new(entropy::keyed_id_gen()),
+            id_gen: self.id_gen.clone(),
             // The refusals the ingress brake holds (see [`RunnerBase::refusals`]).
             refusals: Some(self.refusals.clone()),
             deferred_ceilings: None,
