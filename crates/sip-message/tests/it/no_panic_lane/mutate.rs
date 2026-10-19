@@ -23,6 +23,7 @@ pub const NUMERIC_HEADERS: &[(&str, &str)] = &[
     ("X-Incarnation", "{}"),
     ("Via", "SIP/2.0/UDP 192.0.2.1:{};branch=z9hG4bK-x;rport={}"),
     ("Contact", "<sip:a@192.0.2.1:{}>;expires={};q={}"),
+    ("Record-Route", "<sip:192.0.2.9:{};lr>"),
 ];
 
 /// Extreme numbers: the type bounds either side, signs, exponents, empties.
@@ -119,6 +120,13 @@ pub const SPLICES: &[&str] = &[
     "Contact: <sip:a@[::1]:>;expires=",
     "Route: <sip:a;lr>,",
     "Record-Route: <",
+    "Record-Route: <sip:192.0.2.9:5060x>",
+    "Record-Route: <sip:>",
+    "Record-Route: <sip:@>",
+    "Record-Route: <sip:192.0.2.\u{7f}9>",
+    "Record-Route: <sip:[2001:db8::9>",
+    "Record-Route: <sip:rr.example.com;lr>, <sip:192.0.2.9:5060x>",
+    "Record-Route: <sip:rr.example.com;lr>,<sip:192.0.2.9>",
     "RAck: 1",
     "RSeq: -1",
     "Session-Expires: ;refresher=",

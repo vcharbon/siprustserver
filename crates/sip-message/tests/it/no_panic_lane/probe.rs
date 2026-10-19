@@ -7,6 +7,7 @@
 
 use std::fmt::Debug;
 
+use super::echo;
 use sip_message::generators::cancel::generate_cancel;
 use sip_message::generators::response::{generate_response, retag_response, GenerateResponseOpts};
 use sip_message::generators::spec::InviteClientTransactionHandle;
@@ -95,12 +96,13 @@ pub fn message(raw: &[u8], d: &mut Digest) {
         }
         // The stream and tight sets accept a subset of what these two accept.
         if let (Ok(msg), "default" | "lenient") = (parsed, name) {
-            parsed_message(&msg, d);
+            parsed_message(&msg, name == "default", d);
         }
     }
 }
 
-fn parsed_message(msg: &SipMessage, d: &mut Digest) {
+/// What a parsed message answers; `strict` where the wire grammar read it.
+fn parsed_message(msg: &SipMessage, strict: bool, d: &mut Digest) {
     d.note("message", msg);
     d.note("serialize", &sip_message::serialize(msg));
     d.note("summary", &sip_message::message_summary(msg));
@@ -139,8 +141,8 @@ fn parsed_message(msg: &SipMessage, d: &mut Digest) {
     helpers(msg, d);
     body(msg, d);
     match msg {
-        SipMessage::Request(req) => request(req, d),
-        SipMessage::Response(resp) => response(resp, d),
+        SipMessage::Request(req) => request(req, strict, d),
+        SipMessage::Response(resp) => response(resp, strict, d),
     }
 }
 
@@ -328,7 +330,7 @@ fn body(msg: &SipMessage, d: &mut Digest) {
     }
 }
 
-fn request(req: &SipRequest, d: &mut Digest) {
+fn request(req: &SipRequest, strict: bool, d: &mut Digest) {
     d.note("method", &(req.method(), req.version(), req.offers_100rel()));
     uri(req.request_uri(), d);
     d.note("trace-sample", &sip_message::trace_sample::trace_sample(req));
@@ -356,21 +358,18 @@ fn request(req: &SipRequest, d: &mut Digest) {
     for (status, reason) in
         [(100, "Trying"), (180, "Ringing"), (200, "OK"), (487, "Request Terminated")]
     {
-        match generate_response(req, status, reason, &opts) {
-            Ok(resp) => d.raw("generated", resp.image()),
-            Err(e) => d.note("generated", &e.to_string()),
-        }
+        let built = generate_response(req, status, reason, &opts).map(|r| r.image().to_vec());
+        echo::outcome_image("generated", built, strict, d);
     }
     if *req.method() == Method::Invite {
         let handle = InviteClientTransactionHandle { original_invite: req.clone() };
-        match generate_cancel(&handle, &[]) {
-            Ok(cancel) => d.raw("cancel", cancel.image()),
-            Err(e) => d.note("cancel", &e.to_string()),
-        }
+        echo::outcome("cancel", generate_cancel(&handle, &[]), strict, d);
     }
+    echo::from_request(req, strict, d);
 }
 
-fn response(resp: &SipResponse, d: &mut Digest) {
+fn response(resp: &SipResponse, strict: bool, d: &mut Digest) {
+    echo::from_response(resp, strict, d);
     d.note("status", &(resp.status(), resp.reason(), resp.version()));
     d.note("readiness", &sip_message::worker_report::readiness(resp));
     d.note("incarnation", &sip_message::worker_report::incarnation(resp));

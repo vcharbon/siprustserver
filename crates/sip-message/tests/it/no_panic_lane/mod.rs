@@ -25,8 +25,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use proptest::collection::vec;
-use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+use proptest::test_runner::{Config, FileFailurePersistence, RngSeed, TestRunner};
 
+mod echo;
 mod mutate;
 mod probe;
 mod regressions;
@@ -42,6 +43,9 @@ const LANE_STACK: usize = 512 * 1024;
 
 /// Cases per proptest property.
 const CASES: u32 = 2048;
+
+/// The seed every proptest property draws its cases from.
+const LANE_SEED: u64 = 0x5eed_1a5e;
 
 /// Runs `f` on a thread with the lane's stack, its panic re-raised here.
 fn on_lane_stack(f: impl FnOnce() + Send + 'static) {
@@ -260,12 +264,15 @@ fn structured_corpus_parse_results_unchanged() {
     assert!(report.is_empty(), "outcomes changed:\n{report}");
 }
 
+/// The lane's runner: a fixed seed, so every run draws the same cases and a
+/// red run repeats; a failure is also persisted under `name`.
 fn runner(name: &'static str) -> TestRunner {
     TestRunner::new(Config {
         cases: CASES,
         max_shrink_time: 60_000,
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(name))),
         source_file: Some(file!()),
+        rng_seed: RngSeed::Fixed(LANE_SEED),
         ..Config::default()
     })
 }
