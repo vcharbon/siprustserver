@@ -6,6 +6,7 @@ members = [
     "crates/sip-template",
     "crates/wire-mutations",
     "crates/observe",
+    "crates/observe-testkit",
     "crates/alloc-counter",
     "crates/sip-clock",
     "crates/lock-poison",

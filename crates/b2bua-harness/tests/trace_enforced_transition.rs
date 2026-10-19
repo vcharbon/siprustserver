@@ -46,7 +46,7 @@ fn sample_everything() {
 #[tokio::test(start_paused = true)]
 async fn the_enforced_teardown_of_an_unanswered_a_leg_shows_on_the_trace() {
     sample_everything();
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
 
     let h = Harness::new("b2bua-trace-enforced-transition");
     let alice = h.agent("alice", "127.0.0.1:5064").await;

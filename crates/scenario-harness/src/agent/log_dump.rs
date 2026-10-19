@@ -10,7 +10,7 @@
 //! Scenario tests never assert on captured content — the `Recorder` is their
 //! oracle; this capture exists only so a failing scenario self-documents.
 
-use observe::{CapturedEvent, TestLogGuard, TestLogHandle};
+use observe_testkit::{CapturedEvent, TestLogGuard, TestLogHandle};
 
 /// How many lifecycle log lines a dump prints. A dump is read by a human right
 /// after the digest, so it shows the tail — the lines nearest the failure.
@@ -31,10 +31,10 @@ pub(super) struct LogCapture {
 impl LogCapture {
     /// Start capturing on this thread.
     pub(super) fn install() -> Self {
-        let (installed, handle) = match observe::current_test_buffer() {
+        let (installed, handle) = match observe_testkit::current_test_buffer() {
             Some(handle) => (None, handle),
             None => {
-                let (guard, handle) = observe::test_buffer();
+                let (guard, handle) = observe_testkit::test_buffer();
                 (Some(guard), handle)
             }
         };
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn an_enclosing_capture_buffer_is_reused_not_shadowed() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let capture = LogCapture::install();
         tracing::info!("visible to both");
         assert_eq!(log.lines().len(), 1, "the test's own buffer still sees the line");

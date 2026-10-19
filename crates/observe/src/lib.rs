@@ -28,6 +28,24 @@
 //! Domain crates depend on `tracing` and the thin helpers here; the
 //! OpenTelemetry dependency tree terminates in this crate.
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 mod admission;
 mod attr;
 mod call_span;
@@ -39,8 +57,8 @@ mod otlp;
 pub mod panic_report;
 mod payload_targets;
 mod plane;
+pub mod poison;
 mod rate_draw;
-mod test_buffer;
 pub mod trace_ids;
 mod wave;
 mod wave_set;
@@ -52,13 +70,10 @@ pub use attr::{
     BASE64_SOURCE_CAP_BYTES, BODY_ENCODING_BASE64, TRUNCATED_FIELD,
 };
 pub use call_span::{CallIdentity, CallSpan, ChildSpan, TraceEvent, BODY_CAP_BYTES};
-pub use init::{init_production, ObserveGuard};
+pub use init::{init_production, ObserveGuard, ObserveInitError};
 pub use node::{keep_node, node, set_node_identity, spawn_keeping_node, with_node, NodeScope};
 pub use plane::{is_trace_plane, TRACE_TARGET};
 pub use rate_draw::RateDraw;
-pub use test_buffer::{
-    current_test_buffer, test_buffer, CapturedEvent, CapturedSpan, TestLogGuard, TestLogHandle,
-};
 pub use wave::{
     Edge, Tally, Wave, WaveReport, DEFAULT_IDLE_CLOSE_AFTER, DEFAULT_SUMMARY_EVERY, MAX_COUNTERS,
 };

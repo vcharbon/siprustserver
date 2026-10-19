@@ -246,7 +246,7 @@ mod tests {
     use crate::admission::activation_bucket;
     use crate::admission::SampleAdmission;
     use crate::rate_draw::RateDraw;
-    use crate::test_buffer::test_buffer;
+    use observe_testkit::test_buffer;
 
     fn lease() -> TraceLease {
         SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), activation_bucket(0))

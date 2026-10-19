@@ -42,3 +42,12 @@ pub fn validate_default_dest(
     }
     Ok(())
 }
+
+/// The process subscriber of the service `name`; a log writer the OS refuses
+/// ends the process.
+pub(crate) fn observe_or_exit(name: &str) -> observe::ObserveGuard {
+    observe::init_production(name).unwrap_or_else(|e| {
+        eprintln!("{name} FATAL: {e}");
+        std::process::exit(1)
+    })
+}

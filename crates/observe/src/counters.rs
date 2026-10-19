@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use metric_catalogue::{Family, Labels};
+use metric_catalogue::{Dim, Family, Labels};
 
 /// Lifecycle log lines dropped because the writer's bounded queue was full.
 pub static LOG_LINES_DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +105,13 @@ pub const PANICS_REPEATED_TOTAL: Family = Family::counter(
     "Panics at a source location the process panic hook reported less than its interval (60 s) ago: counted, not reported.",
 );
 
+/// The crate's lock recoveries, by lock ([`crate::poison`]).
+pub const POISONED_LOCK_RECOVERIES_TOTAL: Family = Family::counter(
+    "observe_poisoned_lock_recoveries_total",
+    Labels::Product(&[Dim::new("lock", &crate::poison::LOCKS)]),
+    "observability locks a panic poisoned, taken as they stood and cleared (process-wide), by lock — expected 0",
+);
+
 /// Every family [`prometheus_text`] renders, in exposition order.
 pub const FAMILIES: &[Family] = &[
     LOG_LINES_DROPPED_TOTAL,
@@ -115,6 +122,7 @@ pub const FAMILIES: &[Family] = &[
     TRACE_ADMITTED_TOTAL,
     TRACE_ADOPTION_REFUSED_TOTAL,
     PANICS_REPEATED_TOTAL,
+    POISONED_LOCK_RECOVERIES_TOTAL,
 ];
 
 /// Prometheus exposition for every counter above, appended by each runner's
@@ -133,6 +141,8 @@ pub fn prometheus_text() -> String {
     ]) {
         family.render_value(&mut s, get(counter));
     }
+    let recoveries = &crate::poison::RECOVERIES;
+    POISONED_LOCK_RECOVERIES_TOTAL.render(&mut s, |series| recoveries.count_at(series.at(0)));
     s
 }
 

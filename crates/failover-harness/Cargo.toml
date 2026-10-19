@@ -45,6 +45,7 @@ observe = { path = "../observe" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+observe-testkit = { path = "../observe-testkit" }
 # A test service states the body of a request it originates.
 b2bua-sdk = { path = "../b2bua-sdk" }
 # A test wraps the limiter client (the `CallLimiter` trait is async-trait).

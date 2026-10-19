@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn two_nodes_in_one_process_each_serve_a_call_under_their_own_root() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let traces = gate(true, 1.0, 100);
         let (n1, n2) = ("n1#g1", "n2#g1");
         let on = |node: &str, f: &dyn Fn()| observe::NodeScope::named(node).enter(f);
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn recording_on_an_unsampled_call_is_a_no_op() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let traces = gate(true, 1.0, 100);
         traces.record("never-activated", TraceEvent::new("sip.in", 0, "alice"));
         assert!(log.lines().is_empty());

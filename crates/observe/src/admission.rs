@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use load_shed::{at_ms, TokenBucket};
 
 use crate::counters;
+use crate::poison::{locked, ACTIVATION_BUCKET};
 use crate::rate_draw::RateDraw;
 
 /// Concurrent traced calls a process holds open by default.
@@ -137,7 +138,7 @@ impl SampleAdmission {
 
     /// Take one activation token at `now_ms`.
     fn take_token(&self, now_ms: i64) -> bool {
-        self.bucket.lock().expect("activation bucket mutex").try_take(at_ms(now_ms)).is_ok()
+        locked(&self.bucket, ACTIVATION_BUCKET).try_take(at_ms(now_ms)).is_ok()
     }
 
     /// Claim one active-trace slot without exceeding the cap.

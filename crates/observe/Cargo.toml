@@ -25,6 +25,7 @@ otlp = [
 ]
 
 [dependencies]
+lock-poison = { path = "../lock-poison" }
 metric-catalogue = { path = "../metric-catalogue" }
 tracing = { workspace = true }
 # The trace-activation token bucket (`activation_bucket`).
@@ -44,3 +45,4 @@ opentelemetry-otlp = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+observe-testkit = { path = "../observe-testkit" }

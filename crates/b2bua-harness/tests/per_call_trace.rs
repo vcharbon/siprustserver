@@ -30,7 +30,7 @@ fn sample_everything() {
 #[tokio::test(start_paused = true)]
 async fn a_sampled_call_records_its_messages_decision_and_rules_on_one_span() {
     sample_everything();
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
 
     let s = B2buaScene::new("per-call-trace").await;
     let mut dialog = s.establish().await;

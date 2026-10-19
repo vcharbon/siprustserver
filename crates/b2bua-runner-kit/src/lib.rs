@@ -486,7 +486,7 @@ impl RunnerEnv {
     /// Installs the process subscriber (ADR-0026) first, so every runner
     /// composed from this kit logs and traces identically without wiring it.
     pub async fn bind(self, name: &str) -> RunnerBase {
-        let observe = observe::init_production(name);
+        let observe = validate::observe_or_exit(name);
         // The per-call trace gate, configured once from the environment before
         // any call arrives (ADR-0026): with no OTLP endpoint it is inert and no
         // call path pays more than one boolean check.

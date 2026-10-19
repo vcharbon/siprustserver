@@ -4,7 +4,7 @@
 //! per call, in order, one compact line per fact. Any trace kind a SUT adds
 //! (its timer arm/cancel/fire facts included) appears here with no change.
 
-use observe::CapturedEvent;
+use observe_testkit::CapturedEvent;
 
 use crate::report::wire::format_relative;
 

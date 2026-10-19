@@ -62,44 +62,46 @@ impl fmt::Display for Edge {
 /// resolved=3`); an empty tally formats as `-`.
 #[derive(Clone, Copy, Debug)]
 pub struct Tally {
-    names: [&'static str; MAX_COUNTERS],
-    values: [u64; MAX_COUNTERS],
+    /// The registered counters, `(name, value)`, in the first `len` slots.
+    slots: [(&'static str, u64); MAX_COUNTERS],
     len: usize,
 }
 
 impl Default for Tally {
     fn default() -> Self {
-        Self { names: [""; MAX_COUNTERS], values: [0; MAX_COUNTERS], len: 0 }
+        Self { slots: [("", 0); MAX_COUNTERS], len: 0 }
     }
 }
 
 impl Tally {
+    /// The registered counters, in registration order.
+    fn registered(&self) -> impl Iterator<Item = &(&'static str, u64)> {
+        self.slots.iter().take(self.len)
+    }
+
     /// Add `n` to `name`, registering it on first use. Counters beyond
     /// [`MAX_COUNTERS`] are dropped — widen the constant rather than silently
     /// losing a counter at a new call site.
     pub fn add(&mut self, name: &'static str, n: u64) {
-        for i in 0..self.len {
-            if self.names[i] == name {
-                self.values[i] = self.values[i].saturating_add(n);
-                return;
-            }
+        if let Some(slot) = self.slots.iter_mut().take(self.len).find(|(at, _)| *at == name) {
+            slot.1 = slot.1.saturating_add(n);
+            return;
         }
         debug_assert!(self.len < MAX_COUNTERS, "wave tally overflow on {name}");
-        if self.len < MAX_COUNTERS {
-            self.names[self.len] = name;
-            self.values[self.len] = n;
+        if let Some(slot) = self.slots.get_mut(self.len) {
+            *slot = (name, n);
             self.len += 1;
         }
     }
 
     /// The accumulated value of `name` (`0` if never recorded).
     pub fn get(&self, name: &str) -> u64 {
-        (0..self.len).find(|&i| self.names[i] == name).map(|i| self.values[i]).unwrap_or(0)
+        self.registered().find(|(at, _)| *at == name).map_or(0, |(_, value)| *value)
     }
 
     /// Sum over every counter — the episode's event count.
     pub fn total(&self) -> u64 {
-        self.values[..self.len].iter().fold(0u64, |a, v| a.saturating_add(*v))
+        self.registered().fold(0u64, |a, (_, v)| a.saturating_add(*v))
     }
 }
 
@@ -108,11 +110,11 @@ impl fmt::Display for Tally {
         if self.len == 0 {
             return f.write_str("-");
         }
-        for i in 0..self.len {
+        for (i, (name, value)) in self.registered().enumerate() {
             if i > 0 {
                 f.write_str(" ")?;
             }
-            write!(f, "{}={}", self.names[i], self.values[i])?;
+            write!(f, "{name}={value}")?;
         }
         Ok(())
     }
@@ -270,7 +272,7 @@ impl Wave {
 }
 
 fn elapsed_ms(from: Instant, to: Instant) -> u64 {
-    to.saturating_duration_since(from).as_millis() as u64
+    u64::try_from(to.saturating_duration_since(from).as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

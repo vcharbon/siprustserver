@@ -118,7 +118,7 @@ mod tests {
     /// [`observe::MAX_KEYS`] episodes, each line naming its own class's sample.
     #[tokio::test(start_paused = true)]
     async fn the_samples_stay_bounded_whatever_the_classes() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let waves = UnroutableWaves::new();
         for i in 0..(observe::MAX_KEYS * 4) {
             waves.record(&format!("wire:X{i}:405"), "r", format!("call_id=c{i}"));
@@ -135,7 +135,7 @@ mod tests {
     /// its reason and a real example.
     #[tokio::test(start_paused = true)]
     async fn an_unroutable_storm_prints_a_handful_of_lines_with_a_sample() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let waves = UnroutableWaves::new();
         for i in 0..5_000 {
             waves.record("wire:BYE:481", "no-ruri-callref-no-index", format!("call_id=c{i}"));
@@ -157,7 +157,7 @@ mod tests {
     /// own reason and sample.
     #[tokio::test(start_paused = true)]
     async fn each_successive_episode_names_its_own_sample() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let waves = UnroutableWaves::new();
         waves.record("wire:ACK", "no-dialog", "call_id=old".into());
         tokio::task::yield_now().await;
@@ -197,7 +197,7 @@ mod tests {
     /// carries the episode totals — including the self-releases that ended it.
     #[tokio::test(start_paused = true)]
     async fn a_five_thousand_call_takeover_prints_a_handful_of_lines() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let waves = takeover_waves();
 
         for _ in 0..5_000 {

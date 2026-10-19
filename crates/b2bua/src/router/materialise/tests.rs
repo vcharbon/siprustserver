@@ -63,7 +63,7 @@ fn resident(d: Materialised) -> Call {
 
 /// The value `e`'s `totals` field carries for `counter` (`0` when absent): the
 /// field is the `name=n` run a `Tally` renders.
-fn tallied(e: &observe::CapturedEvent, counter: &str) -> u64 {
+fn tallied(e: &observe_testkit::CapturedEvent, counter: &str) -> u64 {
     e.fields
         .iter()
         .find(|(n, _)| n == "totals")
@@ -75,7 +75,10 @@ fn tallied(e: &observe::CapturedEvent, counter: &str) -> u64 {
 }
 
 /// The rising edge of the one takeover episode the log carries, keyed by `peer`.
-fn takeover_rising(log: &observe::TestLogHandle, peer: &str) -> observe::CapturedEvent {
+fn takeover_rising(
+    log: &observe_testkit::TestLogHandle,
+    peer: &str,
+) -> observe_testkit::CapturedEvent {
     let events = log.matching("acting-backup takeover");
     let rising: Vec<_> = events
         .iter()
@@ -100,7 +103,7 @@ fn takeover_rising(log: &observe::TestLogHandle, peer: &str) -> observe::Capture
 /// nothing.
 #[tokio::test(start_paused = true)]
 async fn takeover_serves_a_backup_replica_once_then_finds_it_resident() {
-    let (_capture, log) = observe::test_buffer();
+    let (_capture, log) = observe_testkit::test_buffer();
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let call = call_in("w0", "w1", "cid-served", CallModelState::Active, &n.clock);
@@ -130,7 +133,7 @@ async fn takeover_serves_a_backup_replica_once_then_finds_it_resident() {
 /// one still owes the teardown's end and is served (D1).
 #[tokio::test(start_paused = true)]
 async fn takeover_refuses_a_terminated_replica_and_serves_a_terminating_one() {
-    let (_capture, log) = observe::test_buffer();
+    let (_capture, log) = observe_testkit::test_buffer();
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let ended = call_in("w0", "w1", "cid-ended", CallModelState::Terminated, &n.clock);
@@ -214,7 +217,7 @@ async fn takeover_misses_are_typed() {
 /// straggler line written — with no takeover mark, and found resident next.
 #[tokio::test(start_paused = true)]
 async fn reclaim_serves_an_own_replica_once_then_finds_it_resident() {
-    let (_capture, log) = observe::test_buffer();
+    let (_capture, log) = observe_testkit::test_buffer();
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let call = call_in("w1", "w0", "cid-reclaim", CallModelState::Active, &n.clock);

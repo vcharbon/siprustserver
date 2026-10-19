@@ -215,7 +215,7 @@ fn forwarded_branch(sent: &Arc<Sent>) -> String {
 // again by an activation that thinks it opened the span.
 #[tokio::test]
 async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
-    let (_guard, log) = observe::test_buffer();
+    let (_guard, log) = observe_testkit::test_buffer();
     let traces = sample_everything();
     let (core, _ep) = core_with(traces.clone(), None);
 
@@ -246,7 +246,7 @@ async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
 // an INVITE arriving, a reason, and nothing leaving.
 #[tokio::test]
 async fn a_shed_call_records_the_503_it_was_answered_with() {
-    let (_guard, log) = observe::test_buffer();
+    let (_guard, log) = observe_testkit::test_buffer();
     let traces = sample_everything();
     let (core, ep) = core_with(traces.clone(), Some(Arc::new(SheddingGate)));
 
@@ -308,7 +308,7 @@ async fn a_rejected_call_closes_its_span_when_the_ack_relays() {
 // state).
 #[tokio::test]
 async fn a_rejected_re_invite_leaves_the_live_call_its_span() {
-    let (_guard, log) = observe::test_buffer();
+    let (_guard, log) = observe_testkit::test_buffer();
     let traces = sample_everything();
     let (core, ep) = core_with(traces.clone(), None);
     const CALL_ID: &str = "reinvite@10.0.0.1";

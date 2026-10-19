@@ -45,8 +45,9 @@ pub struct LogWriterGuard {
     handle: Option<JoinHandle<()>>,
 }
 
-/// Spawn the writer thread and return the `MakeWriter` plus its shutdown guard.
-pub fn spawn() -> (LossyStdout, LogWriterGuard) {
+/// Spawn the writer thread and return the `MakeWriter` plus its shutdown
+/// guard; the OS refusing the thread is the error.
+pub fn spawn() -> io::Result<(LossyStdout, LogWriterGuard)> {
     spawn_into(io::BufWriter::with_capacity(64 * 1024, io::stdout()), QUEUE_LINES)
 }
 
@@ -55,13 +56,12 @@ pub fn spawn() -> (LossyStdout, LogWriterGuard) {
 fn spawn_into<W: Write + Send + 'static>(
     out: W,
     queue_lines: usize,
-) -> (LossyStdout, LogWriterGuard) {
+) -> io::Result<(LossyStdout, LogWriterGuard)> {
     let (tx, rx) = sync_channel::<Msg>(queue_lines);
     let handle = std::thread::Builder::new()
         .name("observe-log-writer".to_string())
-        .spawn(move || drain_into(rx, out))
-        .expect("spawn log writer thread");
-    (LossyStdout { tx: tx.clone() }, LogWriterGuard { tx: Some(tx), handle: Some(handle) })
+        .spawn(move || drain_into(rx, out))?;
+    Ok((LossyStdout { tx: tx.clone() }, LogWriterGuard { tx: Some(tx), handle: Some(handle) }))
 }
 
 /// Write every queued line to `out` until the sentinel or a disconnect, flushing
@@ -233,7 +233,7 @@ mod tests {
         // The guard is dropped on another thread so a join that never returns
         // fails this test instead of hanging the lane.
         std::thread::spawn(move || {
-            let (make, guard) = spawn();
+            let (make, guard) = spawn().expect("the writer thread starts");
             drop(guard);
             // The `MakeWriter` outlives the guard, as it does in a real process
             // where the global subscriber owns it.
@@ -254,7 +254,7 @@ mod tests {
         // ends fails this test instead of hanging the lane.
         std::thread::spawn(move || {
             // A bound above the burst: this test is about ORDER, not loss.
-            let (make, guard) = spawn_into(sink, LINES * 2);
+            let (make, guard) = spawn_into(sink, LINES * 2).expect("the writer thread starts");
             for i in 0..LINES {
                 let mut w = make.make_writer();
                 w.write_all(format!("line-{i}\n").as_bytes()).unwrap();

@@ -108,7 +108,7 @@ fn a_lifecycle_handlers_cursor_move_is_on_the_trace() {
         SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(5), activation_bucket(0)),
         false,
     )));
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
 
     let call = traced_call();
     let event = CallEvent::InternalEvent {

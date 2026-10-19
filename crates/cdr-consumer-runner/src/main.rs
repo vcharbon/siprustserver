@@ -22,6 +22,12 @@ use cdr_consumer_runner::observation::JsonRecordView;
 #[tokio::main]
 async fn main() {
     // Subscriber first (ADR-0026); the guard drains the log writer at exit.
-    let _observe = observe::init_production("cdr-consumer-runner");
+    let _observe = match observe::init_production("cdr-consumer-runner") {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("cdr-consumer-runner FATAL: {e}");
+            std::process::exit(1);
+        }
+    };
     cdr_consumer_runner::app::run(Arc::new(JsonRecordView)).await;
 }

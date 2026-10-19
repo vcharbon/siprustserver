@@ -13,6 +13,14 @@ pub fn sigterm() -> impl std::future::Future<Output = ()> {
     }
 }
 
+/// The process subscriber; a log writer the OS refuses ends the process.
+pub fn observe_or_exit() -> observe::ObserveGuard {
+    observe::init_production("sip-proxy-runner").unwrap_or_else(|e| {
+        eprintln!("sip-proxy-runner FATAL: {e}");
+        std::process::exit(1)
+    })
+}
+
 /// Never resolves: only Ctrl-C drives shutdown off unix.
 #[cfg(not(unix))]
 pub fn sigterm() -> impl std::future::Future<Output = ()> {

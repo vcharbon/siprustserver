@@ -503,6 +503,7 @@ dependencies = [
  "metric-catalogue",
  "metric-values",
  "observe",
+ "observe-testkit",
  "proptest",
  "repl-net",
  "repl-net-testkit",
@@ -540,6 +541,7 @@ dependencies = [
  "media",
  "media-harness",
  "observe",
+ "observe-testkit",
  "proptest",
  "rfc-rules",
  "scenario-harness",
@@ -1575,6 +1577,7 @@ dependencies = [
  "layer-harness",
  "load-shed",
  "observe",
+ "observe-testkit",
  "repl-net",
  "repl-net-testkit",
  "scenario-harness",
@@ -3053,13 +3056,23 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "load-shed",
+ "lock-poison",
  "metric-catalogue",
+ "observe-testkit",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "observe-testkit"
+version = "0.1.0"
+dependencies = [
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -4205,6 +4218,7 @@ dependencies = [
  "http-net-testkit",
  "layer-harness",
  "observe",
+ "observe-testkit",
  "rfc-rules",
  "seq-report",
  "serde",
@@ -4618,6 +4632,7 @@ dependencies = [
  "metric-catalogue",
  "metric-values",
  "observe",
+ "observe-testkit",
  "proptest",
  "scenario-harness",
  "sha1 0.11.0",

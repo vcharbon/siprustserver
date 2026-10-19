@@ -117,11 +117,7 @@ fn seed() -> u64 {
     if current != 0 {
         return current;
     }
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x5DEE_CE66);
-    let fresh = (t ^ ((std::process::id() as u64) << 32)) | 1;
+    let fresh = crate::rate_draw::clock_pid_entropy() | 1;
     SEED.store(fresh, Ordering::Relaxed);
     fresh
 }

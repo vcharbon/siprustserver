@@ -43,6 +43,7 @@ observe = { path = "../observe", default-features = false }
 # shared MessagePack mutations.
 proptest.workspace = true
 wire-mutations = { path = "../wire-mutations" }
+observe-testkit = { path = "../observe-testkit" }
 # The closed rule-token list the coverage doc's rows are checked against.
 rfc-rules = { path = "../rfc-rules" }
 # The call-shape catalog (forked establishments) driven through the SUT.

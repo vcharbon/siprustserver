@@ -46,6 +46,7 @@ tracing = { workspace = true }
 observe = { path = "../observe", default-features = false }
 
 [dev-dependencies]
+observe-testkit = { path = "../observe-testkit" }
 sip-net-testkit = { path = "../sip-net-testkit" }
 scenario-harness = { path = "../scenario-harness" }
 layer-harness = { path = "../layer-harness" }

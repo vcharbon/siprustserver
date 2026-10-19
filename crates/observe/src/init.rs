@@ -90,14 +90,18 @@ fn lifecycle_only() -> FilterFn<fn(&tracing::Metadata<'_>) -> bool> {
 /// It also installs the process panic hook ([`crate::panic_report`]), which
 /// reports a panic site at most once per interval and counts the rest.
 ///
-/// Hold the returned guard until the process exits.
+/// Hold the returned guard until the process exits. The OS refusing the log
+/// writer's thread is the error: a runner refuses to start without its log.
 #[cfg_attr(not(feature = "otlp"), allow(unused_variables))]
-pub fn init_production(service_name: &str) -> ObserveGuard {
+pub fn init_production(service_name: &str) -> Result<ObserveGuard, ObserveInitError> {
     if INSTALLED.swap(true, Ordering::SeqCst) {
-        return ObserveGuard::inert();
+        return Ok(ObserveGuard::inert());
     }
+    let (make_writer, writer_guard) = writer::spawn().map_err(|e| {
+        INSTALLED.store(false, Ordering::SeqCst);
+        ObserveInitError(e)
+    })?;
     crate::panic_report::install();
-    let (make_writer, writer_guard) = writer::spawn();
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     let fmt_layer = tracing_subscriber::fmt::layer()
@@ -140,20 +144,33 @@ pub fn init_production(service_name: &str) -> ObserveGuard {
             if let Some(p) = provider {
                 let _ = p.shutdown();
             }
-            return ObserveGuard::inert();
+            return Ok(ObserveGuard::inert());
         }
-        ObserveGuard { writer: Some(writer_guard), provider }
+        Ok(ObserveGuard { writer: Some(writer_guard), provider })
     }
     #[cfg(not(feature = "otlp"))]
     {
         let registry = Registry::default().with(filter).with(fmt_layer);
         if tracing::subscriber::set_global_default(registry).is_err() {
             drop(writer_guard);
-            return ObserveGuard::inert();
+            return Ok(ObserveGuard::inert());
         }
-        ObserveGuard { writer: Some(writer_guard) }
+        Ok(ObserveGuard { writer: Some(writer_guard) })
     }
 }
+
+/// The process subscriber was not installed: the log writer's thread did not
+/// start.
+#[derive(Debug)]
+pub struct ObserveInitError(std::io::Error);
+
+impl std::fmt::Display for ObserveInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the log writer thread did not start: {}", self.0)
+    }
+}
+
+impl std::error::Error for ObserveInitError {}
 
 #[cfg(test)]
 mod tests {

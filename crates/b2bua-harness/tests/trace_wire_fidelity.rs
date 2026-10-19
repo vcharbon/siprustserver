@@ -85,7 +85,7 @@ fn sample_everything() {
 }
 
 /// One captured field of one captured event.
-fn field(event: &observe::CapturedEvent, name: &str) -> String {
+fn field(event: &observe_testkit::CapturedEvent, name: &str) -> String {
     event
         .fields
         .iter()
@@ -97,7 +97,7 @@ fn field(event: &observe::CapturedEvent, name: &str) -> String {
 #[tokio::test(start_paused = true)]
 async fn a_traced_call_records_the_datagram_and_the_length_of_its_decision() {
     sample_everything();
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
 
     let h = Harness::new("b2bua-trace-wire-fidelity");
     let alice = h.agent("alice", "127.0.0.1:5062").await;

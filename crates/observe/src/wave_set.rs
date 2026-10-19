@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::poison::{locked, WAVE_KEYS, WAVE_SLOT};
 use crate::wave::{Edge, Wave, WaveReport, DEFAULT_IDLE_CLOSE_AFTER, DEFAULT_SUMMARY_EVERY};
 
 /// Maximum concurrently-open keys. Keys can be wire-influenceable (a resolver
@@ -145,7 +146,7 @@ impl<P: Clone + Send + 'static> WaveSet<P> {
     /// The key's live slot, inserted fresh when absent; `None` once
     /// [`MAX_KEYS`] episodes are open.
     fn slot_for(&self, key: &str) -> Option<SlotRef<P>> {
-        let mut waves = self.waves.lock().unwrap();
+        let mut waves = locked(&self.waves, WAVE_KEYS);
         if let Some(slot) = waves.get(key) {
             return Some(slot.clone());
         }
@@ -178,7 +179,7 @@ impl<P: Clone + Send + 'static> WaveSet<P> {
         // added yet: every `+1` here is matched by exactly one `-1` in
         // `recovered` or `finish`.
         let (report, payload) = {
-            let mut s = slot.lock().unwrap();
+            let mut s = locked(slot, WAVE_SLOT);
             if s.retired {
                 return false;
             }
@@ -209,9 +210,9 @@ impl<P: Clone + Send + 'static> WaveSet<P> {
         if !self.is_active() {
             return;
         }
-        let slot = self.waves.lock().unwrap().get(key).cloned();
+        let slot = locked(&self.waves, WAVE_KEYS).get(key).cloned();
         let Some(slot) = slot else { return };
-        let mut s = slot.lock().unwrap();
+        let mut s = locked(&slot, WAVE_SLOT);
         if s.wave.request_close() {
             self.release_active();
         }
@@ -223,9 +224,9 @@ impl<P: Clone + Send + 'static> WaveSet<P> {
         if !self.is_active() {
             return;
         }
-        let slots: Vec<SlotRef<P>> = self.waves.lock().unwrap().values().cloned().collect();
+        let slots: Vec<SlotRef<P>> = locked(&self.waves, WAVE_KEYS).values().cloned().collect();
         for slot in slots {
-            let mut s = slot.lock().unwrap();
+            let mut s = locked(&slot, WAVE_SLOT);
             if s.wave.request_close() {
                 self.release_active();
             }
@@ -237,8 +238,8 @@ impl<P: Clone + Send + 'static> WaveSet<P> {
     /// so a concurrent record either revives this episode or opens the next
     /// one, never both.
     fn drive(&self, key: &str, slot: &SlotRef<P>) -> Step<P> {
-        let mut waves = self.waves.lock().unwrap();
-        let mut s = slot.lock().unwrap();
+        let mut waves = locked(&self.waves, WAVE_KEYS);
+        let mut s = locked(slot, WAVE_SLOT);
         if s.retired || !s.wave.is_open() {
             return Step::Gone;
         }

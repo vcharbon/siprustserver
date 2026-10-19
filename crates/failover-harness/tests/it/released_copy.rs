@@ -211,18 +211,18 @@ async fn settle_to_one_cdr(
 /// The takeover events the log carries: a `rising` event opens an episode keyed
 /// by the dead peer, its 5 s `summary` events report the running totals, and a
 /// `falling` event closes it on the episode's totals.
-fn takeover_events(log: &observe::TestLogHandle) -> Vec<observe::CapturedEvent> {
+fn takeover_events(log: &observe_testkit::TestLogHandle) -> Vec<observe_testkit::CapturedEvent> {
     log.matching("acting-backup takeover")
 }
 
 /// The rendered value of `e`'s `name` field (empty when it carries none).
-fn field<'a>(e: &'a observe::CapturedEvent, name: &str) -> &'a str {
+fn field<'a>(e: &'a observe_testkit::CapturedEvent, name: &str) -> &'a str {
     e.fields.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).unwrap_or_default()
 }
 
 /// The value `e`'s `totals` field carries for `counter` (`0` when absent): the
 /// field is the `name=n` run a `Tally` renders.
-fn tallied(e: &observe::CapturedEvent, counter: &str) -> u64 {
+fn tallied(e: &observe_testkit::CapturedEvent, counter: &str) -> u64 {
     field(e, "totals")
         .split_whitespace()
         .find_map(|pair| pair.strip_prefix(counter)?.strip_prefix('=')?.parse().ok())
@@ -232,7 +232,7 @@ fn tallied(e: &observe::CapturedEvent, counter: &str) -> u64 {
 /// What the takeover log says `counter` did over the whole run: an episode
 /// carries its totals on its falling edge, so the run's total is the sum over
 /// closed episodes. Read it only behind [`assert_every_episode_closed`].
-fn logged_total(log: &observe::TestLogHandle, counter: &str) -> u64 {
+fn logged_total(log: &observe_testkit::TestLogHandle, counter: &str) -> u64 {
     takeover_events(log)
         .iter()
         .filter(|e| field(e, "edge") == "falling")
@@ -243,7 +243,7 @@ fn logged_total(log: &observe::TestLogHandle, counter: &str) -> u64 {
 /// Every takeover episode the run opened has also closed, so the falling edges
 /// carry the whole run's totals. A timing regression that leaves an episode open
 /// fails here, on the episode, rather than as a missing counter downstream.
-fn assert_every_episode_closed(log: &observe::TestLogHandle) {
+fn assert_every_episode_closed(log: &observe_testkit::TestLogHandle) {
     let events = takeover_events(log);
     let opened = events.iter().filter(|e| field(e, "edge") == "rising").count();
     let closed = events.iter().filter(|e| field(e, "edge") == "falling").count();
@@ -252,13 +252,13 @@ fn assert_every_episode_closed(log: &observe::TestLogHandle) {
 }
 
 /// The takeover events as log lines, for an assertion message.
-fn rendered(events: &[observe::CapturedEvent]) -> Vec<String> {
-    events.iter().map(observe::CapturedEvent::line).collect()
+fn rendered(events: &[observe_testkit::CapturedEvent]) -> Vec<String> {
+    events.iter().map(observe_testkit::CapturedEvent::line).collect()
 }
 
 /// The log plane says the same as the counters: the call was taken over ONCE,
 /// and the datagram that arrived after the release was refused, not served.
-fn assert_one_hydration_then_a_refusal(log: &observe::TestLogHandle) {
+fn assert_one_hydration_then_a_refusal(log: &observe_testkit::TestLogHandle) {
     assert_every_episode_closed(log);
     let lines = rendered(&takeover_events(log));
     assert_eq!(
@@ -306,7 +306,7 @@ fn datagrams_toward(fh: &FailoverHarness, to: SocketAddr) -> usize {
 /// call over a second time.
 #[tokio::test(start_paused = true)]
 async fn a_late_request_naming_a_released_takeover_copy_draws_481() {
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
     let mut fh = FailoverHarness::new("released-copy-late-request", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -374,7 +374,7 @@ async fn a_late_request_naming_a_released_takeover_copy_draws_481() {
 /// back to the callee and the ended call is not taken over again.
 #[tokio::test(start_paused = true)]
 async fn a_late_response_naming_a_released_takeover_copy_is_dropped() {
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
     let mut fh = FailoverHarness::new("released-copy-late-response", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;

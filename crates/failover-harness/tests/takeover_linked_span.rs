@@ -35,7 +35,8 @@ use failover_harness::{
 };
 use http_net::{HttpServerHandle, HttpTransport};
 use http_net_testkit::SimulatedHttpNetwork;
-use observe::{activation_bucket, CapturedSpan, RateDraw, SampleAdmission};
+use observe::{activation_bucket, RateDraw, SampleAdmission};
+use observe_testkit::CapturedSpan;
 use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -86,14 +87,14 @@ fn field<'a>(span: &'a CapturedSpan, name: &str) -> &'a str {
 
 /// The root spans opened for calls (`sip.call`), oldest first — HTTP child spans
 /// excluded.
-fn root_spans(log: &observe::TestLogHandle) -> Vec<CapturedSpan> {
+fn root_spans(log: &observe_testkit::TestLogHandle) -> Vec<CapturedSpan> {
     log.spans().into_iter().filter(|s| s.name == "sip.call").collect()
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
     sample_everything();
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
 
     let mut fh = FailoverHarness::new("takeover-linked-span", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;

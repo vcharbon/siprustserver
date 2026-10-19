@@ -97,14 +97,6 @@ crates/load-shed/src/sampler.rs 5
 crates/load-shed/src/token_bucket.rs 2
 crates/metric-values/src/fixed.rs 6
 crates/metric-values/src/open.rs 14
-crates/observe/src/admission.rs 2
-crates/observe/src/attr.rs 4
-crates/observe/src/rate_draw.rs 1
-crates/observe/src/test_buffer.rs 16
-crates/observe/src/trace_ids.rs 1
-crates/observe/src/wave.rs 11
-crates/observe/src/wave_set.rs 16
-crates/observe/src/writer.rs 1
 crates/repl-net/src/codec.rs 45
 crates/repl-net/src/framing.rs 7
 crates/repl-net/src/transport/real.rs 1

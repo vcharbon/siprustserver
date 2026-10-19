@@ -29,6 +29,7 @@ rfc-rules = { path = "../rfc-rules" }
 # and per-call trace into, dumped to stderr when a scenario panics (ADR-0026).
 # No `otlp` feature: a test never exports.
 observe = { path = "../observe" }
+observe-testkit = { path = "../observe-testkit" }
 sip-net = { path = "../sip-net" }
 sip-net-testkit = { path = "../sip-net-testkit" }
 layer-harness = { path = "../layer-harness" }

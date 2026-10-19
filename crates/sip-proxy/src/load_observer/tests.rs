@@ -485,7 +485,7 @@ fn an_empty_bucket_refuses_with_its_time_to_a_token() {
 /// reported the pre-slam cap, the one number an operator reads that line for.
 #[test]
 fn the_band_change_line_reports_the_cap_the_transition_produced() {
-    let (_guard, log) = observe::test_buffer();
+    let (_guard, log) = observe_testkit::test_buffer();
     let o = obs_with(|c| {
         bands_cfg(c);
         c.cap_initial_cps = 100.0;

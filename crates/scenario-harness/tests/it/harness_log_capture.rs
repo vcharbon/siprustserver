@@ -14,13 +14,14 @@ use scenario_harness::Harness;
 #[tokio::test(start_paused = true)]
 async fn a_running_harness_captures_what_the_sut_logs() {
     assert!(
-        observe::current_test_buffer().is_none(),
+        observe_testkit::current_test_buffer().is_none(),
         "nothing captures on this thread before a harness binds",
     );
 
     let h = Harness::new("log-capture")
         .describe("A live harness owns the thread's log/trace capture buffer");
-    let log = observe::current_test_buffer().expect("a harness installs the capture buffer");
+    let log =
+        observe_testkit::current_test_buffer().expect("a harness installs the capture buffer");
 
     tracing::info!(node = "w-0", "takeover complete");
 
@@ -36,7 +37,7 @@ async fn a_running_harness_captures_what_the_sut_logs() {
     h.finish().await;
 
     assert!(
-        observe::current_test_buffer().is_none(),
+        observe_testkit::current_test_buffer().is_none(),
         "the session's end releases the capture buffer",
     );
 }

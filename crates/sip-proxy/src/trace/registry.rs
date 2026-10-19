@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn recording_on_an_untraced_call_is_a_no_op() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let traces = gate(true, 100);
         traces.activate("a@h", id(), 1, None, 0);
         assert!(

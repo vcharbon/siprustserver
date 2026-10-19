@@ -193,7 +193,7 @@ fn main() -> std::process::ExitCode {
 async fn serve() {
     // Subscriber first (ADR-0026): every line below it is a lifecycle log, and
     // the guard drains the writer + flushes spans at exit.
-    let observe_guard = observe::init_production("sip-proxy-runner");
+    let observe_guard = sip_proxy_runner::signal::observe_or_exit();
 
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) parsed —
     // a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms gauges.

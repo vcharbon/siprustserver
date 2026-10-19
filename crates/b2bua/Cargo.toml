@@ -56,6 +56,7 @@ http-net = { path = "../http-net" }
 call-limiter-wire = { path = "../call-limiter-wire" }
 
 [dev-dependencies]
+observe-testkit = { path = "../observe-testkit" }
 # Tests that set an exact call admission state (`CallLimiterState::from_parts`).
 call = { path = "../call", features = ["testkit"] }
 # Paused-clock lever for timer tests (tokio::time::pause/advance).

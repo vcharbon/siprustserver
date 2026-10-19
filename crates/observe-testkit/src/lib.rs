@@ -1,4 +1,5 @@
-//! The in-memory subscriber tests capture logs and trace events with.
+//! `observe-testkit` — the in-memory subscriber tests capture logs and trace
+//! events with.
 //!
 //! ONE subscriber for the process, installed on first use; capture is scoped by
 //! the thread-local buffer stack it writes to, so a current-thread runtime's

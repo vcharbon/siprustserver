@@ -27,7 +27,13 @@ use sip_clock::Clock;
 #[tokio::main]
 async fn main() {
     // Subscriber first (ADR-0026); the guard drains the log writer at exit.
-    let _observe = observe::init_production("call-limiter-runner");
+    let _observe = match observe::init_production("call-limiter-runner") {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("call-limiter-runner FATAL: {e}");
+            std::process::exit(1);
+        }
+    };
     // Installed before anything else: as PID 1 an unhandled SIGTERM is lost.
     let sigterm = sigterm();
 

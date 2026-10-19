@@ -173,6 +173,7 @@ b2bua-runner trace_header_malformed_total counter fixed {}
 b2bua-runner trace_admitted_total counter fixed {}
 b2bua-runner trace_adoption_refused_total counter fixed {}
 b2bua-runner panics_repeated_total counter fixed {}
+b2bua-runner observe_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner http_request_failures_total counter capped:256 {peer,cause}
 b2bua-runner http_request_failures_overflow_total counter fixed {}
 b2bua-runner http_request_poisoned_lock_recoveries_total counter fixed {lock}
@@ -272,6 +273,7 @@ sip-proxy-runner trace_header_malformed_total counter fixed {}
 sip-proxy-runner trace_admitted_total counter fixed {}
 sip-proxy-runner trace_adoption_refused_total counter fixed {}
 sip-proxy-runner panics_repeated_total counter fixed {}
+sip-proxy-runner observe_poisoned_lock_recoveries_total counter fixed {lock}
 sip-proxy-runner jemalloc_allocated_bytes gauge fixed {}
 sip-proxy-runner jemalloc_active_bytes gauge fixed {}
 sip-proxy-runner jemalloc_resident_bytes gauge fixed {}
@@ -332,6 +334,7 @@ call-limiter-runner trace_header_malformed_total counter fixed {}
 call-limiter-runner trace_admitted_total counter fixed {}
 call-limiter-runner trace_adoption_refused_total counter fixed {}
 call-limiter-runner panics_repeated_total counter fixed {}
+call-limiter-runner observe_poisoned_lock_recoveries_total counter fixed {lock}
 loadgen loadgen_calls_total counter semi_open {stream,shape,class}
 loadgen loadgen_branch_total counter semi_open {stream,shape,branch}
 loadgen loadgen_failed_step_total counter semi_open {stream,shape,step}
@@ -378,3 +381,4 @@ cdr-consumer-runner trace_header_malformed_total counter fixed {}
 cdr-consumer-runner trace_admitted_total counter fixed {}
 cdr-consumer-runner trace_adoption_refused_total counter fixed {}
 cdr-consumer-runner panics_repeated_total counter fixed {}
+cdr-consumer-runner observe_poisoned_lock_recoveries_total counter fixed {lock}
