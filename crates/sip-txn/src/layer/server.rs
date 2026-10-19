@@ -59,7 +59,7 @@ impl Owner {
             None => return,
         };
         if let Some(next_interval) = rearm {
-            let key = self.timers.insert(Timer::ServerRetransmit(id.to_key()), next_interval);
+            let key = self.arm(Timer::ServerRetransmit(id.to_key()), next_interval);
             if let Some(t) = self.server_mut(id) {
                 t.retransmit_key = Some(key);
             }
@@ -196,9 +196,7 @@ impl Owner {
         let armed = arm_timer_g
             .then(|| Ladder::armed(Schedule::rfc(Class::InviteServerFinal)))
             .flatten()
-            .map(|(ladder, first)| {
-                (ladder, self.timers.insert(Timer::ServerRetransmit(id.to_key()), first))
-            });
+            .map(|(ladder, first)| (ladder, self.arm(Timer::ServerRetransmit(id.to_key()), first)));
         if let Some((ladder, g_key)) = armed {
             if let Some(txn) = self.server_mut(id) {
                 txn.retransmit_key = Some(g_key);
@@ -315,7 +313,7 @@ impl Owner {
         // `callRef` param yet → `None`.
         let call_ref = extract_ruri_call_ref(&req);
 
-        self.open_txn(NewTransaction {
+        let head = NewTransaction {
             id: TxnId::Server(id.to_key()),
             kind,
             method: req.method().clone(),
@@ -332,8 +330,8 @@ impl Owner {
             // sent (`answer_unanswered_invites_of_call`); the TU's final
             // re-points it.
             destination: is_invite.then_some(src),
-        })
-        .held = held;
+        };
+        self.open_txn_with(head, |txn| txn.held = held);
 
         // For INVITE, immediately send 100 Trying and move to proceeding.
         if is_invite {

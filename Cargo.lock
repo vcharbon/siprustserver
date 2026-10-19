@@ -4500,6 +4500,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4646,6 +4647,7 @@ dependencies = [
  "metric-catalogue",
  "proptest",
  "sha2 0.11.1",
+ "sip-clock",
  "sip-message",
  "sip-net",
  "sip-net-testkit",

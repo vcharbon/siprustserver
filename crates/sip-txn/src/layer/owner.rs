@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
@@ -126,10 +127,11 @@ impl Owner {
         metrics: Arc<MetricsInner>,
         config: TransactionConfig,
     ) -> Self {
-        assert!(
-            config.deferred_bound.is_none() || config.invite_refusals.is_some(),
-            "a deferred bound refuses through invite_refusals"
-        );
+        let unanswerable = config.deferred_bound.is_some() && config.invite_refusals.is_none();
+        debug_assert!(!unanswerable, "a deferred bound refuses through invite_refusals");
+        if unanswerable {
+            tracing::warn!("a deferred bound without invite_refusals refuses nothing");
+        }
         Self {
             clients: HashMap::new(),
             servers: HashMap::new(),
@@ -314,6 +316,11 @@ impl Owner {
             }
             None => false,
         }
+    }
+
+    /// Arm `timer` after `delay`, held within the wheel's range.
+    pub(super) fn arm(&mut self, timer: Timer, delay: Duration) -> Key {
+        sip_clock::delay_queue::insert(&mut self.timers, timer, delay)
     }
 
     pub(super) fn cancel_timer(&mut self, key: Option<Key>) {

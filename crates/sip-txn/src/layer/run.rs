@@ -15,14 +15,12 @@ use super::handle::{Command, Forget};
 use super::owner::Owner;
 use super::txn::Timer;
 
-/// The next expired timer. Only ever awaited while `q` is non-empty — an empty
-/// `DelayQueue` resolves `poll_expired` to `Ready(None)`, which would busy-spin
-/// `select!`, so the call site guards with `if !timers.is_empty()`.
-async fn next_expired(q: &mut DelayQueue<Timer>) -> Timer {
-    std::future::poll_fn(|cx| q.poll_expired(cx))
-        .await
-        .expect("guarded by !is_empty()")
-        .into_inner()
+/// The next expired timer; `None` once `q` is empty. Only awaited while `q` is
+/// non-empty — an empty `DelayQueue` resolves `poll_expired` to `Ready(None)`
+/// at once, which would busy-spin `select!`, so the call site guards with
+/// `if !timers.is_empty()`.
+async fn next_expired(q: &mut DelayQueue<Timer>) -> Option<Timer> {
+    std::future::poll_fn(|cx| q.poll_expired(cx)).await.map(|e| e.into_inner())
 }
 
 /// What one turn of the loop took.
@@ -43,6 +41,7 @@ pub(super) async fn run(
     pulse: Arc<LoopPulse>,
 ) {
     let endpoint: &dyn UdpEndpoint = endpoint.as_ref();
+    #[expect(clippy::disallowed_methods, reason = "TXN_SWEEP_INTERVAL is not zero")]
     let mut sweep = tokio::time::interval(ms(TXN_SWEEP_INTERVAL));
     // Coalesce missed ticks: after any owner stall the catch-up must be a single
     // pass, not a burst of back-to-back full-map scans (default `Burst`).
@@ -71,7 +70,7 @@ pub(super) async fn run(
                 Some(c) => Work::Command(c),
                 None => break, // all handles dropped → shut down
             },
-            timer = next_expired(&mut owner.timers), if !owner.timers.is_empty() => {
+            Some(timer) = next_expired(&mut owner.timers), if !owner.timers.is_empty() => {
                 Work::Timer(timer)
             }
             _ = sweep.tick() => Work::Sweep,

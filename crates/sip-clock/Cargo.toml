@@ -15,6 +15,8 @@ workspace = true
 [dependencies]
 # Only the monotonic `tokio::time::Instant` is needed in prod (no test-util).
 tokio = { workspace = true }
+# The timer wheel whose range `delay_queue` clamps every delay to.
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 # `start_paused` / `pause` / `advance` live behind tokio's test-util feature.

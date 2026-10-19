@@ -78,7 +78,7 @@ impl Owner {
         if self.server(key.id()).is_some() {
             return false;
         }
-        let txn = self.open_txn(NewTransaction {
+        let head = NewTransaction {
             id: TxnId::Server(key.clone()),
             kind: TxnKind::Invite,
             method: Method::Invite,
@@ -90,8 +90,8 @@ impl Owner {
             incarnation_mark: None,
             state: TxnState::Proceeding,
             destination: None,
-        });
-        txn.uas_to_tag = to_tag.filter(|t| !t.is_empty());
+        };
+        self.open_txn_with(head, |txn| txn.uas_to_tag = to_tag.filter(|t| !t.is_empty()));
         self.hold_seeded_identity(TxnRef::Server(key.id()));
         true
     }
@@ -192,12 +192,11 @@ impl Owner {
         }
         let ViaMarks { call_ref: via_call_ref, leg_id, incarnation_mark } =
             extract_via_custom_params(&invite);
-        let bound = self
-            .timers
-            .insert(Timer::ClientTimeout(branch.clone()), ms(self.invite_initial_timeout_ms));
+        let bound =
+            self.arm(Timer::ClientTimeout(branch.clone()), ms(self.invite_initial_timeout_ms));
         let resend = (!provisional)
             .then(|| bytes::Bytes::from(serialize(&SipMessage::Request(invite.clone()))));
-        let txn = self.open_txn(NewTransaction {
+        let head = NewTransaction {
             id: TxnId::Client(branch.clone()),
             kind: TxnKind::Invite,
             method: Method::Invite,
@@ -209,10 +208,12 @@ impl Owner {
             incarnation_mark,
             state: if provisional { TxnState::Proceeding } else { TxnState::Trying },
             destination: Some(dest),
+        };
+        self.open_txn_with(head, |txn| {
+            txn.timeout_kind = TimeoutKind::Transaction;
+            txn.timeout_key = Some(bound);
+            txn.seed_resend = resend;
         });
-        txn.timeout_kind = TimeoutKind::Transaction;
-        txn.timeout_key = Some(bound);
-        txn.seed_resend = resend;
         if let Some(cancel) = cancel {
             self.seed_held_cancel(&branch, *cancel, dest);
         }
@@ -233,7 +234,7 @@ impl Owner {
         else {
             return;
         };
-        let key = self.timers.insert(Timer::ClientRetransmit(branch.to_string()), ms(0));
+        let key = self.arm(Timer::ClientRetransmit(branch.to_string()), ms(0));
         if let Some(txn) = self.clients.get_mut(branch) {
             txn.retransmit_buf = Some(buf);
             txn.retransmit_key = Some(key);

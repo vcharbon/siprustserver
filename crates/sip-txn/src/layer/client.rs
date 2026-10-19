@@ -12,10 +12,12 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
+use sip_clock::delay_queue;
 use sip_message::generators::generate_ack_for_non_2xx;
 use sip_message::header::ParamValue;
 use sip_message::param_codec::decode_param;
-use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
+use sip_message::serializer::{render, write_request_line};
+use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use crate::event::{ClientTransactionHandle, TimeoutKind, TransactionEvent, TxnKind};
@@ -35,11 +37,8 @@ impl Owner {
         dest: SocketAddr,
         txn_type: TxnKind,
     ) -> ClientTransactionHandle {
-        // Wrap by value to serialize (avoids a full request clone just to make a
-        // `&SipMessage`), then destructure `msg` back out for the rest.
-        let wrapped = SipMessage::Request(msg);
-        let buf = Bytes::from(serialize(&wrapped));
-        let SipMessage::Request(msg) = wrapped else { unreachable!("just wrapped a request") };
+        let buf =
+            Bytes::from(render(msg.headers(), msg.body(), |out| write_request_line(out, &msg)));
 
         // CANCEL and ACK deliberately REUSE the branch of the request they relate
         // to (RFC 3261 §9.1 / §13.2.2.4). The client map is keyed by branch, so
@@ -184,7 +183,7 @@ impl Owner {
             && msg.to().tag().is_none()
             && self.invite_first_response_timeout_ms < max_ms
         {
-            self.timers.insert(
+            self.arm(
                 Timer::FirstResponse(branch.clone()),
                 ms(self.invite_first_response_timeout_ms),
             );
@@ -248,8 +247,8 @@ impl Owner {
             return;
         };
         h.ladder = Some(ladder);
-        txn.cancel_retransmit_key =
-            Some(self.timers.insert(Timer::CancelRetransmit(branch.to_string()), first));
+        let timer = Timer::CancelRetransmit(branch.to_string());
+        txn.cancel_retransmit_key = Some(delay_queue::insert(&mut self.timers, timer, first));
     }
 
     /// Timer-E tick for the on-wire CANCEL (RFC 3261 §17.1.2.2: T1, doubling,
@@ -279,7 +278,7 @@ impl Owner {
         self.send_buffer(endpoint, &buf, dest).await;
         self.metrics.retransmits.record_request(Class::CancelClient, method_slot(&Method::Cancel));
         if let Some(interval) = rearm {
-            let key = self.timers.insert(Timer::CancelRetransmit(branch.to_string()), interval);
+            let key = self.arm(Timer::CancelRetransmit(branch.to_string()), interval);
             if let Some(txn) = self.clients.get_mut(branch) {
                 txn.cancel_retransmit_key = Some(key);
             }
@@ -306,8 +305,8 @@ impl Owner {
         // retransmit storm.
         let schedule = Schedule::rfc(class).with_give_up(ms(max_ms.min(TIMER_B)));
         let Some((ladder, first)) = Ladder::armed(schedule) else { return };
-        let r_key = self.timers.insert(Timer::ClientRetransmit(branch.to_string()), first);
-        let t_key = self.timers.insert(Timer::ClientTimeout(branch.to_string()), ms(max_ms));
+        let r_key = self.arm(Timer::ClientRetransmit(branch.to_string()), first);
+        let t_key = self.arm(Timer::ClientTimeout(branch.to_string()), ms(max_ms));
         if let Some(txn) = self.clients.get_mut(branch) {
             txn.retransmit_key = Some(r_key);
             txn.timeout_key = Some(t_key);
@@ -356,8 +355,7 @@ impl Owner {
             None => return,
         };
         if let Some(next_interval) = rearm {
-            let key =
-                self.timers.insert(Timer::ClientRetransmit(branch.to_string()), next_interval);
+            let key = self.arm(Timer::ClientRetransmit(branch.to_string()), next_interval);
             if let Some(txn) = self.clients.get_mut(branch) {
                 txn.retransmit_key = Some(key);
             }
@@ -710,13 +708,14 @@ impl Owner {
                     && !t.lifetime.gave_up()
                     && !t.dead_hop_reported =>
             {
-                bound.saturating_sub(t.created_at.elapsed().as_millis() as u64).max(1)
+                let elapsed = u64::try_from(t.created_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                bound.saturating_sub(elapsed).max(1)
             }
             _ => return,
         };
         let old = self.clients.get_mut(branch).and_then(|t| t.timeout_key.take());
         self.cancel_timer(old);
-        let key = self.timers.insert(Timer::ClientTimeout(branch.to_string()), ms(remaining));
+        let key = self.arm(Timer::ClientTimeout(branch.to_string()), ms(remaining));
         if let Some(txn) = self.clients.get_mut(branch) {
             txn.timeout_key = Some(key);
             txn.timeout_kind = TimeoutKind::Transaction;

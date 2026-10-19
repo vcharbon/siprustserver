@@ -78,6 +78,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
 
+pub mod deadline;
+pub mod delay_queue;
+
 /// A monotonic-anchored clock. Cheap to [`Clone`] (two scalars); share one
 /// instance everywhere that needs a timestamp so all readers sit on the same
 /// timeline.

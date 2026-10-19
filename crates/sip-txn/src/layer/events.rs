@@ -85,7 +85,7 @@ impl Owner {
 
     fn arm_event_retry(&mut self) {
         if !self.event_retry_armed {
-            self.timers.insert(Timer::EventRetry, ms(EVENT_RETRY_MS));
+            self.arm(Timer::EventRetry, ms(EVENT_RETRY_MS));
             self.event_retry_armed = true;
         }
     }

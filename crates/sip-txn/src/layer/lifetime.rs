@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use sip_clock::{deadline, delay_queue};
 use tokio::time::Instant;
 
 use crate::event::TxnKind;
@@ -110,23 +111,35 @@ impl Owner {
     /// node. The backstop never precedes a client transaction's `Timeout`:
     /// it lies `TXN_MAX_AGE` past the INVITE bound, and `TXN_MAX_AGE` exceeds
     /// Timer F.
-    pub(super) fn open_txn(&mut self, head: NewTransaction) -> &mut Transaction {
+    pub(super) fn open_txn(&mut self, head: NewTransaction) {
+        self.open_txn_with(head, |_| {});
+    }
+
+    /// [`open_txn`](Self::open_txn), `finish` completing the transaction
+    /// before it goes into the map.
+    pub(super) fn open_txn_with(
+        &mut self,
+        head: NewTransaction,
+        finish: impl FnOnce(&mut Transaction),
+    ) {
         let budget = match head.kind {
-            TxnKind::Invite => self.invite_initial_timeout_ms + TXN_MAX_AGE,
+            TxnKind::Invite => self.invite_initial_timeout_ms.saturating_add(TXN_MAX_AGE),
             TxnKind::NonInvite => TXN_MAX_AGE,
         };
-        let id = head.id.clone();
-        let lifetime = Lifetime::Active { backstop: Instant::now() + ms(budget) };
-        self.set_txn(Transaction::new(head, lifetime));
-        self.arm_deadline(id.as_ref());
-        self.txn_mut(id.as_ref()).expect("just inserted")
+        let lifetime = Lifetime::Active { backstop: deadline::from_now(ms(budget)) };
+        let mut txn = Transaction::new(head, lifetime);
+        finish(&mut txn);
+        let cleanup = Timer::Cleanup(txn.id.clone());
+        txn.cleanup_key =
+            Some(delay_queue::insert_at(&mut self.timers, cleanup, txn.lifetime.deadline()));
+        self.set_txn(txn);
     }
 
     /// Hold the transaction `id` names for `why`, from now
     /// ([`Lifetime::held`]).
     pub(super) fn hold(&mut self, id: TxnRef<'_>, why: Hold) {
         let Some(txn) = self.txn_mut(id) else { return };
-        txn.lifetime = txn.lifetime.held(why, Instant::now() + why.duration());
+        txn.lifetime = txn.lifetime.held(why, deadline::from_now(why.duration()));
         self.arm_deadline(id);
     }
 
@@ -136,7 +149,7 @@ impl Owner {
         let Some(txn) = self.txn_mut(id) else { return };
         let (old, deadline) = (txn.cleanup_key.take(), txn.lifetime.deadline());
         self.cancel_timer(old);
-        let key = self.timers.insert_at(Timer::Cleanup(id.to_id()), deadline);
+        let key = delay_queue::insert_at(&mut self.timers, Timer::Cleanup(id.to_id()), deadline);
         if let Some(txn) = self.txn_mut(id) {
             txn.cleanup_key = Some(key);
         }
@@ -174,7 +187,7 @@ impl Owner {
             .clients
             .values()
             .chain(self.servers.values())
-            .filter(|t| t.lifetime.deadline() + SWEEP_SLACK <= now)
+            .filter(|t| deadline::after(t.lifetime.deadline(), SWEEP_SLACK) <= now)
             .map(|t| t.id.clone())
             .collect();
         for id in &overdue {
