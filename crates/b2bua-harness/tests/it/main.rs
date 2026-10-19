@@ -61,6 +61,7 @@ mod early_dialog_bye;
 mod early_fork_bye;
 mod ended_leg_txn_timeout;
 mod ending_dialog;
+mod failover_reject_guard;
 mod failure;
 mod failure_consult_bounds;
 mod failure_dump;
