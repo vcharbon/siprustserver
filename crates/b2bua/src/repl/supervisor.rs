@@ -64,6 +64,7 @@ use super::ReplicatingCallStore;
 use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 
 mod backup_deferral;
+mod follow;
 
 /// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
 fn wiring<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -384,21 +385,7 @@ impl ReplicationSupervisor {
         if membership.observes_self() {
             self.inner.self_endpoint.enable();
         }
-        let period = self.inner.reconcile_period;
-        let mut boot_changes = Some(membership.changes());
-        self.reconcile_from_snapshot(membership.snapshot());
-        let (this, followed) = (self.clone(), membership.clone());
-        let handle = crate::supervise::spawn(crate::supervise::MEMBERSHIP_RECONCILE, move || {
-            let (this, membership) = (this.clone(), followed.clone());
-            let changes = boot_changes.take().unwrap_or_else(|| {
-                let changes = membership.changes();
-                this.reconcile_from_snapshot(membership.snapshot());
-                changes
-            });
-            topology::follow_membership(membership, changes, period, move |snapshot| {
-                this.reconcile_from_snapshot(snapshot);
-            })
-        });
+        let handle = self.spawn_membership_follow(membership.clone());
         *wiring(&self.inner.reconcile) = Some(handle);
 
         // Backup-deferral gate: open the Backup streams once the Reclaim flows

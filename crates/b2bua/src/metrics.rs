@@ -584,10 +584,9 @@ impl B2buaMetrics {
         self.inner.timer_live.load(Ordering::Relaxed)
     }
 
-    /// Publish the sampled clock-skew divergence (`raw_wall − now_ms`, signed ms)
-    /// for `clock_wall_divergence_ms`. Stored as the i64's bit pattern (no signed
-    /// atomic); [`clock_wall_divergence_ms`](Self::clock_wall_divergence_ms) reads
-    /// it back.
+    /// Publish the sampled clock-skew divergence (`raw_wall − now_ms`, signed ms),
+    /// stored as the i64's bit pattern (no signed atomic) for `clock_wall_divergence_ms`
+    /// and read back by [`clock_wall_divergence_ms`](Self::clock_wall_divergence_ms).
     pub fn set_clock_wall_divergence_ms(&self, divergence_ms: i64) {
         self.inner.clock_wall_divergence_ms.store(divergence_ms.cast_unsigned(), Ordering::Relaxed);
     }

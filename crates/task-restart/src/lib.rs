@@ -92,6 +92,10 @@ impl Drop for AbortOnDrop {
 /// serving the node of the code that spawns it. A run that panics is counted
 /// and made again [`RESTART_DELAY`] later; a run that returns ends the task.
 /// Aborting the handle aborts the run in flight.
+///
+/// `make` only builds the run: it clones what the run holds and does no
+/// work, which belongs in the future it returns. A `make` that panics all
+/// the same counts as a run that panicked.
 pub fn spawn_restarting<const N: usize, F, Fut>(
     restarts: &'static Restarts<N>,
     name: &'static str,
@@ -103,7 +107,12 @@ where
 {
     observe::spawn_keeping_node(async move {
         loop {
-            let mut run = AbortOnDrop(observe::spawn_keeping_node(make()));
+            let Ok(run) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut make)) else {
+                restarts.restarted(name);
+                tokio::time::sleep(RESTART_DELAY).await;
+                continue;
+            };
+            let mut run = AbortOnDrop(observe::spawn_keeping_node(run));
             match (&mut run.0).await {
                 Err(e) if e.is_panic() => {
                     restarts.restarted(name);
@@ -122,7 +131,7 @@ mod tests {
 
     use super::*;
 
-    static TABLE: Restarts<2> = Restarts::new(["sampler", "other"]);
+    static TABLE: Restarts<3> = Restarts::new(["sampler", "other", "builder"]);
 
     #[tokio::test(start_paused = true)]
     async fn a_run_that_panics_is_counted_and_made_again() {
@@ -141,6 +150,21 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 3);
         assert_eq!(TABLE.count("sampler"), 2, "one restart per panicked run");
         assert_eq!(TABLE.count("other"), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_make_that_panics_is_counted_and_the_task_survives() {
+        let makes = Arc::new(AtomicU32::new(0));
+        let seen = makes.clone();
+        let task = spawn_restarting(&TABLE, "builder", move || {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            assert!(n >= 2, "expected: make {n} panics");
+            async {}
+        });
+        tokio::time::sleep(RESTART_DELAY * 3).await;
+        assert_eq!(TABLE.count("builder"), 2, "each panicking make is a restart");
+        assert!(task.is_finished(), "the third run returned");
+        assert!(task.await.is_ok(), "the supervisor itself never panicked");
     }
 
     #[tokio::test(start_paused = true)]
