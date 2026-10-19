@@ -21,8 +21,19 @@ test-features = ["testkit", "test-util", "sip-retransmit/authored", "sip-message
 # An entry no pure crate reaches is stale; an entry added is a reviewed change.
 pure-deps = [
   "base64",
+  "block-buffer",
   "bytes",
+  "cfg-if",
+  "cmov",
+  "const-oid",
+  # Caches the CPU's SHA extensions in a static; a digest does not depend on it.
+  "cpufeatures",
+  "crypto-common",
+  "ctutils",
+  "digest",
   "dyn-clone",
+  "hmac",
+  "hybrid-array",
   "itoa",
   "memchr",
   "num-traits",
@@ -34,8 +45,10 @@ pure-deps = [
   "serde_bytes",
   "serde_core",
   "serde_json",
+  "sha2",
   "smallvec",
   "thiserror",
+  "typenum",
   "zmij",
 ]
 

@@ -15,6 +15,7 @@ members = [
     "crates/layer-harness",
     "crates/sip-net",
     "crates/sip-net-testkit",
+    "crates/sip-ids",
     "crates/sip-txn",
     "crates/call",
     "crates/sip-proxy",

@@ -30,8 +30,7 @@ sip-clock = { path = "../sip-clock" }
 lock-poison = { path = "../lock-poison" }
 tracing.workspace = true
 # Identifiers are HMAC-SHA256 over a counter, keyed from the OS RNG (`rng.rs`).
-hmac.workspace = true
-sha2.workspace = true
+sip-ids = { path = "../sip-ids" }
 getrandom.workspace = true
 
 [dev-dependencies]

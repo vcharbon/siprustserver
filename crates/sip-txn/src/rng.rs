@@ -2,31 +2,21 @@
 //! **injectable value** (not a trait) — `IdGen::seeded(seed)` for
 //! deterministic tests, `IdGen::from_entropy()` in production.
 //!
-//! Every identifier is HMAC-SHA256 over a counter under a secret key, so an
-//! off-path host cannot guess the branch a response is matched by: the output
-//! reveals neither the key nor the next value, and two keys give unrelated
-//! streams. Why the response's source is not checked: ADR-0007.
+//! Every identifier is the key's counter stream of [`sip_ids::IdKey`]
+//! (HMAC-SHA256 over a counter under a secret key), so an off-path host
+//! cannot guess the branch a response is matched by. Why the response's
+//! source is not checked: ADR-0007.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
-
-/// Branch identifiers MUST start with this magic cookie (RFC 3261 §8.1.1.7).
-const MAGIC_COOKIE: &str = "z9hG4bK";
+use sip_ids::{render, IdKey};
 
 /// A keyed identifier generator. Cheap to share behind an `Arc`; the counter
 /// advances atomically so concurrent callers never draw the same value.
+#[derive(Debug)]
 pub struct IdGen {
-    /// The PRF, keyed once; each draw clones it.
-    prf: Hmac<Sha256>,
+    key: IdKey,
     counter: AtomicU64,
-}
-
-impl std::fmt::Debug for IdGen {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IdGen").finish_non_exhaustive()
-    }
 }
 
 impl IdGen {
@@ -34,7 +24,7 @@ impl IdGen {
     /// by tests that assert on generated identifiers. Not for production: a
     /// 64-bit seed is a guessable key.
     pub fn seeded(seed: u64) -> Self {
-        Self::keyed(&seed.to_le_bytes())
+        Self::keyed(IdKey::new(&seed.to_le_bytes()))
     }
 
     /// Production generator, keyed with 256 bits from the OS RNG, so every
@@ -44,31 +34,16 @@ impl IdGen {
     pub fn from_entropy() -> Result<Self, EntropyUnavailable> {
         let mut key = [0u8; 32];
         getrandom::fill(&mut key).map_err(EntropyUnavailable)?;
-        Ok(Self::keyed(&key))
+        Ok(Self::keyed(IdKey::new(&key)))
     }
 
-    /// The generator under `key`, at most the hash's 64-byte block (a longer
-    /// key fails the build): a shorter key is zero-padded to it, as HMAC
-    /// keys it (RFC 2104 §2).
-    fn keyed<const N: usize>(key: &[u8; N]) -> Self {
-        let () = FitsBlock::<N>::CHECKED;
-        let mut block = hmac::digest::Key::<Hmac<Sha256>>::default();
-        for (slot, byte) in block.iter_mut().zip(key) {
-            *slot = *byte;
-        }
-        Self { prf: Hmac::<Sha256>::new(&block), counter: AtomicU64::new(0) }
+    fn keyed(key: IdKey) -> Self {
+        Self { key, counter: AtomicU64::new(0) }
     }
 
-    /// The next PRF output: HMAC(key, counter), its first 8 bytes.
+    /// The next draw of the key's counter stream.
     fn next_u64(&self) -> u64 {
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        let mut mac = self.prf.clone();
-        mac.update(&n.to_le_bytes());
-        let mut first = [0u8; 8];
-        for (slot, byte) in first.iter_mut().zip(mac.finalize().into_bytes()) {
-            *slot = byte;
-        }
-        u64::from_le_bytes(first)
+        self.key.counter_draw(self.counter.fetch_add(1, Ordering::Relaxed))
     }
 
     /// A uniform 64-bit draw, for a value picked at random (a `Retry-After`).
@@ -78,33 +53,20 @@ impl IdGen {
 
     /// RFC 3261 From/To tag — 8 base-36 chars.
     pub fn new_tag(&self) -> String {
-        to_base36(self.next_u64(), 8)
+        render::tag(self.next_u64())
     }
 
     /// RFC 3261 Via branch with the mandatory magic cookie:
     /// `z9hG4bK` + 16 hex chars.
     pub fn new_branch(&self) -> String {
-        format!("{MAGIC_COOKIE}{:016x}", self.next_u64())
+        render::branch(self.next_u64())
     }
 
-    /// The initial value of a 32-bit signed sequence counter, picked at random
-    /// from `1..=10^8` so a peer cannot guess where a sequence resumes. The
-    /// ceiling RFC 3261 §8.1.1.5 (CSeq) and RFC 3262 §7.1 (RSeq) share is
-    /// `2^31 - 1`; starting two decimal orders of magnitude below it leaves
-    /// every increment a long call can make inside the range.
+    /// The initial value of a 32-bit signed sequence counter
+    /// ([`render::sequence_number`]).
     pub fn new_sequence_number(&self) -> u32 {
-        (self.next_u64() % 100_000_000) as u32 + 1
+        render::sequence_number(self.next_u64())
     }
-}
-
-/// A key of `N` bytes fits HMAC-SHA256's 64-byte block, where HMAC
-/// zero-pads it (a longer one HMAC hashes instead); [`CHECKED`](Self::CHECKED)
-/// is evaluated at compile time.
-struct FitsBlock<const N: usize>;
-
-impl<const N: usize> FitsBlock<N> {
-    #[expect(clippy::disallowed_macros, reason = "checked at compile time")]
-    const CHECKED: () = assert!(N <= 64, "a key longer than the block is hashed, not padded");
 }
 
 /// The OS RNG did not answer, so no generator was keyed.
@@ -119,22 +81,10 @@ impl std::fmt::Display for EntropyUnavailable {
 
 impl std::error::Error for EntropyUnavailable {}
 
-/// The last `len` (at most 16) base-36 digits of `v`.
-fn to_base36(mut v: u64, len: usize) -> String {
-    const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut buf = [b'0'; 16];
-    for slot in buf.iter_mut().rev() {
-        #[expect(clippy::indexing_slicing, reason = "a remainder of 36 indexes the 36 digits")]
-        let digit = ALPHABET[(v % 36) as usize];
-        *slot = digit;
-        v /= 36;
-    }
-    buf.iter().skip(buf.len().saturating_sub(len)).map(|&b| char::from(b)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sip_ids::MAGIC_COOKIE;
 
     #[test]
     fn branch_has_magic_cookie_and_is_unique() {
@@ -223,6 +173,16 @@ mod tests {
             assert_ne!(branch, &zero_branch, "a zero key");
             assert_ne!(tag, &zero_tag, "a zero key");
         }
+    }
+
+    /// The stream is the one the HMAC derivation pins: a seeded generator's
+    /// first branch is HMAC-SHA256(seed, 0)'s first 8 bytes.
+    #[test]
+    fn the_counter_stream_is_the_keys() {
+        let key = IdKey::new(&7u64.to_le_bytes());
+        let g = IdGen::seeded(7);
+        assert_eq!(g.new_branch(), render::branch(key.counter_draw(0)));
+        assert_eq!(g.new_tag(), render::tag(key.counter_draw(1)));
     }
 
     #[test]

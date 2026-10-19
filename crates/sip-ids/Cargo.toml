@@ -1,0 +1,25 @@
+[package]
+name = "sip-ids"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "SIP identifier derivation: tags, Via branches and sequence starts drawn as HMAC-SHA256 under a secret key, from a process-wide counter or per turn. Pure: the key enters as a value, its entropy is the caller's."
+
+[package.metadata.purity]
+tier = "pure"
+
+[lints]
+workspace = true
+
+[dependencies]
+hmac.workspace = true
+sha2.workspace = true
+
+[features]
+# `TurnIds::fixed`, the draws of a turn under a fixed key, for tests.
+testkit = []
+
+[dev-dependencies]
+# The crate's own tests draw fixed turns.
+sip-ids = { path = ".", features = ["testkit"] }
