@@ -7,7 +7,7 @@
  * refusal, else the charged audit finding on the earliest offending message,
  * else the step the run died waiting at, else the first failure under its own
  * tag, else the first record no rule accepts, else the earliest body row no
- * rule accepts. Where the body gate is what refused the cell (every verdict
+ * rule accepts — the earliest a rule names, where one does. Where the body gate is what refused the cell (every verdict
  * failure a named rule accepts), that row leads right after the refusal and
  * the charges. A verdict failure a lane rule answered (a passing shape record
  * at its step) never leads over a record no rule accepts. A scripted party's
@@ -48,8 +48,9 @@ export interface SourceFault extends Schema.Schema.Type<typeof SourceFault> {}
  * first non-body record no rule accepts (`rule` its class, `unknown` or
  * `unlisted`, `step` its step, `detail` the naming rule and its signature),
  * else `bad-body` (the first body row no rule accepts, the session
- * description's included — `rule` `bad-body`, `step` the row's, `detail` its
- * signature and the first differing captured → replayed line). A death or
+ * description's included, a row a rule names ahead of an unnamed one — `rule`
+ * `bad-body`, `step` the row's, `detail` the naming rule, its signature and the
+ * first differing captured → replayed line). A death or
  * failure a passing shape record answers at its own step is skipped where a
  * record no rule accepts, or a body row, can be named instead. Every kind
  * carries the cell's source fault, where it has one, in `source`. A cut's own
@@ -193,7 +194,8 @@ const bytesDelta = (captured: string, replayed: string): string => {
 /**
  * A body row: its step, and its signature with the first line where the two
  * sides differ, `(none)` for a side that ran out of lines first; where every
- * line is the same, what the bytes differ by.
+ * line is the same, what the bytes differ by. The rule naming the row leads,
+ * where one names it.
  */
 const badBody = (row: Records.ConfrontationRecord): MainError => {
   const captured = linesOf(row.captured)
@@ -207,9 +209,17 @@ const badBody = (row: Records.ConfrontationRecord): MainError => {
     ...none(BAD_BODY),
     rule: BAD_BODY,
     step: row.step === "" ? null : row.step,
-    detail: `${row.signature}: ${said}`
+    detail: `${row.rule === "" ? "" : `${row.rule}: `}${row.signature}: ${said}`
   }
 }
+
+/**
+ * The body row a cell leads with: the earliest a rule names — it states its
+ * cause — else the earliest; `rows` is earliest first.
+ */
+export const leadingBody = (
+  rows: ReadonlyArray<Records.ConfrontationRecord>
+): Records.ConfrontationRecord | undefined => rows.find((row) => row.rule !== "") ?? rows[0]
 
 /** The leading source fault of `findings`, as a main error states it; undefined where there is none. */
 export const sourceFaultOf = (findings: ReadonlyArray<Bundle.RfcFinding>): SourceFault | undefined => {
@@ -261,7 +271,7 @@ const sutErrorOf = (input: Input): MainError => {
   if (charge !== undefined) {
     return { ...none("rfc"), rule: charge.rule, rfc: citation(charge.detail), detail: charge.detail }
   }
-  const body = input.body?.[0]
+  const body = leadingBody(input.body ?? [])
   if (input.bodyGated === true && body !== undefined) return badBody(body)
   const verdict = input.verdict ?? undefined
   if (verdict === undefined) {

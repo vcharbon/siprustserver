@@ -419,6 +419,27 @@ describe("mainErrorOf", () => {
       })
     })
 
+    it("leads with the earliest row a rule names, over an earlier unnamed one, the rule ahead of its signature", () => {
+      const unnamed = bodyRow()
+      const named = bodyRow({
+        step: "s34",
+        signature: "body:sdp:session:o=:request:ACK:in-dialog",
+        scope: "request:ACK:in-dialog",
+        captured: ["o=- 1 2 IN IP4 192.0.2.1"],
+        replayed: ["o=- 9 9 IN IP4 192.0.2.2"],
+        class: "unlisted",
+        rule: "origin-rule"
+      })
+      expect(mainErrorOf({ ...clean, body: [unnamed, named] })).toEqual({
+        kind: "bad-body",
+        rule: "bad-body",
+        rfc: null,
+        step: "s34",
+        expected: null,
+        detail: "origin-rule: body:sdp:session:o=:request:ACK:in-dialog: o=- 1 2 IN IP4 192.0.2.1 → o=- 9 9 IN IP4 192.0.2.2"
+      })
+    })
+
     it("comes before reclassified: a clean verdict whose only reason is a body row reads bad-body", () => {
       expect(mainErrorOf({ ...clean, body: [bodyRow()] })?.rule).toEqual("bad-body")
       expect(mainErrorOf({ ...clean, body: [] })?.rule).toEqual("reclassified")
