@@ -7,9 +7,9 @@
  * refusal, else the charged audit finding on the earliest offending message,
  * else the step the run died waiting at, else the first failure under its own
  * tag, else the first record no rule accepts, else the earliest body row no
- * rule accepts — the earliest a rule names, where one does. Where the body gate is what refused the cell (every verdict
- * failure a named rule accepts), that row leads right after the refusal and
- * the charges. A verdict failure a lane rule answered (a passing shape record
+ * rule accepts — the earliest a rule names, where one does. Where the body
+ * gate is what refused the cell (every verdict failure a named rule accepts),
+ * that row leads right after the refusal and the charges. A verdict failure a lane rule answered (a passing shape record
  * at its step) never leads over a record no rule accepts. A scripted party's
  * source fault is never a main error: it fails no cell, and stands beside the
  * SUT's failure where one stands. A cell that passed or was skipped has no
