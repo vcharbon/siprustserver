@@ -497,7 +497,7 @@ fn rack_referencing_unknown_invite_is_flagged() {
     let f = live(RuleId::RackWithoutKnownInvite).check(&evs);
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].0, ALICE, "the PRACK's sender is charged");
-    assert!(f[0].1.contains("names no INVITE this bind opened"), "{}", f[0].1);
+    assert!(f[0].1.contains("names no INVITE it opened"), "{}", f[0].1);
 }
 
 /// The finding quotes the WHOLE RAck (a bare CSeq-num reads as the PRACK's
@@ -531,13 +531,17 @@ fn rack_finding_offers_no_expected_value_when_ambiguous() {
     assert!(!f[0].1.contains("expected"), "{}", f[0].1);
 }
 
-/// A vantage that only TOOK the PRACK charges nobody it can see: the sender
-/// is a foreign endpoint, and the live policy charges the vantage.
+/// A vantage that only TOOK the PRACK charges itself nothing: the sender is
+/// no recorded bind, so the finding is reported where the PRACK was taken,
+/// charged to its sender.
 #[test]
-fn rack_on_a_receiving_bind_charges_nothing() {
+fn rack_on_a_receiving_bind_charges_its_sender() {
     let evs = vec![
         recv(SUT, rack_invite("z9hG4bK-i", 1), ALICE, 0),
         recv(SUT, prack_with_rack("1 7 INVITE"), ALICE, 1),
     ];
-    assert!(live(RuleId::RackWithoutKnownInvite).check(&evs).is_empty());
+    let out = live(RuleId::RackWithoutKnownInvite).check_positioned(&evs);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].0, SUT);
+    assert_eq!(out[0].3, Some(ALICE.to_string()));
 }

@@ -43,9 +43,10 @@ fn unacked_reliable_provisional(f: &rfc_rules::Finding, cid: &str) -> String {
         _ => (0, 0),
     };
     format!(
-        "Received reliable 1xx (status {status}, RSeq={rseq}, callId {cid}, CSeq \
+        "{by} received reliable 1xx (status {status}, RSeq={rseq}, callId {cid}, CSeq \
          {cseq}) — UAC did not send a matching PRACK (RFC 3262 §4 / RFC3262-MUST-021)",
         cseq = f.cseq,
+        by = f.emitter,
     )
 }
 
@@ -67,12 +68,13 @@ fn rack_without_known_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     };
     let seen = known_cseqs.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
     format!(
-        "Sent \"RAck: {rack_rseq} {rack_cseq} INVITE\" (callId {cid}) — its CSeq-num \
-         field ({rack_cseq}) names no INVITE this bind opened (opened INVITE CSeq: \
+        "{by} sent \"RAck: {rack_rseq} {rack_cseq} INVITE\" (callId {cid}) — its CSeq-num \
+         field ({rack_cseq}) names no INVITE it opened (opened INVITE CSeq: \
          {seen}){expected} — RFC 3262 §7.2 (the RAck CSeq-num+method are copied from \
          the acknowledged 1xx's CSeq, NOT from the PRACK's own CSeq; this PRACK \
          matches no reliable provisional and settles nothing, so the 1xx keeps \
-         retransmitting)"
+         retransmitting)",
+        by = f.emitter,
     )
 }
 
@@ -83,8 +85,9 @@ fn no_overlapping_reliable_provisionals(f: &rfc_rules::Finding, cid: &str) -> St
         return String::new();
     };
     format!(
-        "Sent second reliable 1xx (status {status}, RSeq={rseq}, callId {cid}) before \
-         prior RSeq {unacked_rseq} PRACKed — RFC 3262 §3 / RFC3262-MUST-012"
+        "{by} sent second reliable 1xx (status {status}, RSeq={rseq}, callId {cid}) before \
+         prior RSeq {unacked_rseq} PRACKed — RFC 3262 §3 / RFC3262-MUST-012",
+        by = f.emitter,
     )
 }
 
@@ -94,8 +97,9 @@ fn non_contiguous_rseq(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "Sent reliable 1xx RSeq={rseq} not contiguous with prior RSeq={prior_rseq} \
-         (callId {cid}) — RFC 3262 §3 / RFC3262-MUST-013"
+        "{by} sent reliable 1xx RSeq={rseq} not contiguous with prior RSeq={prior_rseq} \
+         (callId {cid}) — RFC 3262 §3 / RFC3262-MUST-013",
+        by = f.emitter,
     )
 }
 
@@ -107,8 +111,9 @@ fn no_prack_of_out_of_order_rseq(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "Sent PRACK for out-of-order RSeq={rack_rseq} (expected {expected_rseq}, callId \
-         {cid}) — UAC must PRACK in order (RFC 3262 §4 / RFC3262-MUST-024)"
+        "{by} sent PRACK for out-of-order RSeq={rack_rseq} (expected {expected_rseq}, callId \
+         {cid}) — UAC must PRACK in order (RFC 3262 §4 / RFC3262-MUST-024)",
+        by = f.emitter,
     )
 }
 
@@ -118,9 +123,10 @@ fn require_reliable_1xx_on_require(f: &rfc_rules::Finding, cid: &str) -> String 
         return String::new();
     };
     format!(
-        "INVITE required 100rel (callId {cid}, branch {branch}) but sent 1xx response \
+        "INVITE required 100rel (callId {cid}, branch {branch}) but {by} sent 1xx response \
          {status} lacks Require:100rel/RSeq and no 420 Unsupported:100rel was sent — RFC \
-         3262 §3 / RFC3262-MUST-001/-002"
+         3262 §3 / RFC3262-MUST-001/-002",
+        by = f.emitter,
     )
 }
 
@@ -131,9 +137,10 @@ fn reliable_needs_client_opt_in(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "Sent reliable 1xx (status {status}, callId {cid}, branch {branch}) — matching \
+        "{by} sent reliable 1xx (status {status}, callId {cid}, branch {branch}) — matching \
          INVITE neither Supported:100rel nor Require:100rel (RFC 3262 §3 / \
-         RFC3262-MUST-004)"
+         RFC3262-MUST-004)",
+        by = f.emitter,
     )
 }
 
@@ -145,9 +152,10 @@ fn no_reliable_1xx_on_in_dialog(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "Sent reliable 1xx on a non-INVITE request (status {status}, callId {cid}, \
+        "{by} sent reliable 1xx on a non-INVITE request (status {status}, callId {cid}, \
          branch {branch}, method {method}) — forbidden per RFC 3262 §3 / \
-         RFC3262-MUST-005"
+         RFC3262-MUST-005",
+        by = f.emitter,
     )
 }
 
@@ -167,10 +175,11 @@ fn unmatched_prack_proxied(f: &rfc_rules::Finding, cid: &str) -> String {
         seqs => seqs.iter().map(u64::to_string).collect::<Vec<_>>().join(", "),
     };
     format!(
-        "Received PRACK with RAck={rack_rseq} {rack_cseq} {rack_method} on proxy bind \
-         (callId {cid}) — no matching reliable 1xx taken on this bind (RSeq taken: \
+        "{by} received PRACK with RAck={rack_rseq} {rack_cseq} {rack_method} on proxy bind \
+         (callId {cid}) — no matching reliable 1xx it took (RSeq taken: \
          {known}) AND no outgoing PRACK observed (proxy must forward unmatched PRACKs, \
-         not absorb) — RFC 3262 §3 / RFC3262-MUST-006"
+         not absorb) — RFC 3262 §3 / RFC3262-MUST-006",
+        by = f.emitter,
     )
 }
 
@@ -186,14 +195,16 @@ fn prack_2xx_or_481(f: &rfc_rules::Finding, cid: &str) -> String {
     };
     match rack_matched {
         true => format!(
-            "Received PRACK with RAck.response-num {rack_rseq} names a reliable 1xx this \
+            "{by} received PRACK with RAck.response-num {rack_rseq} names a reliable 1xx this \
              agent sent (RSeq, INVITE CSeq and method all match), but agent responded \
-             {status} instead of 2xx (callId {cid}) — RFC 3262 §3 / RFC3262-MUST-009"
+             {status} instead of 2xx (callId {cid}) — RFC 3262 §3 / RFC3262-MUST-009",
+            by = f.emitter,
         ),
         false => format!(
-            "Received PRACK with RAck.response-num {rack_rseq} names NO reliable 1xx this \
+            "{by} received PRACK with RAck.response-num {rack_rseq} names NO reliable 1xx this \
              agent sent (RSeq, INVITE CSeq or method differ), but agent responded \
-             {status} instead of 481 (callId {cid}) — RFC 3262 §3 / RFC3262-MUST-010"
+             {status} instead of 481 (callId {cid}) — RFC 3262 §3 / RFC3262-MUST-010",
+            by = f.emitter,
         ),
     }
 }
@@ -209,8 +220,9 @@ fn delay_2xx_on_unacked_reliable_1xx_with_sdp(f: &rfc_rules::Finding, cid: &str)
     };
     let rseqs = unacked_rseqs.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
     format!(
-        "Sent 2xx INVITE response while reliable 1xx (RSeq={rseqs}) with SDP still \
-             unacked (callId {cid}, branch {branch}) — RFC 3262 §3 / RFC3262-MUST-014"
+        "{by} sent 2xx INVITE response while reliable 1xx (RSeq={rseqs}) with SDP still \
+             unacked (callId {cid}, branch {branch}) — RFC 3262 §3 / RFC3262-MUST-014",
+        by = f.emitter,
     )
 }
 
@@ -220,8 +232,9 @@ fn no_new_reliable_1xx_after_final(f: &rfc_rules::Finding, cid: &str) -> String 
         return String::new();
     };
     format!(
-        "Sent new reliable 1xx (RSeq={rseq}, callId {cid}) after final INVITE response — \
-         forbidden per RFC 3262 §3 / RFC3262-MUST-016"
+        "{by} sent new reliable 1xx (RSeq={rseq}, callId {cid}) after final INVITE response — \
+         forbidden per RFC 3262 §3 / RFC3262-MUST-016",
+        by = f.emitter,
     )
 }
 
@@ -230,9 +243,10 @@ fn no_prack_of_100_trying(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "Sent PRACK references RSeq {rseq} from a received 100 Trying carrying \
+        "{by} sent PRACK references RSeq {rseq} from a received 100 Trying carrying \
          Require:100rel (callId {cid}) — UAC MUST ignore 100rel on 100 Trying (RFC 3262 \
-         §4 / RFC3262-MUST-019)"
+         §4 / RFC3262-MUST-019)",
+        by = f.emitter,
     )
 }
 

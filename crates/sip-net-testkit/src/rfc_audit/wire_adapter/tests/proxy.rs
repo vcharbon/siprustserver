@@ -45,6 +45,8 @@ fn no_target_404_is_advisory_proxy_scoped_and_survives_a_branch_rewrite() {
     ];
     assert!(live(RuleId::NoTarget404).check_positioned(&answered_404).is_empty());
 
+    // The downstream that answered is no recorded bind: a row scoped to
+    // proxies never falls back to judge it as one.
     let forwarded = vec![
         recv(SUT, req("INVITE", "z9hG4bK-in", 1, None), ALICE, 0),
         sent(SUT, req("INVITE", "z9hG4bK-out", 1, None), BOB, 1),

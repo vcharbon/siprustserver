@@ -25,10 +25,11 @@ fn concurrent_re_invite_500_or_491(f: &rfc_rules::Finding, cid: &str) -> String 
         return String::new();
     };
     format!(
-        "Took a concurrent re-INVITE (callId {cid}, branch {branch}) while a prior \
+        "{by} took a concurrent re-INVITE (callId {cid}, branch {branch}) while a prior \
          INVITE (branch {pending_invite_branch}) was still in progress — {{Uas}} must \
          respond 500+Retry-After when the same sender sent both, 491 when they cross; \
-         got {answered_status}/RetryAfter={retry_after} (RFC 3261 §14.2)"
+         got {answered_status}/RetryAfter={retry_after} (RFC 3261 §14.2)",
+        by = f.emitter,
     )
 }
 
@@ -48,8 +49,9 @@ fn no_re_invite_while_invite_in_progress(f: &rfc_rules::Finding, cid: &str) -> S
         "still in progress"
     };
     format!(
-        "Sent re-INVITE (callId {cid}, branch {branch}) while prior INVITE (branch \
-             {prior_branch}) {phase} — {{Uac}} RFC 3261 §14.1 / RFC3261-MUST-083"
+        "{by} sent re-INVITE (callId {cid}, branch {branch}) while prior INVITE (branch \
+             {prior_branch}) {phase} — {{Uac}} RFC 3261 §14.1 / RFC3261-MUST-083",
+        by = f.emitter,
     )
 }
 

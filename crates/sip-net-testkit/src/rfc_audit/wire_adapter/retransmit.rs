@@ -43,11 +43,12 @@ fn rung_byte_identical(f: &rfc_rules::Finding, cid: &str) -> String {
     };
     let clause = Class::from_label(class).map_or("RFC 3261 §17", Class::clause);
     format!(
-        "Sent copy {rung} of {copies} of the {class} {what} (callId {cid}, branch {branch}) \
+        "{by} sent copy {rung} of {copies} of the {class} {what} (callId {cid}, branch {branch}) \
          with other bytes than the first: the two diverge in the {region} at byte {offset} \
          — first {}, this copy {}{also} — a retransmission is the same message, byte for \
          byte ({clause})",
         line(first_line),
         line(rung_line),
+        by = f.emitter,
     )
 }

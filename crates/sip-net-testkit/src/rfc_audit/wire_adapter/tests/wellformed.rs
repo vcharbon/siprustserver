@@ -20,7 +20,8 @@ fn legacy_branch_invite() -> Vec<u8> {
 
 /// A sender-minted defect is charged to the lane that WROTE it, at the wire
 /// position of the offending message — and a lane that merely took those
-/// bytes is charged nothing.
+/// bytes is charged nothing: it reports the sender's defect where the sender
+/// is no recorded bind, and none where it is.
 #[test]
 fn a_minted_defect_is_charged_to_its_sender_and_positioned() {
     let out =
@@ -30,8 +31,35 @@ fn a_minted_defect_is_charged_to_its_sender_and_positioned() {
     assert!(out[0].1.contains("magic cookie"), "{}", out[0].1);
     assert_eq!(out[0].2, Some(1), "the offending wire entry");
 
-    let taken = live(RuleId::BranchPrefix).check(&[recv(SUT, legacy_branch_invite(), ALICE, 0)]);
-    assert!(taken.is_empty(), "a lane that only TOOK the bytes minted nothing: {taken:?}");
+    let taken =
+        live(RuleId::BranchPrefix).check_positioned(&[recv(SUT, legacy_branch_invite(), ALICE, 0)]);
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert_eq!(taken[0].0, SUT, "reported where the bytes were taken");
+    assert_eq!(taken[0].3, Some(ALICE.to_string()), "charged to their sender");
+
+    let both = live(RuleId::BranchPrefix).check_positioned(&[
+        sent(ALICE, legacy_branch_invite(), SUT, 0),
+        recv(SUT, legacy_branch_invite(), ALICE, 1),
+    ]);
+    assert_eq!(both.len(), 1, "one defect, reported once: {both:?}");
+    assert_eq!(both[0].0, ALICE);
+}
+
+/// A sender whose own traffic is out of the view is a recorded party where the
+/// view declares its bind or the consumer names it scoped out: its defect is
+/// not reported at the lane that took it.
+#[test]
+fn a_recorded_sender_out_of_the_view_is_not_judged_at_the_taker() {
+    let taken = recv(SUT, legacy_branch_invite(), ALICE, 1);
+    let declared =
+        vec![bind_roles(ALICE, HashSet::from([UaRole::Uac, UaRole::Uas]), 0), taken.clone()];
+    let found = evaluate_rfc_findings(&declared);
+    assert!(!found.iter().any(|f| f.rule == live(RuleId::BranchPrefix).name()), "{found:?}");
+
+    let live = live(RuleId::BranchPrefix);
+    assert_eq!(live.check_positioned(std::slice::from_ref(&taken)).len(), 1);
+    let scoped_out = std::sync::Arc::new(HashSet::from([ALICE.to_string()]));
+    assert!(Scoped { live, scoped_out }.check_positioned(&[taken]).is_empty());
 }
 
 /// A B2BUA Record-Route is judged only on a lane that declared itself a

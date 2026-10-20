@@ -86,7 +86,8 @@ impl FailoverHarness {
     /// see [`RfcAcceptance::partition`](crate::rfc_acceptance::RfcAcceptance::partition).
     #[allow(clippy::type_complexity)]
     pub(super) fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Finding>) {
-        self.rfc_acceptance.partition(&self.audited_events())
+        let (events, scoped_out) = self.audited_events();
+        self.rfc_acceptance.partition(&events, &scoped_out)
     }
 
     /// The findings an acceptance window covered this run — the deviations the
@@ -99,8 +100,9 @@ impl FailoverHarness {
         lane_details(self.partition_rfc_findings().1)
     }
 
-    /// The recorded SIP events the audit judges — the endpoint-scoped view.
-    fn audited_events(&self) -> Vec<Stamped<SignalingNetworkEvent>> {
+    /// The recorded SIP events the audit judges — the endpoint-scoped view —
+    /// and the worker binds taken out of it.
+    fn audited_events(&self) -> (Vec<Stamped<SignalingNetworkEvent>>, HashSet<String>) {
         // RFC 3261 conformance is only observable from OUTSIDE the proxy/LB — at
         // the real UAs (alice/bob). A *transparent* failover legitimately splits
         // ONE logical dialog across several cluster workers: alice's in-dialog
@@ -126,9 +128,10 @@ impl FailoverHarness {
             .map(|a| a.to_string())
             .collect();
         let snapshot = self.harness.recording().channel().snapshot();
-        snapshot
+        let events = snapshot
             .into_iter()
             .filter(|s| !worker_binds.contains(s.event.bind_key()) && audit_visible_event(&s.event))
-            .collect()
+            .collect();
+        (events, worker_binds)
     }
 }

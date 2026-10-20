@@ -17,7 +17,8 @@
 //! rule's occasion is one message at one vantage, so its vantage policy is the
 //! plain reading of the two the adapter already has — charged at the emitter for
 //! what a sender MINTS, at the taker for what the recording checks about a
-//! lane's peer.
+//! lane's peer. A sender that is no recorded bind is still charged for what it
+//! mints, reported on the lane that took it, and every detail names its sender.
 //!
 //! [`msg_reads`] holds the per-message accessors the adapter builds a
 //! `rfc_rules::Msg` from; [`relay_lanes`] classifies which lanes forward rather
@@ -59,12 +60,24 @@ pub mod wire_adapter;
 // The per-rule population an audit pass notes.
 mod occasions;
 
+// The parties the recording holds a lane for.
+mod recorded;
+
 /// The full default set of **cross-message** RFC rules every test harness
 /// installs by default. One pass over the whole recorded channel at layer
 /// close; each finding carries its originating bind so subject dispatch and the
 /// hard gate can filter it.
 pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
     wire_adapter::cross_rules()
+}
+
+/// [`rfc_cross_message_rules`] over a view a consumer took the binds of
+/// `scoped_out` out of: they are recorded parties, so what they sent is never
+/// judged at the lane that took it.
+pub fn rfc_cross_message_rules_scoped(
+    scoped_out: HashSet<String>,
+) -> Vec<Arc<dyn CrossMessageAuditRule>> {
+    wire_adapter::cross_rules_scoped(scoped_out)
 }
 
 // ---------------------------------------------------------------------------

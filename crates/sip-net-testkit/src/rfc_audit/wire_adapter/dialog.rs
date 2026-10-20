@@ -159,9 +159,10 @@ fn unknown_dialog_481(f: &rfc_rules::Finding, cid: &str) -> String {
         st => st.to_string(),
     };
     format!(
-        "Received in-dialog request {method} for unknown dialog \
+        "{by} received in-dialog request {method} for unknown dialog \
          {cid}/{from_tag}/{to_tag} — {{Uas}} must respond 481 (RFC 3261 §12.2.2 / \
-         RFC3261-MUST-071); answered {answered}"
+         RFC3261-MUST-071); answered {answered}",
+        by = f.emitter,
     )
 }
 
@@ -172,13 +173,15 @@ fn no_bye_outside_or_early_dialog(f: &rfc_rules::Finding, cid: &str) -> String {
     };
     if *early_dialog {
         format!(
-            "Callee sent BYE on early dialog (callId {cid}) — should use CANCEL or \
-             4xx/5xx/6xx (RFC 3261 §15)"
+            "{by}, the callee, sent BYE on early dialog (callId {cid}) — should use CANCEL or \
+             4xx/5xx/6xx (RFC 3261 §15)",
+            by = f.emitter,
         )
     } else {
         format!(
-            "Sent BYE (callId {cid}) outside any dialog — RFC 3261 §15 / \
-             RFC3261-MUST-089"
+            "{by} sent BYE (callId {cid}) outside any dialog — RFC 3261 §15 / \
+             RFC3261-MUST-089",
+            by = f.emitter,
         )
     }
 }

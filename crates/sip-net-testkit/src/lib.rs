@@ -35,6 +35,6 @@ pub use loss::RandomLoss;
 pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
 pub use rfc_audit::{
     audit_wire_entries, bind_roles_of, evaluate_rfc_audit, evaluate_rfc_findings,
-    rfc_cross_message_rules, RfcAudit, RfcFinding,
+    rfc_cross_message_rules, rfc_cross_message_rules_scoped, RfcAudit, RfcFinding,
 };
 pub use simulated::{SendFault, SimulatedSignalingNetwork};

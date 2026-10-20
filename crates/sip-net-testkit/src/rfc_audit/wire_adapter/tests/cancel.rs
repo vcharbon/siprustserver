@@ -69,8 +69,8 @@ fn a_cancel_the_sut_sent_after_acking_its_own_final_is_flagged() {
 }
 
 /// The far end's own late CANCEL is not this bind's: the rule charges the
-/// UAC that sent it, and the live policy surfaces a finding only where the
-/// charged party IS the vantage.
+/// UAC that sent it. That UAC is no recorded bind, so the finding is
+/// reported on the lane that took the CANCEL, charged to its sender.
 #[test]
 fn a_late_cancel_the_peer_sent_is_not_charged_to_this_bind() {
     let evs = vec![
@@ -79,7 +79,10 @@ fn a_late_cancel_the_peer_sent_is_not_charged_to_this_bind() {
         recv(SUT, req("ACK", "z9hG4bK-i", 1, Some("bt")), ALICE, 2),
         recv(SUT, req("CANCEL", "z9hG4bK-i", 1, None), ALICE, 3),
     ];
-    assert!(live(RuleId::NoCancelAfterFinal).check_positioned(&evs).is_empty());
+    let out = live(RuleId::NoCancelAfterFinal).check_positioned(&evs);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].0, SUT, "reported where the CANCEL was taken");
+    assert_eq!(out[0].3, Some(ALICE.to_string()), "charged to the UAC that sent it");
 }
 
 #[test]

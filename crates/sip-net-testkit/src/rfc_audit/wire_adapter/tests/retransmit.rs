@@ -110,13 +110,16 @@ fn another_forks_2xx_is_not_a_rung() {
 }
 
 /// The far end's re-composed rung is not this bind's: the rule charges the
-/// emitter, and the live policy surfaces a finding only where the charged
-/// party IS the vantage.
+/// emitter, which is no recorded bind, so the finding is reported where the
+/// rungs were taken, charged to their sender.
 #[test]
 fn a_re_composed_rung_the_peer_sent_is_not_charged_to_this_bind() {
     let bye = req("BYE", "z9hG4bK-b", 2, Some("bt"));
     let evs = vec![recv(SUT, bye.clone(), ALICE, 0), recv(SUT, recomposed(bye), ALICE, 1)];
-    assert!(live(RuleId::RungByteIdentical).check_positioned(&evs).is_empty());
+    let out = live(RuleId::RungByteIdentical).check_positioned(&evs);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].0, SUT);
+    assert_eq!(out[0].3, Some(ALICE.to_string()));
 }
 
 /// A reliable provisional the SUT re-sent under the same `RSeq` with other

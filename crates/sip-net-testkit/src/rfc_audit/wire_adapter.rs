@@ -33,6 +33,7 @@ use crate::report::wire_positions_by_stamp;
 use crate::rfc_audit::msg_reads::{
     call_id, cseq_method, cseq_seq, from_tag, status, to_tag, top_via_branch,
 };
+use crate::rfc_audit::recorded::Recorded;
 use crate::rfc_audit::relay_lanes::relay_lanes;
 use crate::types::UaRole;
 
@@ -49,6 +50,7 @@ mod proxy;
 mod register;
 mod reinvite;
 mod retransmit;
+mod scoped;
 mod via;
 mod wellformed;
 
@@ -204,10 +206,16 @@ fn at_vantage(
 }
 
 /// Where the live audit reports a rule's finding. The charged party is always
-/// the finding's `emitter`; the vantage is the lane that REPORTS it.
+/// the finding's `emitter`; the vantage is the lane that REPORTS it, and subject
+/// dispatch judges the declared roles of that lane.
 #[derive(Clone, Copy)]
 enum Vantage {
-    /// The emitter's own lane: what a sender mints or owes.
+    /// The emitter's own lane: what a sender mints or owes. An emitter that is
+    /// no recorded bind, in the view or scoped out of it, is reported once, at
+    /// the taker, where the recording holds what it sent; it declared no roles,
+    /// so the taker's are dispatched.
+    /// A row scoped to proxies alone judges how a proxy handles what it took,
+    /// which no taker shows of a party it cannot tell is one: it never falls back.
     Emitter,
     /// The taker's lane: a rule that audits what a bind's PEER sent it. The
     /// recording is the only place that stream is checked, so it is reported on
@@ -218,7 +226,7 @@ enum Vantage {
     /// offence whose sender is no recorded bind is still named on the lane that
     /// took it.
     EitherEnd,
-    /// Once, at the taker where it is a recorded bind and at the emitter
+    /// Once, at the taker where its lane is in the view and at the emitter
     /// otherwise: an omission the taker is OWED, whose lane is where the missing
     /// message had to arrive.
     TakerElseEmitter,
@@ -313,6 +321,12 @@ impl Live {
         self
     }
 
+    /// Whether the row is scoped to proxies and to no user-agent role.
+    fn proxy_only(&self) -> bool {
+        !self.subject.is_empty()
+            && !self.subject.iter().any(|r| matches!(r, UaRole::Uac | UaRole::Uas))
+    }
+
     /// Surfaces only the findings `admits` accepts.
     const fn admits(mut self, admits: fn(&rfc_rules::Finding) -> bool) -> Live {
         self.admits = admits;
@@ -345,11 +359,33 @@ impl CrossMessageAuditRule for Live {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        self.found(events, &HashSet::new())
+    }
+}
+
+impl Live {
+    /// The row's findings over `events`, the binds of `scoped_out` taken out of it.
+    fn found(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+        scoped_out: &HashSet<LaneKey>,
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
         let body = self.id.rule().body;
         let admits = self.admits;
         let found = match self.vantage {
             Vantage::Emitter => {
-                at_vantage(events, body, |f, b| f.emitter == *b && admits(f), self.detail)
+                let recorded = Recorded::of(events, scoped_out);
+                let falls_back = !self.proxy_only();
+                at_vantage(
+                    events,
+                    body,
+                    |f, b| {
+                        let own = !falls_back || recorded.holds(&f.emitter);
+                        let at = if own { &f.emitter } else { &f.taker };
+                        at == b && admits(f)
+                    },
+                    self.detail,
+                )
             }
             Vantage::Taker => {
                 at_vantage(events, body, |f, b| f.taker == *b && admits(f), self.detail)
@@ -361,13 +397,13 @@ impl CrossMessageAuditRule for Live {
                 self.detail,
             ),
             Vantage::TakerElseEmitter => {
-                let recorded: HashSet<LaneKey> =
-                    bind_views(events).into_iter().map(|v| v.bind).collect();
+                // The taker's lane must be in the view to report there.
+                let recorded = Recorded::of(events, &HashSet::new());
                 at_vantage(
                     events,
                     body,
                     |f, b| {
-                        let at = if recorded.contains(&f.taker) { &f.taker } else { &f.emitter };
+                        let at = if recorded.holds(&f.taker) { &f.taker } else { &f.emitter };
                         at == b && admits(f)
                     },
                     self.detail,
@@ -431,6 +467,10 @@ pub fn cross_rules() -> Vec<std::sync::Arc<dyn CrossMessageAuditRule>> {
         .map(|live| std::sync::Arc::new(live) as std::sync::Arc<dyn CrossMessageAuditRule>)
         .collect()
 }
+
+pub use scoped::cross_rules_scoped;
+#[cfg(test)]
+use scoped::Scoped;
 
 #[cfg(test)]
 mod tests;

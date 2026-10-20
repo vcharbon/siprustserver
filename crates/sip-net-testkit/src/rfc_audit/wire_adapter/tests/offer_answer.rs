@@ -407,15 +407,29 @@ fn a_shrinking_re_offer_is_charged_only_to_the_lane_that_sent_it() {
     assert!(out[0].1.contains("MUST-042"), "{}", out[0].1);
     assert_eq!(out[0].2, Some(4), "offending points at the shrinking re-offer");
 
-    // The lane that only TOOK that stream authored nothing: the rule judges
-    // what a lane SENT, so it is charged at the sender's vantage alone.
+    // The lane that only TOOK that stream authored nothing: where the
+    // sender's own lane is recorded, it alone reports the finding.
     let taker = vec![
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(OFFER_2MEDIA)), ALICE, 0),
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(ANSWER_2MEDIA)), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(OFFER_1AUDIO)), ALICE, 3),
     ];
-    assert!(live(RuleId::ReOfferMLineCountMonotonic).check(&taker).is_empty());
+    let mut both = evs.clone();
+    both.extend(taker.iter().cloned().map(|mut s| {
+        s.seq += 10;
+        s
+    }));
+    let out = live(RuleId::ReOfferMLineCountMonotonic).check_positioned(&both);
+    assert_eq!(out.len(), 1, "one act, one report: {out:?}");
+    assert_eq!(out[0].0, ALICE);
+
+    // A sender that is no recorded bind is reported where the stream was
+    // taken, charged to the sender.
+    let out = live(RuleId::ReOfferMLineCountMonotonic).check_positioned(&taker);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].0, BOB, "reported at the taker");
+    assert_eq!(out[0].3, Some(ALICE.to_string()), "charged to the sender");
 }
 
 #[test]
@@ -467,4 +481,120 @@ fn a_relay_lane_carrying_a_negotiation_is_not_judged_on_it() {
         let out = rule.check(&evs);
         assert!(out.is_empty(), "{}: {out:?}", rule.name());
     }
+}
+
+/// An offer declared `application/sdp` with no `v=` line (RFC 4566 §5).
+const OFFER_WITHOUT_VERSION: &str = "o=- 7 7 IN IP4 10.0.0.9\n\
+s=-\n\
+c=IN IP4 10.0.0.9\n\
+t=0 0\n\
+m=audio 27500 RTP/AVP 8\n";
+
+/// The callee's own offer in the 2xx to a bodyless re-INVITE.
+const CALLEE_REOFFER: &str = "v=0\r\n\
+o=bob 117241 1 IN IP4 10.0.0.2\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.2\r\n\
+t=0 0\r\n\
+m=audio 60788 RTP/AVP 8\r\n";
+
+/// The SUT is no recorded bind: only the callee's lane holds the call. The
+/// SUT's INVITE carries `offer`, then a bodyless re-INVITE draws the callee's
+/// offer, which the SUT's ACK answers with `ack_answer`.
+fn callee_lane_only(offer: &str, ack_answer: &str) -> Vec<Stamped<SignalingNetworkEvent>> {
+    vec![
+        recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(offer)), SUT, 0),
+        sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_ANSWER)), SUT, 1),
+        recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), SUT, 2),
+        recv(BOB, req_sdp("INVITE", "z9hG4bK-i2", 2, Some("bt"), None), SUT, 3),
+        sent(BOB, resp_sdp(200, 2, "INVITE", "z9hG4bK-i2", Some(CALLEE_REOFFER)), SUT, 4),
+        recv(BOB, req_sdp("ACK", "z9hG4bK-a2", 2, Some("bt"), Some(ack_answer)), SUT, 5),
+    ]
+}
+
+/// What a sender MINTS is reported at its own lane; a sender that is no
+/// recorded bind is reported where its message was taken, still charged to
+/// it. The unreadable offer is the one finding: it opens no delayed-offer
+/// round, and charges nothing to the callee that answered it.
+#[test]
+fn an_unrecorded_senders_unreadable_offer_is_named_at_the_taker_alone() {
+    let found = evaluate_rfc_findings(&callee_lane_only(OFFER_WITHOUT_VERSION, AUDIO_OFFER));
+    let parseable: Vec<&RfcFinding> =
+        found.iter().filter(|f| f.rule == RuleId::SdpBodyParseable.token()).collect();
+    assert_eq!(parseable.len(), 1, "{found:?}");
+    assert_eq!(parseable[0].lane, BOB, "reported where the offer was taken");
+    assert_eq!(parseable[0].charged.as_deref(), Some(SUT), "charged to its sender");
+    assert_eq!(parseable[0].offending, Some(1), "offending points at the INVITE");
+    assert!(
+        !found.iter().any(|f| f.rule == RuleId::DelayedOfferAnsweredInAck.token()),
+        "{found:?}"
+    );
+    let at_callee: Vec<&RfcFinding> =
+        found.iter().filter(|f| f.charged.as_deref() == Some(BOB)).collect();
+    assert!(at_callee.is_empty(), "the callee did nothing wrong: {at_callee:?}");
+}
+
+/// An origin the unrecorded SUT leaves (RFC 3264 §8) is named at the lane
+/// that took the description, charged to the SUT.
+#[test]
+fn an_unrecorded_senders_origin_break_is_named_at_the_taker() {
+    let new_session = AUDIO_OFFER.replace("o=alice 424242 1", "o=alice 999 1");
+    let found = evaluate_rfc_findings(&callee_lane_only(AUDIO_OFFER, &new_session));
+    let origin: Vec<&RfcFinding> =
+        found.iter().filter(|f| f.rule == RuleId::SdpOriginContinuity.token()).collect();
+    assert_eq!(origin.len(), 1, "{found:?}");
+    assert_eq!(origin[0].lane, BOB);
+    assert_eq!(origin[0].charged.as_deref(), Some(SUT));
+    assert_eq!(origin[0].offending, Some(6), "offending points at the answering ACK");
+    assert!(origin[0].advisory);
+
+    // Clean continuity draws nothing.
+    let continued = AUDIO_OFFER.replace("o=alice 424242 1", "o=alice 424242 2");
+    let found = evaluate_rfc_findings(&callee_lane_only(AUDIO_OFFER, &continued));
+    assert!(!found.iter().any(|f| f.rule == RuleId::SdpOriginContinuity.token()), "{found:?}");
+}
+
+/// A detail names its sender in the third person, so it reads right on
+/// whichever lane reports it.
+#[test]
+fn a_detail_names_the_party_that_sent_it() {
+    let silent = vec![
+        recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, None), ALICE, 0),
+        sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_OFFER)), ALICE, 1),
+        recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
+    ];
+    let out = live(RuleId::DelayedOfferAnsweredInAck).check(&silent);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0].1.starts_with(&format!("{ALICE} sent an ACK")), "{}", out[0].1);
+
+    let found = evaluate_rfc_findings(&callee_lane_only(OFFER_WITHOUT_VERSION, AUDIO_OFFER));
+    let parseable =
+        found.iter().find(|f| f.rule == RuleId::SdpBodyParseable.token()).expect("the finding");
+    assert!(parseable.detail.starts_with(&format!("{SUT} sent ")), "{}", parseable.detail);
+}
+
+/// A sender bound at port 0 is recorded under the address it asked for, and
+/// its datagrams arrive from the port it was given: the two are one recorded
+/// party, so its lane alone reports what it sent.
+#[test]
+fn a_sender_bound_at_port_zero_is_one_recorded_party() {
+    const ASKED: &str = "127.0.0.1:0#alice";
+    const GIVEN: &str = "127.0.0.1:40000";
+    let offer = req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(OFFER_2MEDIA));
+    let answer = resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(ANSWER_2MEDIA));
+    let ack = req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None);
+    let reoffer = req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(OFFER_1AUDIO));
+    let evs = vec![
+        sent(ASKED, offer.clone(), BOB, 0),
+        recv(BOB, offer, GIVEN, 1),
+        sent(BOB, answer.clone(), GIVEN, 2),
+        recv(ASKED, answer, BOB, 3),
+        sent(ASKED, ack.clone(), BOB, 4),
+        recv(BOB, ack, GIVEN, 5),
+        sent(ASKED, reoffer.clone(), BOB, 6),
+        recv(BOB, reoffer, GIVEN, 7),
+    ];
+    let out = live(RuleId::ReOfferMLineCountMonotonic).check_positioned(&evs);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].0, ASKED);
 }
