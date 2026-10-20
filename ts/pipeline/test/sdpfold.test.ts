@@ -116,14 +116,14 @@ describe("diffSdp", () => {
     it("an `o=` that differs in its numbers is one `session:o=` row, marked only where the caller read a minted origin", () => {
       const replayed = crlf(swap(OFFER, OFFER[1]!, MINTED))
       expect(diffSdp(VERBATIM, crlf(OFFER), replayed)).toEqual([originRow])
-      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, true)).toEqual([{ ...originRow, mintedOrigin: true }])
-      expect(diffSdp(FLOOR, crlf(OFFER), replayed, true)).toEqual([])
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([{ ...originRow, mintedOrigin: true }])
+      expect(diffSdp(FLOOR, crlf(OFFER), replayed, "minted")).toEqual([])
     })
 
     it("a minted origin never hides another byte: the bytes row follows the marked `o=` row", () => {
       const reordered = [...OFFER.slice(0, 6), "a=sendrecv", ...OFFER.slice(6, 10), OFFER[11]!]
       const replayed = crlf(swap(reordered, OFFER[1]!, MINTED))
-      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, true)).toEqual([
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([
         { ...originRow, mintedOrigin: true },
         { section: "document", line: "bytes", captured: [crlf(OFFER)], replayed: [replayed] }
       ])
@@ -131,15 +131,23 @@ describe("diffSdp", () => {
 
     it("a structural difference beside a minted origin is its own row, the `o=` row still marked", () => {
       const replayed = crlf(swap(swap(OFFER, OFFER[1]!, MINTED), "a=ptime:20", "a=ptime:30"))
-      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, true)).toEqual([
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([
         { ...originRow, mintedOrigin: true },
         { section: "m0", line: "a=ptime", captured: ["a=ptime:20"], replayed: ["a=ptime:30"] }
       ])
     })
 
+    it("an `o=` row the caller read as a session not continued is marked so, and never as minted", () => {
+      const replayed = crlf(swap(OFFER, OFFER[1]!, MINTED))
+      expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "not-continued")).toEqual([
+        { ...originRow, originNotContinued: true }
+      ])
+      expect(diffSdp(FLOOR, crlf(OFFER), replayed, "not-continued")).toEqual([])
+    })
+
     it("a mark asked for a row that is no `o=` row marks nothing", () => {
       const changed = crlf(swap(OFFER, "s=-", "s=call"))
-      expect(diffSdp(VERBATIM, crlf(OFFER), changed, true)).toEqual([
+      expect(diffSdp(VERBATIM, crlf(OFFER), changed, "minted")).toEqual([
         { section: "session", line: "s=", captured: ["s=-"], replayed: ["s=call"] }
       ])
     })

@@ -17,9 +17,10 @@
  * On a rebooked run `o=` sess-id and sess-version are masked (RFC 4566 §5.2
  * owner values no replay reproduces). On a verbatim run they are compared, and
  * a differing `o=` is its own `session:o=` row, marked where the caller read
- * it as an origin the replayed endpoint mints (`./sdporigin.ts`); the bytes
- * check then reads the replayed origin as the captured one, so the mark never
- * hides another byte. The expect's own `rewrite` tokens name WHICH fields
+ * it as an origin the replayed endpoint mints, or as a session it did not
+ * continue where the capture did (`./sdporigin.ts`); the bytes check then
+ * reads the replayed origin as the captured one, so a mark never hides
+ * another byte. The expect's own `rewrite` tokens name WHICH fields
  * are lane-owned — `c=addr`: the address of a `c=IN IP4` line, an IP6 line is
  * never written; `m=port`: the port of an `m=` line where it is non-zero, a
  * `/count` suffix kept and a port-0 stream never written — and `a=rtcp` is
@@ -32,7 +33,7 @@
  * pass erases is then one `document:bytes` row with both texts whole.
  */
 import type { Bundle } from "@sip/contracts"
-import { withOriginOf } from "./sdporigin.js"
+import { type OriginReading, withOriginOf } from "./sdporigin.js"
 
 /** Which lane-owned fields the fold sets aside, and whether the bytes must match. */
 export interface SdpMask {
@@ -76,6 +77,8 @@ export interface SdpDifference {
   readonly replayed: ReadonlyArray<string>
   /** Set on a `session:o=` row whose two origins the caller read as a minted origin and its counterpart. */
   readonly mintedOrigin?: true
+  /** Set on a `session:o=` row the caller read as a session the replay did not continue where the capture did. */
+  readonly originNotContinued?: true
 }
 
 const DIRECTIONS: ReadonlySet<string> = new Set(["sendrecv", "sendonly", "recvonly", "inactive"])
@@ -159,24 +162,32 @@ const structuralFold = (mask: SdpMask, text: string): string => {
 
 const isOriginRow = (d: SdpDifference): boolean => d.section === "session" && d.line === "o="
 
+/** A `session:o=` row as the caller read its origins. */
+const markOrigin = (d: SdpDifference, origin: OriginReading): SdpDifference => {
+  if (!isOriginRow(d)) return d
+  if (origin === "minted") return { ...d, mintedOrigin: true }
+  if (origin === "not-continued") return { ...d, originNotContinued: true }
+  return d
+}
+
 /**
  * Every difference between two texts read as session descriptions under the
  * mask: the structural rows, or — on a verbatim run whose structure matches
  * while the bytes do not — the one `document:bytes` row. On a verbatim run a
- * `session:o=` row is marked {@link SdpDifference.mintedOrigin} under
- * `mintedOrigin`, and it alone never stands for the bytes: the texts must
- * still be the same bytes once the replayed origin reads as the captured one.
+ * `session:o=` row carries the caller's reading of its origins (`origin`),
+ * and it alone never stands for the bytes: the texts must still be the same
+ * bytes once the replayed origin reads as the captured one.
  */
 export const diffSdp = (
   mask: SdpMask,
   captured: string,
   replayed: string,
-  mintedOrigin = false
+  origin: OriginReading = undefined
 ): ReadonlyArray<SdpDifference> => {
   if (captured === replayed) return []
   const structural = diffStructure(mask, captured, replayed)
   if (!mask.verbatim) return structural
-  const rows = structural.map((d): SdpDifference => (mintedOrigin && isOriginRow(d) ? { ...d, mintedOrigin: true } : d))
+  const rows = structural.map((d) => markOrigin(d, origin))
   if (structural.some((d) => !isOriginRow(d))) return rows
   if (withOriginOf(replayed, captured) === captured) return rows
   return [...rows, { section: "document", line: "bytes", captured: [captured], replayed: [replayed] }]

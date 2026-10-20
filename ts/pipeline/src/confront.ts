@@ -36,7 +36,7 @@ import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
 import { layoutFault, locate, type LayoutFault } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
-import { answering, collecting, type Driven, identitiesIn, type Ledger, readOrigins, type Reception, type Sighting } from "./sdporigin.js"
+import { answering, collecting, type Driven, identitiesIn, type Ledger, readings, type Reception, type Sighting } from "./sdporigin.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import { legPlaces } from "./leg-role.js"
@@ -410,9 +410,9 @@ export const bodyProbes = (
   const flowAt = new Map([...steps.keys()].map((id, at) => [id, at]))
   const walk = (origins: Ledger | undefined): ReadonlyMap<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>> => {
     const found = new Map<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>>()
-    wire.forEach(({ message }, replayedAt) => {
+    wire.forEach(({ leg, message }, replayedAt) => {
       const capturedAt = message.step === undefined ? Number.MAX_SAFE_INTEGER : flowAt.get(message.step) ?? Number.MAX_SAFE_INTEGER
-      found.set(message, messageBodyProbes(input, steps, message, media, origins?.at({ capturedAt, replayedAt })))
+      found.set(message, messageBodyProbes(input, steps, message, media, origins?.at({ capturedAt, replayedAt, leg })))
     })
     return found
   }
@@ -420,7 +420,7 @@ export const bodyProbes = (
   if (media === "verbatim") {
     const sightings: Array<Sighting> = []
     walk(collecting(sightings))
-    found = walk(answering(readOrigins(sightings, drivenOrigins(input))))
+    found = walk(answering(readings(sightings, drivenOrigins(input))))
   } else {
     found = walk(undefined)
   }
@@ -580,8 +580,8 @@ const bodyProbe = (
   if (compare === "sdp") {
     // Every pair is read, equal ones included, so each is held to the
     // sessions the cell shows.
-    const minted = origins?.read(capturedText, replayedText) ?? false
-    return diffSdp(maskOf(body.rewrite, media), capturedText, replayedText, minted).map((d) => ({
+    const origin = origins?.read(capturedText, replayedText)
+    return diffSdp(maskOf(body.rewrite, media), capturedText, replayedText, origin).map((d) => ({
       kind: "body",
       step,
       mediaType,
@@ -589,7 +589,12 @@ const bodyProbe = (
       compare,
       captured: d.captured,
       replayed: d.replayed,
-      sdp: { section: d.section, line: d.line, ...(d.mintedOrigin === true ? { mintedOrigin: true as const } : {}) }
+      sdp: {
+        section: d.section,
+        line: d.line,
+        ...(d.mintedOrigin === true ? { mintedOrigin: true as const } : {}),
+        ...(d.originNotContinued === true ? { originNotContinued: true as const } : {})
+      }
     }))
   }
   if (bodiesEqual(compare, capturedText, replayedText)) return []

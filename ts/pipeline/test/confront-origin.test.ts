@@ -239,3 +239,35 @@ describe("the origin of a session the endpoint opens", () => {
     expect(run(sdp(o(7, 7)), sdp(o(9, 8)), undefined, "rebooked")).toEqual([])
   })
 })
+
+describe("a session the endpoint does not continue where the capture did", () => {
+  const notContinued = (probes: ReadonlyArray<BodyProbe>) =>
+    probes.map((p) => ({ step: p.step, minted: p.sdp?.mintedOrigin === true, notContinued: p.sdp?.originNotContinued === true }))
+
+  it("the ACK opening another session on the leg is a `session:o=` row marked not continued", () => {
+    expect(notContinued(run(sdp(o(7, 7)), sdp(o(9, 9, "-", "192.0.2.99"))))).toEqual([
+      { step: "s2", minted: true, notContinued: false },
+      { step: "s3", minted: false, notContinued: true }
+    ])
+  })
+
+  it("a continuation at another version step is marked not continued", () => {
+    expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 9))))[1]).toEqual({ step: "s3", minted: false, notContinued: true })
+  })
+
+  it("a minted continuation is never marked not continued", () => {
+    expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 8)))).some((r) => r.notContinued)).toBe(false)
+  })
+
+  it("a session the replay opens afresh on another leg is no break of that leg", () => {
+    const got = notContinued(acrossLegs(
+      { b: sdp(o(1000, 1000)), a: sdp(o(1000, 1001)) },
+      { b: sdp(o(7, 7)), a: sdp(o(9, 9)) }
+    ))
+    expect(got.some((r) => r.notContinued)).toBe(false)
+  })
+
+  it("a rebooked run reads no ledger and marks nothing", () => {
+    expect(run(sdp(o(7, 7)), sdp(o(9, 8)), undefined, "rebooked")).toEqual([])
+  })
+})

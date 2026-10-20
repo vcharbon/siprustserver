@@ -170,10 +170,17 @@ export interface BodyProbe extends ProbeSite {
   /**
    * Where in the session description the difference sits; set under `sdp`
    * only. `mintedOrigin` marks a `session:o=` row of a verbatim run whose two
-   * origins read as one the replayed endpoint mints and its counterpart
-   * (`./sdporigin.ts`); the signature does not carry it.
+   * origins read as one the replayed endpoint mints and its counterpart, and
+   * `originNotContinued` one whose replayed session is not the one its leg
+   * carried where the capture's is (`./sdporigin.ts`); the signature carries
+   * neither.
    */
-  readonly sdp?: { readonly section: string; readonly line: string; readonly mintedOrigin?: true }
+  readonly sdp?: {
+    readonly section: string
+    readonly line: string
+    readonly mintedOrigin?: true
+    readonly originNotContinued?: true
+  }
 }
 
 export type Probe = HeaderProbe | ShapeProbe | BodyProbe
