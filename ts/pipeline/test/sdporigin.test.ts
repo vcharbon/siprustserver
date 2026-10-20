@@ -148,14 +148,20 @@ describe("notContinued", () => {
     expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(9, 9, "-", "192.0.2.99")]])).toEqual([false, true])
   })
 
-  it("marks a version the replay resets or jumps where the capture steps it", () => {
-    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 7)]])).toEqual([false, true])
+  it("marks a version the replay jumps, resets, or keeps over a changed description", () => {
     expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 9)]])).toEqual([false, true])
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 6)]])).toEqual([false, true])
+    const moved = sdp(o(7, 7), 6002)
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), moved]])).toEqual([false, true])
   })
 
-  it("marks nothing where both sides continue alike", () => {
+  it("marks nothing the replay does as RFC 3264 §8 allows, whatever step the capture took", () => {
     expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 8)]])).toEqual([false, false])
     expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1000), S(7, 7)]])).toEqual([false, false])
+    // An unchanged description keeps its version: no break, though the capture stepped.
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 7)]])).toEqual([false, false])
+    // A +1 on an unchanged description is allowed too.
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1000), S(7, 8)]])).toEqual([false, false])
   })
 
   it("marks nothing where the capture itself opens another session on the leg", () => {

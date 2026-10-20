@@ -255,6 +255,10 @@ describe("a session the endpoint does not continue where the capture did", () =>
     expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 9))))[1]).toEqual({ step: "s3", minted: false, notContinued: true })
   })
 
+  it("an unchanged description that keeps its version is no break, though the capture stepped it", () => {
+    expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 7)))).some((r) => r.notContinued)).toBe(false)
+  })
+
   it("a minted continuation is never marked not continued", () => {
     expect(notContinued(run(sdp(o(7, 7)), sdp(o(7, 8)))).some((r) => r.notContinued)).toBe(false)
   })

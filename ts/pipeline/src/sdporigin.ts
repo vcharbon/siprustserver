@@ -21,11 +21,12 @@
  * §8). A session's first description opens in the same form on both sides
  * (sess-version equal to sess-id on both or on neither).
  *
- * The complementary reading is per leg: where the capture's description
- * CONTINUES the session its previous one on that leg carried, the replay's
- * does not continue its own previous one there — another identity, or a
- * version step other than the capture's — {@link notContinued} reads it as the
- * replayed endpoint breaking the session it holds toward that peer.
+ * The complementary reading is per leg: where the capture's description keeps
+ * the identity its previous one on that leg carried, and the replay's breaks
+ * RFC 3264 §8 against its own previous one there — another identity, or a
+ * sess-version step that is neither +1 nor 0 over an unchanged description —
+ * {@link notContinued} reads it as the replayed endpoint breaking the session
+ * it holds toward that peer.
  */
 
 /** One parsed `o=` line: the two numbers apart from the fields every run reproduces. */
@@ -153,12 +154,16 @@ export const readOrigins = (sightings: ReadonlyArray<Sighting>, driven: Driven):
   })
 }
 
+/** A description's text with its `o=` line taken out: what a sess-version counts. */
+const withoutOrigin = (text: string): string => text.replace(ORIGIN_LINE, "")
+
 /**
- * Whether each sighting is a session the capture continues on its leg and the
- * replay does not: the capture's previous sighting on the leg (capture order)
- * carries the same identity, and the replay's previous one there (replay
- * order) carries another identity, or a version the replay steps by another
- * amount than the capture. A side whose origin does not parse, here or at the
+ * Whether each sighting is a session the capture keeps on its leg and the
+ * replay breaks (RFC 3264 §8): the capture's previous sighting on the leg
+ * (capture order) carries the same identity, and against the replay's
+ * previous one there (replay order) the replayed description carries another
+ * identity, or steps sess-version by neither +1 nor 0 over an unchanged
+ * description. A side whose origin does not parse, here or at the
  * predecessor, reads nothing.
  */
 export const notContinued = (sightings: ReadonlyArray<Sighting>): ReadonlyArray<boolean> => {
@@ -185,15 +190,17 @@ export const notContinued = (sightings: ReadonlyArray<Sighting>): ReadonlyArray<
     const priorB = pb === undefined ? undefined : right[pb]
     if (a === undefined || b === undefined || priorA === undefined || priorB === undefined) return false
     if (identityOf(priorA) !== identityOf(a)) return false
-    return identityOf(priorB) !== identityOf(b) ||
-      b.sessVersion - priorB.sessVersion !== a.sessVersion - priorA.sessVersion
+    if (identityOf(priorB) !== identityOf(b)) return true
+    const step = b.sessVersion - priorB.sessVersion
+    const unchanged = withoutOrigin(sightings[at]!.replayed) === withoutOrigin(sightings[pb!]!.replayed)
+    return !(step === 1n || (step === 0n && unchanged))
   })
 }
 
 /**
  * How one description pair's origins read: an origin the replayed endpoint
- * mints and its counterpart, a session the replay did not continue where the
- * capture did, or neither (`undefined`).
+ * mints and its counterpart, a session the replay breaks (RFC 3264 §8) on a
+ * leg where the capture keeps it, or neither (`undefined`).
  */
 export type OriginReading = "minted" | "not-continued" | undefined
 
