@@ -662,3 +662,57 @@ fn a_bodiless_final_over_an_unreadable_offer_is_undecidable() {
     assert_eq!(out.len(), 1, "the 2xx is the occasion: {out:?}");
     assert!(matches!(out[0].decision, Decision::Undecidable(_)), "{:?}", out[0].decision);
 }
+
+/// An ACK body on a round whose offer the reading cannot parse settles nothing.
+#[test]
+fn an_ack_body_on_a_round_with_an_unreadable_offer_is_undecidable() {
+    let msgs = vec![
+        req(1, ALICE, BOB, "INVITE", 1, None, Some(UNREADABLE_OFFER)),
+        resp(2, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_ANSWER)),
+        req(3, ALICE, BOB, "ACK", 1, Some("bt"), Some(STRAY_ANSWER)),
+    ];
+    let out = run(&AckBodyAfterCompleteOfferAnswer, &msgs);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(matches!(out[0].decision, Decision::Undecidable(_)), "{:?}", out[0].decision);
+}
+
+/// A delayed offer the reading cannot parse leaves the ACK it owed undecided.
+#[test]
+fn a_bodiless_ack_to_an_unreadable_delayed_offer_is_undecidable() {
+    let msgs = vec![
+        req(1, ALICE, BOB, "INVITE", 1, None, None),
+        resp(2, BOB, ALICE, 200, 1, "INVITE", Some(UNREADABLE_OFFER)),
+        req(3, ALICE, BOB, "ACK", 1, Some("bt"), None),
+    ];
+    let out = run(&DelayedOfferAnsweredInAck, &msgs);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(matches!(out[0].decision, Decision::Undecidable(_)), "{:?}", out[0].decision);
+}
+
+/// An offer sent over the agent's own pending offer that the reading cannot
+/// parse is undecided: what was pending cannot be read.
+#[test]
+fn an_offer_over_an_unreadable_pending_offer_is_undecidable() {
+    let msgs = vec![
+        req(1, ALICE, BOB, "INVITE", 1, None, Some(UNREADABLE_OFFER)),
+        req(2, ALICE, BOB, "INVITE", 2, None, Some(OFFER_1AUDIO)),
+    ];
+    let out = run(&NoNewOfferWhileOfferPending, &msgs);
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(matches!(out[1].decision, Decision::Undecidable(_)), "{:?}", out[1].decision);
+}
+
+/// An unreliable provisional binds no answer (RFC 3262 §5): one the reading
+/// cannot parse answers nothing, and the 2xx's answer is still the one read.
+#[test]
+fn an_unreadable_unreliable_provisional_leaves_the_final_the_answer() {
+    let msgs = vec![
+        req(1, ALICE, BOB, "INVITE", 1, None, Some(T38_OFFER)),
+        resp(2, BOB, ALICE, 183, 1, "INVITE", Some(UNREADABLE_OFFER)),
+        resp(3, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_ANSWER)),
+        req(4, ALICE, BOB, "ACK", 1, Some("bt"), None),
+    ];
+    let f = violations(&AnswerStreamMatchesOffer, &msgs);
+    assert_eq!(f.len(), 1, "the 2xx re-typed the offered stream: {f:?}");
+    assert_eq!(f[0].anchor, 2, "judged at the 2xx");
+}

@@ -187,8 +187,8 @@ pub(super) struct AgentState<'a> {
     /// Index into the view's `msgs` of this agent's last SENT description with
     /// a readable `o=` line on this call.
     pub(super) last_origin: Option<usize>,
-    /// Indexes into the view's `msgs` of EVERY description this agent sent on
-    /// this call, ascending — the stream
+    /// Indexes into the view's `msgs` of EVERY readable description this agent
+    /// sent on this call, ascending — the stream
     /// [`Reading::sent_streams`](super::reading::Reading::sent_streams) publishes.
     pub(super) sent_docs: Vec<usize>,
 }

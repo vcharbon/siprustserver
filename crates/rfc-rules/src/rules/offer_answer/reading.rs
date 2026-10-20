@@ -46,7 +46,10 @@ fn offer_answer_method(method: &str) -> bool {
 /// A message that DECLARED a description is one, read or not: the walk opens
 /// and closes rounds on `described`, so a description the reading cannot parse
 /// is still the offer or the answer it was sent as, never an absence. A rule
-/// whose round rests on one ([`Reading::unreadable`]) decides nothing.
+/// whose round rests on one ([`Reading::unreadable`]) decides nothing. Where
+/// the description could state nothing anyway — on an unreliable provisional,
+/// which binds no answer — an unreadable one is no description, and it is no
+/// step of the agent's stream of descriptions.
 ///
 /// Two of the collections are TIMELINES rather than end states, because their
 /// readers judge what an agent knew when it acted: `offer_steps` says which of
@@ -79,7 +82,7 @@ pub(super) struct Reading<'a> {
     /// answer is owed in it — with the offer it owed. Read by
     /// [`DelayedOfferAnsweredInAck`](super::DelayedOfferAnsweredInAck).
     pub(super) delayed_acks: Vec<DelayedAck<'a>>,
-    /// Per agent and call, the indexes into the view's `msgs` of the
+    /// Per agent and call, the indexes into the view's `msgs` of the readable
     /// descriptions that agent SENT, ascending. Read by
     /// [`ReOfferMLineCountMonotonic`](super::ReOfferMLineCountMonotonic)
     /// (consecutive pairs) and
@@ -166,11 +169,15 @@ impl<'a> Reading<'a> {
         let key = AgentKey { agent, call_id: msg.call_id.as_str() };
         let state = agents.entry(key).or_default();
         let dialog = msg.to_tag.as_deref().unwrap_or_default();
-        let has_doc = self.described[mi];
+        let readable = self.docs[mi].is_some();
+        let has_doc = readable
+            || (self.described[mi] && msg.status().is_none_or(|status| binds(status, msg)));
 
         if sent && has_doc {
-            state.sent_docs.push(mi);
-            let readable = self.docs[mi].as_ref().is_some_and(|d| d.origin.is_some());
+            if readable {
+                state.sent_docs.push(mi);
+            }
+            let has_origin = self.docs[mi].as_ref().is_some_and(|d| d.origin.is_some());
             if let Some(prior) = state.last_origin {
                 let step = OriginStep {
                     msg: mi,
@@ -179,13 +186,13 @@ impl<'a> Reading<'a> {
                     cseq: msg.cseq,
                     prior,
                 };
-                if readable {
+                if has_origin {
                     self.origin_steps.push(step);
                 } else {
                     self.unreadable_origins.push(step);
                 }
             }
-            if readable {
+            if has_origin {
                 state.last_origin = Some(mi);
             }
         }
