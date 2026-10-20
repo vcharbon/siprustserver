@@ -441,3 +441,38 @@ async fn an_unparseable_arrival_is_stamped_unparsed_and_never_a_repeat() {
         assert_eq!(wire.repeat_of, None, "a datagram that keys nothing is never a repeat");
     }
 }
+
+/// A bind asked at port 0 is recorded under the socket it was given: its lane
+/// key and its arrivals name the address its peers address it by, never the
+/// port-0 placeholder.
+#[tokio::test]
+async fn a_port_zero_bind_is_recorded_under_the_address_it_was_given() {
+    let wrapped = with_all_contracts(
+        Arc::new(sip_net::RealSignalingNetwork::new()),
+        Recorder::fake(),
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        true,
+    );
+    let net = wrapped.network;
+    let a = net.bind_udp(opts("127.0.0.1:0", 64).with_lane_label("ep0")).await.unwrap();
+    let b = net.bind_udp(opts("127.0.0.1:0", 64)).await.unwrap();
+    b.send_to(b"OPTIONS", a.local_addr()).await.unwrap();
+    let _ = timeout(Duration::from_secs(1), a.recv()).await.unwrap();
+
+    let given = format!("{}#ep0", a.local_addr());
+    let events: Vec<_> =
+        wrapped.recording.channel().snapshot().into_iter().map(|s| s.event).collect();
+    let acquired: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            SignalingNetworkEvent::BindAcquire { bind_key, .. } => Some(bind_key.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(acquired, vec![given.as_str(), b.local_addr().to_string().as_str()]);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SignalingNetworkEvent::RecvItem { bind_key, .. } if *bind_key == given
+    )));
+}

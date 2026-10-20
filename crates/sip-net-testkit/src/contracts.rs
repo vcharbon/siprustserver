@@ -472,20 +472,19 @@ impl RecordingSignalingNetwork {
 #[async_trait]
 impl SignalingNetwork for RecordingSignalingNetwork {
     async fn bind_udp(&self, opts: BindUdpOpts) -> Result<Box<dyn UdpEndpoint>, BindError> {
-        // Logical sub-lane: a labelled bind records under
-        // `ip:port#<label>` so several logical endpoints sharing one socket
-        // stay distinct columns. `report::lane_addr` recovers the address.
-        let bind_key = match &opts.lane_label {
-            Some(label) => format!("{}#{label}", lane_key(opts.addr)),
-            None => lane_key(opts.addr),
-        };
-        let roles = opts.effective_roles();
+        let (roles, label, mut summary) =
+            (opts.effective_roles(), opts.lane_label.clone(), opts.summary());
+        let endpoint = self.0.inner.bind_udp(opts).await?;
+        // The lane is the socket the bind was GIVEN (port 0 resolved); a
+        // labelled bind records under `ip:port#<label>` so endpoints sharing a
+        // socket stay distinct columns. `report::lane_addr` recovers the address.
+        summary.addr = endpoint.local_addr();
+        let key = lane_key(summary.addr);
+        let bind_key = label.map_or_else(|| key.clone(), |label| format!("{key}#{label}"));
         self.0.bind_roles.lock().unwrap().insert(bind_key.clone(), roles.clone());
-        let summary = opts.summary();
         self.0
             .channel
             .record(SignalingNetworkEvent::BindAcquire { bind_key: bind_key.clone(), summary });
-        let endpoint = self.0.inner.bind_udp(opts).await?;
         // Delivery-time recording: arrivals are recorded
         // the moment the inner inbox accepts (or overflows/refuses) them, so a
         // packet the body never reads is still on the trace. Falls back to

@@ -108,7 +108,7 @@ crates/sip-message/src/parser/custom/structured_headers.rs 849
 crates/sip-message/src/sdp_answer.rs 534
 crates/sip-message/src/sniff.rs 608
 crates/sip-message/tests/it/generators.rs 1401
-crates/sip-net-testkit/src/contracts.rs 870
+crates/sip-net-testkit/src/contracts.rs 869
 crates/sip-pcap/src/bin/sipflow.rs 1059
 crates/sip-pcap/src/flow.rs 820
 crates/sip-pcap/src/flow/tests.rs 1000
