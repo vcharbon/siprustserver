@@ -143,10 +143,11 @@ pub fn bind_roles_of(
 }
 
 /// Run the FULL default RFC suite over a recorded trace, applying **subject
-/// dispatch** per finding: a finding is kept only when
-/// its rule's `subject()` intersects the originating bind's declared roles
+/// dispatch** per finding: a finding is kept only when its rule's `subject()`
+/// intersects the declared roles of the party it charges — the binds naming
+/// that party, by key or by address; every role for a party no bind declared
 /// (default = all roles, so this only narrows when roles were declared at
-/// `bind_udp`). This is THE single evaluator — the harness hard gate panics on
+/// `bind_udp`). A finding that charges no party is dispatched on its lane. This is THE single evaluator — the harness hard gate panics on
 /// the non-advisory subset, and the report projection lists the whole set with
 /// its `advisory` tags — so the gate and the report can never disagree on
 /// which endpoint a rule applies to.
@@ -179,9 +180,24 @@ pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit
         .collect();
     let events = events.as_slice();
     let roles = bind_roles_of(events);
-    let roles_of = |bind: &str| roles.get(bind).cloned().unwrap_or_else(all_ua_roles);
-    let subject_hits = |subject: &HashSet<UaRole>, bind: &str| {
-        let r = roles_of(bind);
+    let roles_of = |party: &str| -> HashSet<UaRole> {
+        if let Some(declared) = roles.get(party) {
+            return declared.clone();
+        }
+        let addr = crate::report::lane_addr(party);
+        let named: Vec<&HashSet<UaRole>> = roles
+            .iter()
+            .filter(|(bind, _)| addr.is_some() && crate::report::lane_addr(bind) == addr)
+            .map(|(_, declared)| declared)
+            .collect();
+        if named.is_empty() {
+            all_ua_roles()
+        } else {
+            named.into_iter().flatten().copied().collect()
+        }
+    };
+    let subject_hits = |subject: &HashSet<UaRole>, party: &str| {
+        let r = roles_of(party);
         subject.iter().any(|s| r.contains(s))
     };
 
@@ -198,7 +214,7 @@ pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit
             }
         }
         for (bind, detail, offending, charged) in positioned {
-            if subject_hits(&subject, &bind) {
+            if subject_hits(&subject, charged.as_deref().unwrap_or(&bind)) {
                 findings.push(RfcFinding {
                     rule: rule.name().to_string(),
                     lane: bind,

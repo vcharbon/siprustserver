@@ -16,7 +16,9 @@
 //! holds of a chain whose first sighting it does not (modeled loss) is new.
 //!
 //! Each rule is surfaced by its `Live` row: vantage, skipped lanes, roles,
-//! severity and detail line, the detail a fn named after the rule's token.
+//! severity and detail line, the detail a fn named after the rule's token. A
+//! detail reads `<charged party>: <what it did>`, the same on whichever lane
+//! reports it.
 //! Every rule has a row: `every_merged_rule_has_a_live_adapter` names one
 //! without.
 
@@ -196,7 +198,7 @@ fn at_vantage(
             // vantage this finding is reported at.
             out.push((
                 view.bind.clone(),
-                detail(&f, cid),
+                format!("{}: {}", f.emitter, detail(&f, cid)),
                 positions.get(seq).copied(),
                 Some(f.emitter.clone()),
             ));
@@ -206,14 +208,14 @@ fn at_vantage(
 }
 
 /// Where the live audit reports a rule's finding. The charged party is always
-/// the finding's `emitter`; the vantage is the lane that REPORTS it, and subject
-/// dispatch judges the declared roles of that lane.
+/// the finding's `emitter`; the vantage is the lane that REPORTS it. Subject
+/// dispatch judges the charged party's declared roles, whatever the vantage.
 #[derive(Clone, Copy)]
 enum Vantage {
     /// The emitter's own lane: what a sender mints or owes. An emitter that is
     /// no recorded bind, in the view or scoped out of it, is reported once, at
     /// the taker, where the recording holds what it sent; it declared no roles,
-    /// so the taker's are dispatched.
+    /// so every row scoped to a user-agent role judges it.
     /// A row scoped to proxies alone judges how a proxy handles what it took,
     /// which no taker shows of a party it cannot tell is one: it never falls back.
     Emitter,

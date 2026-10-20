@@ -147,3 +147,24 @@ fn a_late_provisional_fires_at_the_uas_lane_and_not_on_a_relay() {
     ];
     assert!(live(RuleId::No1xxAfterFinal).check_positioned(&relayed).is_empty());
 }
+
+/// A row reported off its sender's lane is dispatched on the SENDER's roles:
+/// a sender that is no recorded bind declared none, so every role-scoped row
+/// judges it, whatever roles the taker declared.
+#[test]
+fn an_unrecorded_senders_second_final_is_dispatched_on_its_own_roles() {
+    let evs = vec![
+        bind_roles(ALICE, HashSet::from([UaRole::Uac]), 0),
+        sent(ALICE, req("INVITE", "z9hG4bK-i", 1, None), SUT, 1),
+        recv(ALICE, resp(487, 1, "INVITE", "bt", "z9hG4bK-i"), SUT, 2),
+        sent(ALICE, req("ACK", "z9hG4bK-i", 1, Some("bt")), SUT, 3),
+        recv(ALICE, resp(480, 1, "INVITE", "bt", "z9hG4bK-i"), SUT, 4),
+    ];
+    let found: Vec<RfcFinding> = evaluate_rfc_findings(&evs)
+        .into_iter()
+        .filter(|f| f.rule == RuleId::SingleFinalPerServerTxn.token())
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].lane, ALICE, "reported where the finals were taken");
+    assert_eq!(found[0].charged.as_deref(), Some(SUT));
+}

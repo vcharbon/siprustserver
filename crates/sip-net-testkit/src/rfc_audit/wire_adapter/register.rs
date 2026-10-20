@@ -18,10 +18,9 @@ fn serial_register(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent REGISTER (callId {cid}, branch {branch}) with new Contact while prior \
+        "Sent REGISTER (callId {cid}, branch {branch}) with new Contact while prior \
          REGISTER (branch {pending_branch}) for AOR {aor} still pending — {{Uac}} RFC 3261 \
          §10.2 / RFC3261-MUST-054",
-        by = f.emitter,
     )
 }
 
@@ -30,8 +29,7 @@ fn register_no_route_set(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent REGISTER (callId {cid}) carries Route header — {{Uac}} RFC 3261 §10.2 / \
+        "Sent REGISTER (callId {cid}) carries Route header — {{Uac}} RFC 3261 §10.2 / \
          RFC3261-MUST-051",
-        by = f.emitter,
     )
 }

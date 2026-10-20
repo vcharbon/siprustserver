@@ -32,11 +32,10 @@ fn single_final_per_server_txn(f: &rfc_rules::Finding, cid: &str) -> String {
         ),
     };
     format!(
-        "{by} sent a second final {second_status} on the {method} server transaction \
+        "Sent a second final {second_status} on the {method} server transaction \
          (callId {cid}, branch {branch}) that already answered {first_status}{also} — a \
          server transaction emits exactly one final response; only a same-status \
          retransmission is legal (RFC 3261 §17.2.1 / §13.3.1.4)",
-        by = f.emitter,
     )
 }
 
@@ -51,9 +50,8 @@ fn no_1xx_after_final(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent a new {status} provisional on an INVITE server transaction (callId {cid}, \
+        "Sent a new {status} provisional on an INVITE server transaction (callId {cid}, \
          branch {branch}) after its {completed_by_status} final — a completed \
          transaction emits no further provisionals (RFC 3261 §13.3.1.1 / §17.2.1)",
-        by = f.emitter,
     )
 }

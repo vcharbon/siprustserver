@@ -23,12 +23,11 @@ fn no_200_after_cancel(f: &rfc_rules::Finding, cid: &str) -> String {
         _ => (0, 0),
     };
     format!(
-        "{by} answered an INVITE it had already taken a CANCEL for with a {status} (callId \
+        "Answered an INVITE it had already taken a CANCEL for with a {status} (callId \
          {cid}, CSeq {cseq}), {gap_ms} ms after that CANCEL — RFC 3261 §9.2 has the \
          cancelled UAS answer 487 Request Terminated",
         cseq = f.cseq,
         gap_ms = gap_us / 1_000,
-        by = f.emitter,
     )
 }
 
@@ -43,11 +42,10 @@ fn cancel_route_echoes_invite(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent CANCEL Route values [{}] differ from INVITE Route values [{}] (callId \
+        "Sent CANCEL Route values [{}] differ from INVITE Route values [{}] (callId \
          {cid}, branch {branch}) — RFC 3261 §9.1 / RFC3261-MUST-046",
         cancel_routes.join(", "),
         invite_routes.join(", "),
-        by = f.emitter,
     )
 }
 
@@ -56,9 +54,8 @@ fn cancel_after_1xx(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent CANCEL (callId {cid}, branch {branch}) before any received 1xx for the \
+        "Sent CANCEL (callId {cid}, branch {branch}) before any received 1xx for the \
          INVITE — {{Uac}} RFC 3261 §9.1 / RFC3261-MUST-048",
-        by = f.emitter,
     )
 }
 
@@ -70,11 +67,10 @@ fn no_cancel_after_final(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent CANCEL (callId {cid}, CSeq {cseq}) {gap_ms} ms after ACKing the \
+        "Sent CANCEL (callId {cid}, CSeq {cseq}) {gap_ms} ms after ACKing the \
          {final_status} that completed its own INVITE transaction — {{Uac}} RFC 3261 \
          §9.1; §17.1.1.2 left no transaction to cancel and §9.2 answers the CANCEL 481",
         cseq = f.cseq,
         gap_ms = since_final_us / 1_000,
-        by = f.emitter,
     )
 }

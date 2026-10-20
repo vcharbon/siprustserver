@@ -50,12 +50,11 @@ fn ack_body_after_complete_offer_answer(f: &rfc_rules::Finding, cid: &str) -> St
     };
     let table = if streams.is_empty() { "no m= line".to_string() } else { streams.join(", ") };
     format!(
-        "{by} sent an ACK (callId {cid}, CSeq {cseq}) carrying a session description \
+        "Sent an ACK (callId {cid}, CSeq {cseq}) carrying a session description \
          ({table}) although the offer/answer exchange it acknowledges was already \
          complete — expected no body on this ACK (Content-Length: 0), RFC 3261 \
          §13.2.2.4 / §13.2.1",
         cseq = f.cseq,
-        by = f.emitter,
     )
 }
 
@@ -74,12 +73,11 @@ fn final_2xx_answers_the_offer(f: &rfc_rules::Finding, cid: &str) -> String {
         offered_streams.join(", ")
     };
     format!(
-        "{by} sent a {status} (callId {cid}, CSeq {cseq}) carrying no session \
+        "Sent a {status} (callId {cid}, CSeq {cseq}) carrying no session \
          description although the request it answers offered one ({table}) and no \
          reliable message had answered it — expected the answer in this final, RFC \
          3261 §13.2.1 / RFC 3264 §6",
         cseq = f.cseq,
-        by = f.emitter,
     )
 }
 
@@ -88,11 +86,10 @@ fn delayed_offer_answered_in_ack(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     }
     format!(
-        "{by} sent an ACK (callId {cid}, CSeq {cseq}) carrying no session description \
+        "Sent an ACK (callId {cid}, CSeq {cseq}) carrying no session description \
          although the 2xx it acknowledges carried the offer (the INVITE had none) — \
          the ACK MUST carry the answer, RFC 3261 §13.2.2.4 / §13.2.1",
         cseq = f.cseq,
-        by = f.emitter,
     )
 }
 
@@ -106,14 +103,13 @@ fn second_answer_repeats_the_first(f: &rfc_rules::Finding, cid: &str) -> String 
         return String::new();
     };
     format!(
-        "{by} sent a second session description on one dialog (callId {cid}, CSeq \
+        "Sent a second session description on one dialog (callId {cid}, CSeq \
          {cseq}) stating a transport plan its first answer did not — first \
          [{first}], second [{second}]; the peer takes the first answer and ignores \
          every later description on that dialog (RFC 3261 §13.2.1)",
         cseq = f.cseq,
         first = first_plan.join(", "),
         second = second_plan.join(", "),
-        by = f.emitter,
     )
 }
 
@@ -134,13 +130,12 @@ fn answer_stream_matches_offer(f: &rfc_rules::Finding, cid: &str) -> String {
         .map(|(i, (o, a))| format!("m=[{i}] offered \"{o}\", answered \"{a}\""))
         .collect();
     format!(
-        "{by} answered the offer on CSeq {cseq} re-typing {n} stream(s) — {rows} (callId \
+        "Answered the offer on CSeq {cseq} re-typing {n} stream(s) — {rows} (callId \
          {cid}); an answer keeps each stream's media type and proto (port 0 to reject \
          it) — RFC 3264 §6",
         cseq = f.cseq,
         n = stream_indexes.len(),
         rows = rows.join("; "),
-        by = f.emitter,
     )
 }
 
@@ -174,10 +169,9 @@ fn sdp_origin_continuity(f: &rfc_rules::Finding, cid: &str) -> String {
         )
     };
     format!(
-        "{by} sent \"{origin_line}\" after \"{prior_origin_line}\" on the same call (callId \
+        "Sent \"{origin_line}\" after \"{prior_origin_line}\" on the same call (callId \
          {cid}, CSeq {cseq}) — {offence} — RFC 4566 §5.2 / RFC 3264 §8",
         cseq = f.cseq,
-        by = f.emitter,
     )
 }
 
@@ -204,11 +198,10 @@ fn no_new_offer_while_offer_pending(f: &rfc_rules::Finding, cid: &str) -> String
         return String::new();
     };
     format!(
-        "{by} sent an SDP offer (callId {cid}, CSeq {cseq}) while its own offer on CSeq \
+        "Sent an SDP offer (callId {cid}, CSeq {cseq}) while its own offer on CSeq \
          {pending_offer_cseq} was still unanswered — an offer is answered before the \
          next one goes out (RFC 3264 §5 / RFC3264-MUST-002)",
         cseq = f.cseq,
-        by = f.emitter,
     )
 }
 
@@ -373,12 +366,11 @@ fn payload_type_mapping_stable(f: &rfc_rules::Finding, cid: &str) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "{by} remapped {n} payload-type binding(s) it had already stated on this call — \
+        "Remapped {n} payload-type binding(s) it had already stated on this call — \
          {rows} (callId {cid}, CSeq {cseq}); the peer decodes by the cached mapping — \
          RFC 3264 §8.3.2 / RFC3264-MUST-047",
         n = payload_types.len(),
         cseq = f.cseq,
-        by = f.emitter,
     )
 }
 
@@ -388,9 +380,8 @@ fn sdp_body_parseable(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent an SDP body that fails the RFC 3264 / RFC 4566 grammar check: \
+        "Sent an SDP body that fails the RFC 3264 / RFC 4566 grammar check: \
          {sdp_failure} (callId {cid})",
-        by = f.emitter,
     )
 }
 

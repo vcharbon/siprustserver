@@ -51,10 +51,9 @@ fn unsupported_method_405_allow(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} received unrecognised method {method} (Call-ID {cid}, branch {branch}) — \
+        "Received unrecognised method {method} (Call-ID {cid}, branch {branch}) — \
          {{Uas}} must respond 405 with Allow header (RFC 3261 §8.2.1 / \
          RFC3261-MUST-030); got {answered_status} / Allow={listed_rows}",
-        by = f.emitter,
     )
 }
 
@@ -71,11 +70,10 @@ fn unsupported_extension_420(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} received request {method} requires unsupported option tag(s) [{tags}] (callId \
+        "Received request {method} requires unsupported option tag(s) [{tags}] (callId \
          {cid}, branch {branch}) — {{Uas}} must respond 420 with Unsupported header; got \
          {answered_status} / Unsupported={listed_rows}",
         tags = unsupported_tags.join(", "),
-        by = f.emitter,
     )
 }
 
@@ -86,10 +84,9 @@ fn unsupported_415_accepts(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent 415 response (callId {cid}, branch {branch}) carries no Accept / \
+        "Sent 415 response (callId {cid}, branch {branch}) carries no Accept / \
          Accept-Encoding / Accept-Language header — {{Uas}} RFC 3261 §8.2.3 / \
          RFC3261-MUST-036",
-        by = f.emitter,
     )
 }
 
@@ -100,9 +97,8 @@ fn unsupported_extension_421(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent 421 response (callId {cid}, branch {branch}) lacks Require header listing \
+        "Sent 421 response (callId {cid}, branch {branch}) lacks Require header listing \
          required extensions — {{Uas}} RFC 3261 §21.4.15 / RFC3261-MUST-182",
-        by = f.emitter,
     )
 }
 
@@ -113,9 +109,8 @@ fn options_response_echoes(f: &rfc_rules::Finding, cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent 2xx OPTIONS response (callId {cid}, branch {branch}) lacks \
+        "Sent 2xx OPTIONS response (callId {cid}, branch {branch}) lacks \
          Allow/Supported/Accept headers — {{Uas}} RFC 3261 §11.2 / RFC3261-MUST-059",
-        by = f.emitter,
     )
 }
 

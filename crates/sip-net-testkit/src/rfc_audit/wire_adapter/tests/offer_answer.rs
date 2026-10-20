@@ -565,12 +565,37 @@ fn a_detail_names_the_party_that_sent_it() {
     ];
     let out = live(RuleId::DelayedOfferAnsweredInAck).check(&silent);
     assert_eq!(out.len(), 1, "{out:?}");
-    assert!(out[0].1.starts_with(&format!("{ALICE} sent an ACK")), "{}", out[0].1);
+    assert!(out[0].1.starts_with(&format!("{ALICE}: Sent an ACK")), "{}", out[0].1);
 
     let found = evaluate_rfc_findings(&callee_lane_only(OFFER_WITHOUT_VERSION, AUDIO_OFFER));
     let parseable =
         found.iter().find(|f| f.rule == RuleId::SdpBodyParseable.token()).expect("the finding");
-    assert!(parseable.detail.starts_with(&format!("{SUT} sent ")), "{}", parseable.detail);
+    assert!(parseable.detail.starts_with(&format!("{SUT}: ")), "{}", parseable.detail);
+}
+
+/// Every detail opens on the party it charges, the impersonal ones too, so
+/// it reads the same on whichever lane reports it.
+#[test]
+fn every_detail_opens_on_its_charged_party() {
+    let mut evs = sdp_round(OFFER_1AUDIO, BAD_ANSWER);
+    evs.extend(callee_lane_only(OFFER_WITHOUT_VERSION, AUDIO_OFFER).into_iter().map(|mut s| {
+        s.seq += 100;
+        s.at_ms += 100;
+        s
+    }));
+    let mut seen = 0;
+    for rule in cross_rules() {
+        for (lane, detail, _, charged) in rule.check_positioned(&evs) {
+            let charged = charged.expect("every live row charges a party");
+            assert!(
+                detail.starts_with(&format!("{charged}: ")),
+                "{} at {lane}: {detail}",
+                rule.name()
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen >= 5, "the traces draw impersonal details too: {seen}");
 }
 
 /// A sender bound at port 0 is recorded under the address it asked for, and
@@ -597,4 +622,27 @@ fn a_sender_bound_at_port_zero_is_one_recorded_party() {
     let out = live(RuleId::ReOfferMLineCountMonotonic).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ASKED);
+}
+
+/// A stream table that shrinks across an unreadable re-offer is still the
+/// sender's shrink: the unreadable description is no step of the stream.
+#[test]
+fn a_shrink_across_an_unreadable_re_offer_is_still_charged() {
+    let mut evs = sdp_round(OFFER_2MEDIA, ANSWER_2MEDIA);
+    evs.push(sent(
+        ALICE,
+        req_sdp("INVITE", "z9hG4bK-i2", 2, Some("bt"), Some(OFFER_WITHOUT_VERSION)),
+        BOB,
+        3,
+    ));
+    evs.push(recv(ALICE, resp_sdp(200, 2, "INVITE", "z9hG4bK-i2", Some(ANSWER_2MEDIA)), BOB, 4));
+    evs.push(sent(ALICE, req_sdp("ACK", "z9hG4bK-a2", 2, Some("bt"), None), BOB, 5));
+    evs.push(sent(
+        ALICE,
+        req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(OFFER_1AUDIO)),
+        BOB,
+        6,
+    ));
+    let out = live(RuleId::ReOfferMLineCountMonotonic).check_positioned(&evs);
+    assert_eq!(out.len(), 1, "{out:?}");
 }

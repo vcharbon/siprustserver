@@ -97,8 +97,7 @@ fn strict_route_shuffle_on_send(f: &rfc_rules::Finding, _cid: &str) -> String {
         return String::new();
     };
     format!(
-        "{by} sent {on} request still carries strict-route topmost Route entry \"{value}\" — \
+        "Sent {on} request still carries strict-route topmost Route entry \"{value}\" — \
          RFC 3261 §16.6 step 6 swap may not have run",
-        by = f.emitter,
     )
 }
