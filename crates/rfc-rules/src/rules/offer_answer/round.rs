@@ -10,6 +10,10 @@ use super::doc::{media_plan, Doc};
 use super::reading::Reading;
 use super::records::AckRound;
 
+/// Why a round resting on a description the reading cannot parse decides
+/// nothing: the description is present, its facts are not.
+const UNREADABLE: &str = "the round rests on a session description the reading cannot parse";
+
 /// **RFC 3261 §13.2.2.4 — an ACK closing a completed offer/answer exchange
 /// carries NO body.** When the INVITE carried the offer and a non-failure
 /// response carried the answer, the round is over: §13.2.1 forbids a further
@@ -21,7 +25,8 @@ use super::records::AckRound;
 /// Charges the ACK's SENDER. Every ACK it sent is an occasion: one carrying no
 /// description meets the obligation, one on a still-open round carries the
 /// answer the round is waiting for, and one whose round this vantage never
-/// carried settles nothing.
+/// carried settles nothing — nor does one where the round, or the ACK itself,
+/// rests on a description the reading cannot parse.
 pub struct AckBodyAfterCompleteOfferAnswer;
 
 impl Obligation for AckBodyAfterCompleteOfferAnswer {
@@ -46,6 +51,11 @@ impl Obligation for AckBodyAfterCompleteOfferAnswer {
                     "the vantage did not carry the offer/answer round this ACK closes",
                 ),
                 AckRound::NoDescription | AckRound::Open => Decision::Compliant,
+                AckRound::Closed { offer, answer }
+                    if [offer, answer, ack.msg].iter().any(|&mi| seen.unreadable(mi)) =>
+                {
+                    Decision::Undecidable(UNREADABLE)
+                }
                 AckRound::Closed { offer, answer } => {
                     Decision::Violated(Evidence::AckBodyOnClosedRound {
                         ack_body_msg: ack.msg,
@@ -84,7 +94,8 @@ impl Obligation for AckBodyAfterCompleteOfferAnswer {
 /// A failure final owes no answer and is no occasion, nor is a round the
 /// vantage never carried the offer of, nor one whose transaction the recording
 /// never sees finished — the charge rests on a 2xx that arrived, never on a
-/// silence. A delayed offer (§13.2.1) is the 2xx itself and is answered in the
+/// silence. An offer the reading cannot parse leaves the answer it was owed
+/// undecided. A delayed offer (§13.2.1) is the 2xx itself and is answered in the
 /// ACK, a different round with a different answerer, so it opens no occasion
 /// here.
 ///
@@ -97,7 +108,9 @@ impl Obligation for Final2xxAnswersTheOffer {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for due in &seen.answers_due {
-            let decision = if due.bound.is_some() || seen.docs[due.msg].is_some() {
+            let decision = if seen.unreadable(due.offer) {
+                Decision::Undecidable(UNREADABLE)
+            } else if due.bound.is_some() || seen.docs[due.msg].is_some() {
                 Decision::Compliant
             } else {
                 match wire.msgs[due.msg].body.as_deref() {
@@ -142,8 +155,9 @@ impl Obligation for Final2xxAnswersTheOffer {
 ///
 /// The occasion is an ACK an agent sent on a delayed-offer round it was
 /// presented (`delayed_at`): met by a description on the ACK. An ACK whose body
-/// bytes the vantage never carried is undecided. Charges the ACK's sender,
-/// anchored at the ACK.
+/// bytes the vantage never carried is undecided, and so is a round whose offer
+/// or answer the reading cannot parse. Charges the ACK's sender, anchored at
+/// the ACK.
 pub struct DelayedOfferAnsweredInAck;
 
 impl Obligation for DelayedOfferAnsweredInAck {
@@ -153,7 +167,9 @@ impl Obligation for DelayedOfferAnsweredInAck {
             .delayed_acks
             .iter()
             .map(|ack| {
-                let decision = if ack.answered {
+                let decision = if seen.unreadable(ack.offer) || seen.unreadable(ack.msg) {
+                    Decision::Undecidable(UNREADABLE)
+                } else if ack.answered {
                     Decision::Compliant
                 } else if !ack.body_known {
                     Decision::Undecidable("the vantage carried no body bytes for this ACK")
@@ -253,7 +269,9 @@ impl Obligation for SecondAnswerRepeatsTheFirst {
 /// transaction carrying a description, or (delayed offer, §13.2.1) the ACK.
 /// A round the agent merely TOOK is the peer's to answer and never blocks: the
 /// peer's own overtaking offer is the peer's occasion, on the peer's slot.
-/// An offer this vantage carried no body for opens no round and is no occasion.
+/// An offer this vantage carried no body for opens no round and is no occasion;
+/// where the pending offer or the new one is a description the reading cannot
+/// parse, the occasion is undecided.
 pub struct NoNewOfferWhileOfferPending;
 
 impl Obligation for NoNewOfferWhileOfferPending {
@@ -263,6 +281,9 @@ impl Obligation for NoNewOfferWhileOfferPending {
         for s in &seen.offer_steps {
             let decision = match s.pending {
                 None => Decision::Compliant,
+                Some(pending) if seen.unreadable(pending) || seen.unreadable(s.msg) => {
+                    Decision::Undecidable(UNREADABLE)
+                }
                 Some(pending) => Decision::Violated(Evidence::OfferWhilePending {
                     new_offer_msg: s.msg,
                     new_offer_hop: wire.msgs[s.msg].hop,

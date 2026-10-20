@@ -43,6 +43,11 @@ fn offer_answer_method(method: &str) -> bool {
 /// direction attributes, rtpmaps and ports included — parsed once. A rule that
 /// needs a fact about a message reaches it by that message's view index.
 ///
+/// A message that DECLARED a description is one, read or not: the walk opens
+/// and closes rounds on `described`, so a description the reading cannot parse
+/// is still the offer or the answer it was sent as, never an absence. A rule
+/// whose round rests on one ([`Reading::unreadable`]) decides nothing.
+///
 /// Two of the collections are TIMELINES rather than end states, because their
 /// readers judge what an agent knew when it acted: `offer_steps` says which of
 /// an agent's own rounds were still open at the moment it sent each offer (an
@@ -52,6 +57,8 @@ fn offer_answer_method(method: &str) -> bool {
 #[derive(Default)]
 pub(super) struct Reading<'a> {
     pub(super) docs: Vec<Option<Doc>>,
+    /// Per message: it declared a session description (RFC 3261 §20.15).
+    pub(super) described: Vec<bool>,
     pub(super) acks: Vec<AckSighting<'a>>,
     pub(super) answers: Vec<Answered<'a>>,
     pub(super) origin_steps: Vec<OriginStep<'a>>,
@@ -83,7 +90,11 @@ pub(super) struct Reading<'a> {
 
 impl<'a> Reading<'a> {
     pub(super) fn of(msgs: &'a [Msg]) -> Self {
-        let mut seen = Reading { docs: msgs.iter().map(Doc::of).collect(), ..Reading::default() };
+        let mut seen = Reading {
+            docs: msgs.iter().map(Doc::of).collect(),
+            described: msgs.iter().map(|m| m.sdp().is_some()).collect(),
+            ..Reading::default()
+        };
         let mut agents: BTreeMap<AgentKey<'a>, AgentState<'a>> = BTreeMap::new();
         for (mi, msg) in msgs.iter().enumerate() {
             seen.absorb(&mut agents, mi, msg, msg.src.as_str(), true);
@@ -101,10 +112,15 @@ impl<'a> Reading<'a> {
         state.rounds.iter().rev().find(|r| r.offer_sent && r.answered.is_empty())
     }
 
-    /// The offer and the answer of one round an agent closed. Both are present
-    /// by construction — a round opens and closes on a message the vantage
-    /// carried a readable description for — so an answer is never an occasion
-    /// whose facts the vantage withheld.
+    /// Whether the message at `mi` declared a description the reading cannot
+    /// parse: present in the round, its facts unreadable.
+    pub(super) fn unreadable(&self, mi: usize) -> bool {
+        self.described[mi] && self.docs[mi].is_none()
+    }
+
+    /// The offer and the answer of one round an agent closed, where both read.
+    /// A round resting on an unreadable description yields none, and the rule
+    /// reading it has no occasion there.
     pub(super) fn round_docs(&self, a: &Answered<'_>) -> Option<(&Doc, &Doc)> {
         Some((self.docs[a.offer].as_ref()?, self.docs[a.msg].as_ref()?))
     }
@@ -150,7 +166,7 @@ impl<'a> Reading<'a> {
         let key = AgentKey { agent, call_id: msg.call_id.as_str() };
         let state = agents.entry(key).or_default();
         let dialog = msg.to_tag.as_deref().unwrap_or_default();
-        let has_doc = self.docs[mi].is_some();
+        let has_doc = self.described[mi];
 
         if sent && has_doc {
             state.sent_docs.push(mi);

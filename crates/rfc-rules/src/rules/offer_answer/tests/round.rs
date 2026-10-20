@@ -602,3 +602,63 @@ fn a_delayed_offer_in_the_2xx_is_its_senders_own_offer() {
     assert_eq!(out[0].emitter, BOB);
     assert!(matches!(out[0].decision, Decision::Compliant));
 }
+
+// ---- a description present, unreadable ------------------------------
+
+/// A body declared `application/sdp` that opens with no `v=` line (RFC 4566
+/// §5): a description the sender stated, which the reading cannot parse.
+const UNREADABLE_OFFER: &str = "o=alice 424242 1 IN IP4 10.0.0.1\n\
+s=-\n\
+c=IN IP4 10.0.0.1\n\
+t=0 0\n\
+m=audio 27500 RTP/AVP 8\n";
+
+/// The INVITE carried a description, unreadable: the 2xx describing a plan is
+/// its answer, never a delayed offer, so the bodyless ACK owes nothing.
+#[test]
+fn an_unreadable_offer_makes_no_delayed_offer_of_the_answer() {
+    let msgs = vec![
+        req(1, ALICE, BOB, "INVITE", 1, None, Some(UNREADABLE_OFFER)),
+        resp(2, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_ANSWER)),
+        req(3, ALICE, BOB, "ACK", 1, Some("bt"), None),
+    ];
+    assert!(
+        violations(&DelayedOfferAnsweredInAck, &msgs).is_empty(),
+        "{:?}",
+        run(&DelayedOfferAnsweredInAck, &msgs)
+    );
+    assert!(violations(&AckBodyAfterCompleteOfferAnswer, &msgs).is_empty());
+}
+
+/// The answerer of an unreadable offer holds no offer of its own pending, so
+/// its later offer in a 2xx to a bodyless re-INVITE overtakes nothing.
+#[test]
+fn an_answer_to_an_unreadable_offer_leaves_no_offer_of_its_own_pending() {
+    let msgs = vec![
+        req(1, ALICE, BOB, "INVITE", 1, None, Some(UNREADABLE_OFFER)),
+        resp(2, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_ANSWER)),
+        req(3, ALICE, BOB, "ACK", 1, Some("bt"), None),
+        req(4, ALICE, BOB, "INVITE", 2, Some("bt"), None),
+        resp(5, BOB, ALICE, 200, 2, "INVITE", Some(T38_ANSWER)),
+        req(6, ALICE, BOB, "ACK", 2, Some("bt"), Some(T38_OFFER)),
+    ];
+    assert!(
+        violations(&NoNewOfferWhileOfferPending, &msgs).is_empty(),
+        "{:?}",
+        run(&NoNewOfferWhileOfferPending, &msgs)
+    );
+}
+
+/// A bodyless 2xx over an unreadable offer: the round is the offerer's, and
+/// what it offered cannot be read, so the answer it owed is undecided.
+#[test]
+fn a_bodiless_final_over_an_unreadable_offer_is_undecidable() {
+    let msgs = vec![
+        req(1, ALICE, BOB, "INVITE", 1, None, Some(UNREADABLE_OFFER)),
+        resp(2, BOB, ALICE, 200, 1, "INVITE", None),
+        req(3, ALICE, BOB, "ACK", 1, Some("bt"), None),
+    ];
+    let out = run(&Final2xxAnswersTheOffer, &msgs);
+    assert_eq!(out.len(), 1, "the 2xx is the occasion: {out:?}");
+    assert!(matches!(out[0].decision, Decision::Undecidable(_)), "{:?}", out[0].decision);
+}
