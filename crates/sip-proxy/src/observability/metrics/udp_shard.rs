@@ -19,6 +19,9 @@ pub struct UdpShardStats {
     /// Datagrams whose pre-ingress hook (the intake shed) panicked: each was
     /// accepted, each is a hook defect.
     pub pre_ingress_panics: u64,
+    /// Receives that failed on the shard's sockets; the recv pump read on
+    /// after each.
+    pub recv_errors: u64,
 }
 
 impl UdpShardStats {
@@ -32,6 +35,20 @@ impl UdpShardStats {
         stats
     }
 
+    /// Render the stats as the `sip_proxy_udp_*` families and the intake shed.
+    pub(super) fn render(&self, s: &mut String) {
+        use crate::observability::catalogue as c;
+        c::UDP_QUEUE_DEPTH.render_value(s, self.queue_depth);
+        c::UDP_QUEUE_MAX.render_value(s, self.queue_max);
+        c::UDP_ENQUEUED.render_value(s, self.enqueued);
+        c::UDP_TAIL_DROPPED.render_value(s, self.tail_dropped);
+        c::INTAKE_SHED.render_value(s, self.intake_shed);
+        c::UDP_SEND_WOULD_BLOCK.render_value(s, self.send_would_block);
+        c::UDP_KERNEL_RX_DROPPED.render_value(s, self.kernel_rx_dropped);
+        c::UDP_PRE_INGRESS_PANICS.render_value(s, self.pre_ingress_panics);
+        c::UDP_RECV_ERRORS.render_value(s, self.recv_errors);
+    }
+
     fn of_endpoint(ep: &dyn UdpEndpoint) -> Self {
         let c = ep.counters();
         Self {
@@ -43,6 +60,7 @@ impl UdpShardStats {
             send_would_block: c.send_would_block,
             kernel_rx_dropped: c.kernel_rx_dropped,
             pre_ingress_panics: c.pre_ingress_panics,
+            recv_errors: c.recv_errors,
         }
     }
 }
@@ -76,5 +94,6 @@ impl std::ops::AddAssign for UdpShardStats {
         self.send_would_block += o.send_would_block;
         self.kernel_rx_dropped += o.kernel_rx_dropped;
         self.pre_ingress_panics += o.pre_ingress_panics;
+        self.recv_errors += o.recv_errors;
     }
 }

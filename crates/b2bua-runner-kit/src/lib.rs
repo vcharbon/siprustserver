@@ -268,10 +268,10 @@ impl RunnerEnv {
                 self.queue_max,
                 brake_counters.clone(),
                 live(|ep| ep.queue_depth() as u64),
-                live(|ep| ep.counters().tail_dropped),
-                live(|ep| ep.counters().send_would_block),
-                live(|ep| ep.counters().kernel_rx_dropped),
-                live(|ep| ep.counters().pre_ingress_panics),
+                {
+                    let endpoint = endpoint.clone();
+                    Arc::new(move || endpoint.counters())
+                },
             )
         };
         tracing::info!(

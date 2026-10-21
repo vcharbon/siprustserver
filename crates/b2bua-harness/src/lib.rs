@@ -815,9 +815,9 @@ impl B2buaSut {
     /// valued by the sum of its series.
     pub fn catalogued_counts(&self) -> std::collections::BTreeMap<&'static str, f64> {
         let udp = self.ingress_brake().map(|brake| {
-            let z: b2bua::metrics::LiveGauge = Arc::new(|| 0);
-            let (b, z1, z2, z3, z4) = (brake.clone(), z.clone(), z.clone(), z.clone(), z.clone());
-            b2bua::metrics::UdpTransportMetrics::new(0, b, z, z1, z2, z3, z4).prometheus_text()
+            let counters: b2bua::metrics::LiveCounters = Arc::new(Default::default);
+            b2bua::metrics::UdpTransportMetrics::new(0, brake.clone(), Arc::new(|| 0), counters)
+                .prometheus_text()
         });
         let text = [
             self.metrics.prometheus_text(),

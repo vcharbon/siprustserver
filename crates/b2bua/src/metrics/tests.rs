@@ -204,7 +204,7 @@ fn sm_cursor_census_renders_and_overwrites() {
 // UdpTransportMetrics shape
 // -----------------------------------------------------------------------
 
-/// A `UdpTransportMetrics` whose `queueDepth` / `dropsTailDrop` are backed by
+/// A `UdpTransportMetrics` whose `queueDepth` / tail drops are backed by
 /// caller-held atomics (standing in for a live `UdpEndpoint`), with the real
 /// brake counters, without standing up a fabric — the fabric-proxy facet is
 /// covered end-to-end in `tests/it/udp_transport_metrics.rs`.
@@ -218,10 +218,13 @@ fn shape() -> (UdpTransportMetrics, IngressBrakeCounters, Arc<AtomicU64>, Arc<At
         5, // queue_max — the brake test's QUEUE_MAX
         brake.clone(),
         Arc::new(move || d.load(Ordering::Relaxed)),
-        Arc::new(move || t.load(Ordering::Relaxed)),
-        Arc::new(|| 0),
-        Arc::new(|| 7),
-        Arc::new(|| 3),
+        Arc::new(move || sip_net::UdpEndpointCounters {
+            tail_dropped: t.load(Ordering::Relaxed),
+            kernel_rx_dropped: 7,
+            pre_ingress_panics: 3,
+            recv_errors: 2,
+            ..Default::default()
+        }),
     );
     (m, brake, depth, tail)
 }
@@ -268,6 +271,8 @@ fn udp_transport_metrics_render() {
     assert!(txt.contains("b2bua_udp_kernel_rx_dropped_total 7"));
     assert!(txt.contains("# TYPE b2bua_udp_kernel_rx_dropped_total counter"));
     assert!(txt.contains("b2bua_udp_pre_ingress_panics_total 3"));
+    assert!(txt.contains("b2bua_udp_recv_errors_total 2"));
+    assert!(txt.contains("# TYPE b2bua_udp_recv_errors_total counter"));
     // Prometheus TYPE lines: gauges vs counters.
     assert!(txt.contains("# TYPE b2bua_udp_queue_depth gauge"));
     assert!(txt.contains("# TYPE b2bua_udp_queue_max gauge"));

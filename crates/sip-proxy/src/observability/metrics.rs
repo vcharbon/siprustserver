@@ -493,15 +493,7 @@ impl ProxyMetrics {
         c::SEND_FAILURES.render_value(&mut s, load(&self.send_failures));
         c::PARSE_PANICS.render_value(&mut s, load(&self.parse_panics));
         c::POISONED_LOCK_RECOVERIES.render(&mut s, |l| crate::poison::RECOVERIES.count_at(l.at(0)));
-        let udp = self.udp_totals();
-        c::UDP_QUEUE_DEPTH.render_value(&mut s, udp.queue_depth);
-        c::UDP_QUEUE_MAX.render_value(&mut s, udp.queue_max);
-        c::UDP_ENQUEUED.render_value(&mut s, udp.enqueued);
-        c::UDP_TAIL_DROPPED.render_value(&mut s, udp.tail_dropped);
-        c::INTAKE_SHED.render_value(&mut s, udp.intake_shed);
-        c::UDP_SEND_WOULD_BLOCK.render_value(&mut s, udp.send_would_block);
-        c::UDP_KERNEL_RX_DROPPED.render_value(&mut s, udp.kernel_rx_dropped);
-        c::UDP_PRE_INGRESS_PANICS.render_value(&mut s, udp.pre_ingress_panics);
+        self.udp_totals().render(&mut s);
         c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));
         self.pool.render_pool(&mut s);
 

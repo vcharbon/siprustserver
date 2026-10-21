@@ -275,6 +275,7 @@ pub const UDP: &[Family] = &[
     udp::SEND_WOULD_BLOCK,
     udp::KERNEL_RX_DROPPED,
     udp::PRE_INGRESS_PANICS,
+    udp::RECV_ERRORS,
 ];
 
 /// The overload signal: rung inputs.

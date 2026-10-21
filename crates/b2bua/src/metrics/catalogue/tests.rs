@@ -14,15 +14,7 @@ fn udp() -> UdpTransportMetrics {
 }
 
 fn udp_with(brake: IngressBrakeCounters) -> UdpTransportMetrics {
-    UdpTransportMetrics::new(
-        8,
-        brake,
-        Arc::new(|| 0),
-        Arc::new(|| 0),
-        Arc::new(|| 0),
-        Arc::new(|| 0),
-        Arc::new(|| 0),
-    )
+    UdpTransportMetrics::new(8, brake, Arc::new(|| 0), Arc::new(Default::default))
 }
 
 fn gate() -> CapacityGate {

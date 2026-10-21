@@ -133,6 +133,9 @@ pub struct UdpEndpointCounters {
     /// was full. Non-zero means egress was throttled by the kernel; the
     /// datagrams are lost and SIP retransmission covers them.
     pub send_would_block: u64,
+    /// Receives that failed on the socket (an ICMP error the kernel reports,
+    /// memory exhausted). The receive pump reads on after each one.
+    pub recv_errors: u64,
     /// Datagrams the kernel dropped before the receive pump read them, mostly
     /// on a full `SO_RCVBUF` (see [`crate::socket_stats::rx_dropped`]). Always 0
     /// for an endpoint with no kernel socket of its own.

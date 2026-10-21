@@ -171,7 +171,7 @@ pub trait SignalingNetwork: Send + Sync {
     async fn await_in_flight(&self, timeout: Duration);
 }
 
-/// Shared per-endpoint counters (the four `UdpEndpointCounters` fields as live
+/// Shared per-endpoint counters (the `UdpEndpointCounters` fields as live
 /// atomics). Both the real recv task and the simulated `deliver` path bump
 /// these; `snapshot` produces the public [`UdpEndpointCounters`].
 #[derive(Debug, Default)]
@@ -183,6 +183,7 @@ pub struct Counters {
     pub pre_ingress_reply_failures: AtomicU64,
     pub pre_ingress_panics: AtomicU64,
     pub send_would_block: AtomicU64,
+    pub recv_errors: AtomicU64,
 }
 
 impl Counters {
@@ -195,6 +196,7 @@ impl Counters {
             pre_ingress_reply_failures: self.pre_ingress_reply_failures.load(Ordering::Relaxed),
             pre_ingress_panics: self.pre_ingress_panics.load(Ordering::Relaxed),
             send_would_block: self.send_would_block.load(Ordering::Relaxed),
+            recv_errors: self.recv_errors.load(Ordering::Relaxed),
             kernel_rx_dropped: 0,
         }
     }

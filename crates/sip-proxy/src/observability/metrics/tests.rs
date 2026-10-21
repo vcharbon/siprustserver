@@ -47,6 +47,7 @@ fn a_dual_face_shard_sums_both_faces() {
                 send_would_block: n,
                 kernel_rx_dropped: n,
                 pre_ingress_panics: n,
+                recv_errors: n,
                 ..UdpEndpointCounters::default()
             },
         )
@@ -61,6 +62,7 @@ fn a_dual_face_shard_sums_both_faces() {
         send_would_block: v,
         kernel_rx_dropped: v,
         pre_ingress_panics: v,
+        recv_errors: v,
     };
     assert_eq!(UdpShardStats::of_faces(&int, Some(&ext)), each(11));
     assert_eq!(UdpShardStats::of_faces(&int, None), UdpShardStats { queue_max: 8, ..each(1) });
@@ -75,6 +77,7 @@ fn udp_shard_stats_render_summed_over_shards() {
         queue_max: 8,
         tail_dropped: 1,
         kernel_rx_dropped,
+        recv_errors: 1,
         ..UdpShardStats::default()
     };
     m.set_udp_endpoint_stats(0, shard(3));
@@ -86,6 +89,7 @@ fn udp_shard_stats_render_summed_over_shards() {
     assert!(txt.contains("\nsip_proxy_udp_tail_dropped_total 2\n"));
     assert!(txt.contains("# TYPE sip_proxy_udp_kernel_rx_dropped_total counter"));
     assert!(txt.contains("\nsip_proxy_udp_kernel_rx_dropped_total 8\n"));
+    assert!(txt.contains("\nsip_proxy_udp_recv_errors_total 2\n"));
 }
 
 #[test]

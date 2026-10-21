@@ -30,7 +30,7 @@ pub use limiter::{
 pub use operator::OPERATOR_RELEASE_KINDS;
 pub use removal_class::RemovalClass;
 use retransmit_row::retransmit_row;
-pub use udp_transport::{LiveGauge, UdpTransportMetrics};
+pub use udp_transport::{LiveCounters, LiveGauge, UdpTransportMetrics};
 
 #[derive(Debug, Default)]
 struct Inner {
