@@ -20,8 +20,9 @@ fn sipflow(args: &[&str]) -> (String, String, bool) {
 }
 
 /// A document whose second message carries a header name that is no token
-/// (RFC 3261 §25.1) is reported on that message alone, and the sweep counts
-/// the rest.
+/// (RFC 3261 §25.1) is reported on that message alone, a third message whose
+/// Refer-To is a bare addr-spec holding `?` (§20) is reported on that header
+/// alone, and the sweep counts the rest.
 #[test]
 fn a_refused_message_is_one_line_and_the_sweep_continues() {
     let path = capture();
@@ -37,6 +38,10 @@ fn a_refused_message_is_one_line_and_the_sweep_continues() {
     let raw = doc["legs"][0]["msgs"][1]["raw"].as_str().expect("text payload").to_string();
     let refused = raw.replacen("\r\n", "\r\nX(Bad): 1\r\n", 1);
     doc["legs"][0]["msgs"][1]["raw"] = serde_json::Value::String(refused);
+    let raw = doc["legs"][0]["msgs"][2]["raw"].as_str().expect("text payload").to_string();
+    let bare = "sip:bob@example.com?Subject=hi";
+    let unread = raw.replacen("\r\n", &format!("\r\nRefer-To: {bare}\r\n"), 1);
+    doc["legs"][0]["msgs"][2]["raw"] = serde_json::Value::String(unread);
 
     let dir = std::env::temp_dir()
         .join(format!("sipflow-reparse-{}", std::process::id()))
@@ -49,9 +54,13 @@ fn a_refused_message_is_one_line_and_the_sweep_continues() {
     assert!(ok, "the sweep exits cleanly: {err}");
     let lines: Vec<serde_json::Value> =
         out.lines().map(|l| serde_json::from_str(l).expect("one JSON line")).collect();
-    assert_eq!(lines.len(), 1, "one refused message: {out}");
+    assert_eq!(lines.len(), 2, "one refused message, one unread header: {out}");
     assert_eq!(lines[0]["capture"], "capture_1");
     assert_eq!((lines[0]["leg"].as_u64(), lines[0]["msg"].as_u64()), (Some(0), Some(1)));
     assert!(lines[0]["reason"].as_str().is_some_and(|r| r.contains("Header name")), "{}", lines[0]);
+    assert_eq!((lines[1]["leg"].as_u64(), lines[1]["msg"].as_u64()), (Some(0), Some(2)));
+    assert_eq!(lines[1]["header"], "Refer-To");
+    assert_eq!(lines[1]["values"], serde_json::json!([bare]));
     assert!(err.contains(&format!("messages={total} refused=1")), "totals: {err}");
+    assert!(err.contains("header-errors=1"), "totals: {err}");
 }

@@ -12,9 +12,14 @@ use sip_pcap::doc::{FlowsDoc, Summary};
 
 use crate::walk::{capture_of, expand_flows_documents};
 
+#[path = "header_errors.rs"]
+mod header_errors;
+
 /// Re-parse every message under `inputs` and print one JSON line per message
 /// the parser refuses (its document, capture, position, start-line facts,
-/// reason and head), then the totals on stderr.
+/// reason and head), and one per non-fatal header reading of an accepted
+/// message that failed ([`header_errors::of`], the line carrying `header` and
+/// that header's `values`), then the totals on stderr.
 ///
 /// A document that cannot be read is printed as one `error` line and counted,
 /// never skipped: the totals cover every document the walk found.
@@ -55,8 +60,8 @@ pub(crate) fn run(inputs: &[PathBuf], jobs: usize) {
     });
     let t = totals.into_inner().unwrap_or_else(|e| e.into_inner());
     eprintln!(
-        "# reparse: documents={} unreadable={} messages={} refused={} documents-with-refusal={}",
-        t.documents, t.unreadable, t.messages, t.refused, t.refusing_documents
+        "# reparse: documents={} unreadable={} messages={} refused={} documents-with-refusal={} header-errors={}",
+        t.documents, t.unreadable, t.messages, t.refused, t.refusing_documents, t.header_errors
     );
 }
 
@@ -67,6 +72,7 @@ struct Totals {
     messages: usize,
     refused: usize,
     refusing_documents: usize,
+    header_errors: usize,
 }
 
 impl Totals {
@@ -76,6 +82,7 @@ impl Totals {
         self.messages += one.messages;
         self.refused += one.refused;
         self.refusing_documents += one.refusing_documents;
+        self.header_errors += one.header_errors;
     }
 }
 
@@ -99,23 +106,44 @@ fn sweep_document(
         }
     };
     let mut lines = Vec::new();
+    let mut refused_here = false;
     for (li, leg) in doc.legs.iter().enumerate() {
         for (mi, msg) in leg.msgs.iter().enumerate() {
             counted.messages += 1;
-            let reason = match msg.payload.bytes() {
-                Ok(raw) => match parser.parse(&raw) {
-                    Ok(_) => continue,
-                    Err(e) => (e.reason, head_of(&raw)),
-                },
-                Err(e) => (format!("payload: {e}"), String::new()),
-            };
-            counted.refused += 1;
             let (kind, method, status) = match &msg.summary {
                 Summary::Request { method, .. } => ("request", method.clone(), None),
                 Summary::Response { status, cseq, .. } => {
                     ("response", cseq.method.clone(), Some(*status))
                 }
             };
+            let reason = match msg.payload.bytes() {
+                Ok(raw) => match parser.parse(&raw) {
+                    Ok(parsed) => {
+                        let errors = header_errors::of(&parsed);
+                        counted.header_errors += errors.len();
+                        for error in errors {
+                            let line = serde_json::json!({
+                                "document": document,
+                                "capture": capture,
+                                "leg": li,
+                                "msg": mi,
+                                "kind": kind,
+                                "method": method,
+                                "status": status,
+                                "header": error.name.as_wire_str(),
+                                "reason": error.reason,
+                                "values": error.values,
+                            });
+                            lines.push(line.to_string());
+                        }
+                        continue;
+                    }
+                    Err(e) => (e.reason, head_of(&raw)),
+                },
+                Err(e) => (format!("payload: {e}"), String::new()),
+            };
+            counted.refused += 1;
+            refused_here = true;
             let line = serde_json::json!({
                 "document": document,
                 "capture": capture,
@@ -130,7 +158,7 @@ fn sweep_document(
             lines.push(line.to_string());
         }
     }
-    counted.refusing_documents = usize::from(!lines.is_empty());
+    counted.refusing_documents = usize::from(refused_here);
     (lines, counted)
 }
 

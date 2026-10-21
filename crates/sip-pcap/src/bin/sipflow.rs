@@ -249,8 +249,8 @@ struct Args {
 
     /// Re-parse every message of ALREADY EMITTED flows documents — files, or
     /// directories walked recursively for `*.flows.json` — and print one JSON
-    /// line per message the parser refuses, continuing past each, with the
-    /// totals on stderr. Reads no capture, and modifies no document.
+    /// line per message the parser refuses and per failed non-fatal header of
+    /// an accepted one, with the totals on stderr. Reads no capture.
     #[arg(
         long,
         value_delimiter = ',',
