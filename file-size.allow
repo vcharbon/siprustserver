@@ -20,7 +20,7 @@ crates/b2bua-core/tests/it/rules.rs 5197
 crates/b2bua-harness/src/lib.rs 1025
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
-crates/b2bua-harness/tests/it/message_ring.rs 955
+crates/b2bua-harness/tests/it/message_ring.rs 832
 crates/b2bua-harness/tests/it/prack_owed_at_final.rs 913
 crates/b2bua-harness/tests/it/prack_reliable_ladder.rs 877
 crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 858

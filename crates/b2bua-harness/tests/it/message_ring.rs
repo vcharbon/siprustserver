@@ -3,9 +3,8 @@
 //! the configured headers — and nothing for a retransmission, inbound or
 //! outbound (RFC 3261 §17.2.1 replays, §13.2.2.4 re-ACKs, §13.3.1.4 2xx
 //! repeats). Every entry carries the number of the turn that handled it, so
-//! two turns sharing a millisecond stay apart. The cap keeps the last N
-//! entries and counts the evicted; a cap of `0` (the default) records
-//! nothing.
+//! two turns sharing a millisecond stay apart. The cap ([`cap`]) keeps a
+//! leg's opening and the last N entries after it, and counts the evicted.
 //!
 //! The SUT is the harness [`B2buaSut`], which hands the test every
 //! terminated `Call` — the ring as the record sees it — while the live copy
@@ -25,6 +24,8 @@ use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::{Call, CallBodyCodec, MessageDirection, MessageEntry, MsgpackCodec};
 use scenario_harness::{Agent, Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
+
+mod cap;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -567,130 +568,6 @@ async fn a_cancelled_setup_records_the_layer_answered_cancel() {
     // the CANCEL sent on too; the hop ACK the callee's 487 draws, the 487's.
     assert_eq!(turns(&done.a_leg.messages.entries), vec![1, 1, 2, 3, 3, 3]);
     assert_eq!(turns(&b_leg(&done).messages.entries), vec![1, 2, 3, 4, 5, 5]);
-
-    let _report = h.finish().await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_cap_keeps_the_last_entries_and_counts_the_evicted() {
-    let h = Harness::new("message-ring-cap");
-    let alice = h.agent("alice", ALICE).await;
-    let bob = h.agent("bob", BOB).await;
-    let sut = Sut::spawn(&h, CdrConfig { message_ring: 4, captured_headers: Vec::new() }).await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(180, "Ringing").await;
-    call.expect(180).await;
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let invite_cseq = call.invite_cseq();
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-
-    let done = sut.assert_reaped().await;
-    let bye_cseq = dialog.local_cseq();
-    assert_eq!(
-        rows(&done.a_leg.messages.entries),
-        vec![
-            (Relayed, "INVITE", invite_cseq, Some(200)),
-            (Received, "ACK", invite_cseq, None),
-            (Received, "BYE", bye_cseq, None),
-            (Authored, "BYE", bye_cseq, Some(200)),
-        ],
-        "the last four of seven"
-    );
-    assert_eq!(done.a_leg.messages.dropped, 3);
-    assert_eq!(b_leg(&done).messages.entries.len(), 4);
-    assert_eq!(b_leg(&done).messages.dropped, 2, "six b-leg messages, four kept");
-    assert_eq!(done.message_seq, 13, "the seq counts what was evicted too");
-    assert_eq!(done.a_leg.messages.last_seq(), Some(11), "the 200 to the caller's BYE");
-
-    let _report = h.finish().await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_ring_off_records_nothing() {
-    let h = Harness::new("message-ring-off");
-    let alice = h.agent("alice", ALICE).await;
-    let bob = h.agent("bob", BOB).await;
-    let sut = Sut::spawn(&h, CdrConfig::default()).await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(180, "Ringing").await;
-    call.expect(180).await;
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-
-    let done = sut.assert_reaped().await;
-    assert!(done.a_leg.messages.entries.is_empty());
-    assert!(b_leg(&done).messages.entries.is_empty());
-    assert_eq!(done.a_leg.messages.dropped, 0);
-    assert_eq!(done.message_seq, 0);
-
-    let _report = h.finish().await;
-}
-
-/// The liveness probe this stack originates — the in-dialog OPTIONS
-/// keepalive — and its answer are not dialog history: a long call keeps its
-/// setup rows under a cap the probes alone would have overrun.
-#[tokio::test(start_paused = true)]
-async fn keepalive_rounds_add_nothing_and_evict_nothing() {
-    let h = Harness::new("message-ring-keepalive");
-    let alice = h.agent("alice", ALICE).await;
-    let bob = h.agent("bob", BOB).await;
-    // Three rounds would add twelve rows across the legs — over this cap.
-    let sut = Sut::spawn(&h, CdrConfig { message_ring: 8, captured_headers: Vec::new() }).await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(180, "Ringing").await;
-    call.expect(180).await;
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let invite_cseq = call.invite_cseq();
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-
-    for _ in 0..3 {
-        h.advance(Duration::from_secs(30)).await;
-        alice.receive("OPTIONS").await.respond(200, "OK").await;
-        bob.receive("OPTIONS").await.respond(200, "OK").await;
-    }
-    h.advance(Duration::from_secs(1)).await;
-
-    let live = sut.live(&call.call_id(), dialog.local_tag());
-    assert_eq!(
-        rows(&live.a_leg.messages.entries),
-        vec![
-            (Received, "INVITE", invite_cseq, None),
-            (Authored, "INVITE", invite_cseq, Some(100)),
-            (Relayed, "INVITE", invite_cseq, Some(180)),
-            (Relayed, "INVITE", invite_cseq, Some(200)),
-            (Received, "ACK", invite_cseq, None),
-        ],
-        "the setup rows survive three keepalive rounds"
-    );
-    assert_eq!(b_leg(&live).messages.entries.len(), 4);
-    assert_eq!(live.a_leg.messages.dropped, 0);
-    assert_eq!(b_leg(&live).messages.dropped, 0);
-    assert_eq!(live.message_seq, 9);
-
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-    let done = sut.assert_reaped().await;
-    assert_eq!(done.a_leg.messages.entries.len(), 7);
-    assert_eq!(done.a_leg.messages.dropped, 0);
 
     let _report = h.finish().await;
 }
