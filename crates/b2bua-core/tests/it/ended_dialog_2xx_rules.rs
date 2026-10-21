@@ -2,13 +2,15 @@
 //! dialog, or while that BYE awaits its final (RFC 3261 §13.2.2.4, RFC 5407 §2):
 //! it is ACKed under the re-INVITE's CSeq, an offer it makes answered with every
 //! stream rejected (RFC 3264 §6), and draws no second BYE. A repeat is re-ACKed
-//! with the same ACK.
+//! with the same ACK. A 2xx whose ACK a relayed INVITE's originator still owes
+//! is not this stack's to acknowledge.
 
 use b2bua_core::config::B2buaConfig;
 use b2bua_core::effects::{HandlerResult, OutboundBody};
 use b2bua_core::rules::{ActionExecutor, RuleAction, RuleCall, RuleContext};
 use b2bua_core::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
+use b2bua_sdk::model::Body;
 use call::Direction;
 use sip_ids::TurnIds;
 use sip_message::parser::custom::CustomParser;
@@ -87,12 +89,18 @@ fn sent_to_bob(result: &HandlerResult) -> Vec<SipRequest> {
 /// The bridged call after an offerless re-INVITE toward the callee, then the
 /// BYE ending its dialog: the call, the re-INVITE's CSeq and the BYE's.
 fn reinvite_then_bye() -> (call::Call, u32, u32) {
+    reinvite_carrying_then_bye(None)
+}
+
+/// [`reinvite_then_bye`] with the re-INVITE carrying `offer`.
+fn reinvite_carrying_then_bye(offer: Option<Body>) -> (call::Call, u32, u32) {
+    let offered = offer.is_some();
     let reinvited = executed(
         &bridged(),
-        &[RuleAction::SendReinvite { leg_id: "b-1".into(), body: None, add_headers: vec![] }],
+        &[RuleAction::SendReinvite { leg_id: "b-1".into(), body: offer, add_headers: vec![] }],
     );
     let reinvite = sent_to_bob(&reinvited).remove(0);
-    assert!(reinvite.body().is_empty(), "the re-INVITE makes no offer");
+    assert_eq!(!reinvite.body().is_empty(), offered, "the re-INVITE's offer, if any");
     let ended = executed(
         &reinvited.call,
         &[RuleAction::DestroyLeg { leg_id: "b-1".into(), headers: vec![] }],
@@ -155,5 +163,25 @@ fn a_2xx_on_a_confirmed_dialog_is_not_this_rules() {
     );
     let cseq = sent_to_bob(&reinvited).remove(0).cseq().seq();
     let (rule, _) = turn(&reinvited.call, &from_bob(200, cseq, "INVITE", OFFER));
+    assert_ne!(rule, Some("ack-2xx-on-ended-dialog"));
+}
+
+#[test]
+fn a_2xx_answering_our_offer_is_acked_bare() {
+    let ours = Body::own(OFFER.replace("bob", "svc").into_bytes(), None);
+    let (call, reinvite, _) = reinvite_carrying_then_bye(Some(ours));
+    let (rule, result) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
+    assert_eq!(rule, Some("ack-2xx-on-ended-dialog"));
+    let (_, answer) = ack_to_bob(&result.expect("a turn"));
+    assert!(answer.is_empty(), "the 2xx answered our offer: the ACK is bare: {answer}");
+}
+
+#[test]
+fn a_2xx_whose_relayed_ack_is_still_owed_is_left_to_its_originator() {
+    let (mut call, reinvite, _) = reinvite_then_bye();
+    let leg = call.b_legs.iter_mut().find(|l| l.leg_id == "b-1").expect("the callee's leg");
+    let dialog = leg.dialogs.established_mut().expect("the callee's dialog");
+    dialog.awaited_ack_cseq = Some(i64::from(reinvite));
+    let (rule, _) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
     assert_ne!(rule, Some("ack-2xx-on-ended-dialog"));
 }

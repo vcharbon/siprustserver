@@ -18,7 +18,9 @@ use crate::rules::relay;
 /// The rule family: CORE, registered before the generic core set. Disjoint from
 /// `re-ack-retransmitted-2xx` (an ACK already sent), `release-fork-straggler-2xx`
 /// (a dialog no 2xx established) and `relay-reinvite-response` (a relayed
-/// re-INVITE's 2xx, owed to its originator).
+/// re-INVITE's 2xx, owed to its originator). A 2xx whose ACK the originator of
+/// a relayed INVITE still owes is hers to acknowledge, whoever's BYE ended the
+/// dialog meanwhile, so the rule leaves it alone.
 pub fn ended_dialog_2xx_rules() -> Vec<RuleDefinition> {
     vec![RuleDefinition::core(
         "ack-2xx-on-ended-dialog",
@@ -30,13 +32,15 @@ pub fn ended_dialog_2xx_rules() -> Vec<RuleDefinition> {
 }
 
 /// Whether the current 2xx is the first to the INVITE this stack last sent on a
-/// dialog ending or ended by a BYE, with no relay pending for it.
+/// dialog ending or ended by a BYE, with no relay pending for it and no relayed
+/// ACK awaited for it.
 fn answers_our_invite_after_bye(ctx: &RuleContext) -> bool {
     let (Some(resp), Some(dialog)) = (ctx.response(), ctx.dialog()) else { return false };
     dialog.was_established()
         && dialog.state != DialogState::Confirmed
         && dialog.pending_invite_txn.is_some()
         && dialog.ack_branch.is_none()
+        && dialog.awaited_ack_cseq.is_none()
         && resp.to().tag() == Some(dialog.peer_tag.as_str())
         && relay::acked_invite_cseq(dialog) == Some(resp.cseq().seq())
         && ctx.relayed_pending().is_none()
