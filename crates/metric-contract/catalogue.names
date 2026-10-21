@@ -387,6 +387,8 @@ loadgen loadgen_outcome_records_dropped_total counter semi_open {stream,stage}
 cdr-consumer-runner cdr_consumed_total counter fixed {}
 cdr-consumer-runner cdr_call_duration_ms_total counter fixed {}
 cdr-consumer-runner cdr_parse_errors_total counter fixed {}
+cdr-consumer-runner cdr_amqp_consuming gauge fixed {}
+cdr-consumer-runner cdr_amqp_setup_failures_total counter fixed {}
 cdr-consumer-runner cdr_observations_shipped_total counter fixed {}
 cdr-consumer-runner cdr_observations_dropped_total counter fixed {}
 cdr-consumer-runner cdr_observation_post_failures_total counter fixed {}

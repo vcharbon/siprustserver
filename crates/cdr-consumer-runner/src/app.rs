@@ -16,15 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use lapin::{
-    options::{BasicAckOptions, BasicConsumeOptions, QueueDeclareOptions},
-    types::{AMQPValue, FieldTable, LongString},
-    uri::AMQPUri,
-};
+use lapin::options::BasicAckOptions;
 use probe_http::{ProbeRoutes, ProbeServer, ProbeState};
-use tokio::time::Instant;
 
 use crate::counting::{Metrics, Payload};
+use crate::link::{LinkMetrics, Target};
 use crate::observation::ObservationView;
 use crate::shipper::{self, Endpoint, ObservationSink, ShipMetrics, Shipped};
 
@@ -32,11 +28,16 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// The `/metrics` and `/healthz` routes: the consumer's counts and the
-/// shipper's, and readiness that is always ready (the consumer takes no traffic).
-fn probe_routes(metrics: Arc<Metrics>, ship: Arc<ShipMetrics>) -> ProbeRoutes {
+/// The `/metrics` and `/healthz` routes: the consumer's counts, its link's
+/// state and the shipper's counts, and readiness that is always ready (the
+/// consumer takes no traffic; `cdr_amqp_consuming` tells its link's state).
+fn probe_routes(
+    metrics: Arc<Metrics>,
+    link: Arc<LinkMetrics>,
+    ship: Arc<ShipMetrics>,
+) -> ProbeRoutes {
     ProbeRoutes {
-        metrics: Arc::new(move || crate::metrics_body(&metrics, &ship)),
+        metrics: Arc::new(move || crate::metrics_body(&metrics, &link, &ship)),
         ready: Arc::new(|| ProbeState::Ready),
         heap: None,
         vrrp: None,
@@ -69,50 +70,23 @@ impl Consumer {
     }
 }
 
-/// How long one connect (resolution, TCP, TLS) may take before the pass fails.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The bound of one AMQP setup, from resolving the broker to the consume registered.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// An ack the client refused: its channel failed or the delivery was already acked.
 fn ack_refused() -> io::Error {
     io::Error::other("the CDR ack was refused: the channel failed or the acker was used")
 }
 
-/// One connect → declare → consume pass. Returns `Err` on any AMQP fault so the
-/// outer loop reconnects; runs forever on success (the consume stream is endless).
+/// One link → consume pass. Returns `Err` on any AMQP fault so the outer loop
+/// reconnects; runs forever on success (the consume stream is endless).
 async fn consume(
-    url: &str,
-    queue: &str,
-    max_len: i64,
+    target: &Target,
+    link_metrics: &Arc<LinkMetrics>,
     consumer: &Consumer,
 ) -> Result<(), lapin::Error> {
-    tracing::info!(node = observe::node(), state = "connecting", %url, "AMQP connection");
-    let uri: AMQPUri = url.parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let connected = amqp_connect::connect_uri(&uri, Instant::now() + CONNECT_TIMEOUT).await?;
-    let conn = amqp_connect::open_over(uri, connected.stream).await?;
-    tracing::info!(node = observe::node(), state = "connected", %url, "AMQP connection");
-    let chan = conn.create_channel().await?;
-
-    // Declare the SAME queue the producer declares (durable + bounded), so the
-    // two declarations agree argument-for-argument whichever side wins the race.
-    let mut args = FieldTable::default();
-    if max_len > 0 {
-        args.insert("x-max-length".into(), AMQPValue::LongLongInt(max_len));
-        args.insert("x-overflow".into(), AMQPValue::LongString(LongString::from("drop-head")));
-    }
-    let durable = QueueDeclareOptions { durable: true, ..Default::default() };
-    chan.queue_declare(queue.into(), durable, args).await?;
-
-    let mut deliveries = chan
-        .basic_consume(
-            queue.into(),
-            "cdr-consumer".into(),
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await?;
-    tracing::info!(node = observe::node(), state = "consuming", %queue, %url, "AMQP connection");
-
-    while let Some(delivery) = deliveries.next().await {
+    let mut link = target.open(link_metrics).await?;
+    while let Some(delivery) = link.deliveries().next().await {
         let delivery = delivery?;
         // Ack regardless of the payload: a malformed record is counted, not
         // redelivered forever. A shipped observation is acked once it landed,
@@ -140,15 +114,23 @@ async fn consume(
         }
     }
     // The consumer stream ended without an error — the broker closed it.
-    tracing::info!(node = observe::node(), state = "stream_closed", %queue, "AMQP connection");
+    tracing::info!(
+        node = observe::node(),
+        state = "stream_closed",
+        queue = %target.queue,
+        "AMQP connection"
+    );
     Ok(())
 }
 
 /// The consumer, reading observations with `view`. Runs until the process ends.
 pub async fn run(view: Arc<dyn ObservationView>) {
-    let url = env_or("CDR_AMQP_URL", "amqp://guest:guest@rabbitmq:5672/%2f");
-    let queue = env_or("CDR_QUEUE", "cdr");
-    let max_len: i64 = env_or("CDR_QUEUE_MAX_LEN", "100000").parse().expect("CDR_QUEUE_MAX_LEN");
+    let target = Target {
+        url: env_or("CDR_AMQP_URL", "amqp://guest:guest@rabbitmq:5672/%2f"),
+        queue: env_or("CDR_QUEUE", "cdr"),
+        max_len: env_or("CDR_QUEUE_MAX_LEN", "100000").parse().expect("CDR_QUEUE_MAX_LEN"),
+        setup_timeout: SETUP_TIMEOUT,
+    };
     let metrics_listen = env_or("CDR_METRICS_LISTEN", "0.0.0.0:9093");
     let payload = Payload::from_env_value(std::env::var("CDR_PAYLOAD").ok().as_deref())
         .unwrap_or_else(|e| panic!("{e}"));
@@ -165,7 +147,8 @@ pub async fn run(view: Arc<dyn ObservationView>) {
         });
     let consumer = Consumer { payload, metrics: Arc::new(Metrics::default()), view, sink };
 
-    let routes = probe_routes(consumer.metrics.clone(), ship.clone());
+    let link_metrics = Arc::new(LinkMetrics::default());
+    let routes = probe_routes(consumer.metrics.clone(), link_metrics.clone(), ship.clone());
     let probe = ProbeServer::start(addr, routes)
         .await
         .unwrap_or_else(|e| panic!("failed to bind CDR_METRICS_LISTEN {addr}: {e}"));
@@ -174,7 +157,7 @@ pub async fn run(view: Arc<dyn ObservationView>) {
     // Reconnect loop: the broker may be down at startup or bounce mid-run. CDRs
     // missed while disconnected are bounded by the broker's own x-max-length.
     loop {
-        if let Err(e) = consume(&url, &queue, max_len, &consumer).await {
+        if let Err(e) = consume(&target, &link_metrics, &consumer).await {
             tracing::warn!(
                 node = observe::node(),
                 state = "disconnected",
@@ -262,7 +245,7 @@ mod tests {
         let c = consumer(None);
         c.deliver(RECORD);
         let ship = Arc::new(ShipMetrics::default());
-        let routes = probe_routes(c.metrics.clone(), ship);
+        let routes = probe_routes(c.metrics.clone(), Arc::new(LinkMetrics::default()), ship);
         let probe = ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
         let metrics = get(probe.addr(), "/metrics").await;
         assert!(

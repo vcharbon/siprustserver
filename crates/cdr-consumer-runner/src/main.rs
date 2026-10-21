@@ -9,6 +9,10 @@
 //!   i.e. Σ (terminated_at − created_at), 0 in `opaque` mode — and
 //!   `cdr_parse_errors_total` for payloads that do not decode.
 //!
+//! Its link to the broker ([`link`](cdr_consumer_runner::link)) is set up by
+//! one deadline and reconnected on any fault; `cdr_amqp_consuming` and
+//! `cdr_amqp_setup_failures_total` tell a broker out of reach from an idle queue.
+//!
 //! With `CDR_OBSERVATION_URL` set it also ships one `cdr-observation.v1` line
 //! per base JSON record to VictoriaLogs for the HA tooling's CDR join
 //! ([`shipper`](cdr_consumer_runner::shipper)). It persists nothing: on

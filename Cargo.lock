@@ -889,6 +889,7 @@ dependencies = [
 name = "cdr-consumer-runner"
 version = "0.1.0"
 dependencies = [
+ "amq-protocol",
  "amqp-connect",
  "futures-util",
  "lapin",

@@ -34,3 +34,9 @@ futures-util = "0.3"
 # Process subscriber + lifecycle logging (ADR-0026).
 observe = { path = "../observe", features = ["otlp"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# The scripted AMQP 0-9-1 broker the link tests run against
+# (tests/it/support/broker.rs): lapin's own frame codec, so the wire is the
+# client's.
+amq-protocol = { version = "10.6.3", default-features = false }
