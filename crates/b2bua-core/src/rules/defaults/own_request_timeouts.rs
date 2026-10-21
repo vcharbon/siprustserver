@@ -1,6 +1,5 @@
-//! The timeouts of requests this stack originated itself on a dialog whose
-//! INVITE usage they do not carry: each ends what the request was for and
-//! leaves the call as it was. Registered between the straggler absorptions and
+//! The timeouts of requests this stack originated itself that end only what
+//! the request was for: the call stays as it was. Registered between the straggler absorptions and
 //! the terminating rules of [`super::core_rules`], ahead of `handle-timeout`.
 
 use b2bua_sdk::model::{Match, RuleDefinition};
@@ -25,9 +24,10 @@ pub(super) fn own_request_timeouts() -> [RuleDefinition; 2] {
         )
         .runs_while_terminating(),
         // The timeout of a NOTIFY this stack originated itself on a leg still
-        // up removes that NOTIFY's subscription (RFC 6665 §4.2.2) and nothing
-        // else: the INVITE usage sharing the dialog stands (RFC 5057 §5.2). A
-        // relayed NOTIFY's timeout and a leg going away keep `handle-timeout`.
+        // up ends that NOTIFY's subscription alone (RFC 6665 §4.2.2), which a
+        // machine owning it reads first: the INVITE usage sharing the dialog
+        // stands (RFC 5057 §5.2). A relayed NOTIFY's timeout and a leg going
+        // away keep `handle-timeout`.
         rule(
             "absorb-own-notify-timeout",
             &[],

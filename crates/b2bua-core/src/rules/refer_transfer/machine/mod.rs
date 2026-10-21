@@ -36,6 +36,7 @@ define_service! {
     rules: [
         guards::reject_second_refer(),
         guards::referrer_notify_481(),
+        guards::referrer_notify_timeout(),
         authorizing::http_reject(),
         authorizing::http_allow(),
         authorizing::http_timeout(),

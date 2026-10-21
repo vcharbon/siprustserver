@@ -279,9 +279,7 @@ pub fn retired_relay_count(leg: &Leg) -> usize {
 }
 
 /// Whether a dialog of `leg`, open or retired, holds a relay of `method` sent
-/// with CSeq `cseq`. A CSeq names a request within its dialog only, so a
-/// request of this stack with that number on another of the leg's dialogs
-/// answers `true` too.
+/// with CSeq `cseq`.
 pub fn leg_relays(leg: &Leg, method: &str, cseq: i64) -> bool {
     leg.dialogs.iter().any(|d| {
         let open = d.retired().map_or(&d.inbound_pending_requests, |r| &r.open_relays);

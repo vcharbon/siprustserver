@@ -168,6 +168,37 @@ pub(super) fn referrer_notify_481() -> RuleDefinition {
     }
 }
 
+/// transfer-notify-timeout — a refer NOTIFY of this stack toward a referrer
+/// still up draws no final before its transaction times out: the implicit
+/// subscription is over (RFC 6665 §4.2.2) and no further NOTIFY leaves on it;
+/// the call and the transfer stand (RFC 5057 §5.2). A relayed NOTIFY's
+/// timeout and a referrer going away stay the core's.
+pub(super) fn referrer_notify_timeout() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-notify-timeout",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::ReferAuthorizing, Phase::CRinging, Phase::CRealigning, Phase::ARealigning ],
+        transitions: [],
+        effects: [],
+        matcher: Match::timeout().filter(|ctx| {
+            let (Some(method), Some(cseq), Some(leg)) =
+                (ctx.timeout_method(), ctx.timeout_cseq(), ctx.source_leg())
+            else {
+                return false;
+            };
+            method.eq_ignore_ascii_case("NOTIFY")
+                && state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)
+                && !call::helpers::leg_is_going_away(ctx.call.state(), leg)
+                && !call::helpers::leg_relays(leg, "NOTIFY", i64::from(cseq))
+        }),
+        handle: |ctx| {
+            let mut st = state(ctx)?.clone();
+            st.subscription_terminated = true;
+            ok(vec![RuleAction::SetTransfer { state: Some(st) }])
+        },
+    }
+}
+
 /// transfer-b-in-cre-are-reject — referrer B's non-BYE in-dialog request
 /// during realigning → 481 (B's signalling is "dead" until merge; its BYE
 /// is still allowed through `relay-bye`).

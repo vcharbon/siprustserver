@@ -4,10 +4,10 @@
 //! occurred in. The implicit REFER subscription (RFC 3515 §2.4.6) shares the
 //! INVITE dialog of the call, so the INVITE usage stands: A↔B stay up.
 //!
-//! Scenario: A↔B established, B REFERs, the decision rejects the transfer.
-//! The referrer answers the `active` NOTIFY and never answers the terminating
-//! one (the silent referrer is the test target). Past its Timer F (64·T1 =
-//! 32 s) the call is still up and A hangs up normally.
+//! The silent referrer is the test target of both scenarios: a rejected
+//! transfer leaves A↔B up past the terminating NOTIFY's Timer F (64·T1 =
+//! 32 s); an allowed one completes, and the subscription the unanswered
+//! progress NOTIFY ended carries no further NOTIFY.
 
 use std::time::Duration;
 
@@ -19,6 +19,10 @@ use sip_message::header::SubscriptionState;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+
+const CHARLIE_PORT: u16 = 6093;
 
 fn assert_state(txn: &ServerTxn, state: &str) {
     let ss = txn
@@ -89,4 +93,83 @@ async fn unanswered_notify_leaves_the_call_up() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
+}
+
+/// B never answers the progress NOTIFY. Past its Timer F the transferee
+/// answers and the transfer completes; the subscription that NOTIFY ended
+/// carries no terminating NOTIFY (RFC 6665 §4.2.2).
+#[tokio::test(start_paused = true)]
+async fn unanswered_notify_ends_the_subscription() {
+    let h = Harness::new("refer-notify-timeout-subscription");
+    let alice = h.agent("alice", "127.0.0.1:6091").await;
+    let bob = h.agent("bob", "127.0.0.1:6092").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6092)
+        .start(&h, "b2bua", "127.0.0.1:6094")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &format!("<sip:charlie@127.0.0.1:{CHARLIE_PORT}>"))
+        .with_header(
+            "X-Api-Call",
+            &format!(
+                r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#
+            ),
+        )
+        .send()
+        .await;
+    refer.expect(202).await;
+
+    // The progress NOTIFY is never answered.
+    let n100 = bob.receive("NOTIFY").await;
+    assert_state(&n100, "active");
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    charlie_uas.respond(180, "Ringing").await;
+
+    h.advance(Duration::from_secs(30)).await;
+    alice.receive("OPTIONS").await.respond(200, "OK").await;
+    bob.receive("OPTIONS").await.respond(200, "OK").await;
+    h.advance(Duration::from_secs(3)).await;
+    drop(n100);
+
+    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie.receive("ACK").await;
+    let mut c_realign = charlie.receive("INVITE").await;
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
+    charlie.receive("ACK").await;
+    let mut a_realign = alice.receive("INVITE").await;
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        bob.try_receive_tolerating("NOTIFY", &[]).await.is_none(),
+        "the timed-out NOTIFY ended the subscription: no further NOTIFY on it (RFC 6665 §4.2.2)",
+    );
+
+    let mut alice_bye = alice_dialog.bye().await;
+    charlie.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    let _ = h.finish().await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let cdrs = b2bua.cdr_records();
+    assert!(
+        cdrs.iter()
+            .any(|c| c.events.iter().any(|e| e.reason.as_deref() == Some("transfer-completed"))),
+        "the transfer completes despite the dead NOTIFY: {cdrs:?}",
+    );
 }

@@ -23,7 +23,7 @@ use sip_net::UdpEndpoint;
 
 use crate::event::{ClientTransactionHandle, TransactionEvent};
 use crate::metrics::method_slot;
-use crate::timers::{ms, TIMER_B, TIMER_F};
+use crate::timers::{ms, TIMER_B};
 use sip_retransmit::{Class, Ladder, Schedule};
 
 use super::lifetime::Hold;
