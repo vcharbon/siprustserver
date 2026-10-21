@@ -55,6 +55,8 @@ pub enum CallEvent {
         call_ref: Option<String>,
         leg_id: Option<String>,
         method: Option<String>,
+        /// The CSeq number of the request that drew no final.
+        cseq: u32,
         /// The peer the timed-out request was sent to (forwarded from the txn
         /// layer). `None` when the txn never stored a destination — the consumer
         /// then skips per-peer failure attribution.

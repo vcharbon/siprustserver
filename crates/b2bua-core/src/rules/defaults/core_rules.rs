@@ -820,20 +820,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |_ctx| ok(vec![]),
         )
         .runs_while_terminating(),
-        // The timeout of a PRACK this stack originated itself (RFC 3261
-        // §17.1.2.2 Timer F) denies that one acknowledgement, as its non-2xx
-        // final does (`absorb-own-request-failure`): the dialog and the call
-        // stay as they were. A relayed PRACK's timeout keeps `handle-timeout`.
-        rule(
-            "absorb-own-prack-timeout",
-            &[],
-            Match::timeout().filter(|ctx| {
-                ctx.timeout_method().is_some_and(|m| m.eq_ignore_ascii_case("PRACK"))
-                    && ctx.call.own_prack_branch(ctx.timeout_branch().unwrap_or_default())
-            }),
-            |_ctx| ok(vec![]),
-        )
-        .runs_while_terminating(),
+    ]);
+    rules.extend(super::own_request_timeouts::own_request_timeouts());
+    rules.extend([
         // ── terminating ─────────────────────────────────────────────────────
         rule(
             "resolve-bye-response",

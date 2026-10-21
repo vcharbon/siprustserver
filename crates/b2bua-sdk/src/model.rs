@@ -4,7 +4,6 @@
 //! ext narrowing and rule composition are deferred with their consumers.
 
 use call::features::FeatureActivations;
-use call::TxnTimeoutKind;
 use call::{
     CallModelState, CdrEventType, Dialog, Direction, ExtMap, Leg, LegDisposition, LegKind,
     LegState, MachineId, Obligation, StateLabel, TerminationCause, TimerKey, TimerType,
@@ -1093,30 +1092,6 @@ impl<'a> RuleContext<'a> {
     pub fn service_timer_key(&self) -> Option<(&MachineId, &str)> {
         match self.timer_type() {
             Some(TimerType::Service { service_id, key }) => Some((service_id, key)),
-            _ => None,
-        }
-    }
-    pub fn timeout_method(&self) -> Option<&str> {
-        match self.event {
-            CallEvent::Timeout { method, .. } => method.as_deref(),
-            _ => None,
-        }
-    }
-    /// For a `Timeout` event: the branch of the client transaction that timed
-    /// out. `None` for every other event kind.
-    pub fn timeout_branch(&self) -> Option<&str> {
-        match self.event {
-            CallEvent::Timeout { branch, .. } => Some(branch.as_str()),
-            _ => None,
-        }
-    }
-    /// For a `Timeout` event: which client-transaction timeout fired —
-    /// `Response` (nothing at all answered: the hop is dead) or `Transaction`
-    /// (it answered a provisional, then went silent past the INVITE bound).
-    /// `None` for every other event kind.
-    pub fn timeout_kind(&self) -> Option<TxnTimeoutKind> {
-        match self.event {
-            CallEvent::Timeout { timeout_kind, .. } => Some(*timeout_kind),
             _ => None,
         }
     }

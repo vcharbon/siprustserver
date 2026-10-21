@@ -62,7 +62,7 @@ pub use decision_log::mark_decision;
 pub use dialog::{
     add_pending_request, advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog,
     cached_sdp_for_leg_dialog, cancel_pending_request, close_rejected_invite_round, close_relay,
-    find_pending_request, invite_glare, invite_transaction_open, peer_update_pending,
+    find_pending_request, invite_glare, invite_transaction_open, leg_relays, peer_update_pending,
     relayed_pending, remove_pending_request, retain_ack_branch, retain_emitted_ack,
     retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
     set_awaited_ack_cseq, settle_straggler_release, take_retired_relays, PendingHolder,

@@ -278,6 +278,17 @@ pub fn retired_relay_count(leg: &Leg) -> usize {
     leg.dialogs.iter().filter_map(Dialog::retired).map(|r| r.open_relays.len()).sum()
 }
 
+/// Whether a dialog of `leg`, open or retired, holds a relay of `method` sent
+/// with CSeq `cseq`. A CSeq names a request within its dialog only, so a
+/// request of this stack with that number on another of the leg's dialogs
+/// answers `true` too.
+pub fn leg_relays(leg: &Leg, method: &str, cseq: i64) -> bool {
+    leg.dialogs.iter().any(|d| {
+        let open = d.retired().map_or(&d.inbound_pending_requests, |r| &r.open_relays);
+        open.iter().any(|p| p.outbound_cseq == cseq && p.method.eq_ignore_ascii_case(method))
+    })
+}
+
 /// Find a pending transparent-relay entry by outbound CSeq.
 pub fn find_pending_request(dialog: &Dialog, outbound_cseq: i64) -> Option<&PendingRequest> {
     dialog.inbound_pending_requests.iter().find(|p| p.outbound_cseq == outbound_cseq)

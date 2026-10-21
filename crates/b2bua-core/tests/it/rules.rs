@@ -294,11 +294,23 @@ fn cancelling_a_leg_retires_its_timers() {
 /// The `handle-timeout` rule's output for a b-leg INVITE transaction timeout
 /// naming `leg_id` on `call`.
 fn handle_timeout_result(call: &call::Call, leg_id: &str) -> Vec<RuleAction> {
+    timeout_result(call, leg_id, "INVITE", Direction::FromB)
+}
+
+/// The `handle-timeout` rule's output for a transaction timeout of `method`
+/// on `leg_id` of `call`.
+fn timeout_result(
+    call: &call::Call,
+    leg_id: &str,
+    method: &str,
+    direction: Direction,
+) -> Vec<RuleAction> {
     let event = CallEvent::Timeout {
-        branch: "z9hG4bKb1".into(),
+        branch: format!("z9hG4bK{leg_id}"),
         call_ref: Some(call.call_ref.clone()),
         leg_id: Some(leg_id.into()),
-        method: Some("INVITE".into()),
+        method: Some(method.into()),
+        cseq: 1,
         destination: None,
         timeout_kind: call::TxnTimeoutKind::Transaction,
         incarnation: None,
@@ -308,7 +320,7 @@ fn handle_timeout_result(call: &call::Call, leg_id: &str) -> Vec<RuleAction> {
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: leg_id,
-        direction: Direction::FromB,
+        direction,
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
@@ -345,31 +357,7 @@ fn invite_timeout_on_a_cancelling_leg_resolves_locally_without_consult() {
 /// The `handle-timeout` rule's output for a transaction timeout of `method`
 /// on the a-leg of `call`.
 fn a_leg_timeout_result(call: &call::Call, method: &str) -> Vec<RuleAction> {
-    let event = CallEvent::Timeout {
-        branch: "z9hG4bKa1".into(),
-        call_ref: Some(call.call_ref.clone()),
-        leg_id: Some("a".into()),
-        method: Some(method.into()),
-        destination: None,
-        timeout_kind: call::TxnTimeoutKind::Transaction,
-        incarnation: None,
-    };
-    let ctx = RuleContext {
-        call: RuleCall::new(call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 0,
-        config: &B2buaConfig::default(),
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
-    let rules = default_rules();
-    let ranked = pick_ranked(&rules, call, &ctx);
-    let handle_timeout =
-        ranked.iter().find(|r| r.id == "handle-timeout").expect("handle-timeout is a candidate");
-    (handle_timeout.handle)(&ctx).expect("handle-timeout handles the timeout").actions
+    timeout_result(call, "a", method, Direction::FromA)
 }
 
 /// A terminating call's leg awaiting the answer to its BYE (`ByeSent`) is

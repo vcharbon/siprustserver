@@ -57,6 +57,9 @@ pub enum TransactionEvent {
         incarnation_mark: Option<String>,
         /// SIP method of the timed-out transaction (INVITE / BYE / …).
         method: Option<String>,
+        /// The CSeq number of the request that drew no final: with `method`,
+        /// which request of its dialog it was.
+        cseq: u32,
         /// The destination the timed-out request was sent to, forwarded from the
         /// `Transaction`'s stored `destination`. `None` only when the txn never
         /// recorded one (legacy/server paths) — consumers then skip per-peer

@@ -24,8 +24,8 @@ impl Owner {
     /// counted dropped only if it never left), the 2xx's dialog is recorded,
     /// Timer M holds it from this 2xx, and it leaves its call's books
     /// ([`Owner::settle_accepted`]). The parsed INVITE, several times the size
-    /// of its image, gives way to that image and its CSeq number, all an
-    /// Accepted txn reads of it; the orphan path parses the image again
+    /// of its image, gives way to that image, all an Accepted txn reads of it
+    /// beside its CSeq number; the orphan path parses the image again
     /// ([`Owner::accepted_invite`]).
     pub(super) fn accept_2xx(&mut self, branch: &str, resp: &SipResponse) {
         let keys = match self.clients.get_mut(branch) {
@@ -37,7 +37,6 @@ impl Owner {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 if let Some(invite) = txn.original_request.take() {
-                    txn.invite_cseq = invite.cseq().seq();
                     txn.retransmit_buf = Some(invite.image().clone());
                 }
                 txn.seed_resend = None;
@@ -77,7 +76,7 @@ impl Owner {
                     t.state == TxnState::Accepted
                         && t.call_id == call_id
                         && t.from_tag == from_tag
-                        && t.invite_cseq == seq
+                        && t.cseq == seq
                 })
             })
             .cloned()

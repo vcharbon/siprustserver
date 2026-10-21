@@ -64,6 +64,7 @@ pub mod sdp_form;
 pub mod service;
 pub mod service_params;
 pub mod timer_delay;
+mod txn_timeout;
 
 /// The framework-type façade the [`define_service!`] / [`sm_rule!`] macros
 /// reference through `$crate::rules::…`, and the curated surface a service crate

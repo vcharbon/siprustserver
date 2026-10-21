@@ -154,6 +154,7 @@ mod refer_gating;
 mod refer_no_notify_after_terminated;
 mod refer_notify_481;
 mod refer_notify_order;
+mod refer_notify_timeout;
 mod refer_reject;
 mod refer_timers;
 mod refer_transparent_relay;

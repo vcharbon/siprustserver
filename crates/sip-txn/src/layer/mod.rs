@@ -22,6 +22,7 @@
 //! `call_txns` (a call's transactions, as the per-call index files them) ·
 //! `via_marks` (the call attribution a sent request's Via carries) ·
 //! `ingress` (an inbound datagram parsed, a parser panic contained to it) · `client` (RFC 3261 §17.1 UAC FSM) ·
+//! `client_give_up` (a client transaction's deadlines and the Timeout it reports) ·
 //! `accepted` (RFC 6026 §7.2: a client INVITE after its 2xx, and who ACKs it) ·
 //! `orphan` (a released call's client transactions, ADR-0034) ·
 //! `server` (§17.2 UAS FSM) · `server_cancel` (§9.2: a CANCEL of a server
@@ -40,6 +41,7 @@ mod backlog;
 mod bind;
 mod call_txns;
 mod client;
+mod client_give_up;
 mod events;
 mod handle;
 mod ingress;

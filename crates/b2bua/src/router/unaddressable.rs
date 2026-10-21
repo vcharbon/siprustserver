@@ -43,6 +43,7 @@ pub(super) fn fail_unaddressable(
         call_ref: Some(call_ref.to_string()),
         leg_id: eff.leg_id.clone(),
         method: Some(req.method().as_str().to_string()),
+        cseq: req.cseq().seq(),
         destination: None,
         timeout_kind: TxnTimeoutKind::Response,
         incarnation: None,

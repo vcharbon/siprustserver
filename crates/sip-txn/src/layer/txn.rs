@@ -187,6 +187,8 @@ pub(super) struct NewTransaction {
     pub(super) id: TxnId,
     pub(super) kind: TxnKind,
     pub(super) method: Method,
+    /// The CSeq number of the request this transaction is for.
+    pub(super) cseq: u32,
     pub(super) call_id: String,
     pub(super) from_tag: String,
     pub(super) original_request: Option<SipRequest>,
@@ -206,6 +208,7 @@ impl Transaction {
             id: head.id,
             kind: head.kind,
             method: head.method,
+            cseq: head.cseq,
             call_id: head.call_id,
             from_tag: head.from_tag,
             original_request: head.original_request.map(Box::new),
@@ -225,7 +228,6 @@ impl Transaction {
             held_cancel: None,
             cancel_retransmit_key: None,
             retransmit_buf: None,
-            invite_cseq: 0,
             seed_resend: None,
             ladder: None,
             timeout_kind: TxnTimeoutKind::Response,
@@ -292,6 +294,9 @@ pub(super) struct Transaction {
     /// of every message on it, and the `method` a rung of its ladder is
     /// counted under.
     pub(super) method: Method,
+    /// The CSeq number of the request this transaction is for: the ACK of each
+    /// 2xx to an INVITE repeats it (RFC 3261 §13.2.2.4), a timeout names it.
+    pub(super) cseq: u32,
     pub(super) call_id: String,
     pub(super) from_tag: String,
     /// The INVITE an INVITE transaction is for; an Accepted client one keeps
@@ -343,9 +348,6 @@ pub(super) struct Transaction {
     /// as [`last_response`](Self::last_response). On an Accepted INVITE client
     /// txn, the INVITE's image, which stands in for `original_request`.
     pub(super) retransmit_buf: Option<Bytes>,
-    /// On an Accepted INVITE client txn: its INVITE's CSeq number, which the
-    /// ACK of each of its 2xx repeats (RFC 3261 §13.2.2.4).
-    pub(super) invite_cseq: u32,
     /// On a client INVITE seeded `Trying` (ADR-0014): its INVITE, re-sent once
     /// when a CANCEL is first held on it (ADR-0043), taken at that send.
     pub(super) seed_resend: Option<Bytes>,

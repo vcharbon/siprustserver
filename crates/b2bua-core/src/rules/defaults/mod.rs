@@ -8,6 +8,8 @@
 //!   registration list.
 //! - `failover_rules` — the CORE_LAYER failover resolution the list
 //!   registers in its place: one rule per `/call/failure` outcome.
+//! - `own_request_timeouts` — the timeouts of requests this stack originated
+//!   itself that end what the request was for, not the call.
 //! - `reaper_verdicts` — the bodies of the rules that handle the call
 //!   reaper's verdicts (ADR-0020).
 //! - `route_fold` — the shared route-shaped-payload parser + parity actions
@@ -20,6 +22,7 @@
 mod compose;
 mod core_rules;
 mod failover_rules;
+mod own_request_timeouts;
 mod reaper_verdicts;
 mod route_fold;
 

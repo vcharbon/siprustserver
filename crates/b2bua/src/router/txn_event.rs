@@ -24,6 +24,7 @@ pub(crate) fn call_event(event: TransactionEvent) -> CallEvent {
             leg_id,
             incarnation_mark,
             method,
+            cseq,
             destination,
             kind,
         } => {
@@ -36,6 +37,7 @@ pub(crate) fn call_event(event: TransactionEvent) -> CallEvent {
                 call_ref,
                 leg_id,
                 method,
+                cseq,
                 destination,
                 timeout_kind: kind,
                 incarnation,
@@ -58,6 +60,7 @@ mod tests {
             leg_id: Some("b-1".into()),
             incarnation_mark: mark.map(str::to_string),
             method: Some("INVITE".into()),
+            cseq: 1,
             destination: None,
             kind: TxnTimeoutKind::Response,
         })
