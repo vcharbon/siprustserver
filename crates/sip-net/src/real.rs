@@ -157,8 +157,9 @@ const _: () = assert!(RECV_BUF_LEN > crate::types::MAX_UDP_PAYLOAD);
 const RECV_PAUSE: Duration = Duration::from_millis(10);
 
 /// The pause before the next receive after `error`: none for an error that
-/// one datagram or a signal caused (an ICMP refusal or unreachable the kernel
-/// reports, an interrupted call), [`RECV_PAUSE`] for any other.
+/// one datagram or a signal caused (an ICMP refusal or unreachable, which the
+/// kernel reports on a connected socket only; an interrupted call),
+/// [`RECV_PAUSE`] for any other.
 fn recv_pause(error: &std::io::Error) -> Option<Duration> {
     use std::io::ErrorKind::{
         ConnectionRefused, ConnectionReset, HostUnreachable, Interrupted, NetworkUnreachable,
@@ -181,8 +182,8 @@ async fn recv_loop(
     pre_ingress: Option<PreIngressHook>,
     clock: Clock,
 ) {
-    // However the pump ends — an abort, a panic — the queue closes, so the endpoint's `recv()` resolves to None and the owner
-    // task can wind down. Without it the layer goes permanently DEAF — sends
+    // However the pump ends — an abort, a panic — the queue closes, so the
+    // endpoint's `recv()` resolves to None and the owner task can wind down. Without it the layer goes permanently DEAF — sends
     // still work, nothing is ever received, no panic/metric/readiness change —
     // because the endpoint is owned by the very owner task blocked on
     // `recv()`, so its `Drop` (the other `close` site) can never run until

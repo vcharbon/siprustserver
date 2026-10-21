@@ -4,9 +4,8 @@ use super::*;
 
 /// A socket connected to a port nobody listens on: its first send draws an
 /// ICMP port-unreachable, which the kernel reports as `ECONNREFUSED` on the
-/// socket's next receive. On loopback the ICMP is handled before `send`
-/// returns, so the error is pending once it has. `peer` is the closed port's
-/// address, free to bind afterwards.
+/// socket's next receive. `peer` is the closed port's address, free to bind
+/// afterwards.
 async fn refused_socket() -> (UdpSocket, SocketAddr) {
     let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let peer = closed.local_addr().unwrap();
@@ -31,6 +30,14 @@ async fn a_receive_error_does_not_stop_the_pump() {
         Clock::test_at(0),
     ));
 
+    // The refusal arrives after the send; the peer binds only once the pump has
+    // read it, so "to nobody" never reaches the peer.
+    let read_error = async {
+        while counters.snapshot().recv_errors == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read_error).await.expect("no refusal read");
     let sender = UdpSocket::bind(peer).await.unwrap();
     sender.send_to(b"after the error", socket.local_addr().unwrap()).await.unwrap();
     let received = tokio::time::timeout(Duration::from_secs(5), queue.take()).await;

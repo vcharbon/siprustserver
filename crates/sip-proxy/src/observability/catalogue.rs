@@ -308,7 +308,7 @@ pub const UDP_PRE_INGRESS_PANICS: Family = Family::counter(
 pub const UDP_RECV_ERRORS: Family = Family::counter(
     "sip_proxy_udp_recv_errors_total",
     Labels::None,
-    "Receives that failed on the signalling sockets (an ICMP error the kernel reports, memory exhausted); the recv pump reads on after each, expected 0 outside an incident. Summed over recv shards and both faces.",
+    "Receives that failed on the signalling sockets (memory or buffers exhausted); the recv pump reads on after each, expected 0 outside an incident. Summed over recv shards and both faces.",
 );
 
 pub const RECV_SHARDS_STALLED: Family = Family::gauge(

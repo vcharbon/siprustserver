@@ -35,7 +35,7 @@ pub const PRE_INGRESS_PANICS: Family = Family::counter(
 pub const RECV_ERRORS: Family = Family::counter(
     "b2bua_udp_recv_errors_total",
     Labels::None,
-    "Receives that failed on the signalling socket (an ICMP error the kernel reports, memory exhausted); the receive pump reads on after each, expected 0 outside an incident.",
+    "Receives that failed on the signalling socket (memory or buffers exhausted); the receive pump reads on after each, expected 0 outside an incident.",
 );
 
 pub const KERNEL_RX_DROPPED: Family = Family::counter(

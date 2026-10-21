@@ -1,6 +1,6 @@
-//! [`ProbeServer`] — the one hand-rolled HTTP probe/metrics server both runner
-//! binaries (the b2bua worker and the front proxy) expose on their
-//! observability port. A tiny tokio TCP handler (no HTTP framework dep) serving
+//! [`ProbeServer`] — the one hand-rolled HTTP probe/metrics server the runner
+//! binaries (the b2bua worker, the front proxy, the CDR consumer) expose on
+//! their observability port. A tiny tokio TCP handler (no HTTP framework dep) serving
 //! a fixed route set:
 //!
 //! - `GET /metrics` — Prometheus exposition, body supplied per-scrape by the
@@ -26,11 +26,11 @@
 //! - everything else — `404`.
 //!
 //! ## Why one module
-//! The two servers differ only in the `/metrics` body and the readiness
-//! predicate — exactly the two closures of [`ProbeRoutes`]. Everything else (the
-//! accept loop, the exact-path match, the response framing, the **fully-idle
+//! The servers differ only in the `/metrics` body and the readiness predicate —
+//! exactly the closures of [`ProbeRoutes`]. Everything else (the accept loop of
+//! `accept.rs`, the exact-path match, the response framing, the **fully-idle
 //! connection cut**, the flamegraph route) is shared transport, so the hardening
-//! applies to both by construction.
+//! applies to each by construction.
 //!
 //! ## Fully-idle connection cut (auto resource exclusion, not DDoS)
 //! The observability port is internal to the cluster, so this is not DDoS
