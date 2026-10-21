@@ -1264,10 +1264,10 @@ async fn retransmitted_invite_replays_the_cached_100() {
 // ── #9: call_ref → txn-count index (acting-backup self-release gate) ─────────
 
 /// An inbound in-dialog request whose Request-URI carries the `callref` param the
-/// B2BUA's Contact stamps — the key the txn layer attributes the server txn to
-/// (ADR-0014 self-release counting). `extract_ruri_call_ref` percent-decodes it,
-/// so a plain value round-trips unchanged.
+/// B2BUA's Contact stamps, escaped as it writes it — the key the txn layer
+/// attributes the server txn to (ADR-0014 self-release counting).
 fn inbound_with_callref(method: &str, branch: &str, call_id: &str, call_ref: &str) -> Vec<u8> {
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     format!(
         "{method} sip:b2bua@127.0.0.1:5070;callref={call_ref} SIP/2.0\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\

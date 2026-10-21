@@ -8,18 +8,21 @@
 //! `Hydrate` runs only the baseline presence/range/tag checks for already-
 //! trusted internal construction.
 
-use super::contact_entries::{contact_entry_spans, read_contact_entry, ContactEntry};
-use super::header_index::HeaderIndex;
-use super::port_garbage::has_via_port_trailing_garbage;
-use super::request_uri::request_uri_refusal;
-use super::scanner::{is_token_char, strict_non_negative_decimal};
-use super::structured_headers::{
-    parse_cseq, parse_name_addr, parse_via, top_level_comma_entries, validate_strict_host,
-    validate_strict_sip_uri,
+use super::contact_entries::{
+    contact_entry_spans, read_contact_entry, read_contact_entry_lenient, ContactEntry,
 };
+use super::dialog_ids::{count_tag_params, is_call_id, read_address, tag_refusal};
+use super::header_index::HeaderIndex;
+use super::optional_headers::date_refusal;
+use super::port_garbage::has_via_port_trailing_garbage;
+use super::request_uri::read_request_uri;
+use super::routes::route_refusal;
+use super::scanner::strict_non_negative_decimal;
+use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
 use super::top_via;
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
-use crate::header::{self, HostPort, NameAddr, Uri};
+use crate::header::{self, host_refusal, HostPort, Uri};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
@@ -55,79 +58,6 @@ pub struct RequestEager {
 /// RFC 3261 / RFC 3986 §3.2.3: SIP ports are 1..=65535.
 pub(super) fn is_valid_port(p: u64) -> bool {
     (1..=65535).contains(&p)
-}
-
-// ---------------------------------------------------------------------------
-// Internal → public field mapping
-// ---------------------------------------------------------------------------
-
-/// A scanned name-addr as the typed address value. A URI the strict reader
-/// rejects is kept whole (the parser's own gates decide admissibility), so no
-/// reader ever loses what the peer sent.
-fn to_name_addr(p: super::structured_headers::ParsedNameAddr) -> NameAddr {
-    NameAddr::from_parts(p.display_name, Uri::parse_or_verbatim(&p.uri), p.params)
-}
-
-fn to_contact(p: super::structured_headers::ParsedContact) -> header::Contact {
-    header::Contact::new(NameAddr::from_parts(
-        p.display_name,
-        Uri::parse_or_verbatim(&p.uri),
-        p.params,
-    ))
-}
-
-/// True iff the name-addr's `<` opens an addr-spec no `>` closes (RFC 3261
-/// §25.1 `name-addr = [ display-name ] LAQUOT addr-spec RAQUOT`): a parameter
-/// written after it would read as part of the URI.
-fn has_unclosed_angle(value: &str) -> bool {
-    let s = value.as_bytes();
-    s.iter().rposition(|&b| b == b'<').is_some_and(|lt| !s.iter().skip(lt).any(|&b| b == b'>'))
-}
-
-/// Count `;tag=` occurrences outside quoted-strings (RFC 3261 permits one).
-fn count_tag_params(value: &str) -> usize {
-    let s = value.as_bytes();
-    let at = |k: usize| s.get(k).copied();
-    let skip_ws = |mut k: usize| {
-        while matches!(at(k), Some(b' ' | b'\t')) {
-            k += 1;
-        }
-        k
-    };
-    let mut count = 0usize;
-    let mut in_quote = false;
-    let mut i = 0usize;
-    while let Some(c) = at(i) {
-        if in_quote {
-            if c == b'\\' {
-                i += 2;
-                continue;
-            }
-            if c == b'"' {
-                in_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'"' {
-            in_quote = true;
-            i += 1;
-            continue;
-        }
-        if c != b';' {
-            i += 1;
-            continue;
-        }
-        let j = skip_ws(i + 1);
-        let is_tag = s.get(j..j + 3).is_some_and(|name| name.eq_ignore_ascii_case(b"tag"));
-        if !is_tag || at(skip_ws(j + 3)) != Some(b'=') {
-            i += 1;
-            continue;
-        }
-        count += 1;
-        i += 1;
-    }
-    count
 }
 
 /// Confirm the Via sent-protocol grammar: three non-empty `1*tchar` tokens
@@ -212,49 +142,36 @@ pub fn extract_common_fields(
 
     let from_val =
         idx.from.first.ok_or_else(|| SipParseError::new("Missing mandatory From header"))?;
-    let from_parsed = parse_name_addr(from_val);
-    if from_parsed.tag.as_deref() == Some("") {
+    let from = read_address(from_val, "From", wire)?;
+    if from.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty From tag parameter"));
     }
     if count_tag_params(from_val) > 1 {
         return Err(SipParseError::new("Duplicate From tag parameter"));
     }
-    if wire {
-        if let Some(reason) = validate_strict_sip_uri(&from_parsed.uri) {
-            return Err(SipParseError::new(format!(
-                "Strict From URI: {reason} (\"{}\")",
-                from_parsed.uri
-            )));
-        }
-        if has_unclosed_angle(from_val) {
-            return Err(SipParseError::new("Strict From: unterminated \"<...>\""));
-        }
-    }
 
     let to_val = idx.to.first.ok_or_else(|| SipParseError::new("Missing mandatory To header"))?;
-    let to_parsed = parse_name_addr(to_val);
-    if to_parsed.tag.as_deref() == Some("") {
+    let to = read_address(to_val, "To", wire)?;
+    if to.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty To tag parameter"));
     }
     if count_tag_params(to_val) > 1 {
         return Err(SipParseError::new("Duplicate To tag parameter"));
     }
     if wire {
-        if let Some(reason) = validate_strict_sip_uri(&to_parsed.uri) {
-            return Err(SipParseError::new(format!(
-                "Strict To URI: {reason} (\"{}\")",
-                to_parsed.uri
-            )));
-        }
-        if has_unclosed_angle(to_val) {
-            return Err(SipParseError::new("Strict To: unterminated \"<...>\""));
-        }
+        tag_refusal(&from, "From")?;
+        tag_refusal(&to, "To")?;
     }
 
     let call_id = match idx.call_id.first {
         Some(v) if !v.is_empty() => v.clone(),
         _ => return Err(SipParseError::new("Missing mandatory Call-ID header")),
     };
+    if wire && !is_call_id(&call_id) {
+        return Err(SipParseError::new(format!(
+            "Call-ID is not word [\"@\" word] (RFC 3261 §25.1): \"{call_id}\""
+        )));
+    }
 
     let cseq_val =
         idx.cseq.first.ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
@@ -276,6 +193,11 @@ pub fn extract_common_fields(
                 if cseq_method.trim().is_empty() {
                     return Err(SipParseError::new(format!(
                         "CSeq missing method token: \"{cseq_val}\""
+                    )));
+                }
+                if !cseq_method.trim().bytes().all(is_token_char) {
+                    return Err(SipParseError::new(format!(
+                        "CSeq method is not a token: \"{cseq_val}\""
                     )));
                 }
             }
@@ -317,10 +239,16 @@ pub fn extract_common_fields(
             if let Some(refusal) = top.then(|| top_via::cookie_refusal(&v)).flatten() {
                 return Err(refusal);
             }
-            if let Some(reason) = validate_strict_host(&v.host) {
+            if let Some(reason) = host_refusal(&v.host) {
                 return Err(SipParseError::new(format!(
                     "Strict Via sent-by host: {reason} (\"{}\")",
                     v.host
+                )));
+            }
+            if v.branch.as_ref().is_some_and(|b| !b.bytes().all(is_token_char)) {
+                return Err(SipParseError::new(format!(
+                    "Via branch is not a token: \"{}\"",
+                    v.branch.as_deref().unwrap_or_default()
                 )));
             }
             if let Some(colon_count) = sent_by_extra_colons(raw) {
@@ -347,13 +275,17 @@ pub fn extract_common_fields(
     }
 
     let contacts = read_contacts(idx, wire, contact_reading)?;
+    if wire {
+        route_refusal(idx)?;
+        date_refusal(&idx.date)?;
+    }
 
     let mut hops = vias.into_iter();
     let top = hops.next().ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
 
     Ok(CoreHeaders::new(
-        header::From::new(to_name_addr(from_parsed)),
-        header::To::new(to_name_addr(to_parsed)),
+        header::From::new(from),
+        header::To::new(to),
         header::CallId::new(call_id),
         // The lenient read saturates a sequence number past `u32`; the wire
         // read refused it above.
@@ -412,17 +344,14 @@ fn read_contacts(
     for span in spans() {
         match read_contact_entry(&span) {
             ContactEntry::Wildcard => {}
-            ContactEntry::Readable(contact) => contact_list.push(to_contact(contact)),
-            // The strict URI gate holds on wire bytes only.
-            ContactEntry::Unreadable { contact, .. } if !wire => {
-                contact_list.push(to_contact(contact));
+            ContactEntry::Readable(contact) => contact_list.push(*contact),
+            // The grammar holds on wire bytes only.
+            ContactEntry::Unreadable { .. } if !wire => {
+                contact_list.push(read_contact_entry_lenient(&span));
             }
             ContactEntry::Unreadable { .. } if !strict => {}
-            ContactEntry::Unreadable { contact, reason } => {
-                return Err(SipParseError::new(format!(
-                    "Strict Contact URI: {reason} (\"{}\")",
-                    contact.uri
-                )));
+            ContactEntry::Unreadable { reason } => {
+                return Err(SipParseError::new(format!("Strict Contact: {reason} (\"{span}\")")));
             }
         }
     }
@@ -491,16 +420,10 @@ pub fn extract_request_fields(
         }
     }
 
-    // Strict Request-URI gates.
-    if wire {
-        if let Some(reason) = validate_strict_sip_uri(request_uri) {
-            return Err(SipParseError::new(format!(
-                "Strict Request-URI: {reason} (\"{request_uri}\")"
-            )));
-        }
-    }
-    request_uri_refusal(request_uri)?;
-    Ok(RequestEager { common, request_uri: Uri::parse_or_verbatim(request_uri) })
+    // The Request-URI is read in every mode: a URI that does not read is no
+    // request's target, whoever built the request.
+    let request_uri = read_request_uri(request_uri)?;
+    Ok(RequestEager { common, request_uri })
 }
 
 // ---------------------------------------------------------------------------

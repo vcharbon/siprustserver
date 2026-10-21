@@ -39,9 +39,6 @@ enum Side {
     /// refuses what the grammar admits, or a malformed header the RFC leaves
     /// to the element.
     Gate,
-    /// The production parser accepts what the grammar refuses; an open
-    /// question of its own, whatever the oracle reads.
-    Leniency,
     /// The oracle departs from the RFC: it accepts a message whose start line
     /// or mandatory header breaks the grammar, refuses a valid one, or reads a
     /// field wrong.
@@ -96,7 +93,7 @@ const EXPECTED: &[Expected] = &[
     gate("param-gaps/fromDuplicateTag", OnlyCustomRefuses, "RFC 3261 §8.1.1.3, §19.3")
         .values(0xc65c90c33e9b74d9),
     gate("param-gaps/requestUriPortOverflow", OnlyCustomRefuses, "RFC 3261 §19.1.1 port")
-        .values(0xc4768efb4aa46a8e),
+        .values(0xbd21100f3778e6f1),
     gate("param-gaps/viaPortOverflow", OnlyCustomRefuses, "RFC 3261 §20.42 sent-by")
         .values(0x2688719069804f87),
     gate("param-gaps/viaPortZero", OnlyCustomRefuses, "RFC 3261 §18.2.2, §20.42 sent-by")
@@ -108,23 +105,37 @@ const EXPECTED: &[Expected] = &[
     rvoip("cve/cve_2023_27599", OnlyCustomRefuses, "RFC 3261 §25.1 quoted-string")
         .values(0x5375cbaccf51bcc2),
     rvoip("ipv6/v42_ipv6NoBrackets", OnlyCustomRefuses, "RFC 3261 §25.1; RFC 5118 §4.2")
-        .values(0xd98950dd6fd88b73),
+        .values(0xb6843c68f7c98e91),
     rvoip("param-gaps/fromEmptyTag", OnlyCustomRefuses, "RFC 3261 §25.1 tag-param")
-        .values(0xa1c15d6f5469bc11),
+        .values(0xf08f087dcdf891df),
     rvoip("param-gaps/requestUriCtlInParamName", OnlyCustomRefuses, "RFC 3261 §25.1")
-        .values(0xd7f089128476ba92),
+        .values(0x2728cd06adea20af),
     rvoip("param-gaps/requestUriIpv6Unclosed", OnlyCustomRefuses, "RFC 3261 §25.1")
-        .values(0xfcc43cb5723ab74d),
+        .values(0x9bd7c5c92f3ead99),
     rvoip("param-gaps/requestUriNoHost", OnlyCustomRefuses, "RFC 3261 §19.1.1, §25.1")
-        .values(0xba277b2fe6f328ea),
+        .values(0xd8b1ca963fae2749),
     rvoip("param-gaps/requestUriPortTrailingGarbage", OnlyCustomRefuses, "RFC 3261 §25.1")
-        .values(0x2302c195d5c666fe),
+        .values(0x679fd0f32d4672d3),
     rvoip("param-gaps/viaEmptyBranch", OnlyCustomRefuses, "RFC 3261 §25.1 via-branch")
         .values(0x57f029553723be25),
     rvoip("param-gaps/viaPortTrailingGarbage", OnlyCustomRefuses, "RFC 3261 §25.1 sent-by")
         .values(0xc978a1042444b2bc),
     rvoip("rfc4475-invalid/angleBracketRequestUri", OnlyCustomRefuses, "RFC 4475 §3.1.2.7")
         .values(0x377fef051d494302),
+    rvoip("rfc4475-invalid/escapedHeadersInUri", OnlyCustomRefuses, "RFC 3261 §19.1.1 Table 1")
+        .values(0x6752bdbce2491d00),
+    rvoip(
+        "rfc4475-invalid/invalidTimezone",
+        OnlyCustomRefuses,
+        "RFC 3261 §20.17; RFC 4475 §3.1.2.12",
+    )
+    .values(0x11b637e5652ddfd6),
+    rvoip("rfc4475-invalid/nonTokenDisplayName", OnlyCustomRefuses, "RFC 4475 §3.1.2.15")
+        .values(0xde535a809e338700),
+    rvoip("rfc4475-invalid/unencloseNameAddr", OnlyCustomRefuses, "RFC 4475 §3.1.2.13")
+        .values(0x01a87ce68e28faa0),
+    rvoip("synthetic/utf8-raw-user", OnlyCustomRefuses, "RFC 3261 §25.1 user, escaped")
+        .values(0xc658e4784a248ef3),
     rvoip("rfc4475-invalid/extraneousSeparators", OnlyCustomRefuses, "RFC 4475 §3.1.2.1")
         .values(0x921cff418a09fd67),
     rvoip("rfc4475-invalid/methodMismatch", OnlyCustomRefuses, "RFC 3261 §8.1.1.5")
@@ -136,7 +147,7 @@ const EXPECTED: &[Expected] = &[
     rvoip("rfc4475-invalid/overlargResponseScalars", OnlyCustomRefuses, "RFC 3261 §8.1.1.5")
         .values(0xf3c074caf38e0f5d),
     rvoip("rfc4475-invalid/spacesInAddrSpec", OnlyCustomRefuses, "RFC 4475 §3.1.2.14")
-        .values(0xf2252fe79f8427ee),
+        .values(0x6437d54bb7592a36),
     rvoip("rfc4475-invalid/unknownMethodMismatch", OnlyCustomRefuses, "RFC 3261 §8.1.1.5")
         .values(0xd4f1563f06b7c76d),
     rvoip("rfc4475-invalid/unknownProtocolVersion", OnlyCustomRefuses, "RFC 3261 §7.1")
@@ -149,8 +160,6 @@ const EXPECTED: &[Expected] = &[
     rvoip("rfc4475-valid/extraTrailingOctets", OnlyRvoipRefuses, "RFC 3261 §18.3")
         .values(0x768d41a8cf8b34aa),
     rvoip("rfc4475-valid/multipartMime", OnlyRvoipRefuses, "RFC 4475 §3.1.1.11")
-        .values(0x768d41a8cf8b34aa),
-    rvoip("rfc4475-valid/wideRangeValidChars", OnlyRvoipRefuses, "RFC 4475 §3.1.1.2")
         .values(0x768d41a8cf8b34aa),
     // The tag of an unbracketed From/To URI.
     rvoip("ipv6/v410a_extraColon", FromTag, ADDR_SPEC_PARAMS).values(0xa0f4a29e4b2e58f8),
@@ -166,28 +175,21 @@ const EXPECTED: &[Expected] = &[
     rvoip("ipv6/v47_mixedIpv4Ipv6Vias", ToTag, ADDR_SPEC_PARAMS).values(0xd24dd170bd8db175),
     rvoip("ipv6/v48_multipleIpInSdp", FromTag, ADDR_SPEC_PARAMS).values(0xec9681ef8a5b85d8),
     rvoip("ipv6/v49_ipv4Mapped", FromTag, ADDR_SPEC_PARAMS).values(0xec9681ef8a5b85d8),
-    rvoip("rfc4475-invalid/escapedHeadersInUri", FromTag, ADDR_SPEC_PARAMS)
-        .values(0xa181af8a6373c42f),
-    rvoip("rfc4475-invalid/invalidTimezone", FromTag, ADDR_SPEC_PARAMS).values(0xfcf9cfef20cb724e),
-    rvoip("rfc4475-invalid/unencloseNameAddr", FromTag, ADDR_SPEC_PARAMS)
-        .values(0x4a4b5587527fa30d),
     rvoip("rfc4475-valid/escapedNulls", FromTag, ADDR_SPEC_PARAMS).values(0x8146bcc924d85594),
     rvoip("rfc4475-valid/semicolonInUserPart", FromTag, ADDR_SPEC_PARAMS)
         .values(0x1761762f9f70ab1f),
     rvoip("rfc4475-valid/unusualReasonPhrase", FromTag, ADDR_SPEC_PARAMS)
         .values(0x3fb5b3df1e6604b5),
     rvoip("rfc4475-valid/unusualReasonPhrase", ToTag, ADDR_SPEC_PARAMS).values(0x5b12eb6bf24b8138),
-    // A mandatory From the oracle cannot read, in a message it accepts.
-    rvoip("rfc4475-invalid/nonTokenDisplayName", FromTag, "RFC 3261 §8.1.1.3")
-        .values(0xf663727fa8fc3a4c),
-    // A Contact entry the oracle drops from a message it accepts.
-    rvoip("rfc4475-invalid/unencloseNameAddr", Contacts, "RFC 3261 §20.10")
-        .values(0x600845fccbe292f9),
     // A bare IPv6 `received` the oracle stops at, losing the branch after it.
     rvoip("ipv6/v45b_receivedBare", Vias, "RFC 3261 §20.42; RFC 5118 §4.5")
         .values(0x6c0069c1c9db60a1),
     // Request-URIs the oracle renders changed.
     rvoip("rfc4475-valid/semicolonInUserPart", Start, RESERVED_ESCAPE).values(0x03804767341bed84),
+    // The oracle escapes the user part's reserved characters; the production
+    // parser also reads the extension method uppercased (RFC 3261 §7.1 holds
+    // methods case-sensitive).
+    rvoip("rfc4475-valid/wideRangeValidChars", Start, RESERVED_ESCAPE).values(0xc5dd43559d2db28a),
     rvoip("synthetic/cancel", Start, RESERVED_ESCAPE).values(0x35b690fec65f2844),
     rvoip("synthetic/invite-sdp", Start, RESERVED_ESCAPE).values(0xa009737edb4ccd12),
     Expected {
@@ -196,15 +198,6 @@ const EXPECTED: &[Expected] = &[
         side: Side::EquivalentForm,
         rfc: "RFC 3261 §19.1.4; RFC 5118 §4.10",
         values: 0x62895373da78f08f,
-    },
-    // A raw UTF-8 user part, which §25.1 admits only escaped: the production
-    // parser accepts it, the oracle cannot read the From that carries one.
-    Expected {
-        seed: "synthetic/utf8-raw-user",
-        difference: FromTag,
-        side: Side::Leniency,
-        rfc: "RFC 3261 §25.1 user",
-        values: 0x3308e8282d77b070,
     },
 ];
 
@@ -279,8 +272,7 @@ fn oracle_agrees_but_for_listed_differences() {
 }
 
 /// Each entry names its RFC section once, and its side fits its difference: a
-/// gate only refuses, a leniency or an equivalent form is a field both
-/// parsers read.
+/// gate only refuses, an equivalent form is a field both parsers read.
 #[test]
 fn listed_differences_are_well_formed() {
     let mut seen = BTreeMap::new();
@@ -289,9 +281,7 @@ fn listed_differences_are_well_formed() {
         let fits = match e.side {
             Side::Gate => e.difference == OnlyCustomRefuses,
             Side::RvoipDeviation => true,
-            Side::Leniency | Side::EquivalentForm => {
-                !matches!(e.difference, OnlyCustomRefuses | OnlyRvoipRefuses)
-            }
+            Side::EquivalentForm => !matches!(e.difference, OnlyCustomRefuses | OnlyRvoipRefuses),
         };
         assert!(fits, "side does not fit the difference: {e:?}");
         assert!(seen.insert((e.seed, e.difference), ()).is_none(), "listed twice: {e:?}");

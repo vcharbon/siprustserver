@@ -103,7 +103,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | `parsers/custom/headers.ts` | `parser/custom/headers.rs` | ✅ ported |
 | `parsers/custom/structured-headers.ts` | `parser/custom/structured_headers.rs` | ✅ ported |
 | `parsers/extract-fields.ts` (wire-grammar gates) | `parser/custom/extract_fields.rs` | ✅ ported (wire+hydrate; finalize/hydrate wrappers fold into `CustomParser`) |
-| `parsers/custom/lazy-parsers.ts` | `parser/custom/optional_headers.rs` | ✅ ported as **eager + non-fatal** (`OptionalHeaders`) + `SipMessage::validate_strict()` ([ADR-0003 amendment](docs/adr/0003-typed-header-model.md)) |
+| `parsers/custom/lazy-parsers.ts` | `parser/custom/optional_headers.rs` | ✅ ported as **eager + non-fatal** (`OptionalHeaders`) ([ADR-0003 amendment](docs/adr/0003-typed-header-model.md)); the strict pass is folded into the parse (ADR-0053) |
 | `parsers/custom/index.ts` | `parser/custom/mod.rs` (`CustomParser`) | ✅ ported (full parse pipeline) |
 | `parsers/native-adapter.ts` (role) | `parser/rvoip.rs` (feature-gated) | ✅ ported — reads `rvoip-sip-core` 0.4 behind `rvoip-oracle` into the fields the differential test (`tests/it/rvoip_parity.rs`, `just parity-oracle`) compares |
 | `Serializer.ts` | `serializer.rs` | ✅ ported (`serialize`/`sip_summary`/`message_summary`, Content-Length safety net) |
@@ -114,7 +114,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 ### Tests to port
 | Source test | Rust home | Status |
 |---|---|---|
-| `parser-compliance.test.ts` (matrix, `custom` column) | `tests/compliance_matrix.rs` | ✅ 63 fixtures (RFC4475 valid/invalid, CVE, param-gaps, RFC5118 IPv6, strict-valid); byte-exact fixtures dumped from TS; invalid corpus now uses full `parse + validate_strict` (only the 2 TS-lenient start-line cases remain lenient) |
+| `parser-compliance.test.ts` (matrix, `custom` column) | `tests/compliance_matrix.rs` | ✅ 63 fixtures (RFC4475 valid/invalid, CVE, param-gaps, RFC5118 IPv6, strict-valid); byte-exact fixtures dumped from TS; every corpus uses the one `parse` (only the trailing-spaces start-line case remains lenient) |
 | `Parser.test.ts` (RFC 4475 field extraction asserts) | `tests/parser.rs` | ✅ 11 (field-content + eager-leniency split) |
 | `parser-extraction.test.ts` | `tests/parser_extraction.rs` | ✅ 17 (jssip cross-parser block dropped — no jssip) |
 | `parser-response-totag.test.ts` | `tests/parser_response_totag.rs` | ✅ 3 |
@@ -142,7 +142,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
   adapter; same reasoning.
 - (none for the parser layer — `lazy-parsers.ts` is now ported as
   `optional_headers.rs`; the previously-noted 3.1.2.12/.13/.15 gap is closed by
-  `validate_strict()`.)
+  the parse itself, ADR-0053.)
 - `MessageHelpers-random.test.ts` (seeded-RNG identifier generators) — the
   `newTag`/`newBranch`/`newCallId`/`currentRng` helpers read a fiber-local
   Effect `Random` reference. That RNG seam belongs to the **network slice**

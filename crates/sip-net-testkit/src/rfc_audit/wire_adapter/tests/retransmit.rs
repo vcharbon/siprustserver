@@ -49,7 +49,7 @@ fn a_re_stamped_own_record_route_cookie_is_not_charged_but_a_foreign_row_is() {
                  Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-p;rport\r\n\
                  Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-i;received=127.0.0.1;rport=5060\r\n\
                  Record-Route: <sip:127.0.0.1:5080;outbound;lr>\r\n\
-                 Record-Route: <sip:127.0.0.1:5080;w_pri=b1;w_bak={cookie};lr>\r\n\
+                 Record-Route: <sip:127.0.0.1:5080;w_pri=b1;{cookie};lr>\r\n\
                  Record-Route: <sip:10.0.0.7:5060;{foreign}>\r\n\
                  From: <{A}>;tag=at\r\n\
                  To: <{B}>\r\n\
@@ -62,17 +62,17 @@ fn a_re_stamped_own_record_route_cookie_is_not_charged_but_a_foreign_row_is() {
     };
     let evs = vec![
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
-        sent(SUT, forwarded("b2", "lr"), WORKER, 1),
+        sent(SUT, forwarded("w_bak=b2", "lr"), WORKER, 1),
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 2),
-        sent(SUT, forwarded("\"\"", "lr"), WORKER, 3),
+        sent(SUT, forwarded("w_bak", "lr"), WORKER, 3),
     ];
     assert!(live(RuleId::RungByteIdentical).check_positioned(&evs).is_empty());
 
     let evs = vec![
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
-        sent(SUT, forwarded("b2", "lr"), WORKER, 1),
+        sent(SUT, forwarded("w_bak=b2", "lr"), WORKER, 1),
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 2),
-        sent(SUT, forwarded("\"\"", "x=1;lr"), WORKER, 3),
+        sent(SUT, forwarded("w_bak", "x=1;lr"), WORKER, 3),
     ];
     let out = live(RuleId::RungByteIdentical).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");

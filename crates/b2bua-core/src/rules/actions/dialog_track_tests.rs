@@ -6,13 +6,26 @@ use crate::config::B2buaConfig;
 use crate::turn_scope::TurnScope;
 use sip_ids::TurnIds;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
+use sip_message::{SipMessage, SipParser, SipParserLimits};
 
 const PROXY_ROUTE: &str = "<sip:10.0.0.9:5060;lr>";
 
-/// A port no reader accepts (RFC 3261 §19.1.1 `port` is 16-bit): the message
-/// parses, the recorded route does not.
+/// A port no reader accepts (RFC 3261 §19.1.1 `port` is 16-bit): the wire
+/// parse refuses the message, a read without the wire grammar keeps it and the
+/// recorded-route read refuses the route.
 const UNREADABLE_RR: &str = "<sip:10.0.0.9:70596;lr>";
+
+/// `raw` as the wire parse reads it, or, when it records [`UNREADABLE_RR`]
+/// (which the wire parse refuses), as a read without the wire grammar holds it.
+fn read(raw: &str, record_route: &str) -> SipMessage {
+    let wire = CustomParser::new().parse(raw.as_bytes());
+    if record_route != UNREADABLE_RR {
+        return wire.expect("parses");
+    }
+    assert!(wire.is_err(), "the wire parse refuses a recorded route no reader accepts");
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    CustomParser::with_limits(lenient).parse(raw.as_bytes()).expect("parses leniently")
+}
 
 fn ok_200(record_route: &str) -> sip_message::SipResponse {
     let raw = format!(
@@ -26,7 +39,7 @@ Record-Route: {record_route}\r\n\
 Contact: <sip:bob@10.244.2.7:5060>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    match CustomParser::new().parse(raw.as_bytes()).expect("parses") {
+    match read(&raw, record_route) {
         SipMessage::Response(r) => r,
         _ => panic!("expected response"),
     }
@@ -45,7 +58,7 @@ Record-Route: {record_route}\r\n\
 Contact: <sip:alice@10.0.0.1:5060>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    match CustomParser::new().parse(raw.as_bytes()).expect("parses") {
+    match read(&raw, record_route) {
         SipMessage::Request(r) => r,
         _ => panic!("expected request"),
     }

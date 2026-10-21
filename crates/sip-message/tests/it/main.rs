@@ -33,5 +33,6 @@ mod sdp_form;
 mod sdp_offer_answer_grammar;
 mod sdp_utils;
 mod sipfrag;
+mod uri_grammar;
 mod via_lower_hops;
 mod via_sent_by;

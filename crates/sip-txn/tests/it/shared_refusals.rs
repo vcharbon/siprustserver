@@ -20,7 +20,8 @@ fn refuse_503(req: &SipRequest) -> Result<SipResponse, sip_message::generators::
         503,
         "Service Unavailable",
         &GenerateResponseOpts {
-            to_tag: Some(format!("refused-{}", req.call_id().as_str())),
+            // A tag is a token (RFC 3261 §25.1): the Call-ID's `@` stays out.
+            to_tag: Some(format!("refused-{}", req.call_id().as_str().replace('@', "."))),
             ..Default::default()
         },
     )
@@ -79,7 +80,7 @@ async fn a_copy_of_an_invite_refused_ahead_draws_that_refusal() {
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
     assert_eq!(delivered_invites(&stack.drain_events()), 0);
 
-    let ack = inbound_request("ACK", "z9hG4bK-shared", "shared@unit", Some("refused-shared@unit"));
+    let ack = inbound_request("ACK", "z9hG4bK-shared", "shared@unit", Some("refused-shared.unit"));
     stack.inject(&ack).await;
     elapse_ms(50).await;
     assert!(stack.drain_events().is_empty(), "the ACK to the refusal ends in the layer");

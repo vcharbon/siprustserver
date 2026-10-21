@@ -148,17 +148,21 @@ fn uri_renders_verbatim(input: &str) -> bool {
 }
 
 // --- name-addr family, driven by the ABNF corpus ---
+//
+// The corpus grammars draw a header parameter's name from the URI's
+// `paramchar`, where RFC 3261 §25.1 takes a token: the lines carrying such a
+// name are refused, and the floors stand below them.
 
 #[test]
 fn from_values_are_a_render_parse_fixpoint() {
-    assert_fixpoint::<header::From>("From", &corpus("from"), 900);
-    assert_no_loss::<header::From>("From", &corpus("from"), addr_renders_verbatim, 400);
+    assert_fixpoint::<header::From>("From", &corpus("from"), 780);
+    assert_no_loss::<header::From>("From", &corpus("from"), addr_renders_verbatim, 350);
 }
 
 #[test]
 fn contact_values_are_a_render_parse_fixpoint() {
-    assert_fixpoint::<header::Contact>("Contact", &corpus("contact"), 900);
-    assert_no_loss::<header::Contact>("Contact", &corpus("contact"), addr_renders_verbatim, 80);
+    assert_fixpoint::<header::Contact>("Contact", &corpus("contact"), 380);
+    assert_no_loss::<header::Contact>("Contact", &corpus("contact"), addr_renders_verbatim, 60);
 }
 
 #[test]
@@ -174,16 +178,16 @@ fn p_asserted_identity_values_are_a_render_parse_fixpoint() {
 
 #[test]
 fn refer_to_values_are_a_render_parse_fixpoint() {
-    assert_fixpoint::<header::ReferTo>("Refer-To", &corpus("refer-to"), 900);
-    assert_no_loss::<header::ReferTo>("Refer-To", &corpus("refer-to"), addr_renders_verbatim, 350);
+    assert_fixpoint::<header::ReferTo>("Refer-To", &corpus("refer-to"), 610);
+    assert_no_loss::<header::ReferTo>("Refer-To", &corpus("refer-to"), addr_renders_verbatim, 280);
 }
 
 #[test]
 fn route_values_are_a_render_parse_fixpoint() {
     // Route entries share the name-addr grammar; the Contact corpus is the
     // richest name-addr generator we have.
-    assert_fixpoint::<header::RouteEntry>("Route", &corpus("contact"), 900);
-    assert_no_loss::<header::RouteEntry>("Route", &corpus("contact"), addr_renders_verbatim, 80);
+    assert_fixpoint::<header::RouteEntry>("Route", &corpus("contact"), 380);
+    assert_no_loss::<header::RouteEntry>("Route", &corpus("contact"), addr_renders_verbatim, 60);
 }
 
 // --- Via, CSeq, RAck ---
@@ -251,12 +255,12 @@ fn uris_are_a_render_parse_fixpoint() {
 }
 
 // The ABNF generator writes every escaped-header pair with its `=`, so the pair
-// a peer may write without one — malformed under RFC 3261 §19.1.1, and passed
-// through rather than deleted — is pinned by hand.
+// a peer may write without one — malformed under RFC 3261 §25.1 `header =
+// hname "=" hvalue` — is pinned by hand: the URI is refused.
 #[test]
-fn an_escaped_header_pair_with_no_value_is_byte_preserving() {
+fn an_escaped_header_pair_with_no_value_is_refused() {
     for input in ["sip:a@h?X-Trace", "sip:a@h?a=b&X-Trace&c=d", "sip:a@h;lr?X-Trace&Replaces=1"] {
-        assert_eq!(uri_round_trip(input), Some(true), "URI: {input:?} lost its valueless pair");
+        assert_eq!(uri_round_trip(input), None, "URI: {input:?} was accepted");
     }
 }
 

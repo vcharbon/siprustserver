@@ -260,7 +260,7 @@ fn refuse_503(req: &SipRequest) -> Result<SipResponse, GenerateError> {
         503,
         "Service Unavailable",
         &GenerateResponseOpts {
-            to_tag: Some(format!("refused-{}", req.call_id().as_str())),
+            to_tag: Some(format!("refused-{}", req.call_id().as_str().replace('@', "."))),
             extra_headers: vec![SipHeader {
                 name: "Retry-After".to_string().into(),
                 value: "5".to_string().into(),

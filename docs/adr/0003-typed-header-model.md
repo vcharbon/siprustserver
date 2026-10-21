@@ -77,7 +77,8 @@ the **non-fatal** axis, not the **lazy** axis, and is satisfied by storing a
   `OptionalHeaders { p_asserted_identity: Result<Vec<NameAddr>, _>, … }`.
   `parse()` stays tolerant — a malformed one is captured as `Err`, the message
   still parses.
-- `SipMessage::validate_strict()` is the port of `runAllStrictLazyParsers`: it
+- (Superseded by ADR-0053: the strict pass is folded into the parse and
+  removed.) `SipMessage::validate_strict()` is the port of `runAllStrictLazyParsers`: it
   re-validates Date/From/To/Contact grammar + every optional header and returns
   the first violation. Security-sensitive callers (and the compliance matrix's
   invalid corpus) opt into it; production stays tolerant. Note it intentionally

@@ -1,38 +1,10 @@
-//! The strict-reader checks of a port written with letters after its digits
-//! (`host:5060abc`): in a Request-URI and in a Via sent-by.
+//! The strict-reader check of a Via sent-by port written with letters after
+//! its digits (`host:5060abc`).
 
 /// The index of the first byte at or after `i` that `stop` holds for, or the
 /// end.
 fn scan(s: &[u8], i: usize, stop: impl Fn(u8) -> bool) -> usize {
     s.iter().skip(i).position(|&c| stop(c)).map_or(s.len().max(i), |p| i + p)
-}
-
-/// True iff `uri` has port digits followed by an alphabetic byte at the
-/// host:port position (SIP-ALG confusion), context-aware about userinfo.
-pub(super) fn has_uri_port_trailing_garbage(uri: &str) -> bool {
-    let s = uri.as_bytes();
-    let first = match s.iter().position(|&c| c == b'@') {
-        Some(a) => a,
-        None => match s.iter().position(|&c| c == b':') {
-            Some(c) => c,
-            None => return false,
-        },
-    };
-    let mut i = first + 1; // past `@` or scheme colon
-    if s.get(i) == Some(&b'[') {
-        match s.iter().skip(i + 1).position(|&c| c == b']') {
-            None => return false,
-            Some(close) => i = i + 1 + close + 1,
-        }
-    } else {
-        i = scan(s, i, |c| matches!(c, b':' | b';' | b'?' | b'>'));
-    }
-    if s.get(i) != Some(&b':') {
-        return false;
-    }
-    let port_start = i + 1;
-    let port_end = scan(s, port_start, |c| !c.is_ascii_digit());
-    port_end > port_start && s.get(port_end).is_some_and(u8::is_ascii_alphabetic)
 }
 
 /// True iff the sent-by of `via` carries a port followed by alphabetic

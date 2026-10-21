@@ -8,9 +8,13 @@
 
 use smallvec::SmallVec;
 
+use crate::char_class::is_token_char;
+use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::scan::{byte_at, read_quoted, scan_until, skip_ws, sub};
+use super::scan::{
+    byte_at, clamped, index_of, quoted_close, read_quoted, scan_until, skip_ws, sub,
+};
 use super::wire::Wire;
 
 /// What a parameter carries: nothing (`;lr`), a bare token (`;branch=z9hG4bK1`)
@@ -224,6 +228,85 @@ fn collect_semicolon_params(
         }
         i = read_one(base, skip_ws(bytes, at + 1), style, params);
     }
+}
+
+/// Read `*( SEMI generic-param )` from byte `i` to the end of `base`, by RFC
+/// 3261 §25.1: `generic-param = token [ EQUAL gen-value ]`, `gen-value =
+/// token / host / quoted-string`, LWS allowed around `;` and `=`. Anything
+/// else between `i` and the end refuses the list.
+pub(crate) fn read_generic_params(base: &SipStr, mut i: usize) -> Result<Params, SipParseError> {
+    let bytes = base.as_bytes();
+    let text = base.as_str();
+    let mut params = Params::new();
+    loop {
+        i = skip_ws(bytes, i);
+        match byte_at(bytes, i) {
+            None => return Ok(params),
+            Some(b';') => {}
+            Some(_) => {
+                return Err(SipParseError::new(format!(
+                    "unexpected {:?} where a `;` parameter or the end belongs",
+                    clamped(text, i, bytes.len())
+                )))
+            }
+        }
+        let name_at = skip_ws(bytes, i + 1);
+        let name_end = token_end(bytes, name_at);
+        i = skip_ws(bytes, name_end);
+        let after_name = byte_at(bytes, i);
+        if name_end == name_at || !matches!(after_name, None | Some(b'=' | b';')) {
+            return Err(SipParseError::new(format!(
+                "parameter name is not a token: {:?}",
+                clamped(text, name_at, bytes.len())
+            )));
+        }
+        let name = sub(base, name_at, name_end);
+        if after_name != Some(b'=') {
+            params.push(name, ParamValue::Flag);
+            continue;
+        }
+        let value_at = skip_ws(bytes, i + 1);
+        let (value, end) = match byte_at(bytes, value_at) {
+            Some(b'"') => {
+                let end = quoted_close(bytes, value_at).ok_or_else(|| {
+                    SipParseError::new(format!("unterminated quoted value of parameter {name}"))
+                })?;
+                (ParamValue::Quoted(read_quoted(base, value_at).0), end)
+            }
+            Some(b'[') => {
+                let close = index_of(bytes, b']', value_at).ok_or_else(|| {
+                    SipParseError::new(format!("unclosed IPv6 reference in parameter {name}"))
+                })?;
+                let end = close + 1;
+                let inner = clamped(text, value_at + 1, close);
+                if !inner.contains(':') || super::uri::host_refusal(inner).is_some() {
+                    return Err(SipParseError::new(format!(
+                        "parameter {name}: invalid IPv6 reference [{inner}]"
+                    )));
+                }
+                (ParamValue::Token(sub(base, value_at, end)), end)
+            }
+            _ => {
+                let end = token_end(bytes, value_at);
+                if end == value_at {
+                    return Err(SipParseError::new(format!(
+                        "value of parameter {name} is not a token, host or quoted-string"
+                    )));
+                }
+                (ParamValue::Token(sub(base, value_at, end)), end)
+            }
+        };
+        params.push(name, value);
+        i = end;
+    }
+}
+
+/// The end of the run of token characters starting at `i`.
+fn token_end(s: &[u8], mut i: usize) -> usize {
+    while byte_at(s, i).is_some_and(is_token_char) {
+        i += 1;
+    }
+    i
 }
 
 /// Read comma-separated `name=value` parameters covering all of `base` from

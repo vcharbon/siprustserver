@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
+use sip_message::{SipMessage, SipParser, SipParserLimits};
 use sip_net::types::BindUdpOpts;
 use sip_net::SignalingNetwork;
 use sip_net_testkit::SimulatedSignalingNetwork;
@@ -100,11 +100,13 @@ Content-Length: 0\r\n\r\n"
 }
 
 // An out-of-range URI port (70596 & 0xFFFF == 5060) must read as malformed,
-// never silently truncate into an alias of the proxy's own address.
+// never silently truncate into an alias of the proxy's own address: the wire
+// parse refuses the request, and a read without the wire grammar keeps the
+// route foreign.
 #[tokio::test]
 async fn oversized_route_port_does_not_alias_the_advertised_address() {
     let (core, _metrics) = core_with_metrics().await;
-    let req = parse_req(&format!(
+    let raw = format!(
         "BYE sip:b2bua@{W1}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKbig;rport\r\n\
 Max-Forwards: 70\r\n\
@@ -114,7 +116,10 @@ Call-ID: bigport-1@test\r\n\
 CSeq: 2 BYE\r\n\
 Route: <sip:{PROXY_VIP}:70596;lr>\r\n\
 Content-Length: 0\r\n\r\n"
-    ));
+    );
+    assert!(CustomParser::default().parse(raw.as_bytes()).is_err(), "the wire parse refuses it");
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let req = CustomParser::with_limits(lenient).parse(raw.as_bytes()).unwrap();
     let outcome = core.route_request_from(&req, format!("{UAC}:5060").parse().unwrap()).await;
     // A 70596→5060 wrap would match the advertised VIP and strip the entry
     // as a self-route. It must stay foreign (and being malformed, it can't

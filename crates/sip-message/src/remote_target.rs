@@ -4,17 +4,16 @@
 //! header params, in their captured placement); matching compares the user part
 //! and the two parameter sets (URI vs header) separately, host:port ignored.
 //!
-//! Structured parsing goes through the one SIP parser (`parse_name_addr` /
-//! `parse_sip_uri_string`); only the host:port *rewrite* is targeted string
+//! Structured parsing goes through the parser's name-addr scan and the one URI
+//! reader ([`Uri::parse`]); only the host:port *rewrite* is targeted string
 //! surgery, because reconstructing from the sorted parsed param maps would lose
 //! the captured parameter order/placement the model must preserve.
 
 use std::collections::BTreeMap;
 
+use crate::header::Uri;
 use crate::parser::custom::compact_forms::expanded_name;
-use crate::parser::custom::structured_headers::{
-    parse_name_addr, parse_sip_uri_string, split_top_level_commas,
-};
+use crate::parser::custom::structured_headers::{parse_name_addr, split_top_level_commas};
 use crate::sip_str::SipStr;
 
 /// Canonical, case-folded header name (compact forms expanded).
@@ -50,12 +49,9 @@ fn params_to_map(params: crate::header::Params) -> BTreeMap<String, String> {
 
 fn parse_element(elem: &str) -> RtElement {
     let na = parse_name_addr(&SipStr::owned(elem.trim()));
-    let (user, uri_params) = match parse_sip_uri_string(&na.uri) {
-        Some(u) => (
-            u.user.map(String::from),
-            u.params.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), String::from(v))).collect(),
-        ),
-        None => (None, BTreeMap::new()),
+    let (user, uri_params) = match Uri::parse(&na.uri) {
+        Ok(u) => (u.user().map(String::from), params_to_map(u.params().clone())),
+        Err(_) => (None, BTreeMap::new()),
     };
     RtElement { user, uri_params, header_params: params_to_map(na.params) }
 }
@@ -70,8 +66,9 @@ pub fn parse_elements(value: &str) -> Vec<RtElement> {
 pub fn first_hostport(value: &str) -> Option<(String, u16)> {
     let first = split_top_level_commas(value).into_iter().next()?;
     let na = parse_name_addr(&SipStr::owned(first.trim()));
-    let u = parse_sip_uri_string(&na.uri)?;
-    Some((u.host.into(), u16::try_from(u.port.unwrap_or(5060)).ok()?))
+    let u = Uri::parse(&na.uri).ok()?;
+    let (host, port) = u.host_port();
+    Some((host.to_string(), port))
 }
 
 /// Replace the host:port span of a single SIP-URI string, preserving scheme,

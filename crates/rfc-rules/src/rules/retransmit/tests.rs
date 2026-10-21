@@ -514,7 +514,7 @@ fn forwarded(at_us: u64, raw: &str) -> Msg {
 }
 
 const OWN_COOKIE_B2: &str = "Record-Route: <sip:10.0.0.9:5080;w_pri=b1;w_bak=b2;lr>";
-const OWN_COOKIE_NONE: &str = "Record-Route: <sip:10.0.0.9:5080;w_pri=b1;w_bak=\"\";lr>";
+const OWN_COOKIE_NONE: &str = "Record-Route: <sip:10.0.0.9:5080;w_pri=b1;w_bak;lr>";
 const OWN_OUTBOUND: &str = "Record-Route: <sip:10.0.0.9:5080;outbound;lr>";
 const FOREIGN: &str = "Record-Route: <sip:10.0.0.7:5060;lr>";
 

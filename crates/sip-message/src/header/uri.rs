@@ -10,9 +10,12 @@ use std::borrow::Cow;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::params::{parse_semicolon_params, ParamValue, Params, URI_PARAMS};
-use super::scan::{byte_at, clamped, digits_end, index_of, parse_port, scan_until, sub, sub_lower};
+use super::params::{ParamValue, Params};
+use super::scan::{byte_at, clamped, digits_end, index_of, parse_port, scan_until, sub};
 use super::wire::Wire;
+
+mod read;
+pub(crate) use read::host_refusal;
 
 /// A host with an optional explicit port. An IPv6 literal is held WITHOUT its
 /// brackets; [`render`](Self::render) puts them back.
@@ -122,8 +125,9 @@ pub struct Uri {
     user: Option<SipStr>,
     authority: HostPort,
     params: Params,
-    /// The `?a=b&c=d` escaped-header list (RFC 3261 §19.1.1), verbatim. A pair
-    /// written without its `=` carries no value and renders back without one.
+    /// The `?a=b&c=d` escaped-header list (RFC 3261 §19.1.1), verbatim. A
+    /// sip/sips pair always carries a value; a pair of another scheme written
+    /// without its `=` carries none and renders back without one.
     headers: Vec<(SipStr, Option<SipStr>)>,
     /// The text this URI was read from, dropped by the first update.
     source: Option<SipStr>,
@@ -389,48 +393,20 @@ impl Uri {
         self.normalized()
     }
 
-    /// Read a whole URI. The value must carry a scheme colon; anything looser
-    /// is [`opaque`](Self::opaque) territory, not a URI. Every byte of the
-    /// authority is either read into a part or refused — an unbracketed IPv6
-    /// host is an error, not a host truncated at its first colon.
+    /// Read a whole URI, surrounding whitespace aside. The value must carry a
+    /// scheme colon; anything looser is [`opaque`](Self::opaque) territory,
+    /// not a URI. A `sip` / `sips` URI is held to the RFC 3261 §25.1 grammar
+    /// byte for byte; another scheme to the URI character set (ADR-0053).
     pub fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let value = raw.trimmed();
-        let bytes = value.as_bytes();
-        let len = bytes.len();
-        let colon = index_of(bytes, b':', 0).ok_or_else(|| {
-            SipParseError::new(format!("URI has no scheme: {:?}", value.as_str()))
-        })?;
-        let scheme = sub_lower(&value, 0, colon);
-        let mut i = colon + 1;
+        Self::read_exact(&raw.trimmed())
+    }
 
-        // Userinfo may itself contain `;` (RFC 3261 §19.1.1 escaped user), so
-        // the `@` search runs to the end of the value rather than stopping at
-        // the first parameter.
-        let at = scan_until(bytes, i, b"@>");
-        let user = if byte_at(bytes, at) == Some(b'@') {
-            let u = sub(&value, i, at);
-            i = at + 1;
-            Some(u)
-        } else {
-            None
-        };
-
-        let (authority, after_host) = HostPort::parse_at(&value, i)?;
-        let (params, after_params) = parse_semicolon_params(&value, after_host, &URI_PARAMS);
-
-        let mut headers = Vec::new();
-        if byte_at(bytes, after_params) == Some(b'?') {
-            for pair in clamped(value.as_str(), after_params + 1, len).split('&') {
-                match pair.split_once('=') {
-                    Some((name, val)) => {
-                        headers.push((value.reslice(name), Some(value.reslice(val))))
-                    }
-                    None => headers.push((value.reslice(pair), None)),
-                }
-            }
-        }
-
-        Ok(Self { scheme, user, authority, params, headers, source: Some(value) })
+    /// Read all of `value` as one URI, whitespace included: the reading of a
+    /// URI whose surroundings already delimit it (a Request-URI, the inside of
+    /// `<...>`), where a space is a byte of the URI and refuses it.
+    pub(crate) fn read_exact(value: &SipStr) -> Result<Self, SipParseError> {
+        let read::UriParts { scheme, user, authority, params, headers } = read::read(value)?;
+        Ok(Self { scheme, user, authority, params, headers, source: Some(value.clone()) })
     }
 
     /// [`parse`](Self::parse), falling back to [`opaque`](Self::opaque): text no

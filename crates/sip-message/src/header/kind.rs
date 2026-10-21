@@ -10,6 +10,7 @@
 //! prelude's `From` trait.
 
 use super::name::HeaderName;
+use super::name_addr::AddrForm;
 use super::value::Folding;
 
 /// `2^31 - 1` — the ceiling RFC 3261 puts on the 32-bit signed counters.
@@ -23,7 +24,10 @@ pub trait HeaderKind: std::fmt::Debug + Clone + Copy + Send + Sync + 'static {
 }
 
 /// A header whose value is a name-addr.
-pub trait NameAddrKind: HeaderKind {}
+pub trait NameAddrKind: HeaderKind {
+    /// Where this header's grammar lets its address stand.
+    const FORM: AddrForm = AddrForm::NameAddrOrSpec;
+}
 
 /// A name-addr header whose grammar admits header parameters. Absent on
 /// P-Asserted-Identity and P-Preferred-Identity, whose RFC 3325 grammar is a
@@ -144,9 +148,21 @@ kinds! {
 }
 
 capability! { NameAddrKind:
-    From, To, Contact, Route, RecordRoute, Path, ServiceRoute, ReferTo, ReferredBy, ReplyTo,
-    Diversion, HistoryInfo, RemotePartyId, PAssertedIdentity, PPreferredIdentity,
+    From, To, Contact, ReferTo, ReferredBy, ReplyTo, Diversion, HistoryInfo, RemotePartyId,
+    PAssertedIdentity, PPreferredIdentity,
 }
+
+/// The route family: `route-param = name-addr *( SEMI rr-param )` (RFC 3261
+/// §20.30, §20.34; RFC 3327 §4; RFC 3608 §5).
+macro_rules! route_kinds {
+    ($($marker:ident),+) => {
+        $(impl NameAddrKind for $marker {
+            const FORM: AddrForm = AddrForm::NameAddrOnly;
+        })+
+    };
+}
+
+route_kinds!(Route, RecordRoute, Path, ServiceRoute);
 
 capability! { RichParams:
     From, To, Contact, Route, RecordRoute, Path, ServiceRoute, ReferTo, ReferredBy, ReplyTo,

@@ -14,8 +14,9 @@ each message through both and compares what they read.
 
 ## The gates beyond the grammar
 
-The wire-grammar gates mostly enforce RFC 3261 §25.1 as written. These refuse
-what the grammar or the RFC's compatibility rules admit, on purpose:
+The wire-grammar gates mostly enforce RFC 3261 §25.1 as written, every URI
+through one reader (ADR-0053). These refuse what the grammar or the RFC's
+compatibility rules admit, on purpose:
 
 - **The magic cookie.** The topmost Via's branch starts with `z9hG4bK`
   (§8.1.1.7). A scope choice: RFC 2543 elements are not served, departing from
@@ -26,6 +27,9 @@ what the grammar or the RFC's compatibility rules admit, on purpose:
   name any transport §25.1 admits.
 - **Ports.** A port is at most 65535; port 0 is refused on the topmost Via and
   in a URI, and read on a lower Via.
+- **IPv4 octets.** An octet of an IPv4 host in a URI or a Via sent-by is at
+  most 255 and carries no leading zero (`1*3DIGIT` admits both): an octal
+  reading of `010` names another host.
 - **One From tag.** A From with two `tag` parameters is refused (§8.1.1.3,
   §19.3).
 - **Readable credentials.** An Authorization or Proxy-Authorization whose

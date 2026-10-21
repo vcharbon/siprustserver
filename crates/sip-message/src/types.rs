@@ -100,8 +100,7 @@ impl ContactSet {
 
 /// Optional structured headers, parsed **eagerly + non-fatally** (ADR-0003):
 /// each is a `Result` so a malformed optional header does NOT reject the
-/// message, but the error is captured and surfaced on access — and by
-/// [`SipMessage::validate_strict`].
+/// message, but the error is captured and surfaced on access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalHeaders {
     pub p_asserted_identity: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
@@ -253,14 +252,6 @@ impl SipMessage {
     /// The eagerly-parsed optional structured headers.
     pub fn optional(&self) -> &OptionalHeaders {
         &self.core().optional
-    }
-
-    /// Strict header-content validation. `parse()` is tolerant (a malformed
-    /// optional header does not reject the message); this opt-in pass
-    /// re-validates Date/From/To/Contact grammar and every optional structured
-    /// header, returning the first violation.
-    pub fn validate_strict(&self) -> Result<(), crate::error::SipParseError> {
-        crate::parser::custom::optional_headers::run_all_strict(self.headers())
     }
 }
 

@@ -1,7 +1,6 @@
 //! What one routing URI states about where a message goes.
 
 use crate::parser::custom::request_uri::request_uri_refusal;
-use crate::sip_str::SipStr;
 
 /// What one URI states about where a message goes: the canonical text, the
 /// host and effective port RFC 3263 §4 resolves it to, whether it is a loose
@@ -30,7 +29,7 @@ impl UriFacts {
             host: host.to_string(),
             port,
             loose: uri.is_loose_route(),
-            addressable: request_uri_refusal(&SipStr::owned(&uri.text())).is_ok(),
+            addressable: request_uri_refusal(uri).is_ok(),
         }
     }
 }

@@ -401,7 +401,8 @@ fn more_synthetic() -> Vec<(&'static str, Vec<u8>)> {
             "héllo wörld €",
         ),
     ));
-    // A user part in raw UTF-8, which RFC 3261 §25.1 admits only escaped.
+    // A user part in raw UTF-8, which RFC 3261 §25.1 admits only escaped: the
+    // parser refuses the message.
     seeds.push((
         "utf8-raw-user",
         message(

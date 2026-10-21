@@ -132,7 +132,7 @@ impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        NameAddr::parse(raw).map(Self::new)
+        NameAddr::parse_as(raw, K::FORM).map(Self::new)
     }
 
     fn render(&self, out: &mut Wire) {

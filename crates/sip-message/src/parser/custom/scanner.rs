@@ -17,25 +17,6 @@ pub const CR: u8 = 0x0d; // \r
 pub const LF: u8 = 0x0a; // \n
 pub const COLON: u8 = 0x3a; // :
 
-/// RFC 3261 token character: alphanum + `-.!%*_+\`'~`.
-pub fn is_token_char(b: u8) -> bool {
-    matches!(b,
-        0x41..=0x5a // A-Z
-        | 0x61..=0x7a // a-z
-        | 0x30..=0x39 // 0-9
-        | 0x2d // -
-        | 0x2e // .
-        | 0x21 // !
-        | 0x25 // %
-        | 0x2a // *
-        | 0x5f // _
-        | 0x2b // +
-        | 0x60 // `
-        | 0x27 // '
-        | 0x7e // ~
-    )
-}
-
 pub fn is_digit(b: u8) -> bool {
     b.is_ascii_digit()
 }

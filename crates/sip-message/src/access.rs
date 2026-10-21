@@ -57,7 +57,7 @@ fn recorded_routes(
 ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
     let set = values_of::<header::RecordRouteEntry>(headers)?;
     for entry in &set {
-        request_uri_refusal(&SipStr::owned(&entry.uri().text()))?;
+        request_uri_refusal(entry.uri())?;
     }
     Ok(HeaderList::new(set))
 }
@@ -180,11 +180,6 @@ macro_rules! core_read_surface {
                 &self,
             ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
                 recorded_routes(self.headers())
-            }
-
-            /// Strict header-content validation — the opt-in re-parse pass.
-            pub fn validate_strict(&self) -> Result<(), SipParseError> {
-                crate::parser::custom::optional_headers::run_all_strict(self.headers())
             }
         }
     };

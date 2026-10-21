@@ -6,10 +6,8 @@
 //! dumped verbatim from the TS source (the `sipMsg` template results) so the
 //! wire bytes match 1:1.
 //!
-//! The TS matrix tests valid/CVE/param-gap/IPv6 with eager `parse` only, and
-//! invalid/strict-valid with `parseStrict` (eager + `runAllStrictLazyParsers`).
-//! We mirror that split: [`verdict_eager`] vs [`verdict_strict`] (the latter
-//! runs `SipMessage::validate_strict()`), selected per category.
+//! Every category is read by the one default parse: the grammar of RFC 3261
+//! §25.1 and the gates of ADR-0001 are all held at parse time.
 
 use std::collections::HashSet;
 use std::fs;
@@ -25,27 +23,17 @@ fn fixture(category: &str, name: &str) -> Vec<u8> {
     fs::read(&p).unwrap_or_else(|e| panic!("read fixture {p:?}: {e}"))
 }
 
-/// Eager parse only — the TS `impl.parse(buf)`.
-fn verdict_eager(bytes: &[u8]) -> Result<(), String> {
+fn verdict(bytes: &[u8]) -> Result<(), String> {
     CustomParser::new().parse(bytes).map(|_| ()).map_err(|e| e.reason)
-}
-
-/// Eager parse + strict pass — the TS `parseStrict` (rejection at either step
-/// counts). The strict pass intentionally over-rejects some RFC-valid torture
-/// display names, so the TS applies it ONLY to the invalid + strict-valid
-/// corpora — never the full valid torture set.
-fn verdict_strict(bytes: &[u8]) -> Result<(), String> {
-    let msg = CustomParser::new().parse(bytes).map_err(|e| e.reason)?;
-    msg.validate_strict().map_err(|e| e.reason)
 }
 
 /// Run a category: assert each fixture's accept/reject matches expectation,
 /// collecting every mismatch so one run surfaces them all.
-fn run_category(category: &str, names: &[&str], expect_reject: &HashSet<&str>, strict: bool) {
+fn run_category(category: &str, names: &[&str], expect_reject: &HashSet<&str>) {
     let mut mismatches: Vec<String> = Vec::new();
     for &name in names {
         let bytes = fixture(category, name);
-        let v = if strict { verdict_strict(&bytes) } else { verdict_eager(&bytes) };
+        let v = verdict(&bytes);
         let should_reject = expect_reject.contains(name);
         match (&v, should_reject) {
             (Ok(()), true) => {
@@ -92,7 +80,7 @@ fn rfc4475_valid() {
     // requests, refused by scope choice (ADR-0001 gates, departing from RFC
     // 3261 §17.2.3).
     let reject = set(&["shortTorturousInvite", "longValues"]);
-    run_category("rfc4475-valid", &names, &reject, false);
+    run_category("rfc4475-valid", &names, &reject);
 }
 
 // ---------------------------------------------------------------------------
@@ -122,16 +110,12 @@ fn rfc4475_invalid() {
         "unknownMethodMismatch",       // 3.1.2.18
         "overlargeResponseCode",       // 3.1.2.19
     ];
-    // Reject every invalid fixture EXCEPT the two the TS `custom` column is
-    // also lenient on — start-line *shape* malformations that sit outside both
-    // the eager strict-header pipeline and the strict re-parsers:
-    //   - trailingSpacesInRequestLine (3.1.2.10)
-    //   - escapedHeadersInUri (3.1.2.11)
-    // The Date / bare-addr-spec / non-token-display cases (3.1.2.12/.13/.15)
-    // are caught by `validate_strict()` (the strict re-parsers).
-    let lenient = set(&["trailingSpacesInRequestLine", "escapedHeadersInUri"]);
+    // Reject every invalid fixture except trailingSpacesInRequestLine
+    // (3.1.2.10), whose trailing SP the start-line reader leaves to the
+    // Request-URI split.
+    let lenient = set(&["trailingSpacesInRequestLine"]);
     let reject: HashSet<&str> = names.iter().copied().filter(|n| !lenient.contains(n)).collect();
-    run_category("rfc4475-invalid", &names, &reject, true);
+    run_category("rfc4475-invalid", &names, &reject);
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +126,7 @@ fn rfc4475_invalid() {
 fn cve_regression() {
     let names = ["cve_2023_27598", "cve_2023_27599", "cve_2023_28098"];
     let reject = set(&names);
-    run_category("cve", &names, &reject, false);
+    run_category("cve", &names, &reject);
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +149,7 @@ fn param_grammar_gaps() {
         "requestUriCtlInParamName",
     ];
     let reject = set(&names);
-    run_category("param-gaps", &names, &reject, false);
+    run_category("param-gaps", &names, &reject);
 }
 
 // ---------------------------------------------------------------------------
@@ -187,10 +171,10 @@ fn rfc5118_ipv6() {
         "v410a_extraColon",
         "v410b_correctIpv4InIpv6",
     ];
-    run_category("ipv6", &valid, &HashSet::new(), false); // all must parse
+    run_category("ipv6", &valid, &HashSet::new()); // all must parse
 
     let invalid = ["v42_ipv6NoBrackets"];
-    run_category("ipv6", &invalid, &set(&invalid), false); // unbracketed IPv6 in R-URI
+    run_category("ipv6", &invalid, &set(&invalid)); // unbracketed IPv6 in R-URI
 }
 
 // ---------------------------------------------------------------------------
@@ -201,5 +185,5 @@ fn rfc5118_ipv6() {
 fn strict_valid_canonical() {
     let names =
         ["dateGmt", "fromQuotedDisplay", "fromTokenDisplay", "contactNameAddr", "contactBareUri"];
-    run_category("strict-valid", &names, &HashSet::new(), true);
+    run_category("strict-valid", &names, &HashSet::new());
 }

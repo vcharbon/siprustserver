@@ -13,8 +13,8 @@ use lookup_map::LookupSet;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
-use crate::parser::custom::scanner::is_token_char;
 use crate::sip_str::SipStr;
 
 use super::kind::TokenKind;

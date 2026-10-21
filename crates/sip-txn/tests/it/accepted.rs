@@ -30,6 +30,8 @@ fn handed_up(events: &[TransactionEvent], method: &str) -> usize {
 /// `inbound_request` addressed to the call `call_ref` names in its
 /// Request-URI, as an in-dialog request routed to this node carries it.
 fn in_dialog_request(method: &str, branch: &str, call_id: &str, call_ref: &str) -> Vec<u8> {
+    // Escaped as the B2BUA writes it: a callRef's `|` is no paramchar.
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     String::from_utf8(inbound_request(method, branch, call_id, Some("peer-tag")))
         .expect("utf-8")
         .replacen(

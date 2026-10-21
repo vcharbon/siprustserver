@@ -6,8 +6,8 @@
 //! are matched on, so a value re-minted mid-path breaks the correlation the
 //! header exists for. `icid-generated-at` names the element that minted it.
 
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
-use crate::parser::custom::scanner::is_token_char;
 use crate::sip_str::SipStr;
 
 use super::name::HeaderName;

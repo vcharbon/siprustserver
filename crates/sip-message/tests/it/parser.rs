@@ -2,10 +2,8 @@
 //! Port of `tests/sip/Parser.test.ts`.
 //!
 //! The accept/reject verdicts overlap `compliance_matrix.rs`; what this file
-//! adds is (a) assertions on the *parsed field content* of the messages that
-//! parse, and (b) the eager-only §3.1.2 leniency split — `parse()` alone
-//! accepts the Date / bare-addr-spec / non-token-display cases that
-//! `validate_strict()` (exercised in the compliance matrix) rejects.
+//! adds is assertions on the *parsed field content* of the messages that
+//! parse, and the one §3.1.2 message `parse()` still reads.
 
 use std::fs;
 use std::path::PathBuf;
@@ -107,7 +105,11 @@ fn invalid_messages_rejected_by_eager_parse() {
         "angleBracketRequestUri",   // 3.1.2.7
         "embeddedLwsInUri",         // 3.1.2.8
         "multipleSPInRequestLine",  // 3.1.2.9
+        "escapedHeadersInUri",      // 3.1.2.11
+        "invalidTimezone",          // 3.1.2.12
+        "unencloseNameAddr",        // 3.1.2.13
         "spacesInAddrSpec",         // 3.1.2.14
+        "nonTokenDisplayName",      // 3.1.2.15
         "unknownProtocolVersion",   // 3.1.2.16
         "methodMismatch",           // 3.1.2.17
         "unknownMethodMismatch",    // 3.1.2.18
@@ -118,21 +120,12 @@ fn invalid_messages_rejected_by_eager_parse() {
     }
 }
 
-// --- §3.1.2 cases the EAGER parser accepts (validate_strict rejects them; see
-//     compliance_matrix.rs) — documents the tolerant-parse / strict-validate split ---
+// --- §3.1.2 the parser still reads ---
 
 #[test]
-fn invalid_messages_accepted_eagerly_as_request() {
-    let accepted = [
-        "trailingSpacesInRequestLine", // 3.1.2.10
-        "escapedHeadersInUri",         // 3.1.2.11
-        "invalidTimezone",             // 3.1.2.12
-        "unencloseNameAddr",           // 3.1.2.13
-        "nonTokenDisplayName",         // 3.1.2.15
-    ];
-    for name in accepted {
-        let msg = parse("rfc4475-invalid", name)
-            .unwrap_or_else(|e| panic!("{name} should parse eagerly: {}", e.reason));
-        assert!(matches!(msg, SipMessage::Request(_)), "{name}: expected request");
-    }
+fn trailing_spaces_in_the_request_line_still_read_as_a_request() {
+    let name = "trailingSpacesInRequestLine"; // 3.1.2.10
+    let msg = parse("rfc4475-invalid", name)
+        .unwrap_or_else(|e| panic!("{name} should parse: {}", e.reason));
+    assert!(matches!(msg, SipMessage::Request(_)), "{name}: expected request");
 }

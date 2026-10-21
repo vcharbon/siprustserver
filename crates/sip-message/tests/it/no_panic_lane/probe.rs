@@ -106,7 +106,6 @@ fn parsed_message(msg: &SipMessage, strict: bool, d: &mut Digest) {
     d.note("message", msg);
     d.note("serialize", &sip_message::serialize(msg));
     d.note("summary", &sip_message::message_summary(msg));
-    d.note("strict", &msg.validate_strict());
     d.note("layout", &BodyLayout::of(msg));
     d.note("payload", &Payload::of_datagram(msg.image()).bytes());
     let projection = HeaderProjection::of(msg);

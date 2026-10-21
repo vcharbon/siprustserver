@@ -6,10 +6,11 @@
 
 use super::compact_forms::expand_compact_form;
 use super::scanner::{
-    decode, is_token_char, is_wsp, strict_non_negative_decimal, trim_span, HeaderValue, Scanner,
-    Span, COLON, CR, HTAB, LF,
+    decode, is_wsp, strict_non_negative_decimal, trim_span, HeaderValue, Scanner, Span, COLON, CR,
+    HTAB, LF,
 };
 use super::structured_headers::split_top_level_commas;
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::header::HeaderName;
 use crate::parser::SipParserLimits;
@@ -126,6 +127,13 @@ pub fn parse_headers(
         let raw_name = read_header_name(s)?;
         if raw_name.is_empty() {
             return Err(SipParseError::new(format!("Empty header name at position {}", s.pos())));
+        }
+        let name_bytes = image.as_bytes().get(raw_name.clone());
+        if limits.wire_grammar && !name_bytes.is_some_and(|n| n.iter().all(|&b| is_token_char(b))) {
+            return Err(SipParseError::new(format!(
+                "Header name is not a token at position {}",
+                raw_name.start
+            )));
         }
 
         s.expect(COLON)?;

@@ -16,7 +16,7 @@ pub use uri_facts::UriFacts;
 pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
 pub use via_stamp::relay_stamp_spans;
 
-use crate::parser::custom::scanner::is_token_char;
+use crate::char_class::is_token_char;
 use crate::trace_sample::{TraceSample, TRACE_SAMPLE_HEADER};
 
 fn as_str(raw: &[u8]) -> Cow<'_, str> {

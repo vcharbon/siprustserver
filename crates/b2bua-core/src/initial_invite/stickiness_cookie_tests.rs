@@ -10,11 +10,12 @@ use super::build_initial_call;
 use super::topology_cookie::{read_topology_cookie, CookieRead};
 use crate::config::B2buaConfig;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser, SipRequest};
+use sip_message::{SipMessage, SipParser, SipParserLimits, SipRequest};
 use std::net::SocketAddr;
 
-/// A port no reader accepts (RFC 3261 §19.1.1 `port` is 16-bit): the message
-/// parses, the recorded route does not.
+/// A port no reader accepts (RFC 3261 §19.1.1 `port` is 16-bit): the wire
+/// parse refuses the message, a read without the wire grammar keeps it and the
+/// recorded-route read refuses the route.
 const UNREADABLE_RR: &str = "<sip:10.0.0.9:70596;v=3;w_pri=w0;w_bak=w1;lr>";
 
 /// The proxy's double-record-route as it arrives on an inbound INVITE: the
@@ -23,11 +24,32 @@ const COOKIE_RR: &str =
     "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;v=3;w_pri=w7;w_bak=w9;lr>";
 
 fn invite_with_record_route(rr: Option<&str>) -> SipRequest {
+    read_invite(rr, &CustomParser::new())
+}
+
+/// The INVITE as a message read without the wire grammar holds it.
+fn lenient_invite_with_record_route(rr: &str) -> SipRequest {
+    assert!(
+        CustomParser::new().parse(raw_invite(Some(rr)).as_bytes()).is_err(),
+        "the wire parse refuses a recorded route no reader accepts"
+    );
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    read_invite(Some(rr), &CustomParser::with_limits(lenient))
+}
+
+fn read_invite(rr: Option<&str>, parser: &CustomParser) -> SipRequest {
+    match parser.parse(raw_invite(rr).as_bytes()).expect("fixture INVITE should parse") {
+        SipMessage::Request(r) => r,
+        SipMessage::Response(_) => panic!("expected a request"),
+    }
+}
+
+fn raw_invite(rr: Option<&str>) -> String {
     let rr_line = match rr {
         Some(v) => format!("Record-Route: {v}\r\n"),
         None => String::new(),
     };
-    let raw = format!(
+    format!(
         "INVITE sip:bob@example.com SIP/2.0\r\n\
              Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-cookie-iih\r\n\
              Max-Forwards: 70\r\n\
@@ -38,11 +60,7 @@ fn invite_with_record_route(rr: Option<&str>) -> SipRequest {
              Contact: <sip:alice@10.0.0.9:5060>\r\n\
              {rr_line}\
              Content-Length: 0\r\n\r\n"
-    );
-    match CustomParser::new().parse(raw.as_bytes()).expect("fixture INVITE should parse") {
-        SipMessage::Request(r) => r,
-        SipMessage::Response(_) => panic!("expected a request"),
-    }
+    )
 }
 
 fn call_for(invite: &SipRequest) -> call::Call {
@@ -85,10 +103,10 @@ fn an_unreadable_record_route_is_not_mistaken_for_an_absent_cookie() {
     // Same placement as a cookie-less INVITE — inventing pri/bak from a
     // header we cannot read would have the backup disagree with the proxy's
     // rendezvous choice — but it takes the warning branch, not the quiet one.
-    let invite = invite_with_record_route(Some(UNREADABLE_RR));
+    let invite = lenient_invite_with_record_route(UNREADABLE_RR);
     assert!(
         matches!(read_topology_cookie(&invite, "w0"), CookieRead::Unreadable(_)),
-        "an out-of-range port must fail the recorded-route read, not the message parse"
+        "an out-of-range port fails the recorded-route read"
     );
     assert!(
         call_for(&invite).topology.is_none(),
@@ -102,15 +120,16 @@ fn one_unreadable_recorded_route_hides_a_readable_cookie() {
     // `;outbound` half takes the cookie half down with it. Pinned because it
     // is the reason the warning names the *route*, not the cookie.
     let invite =
-        invite_with_record_route(Some(&format!("<sip:10.0.0.9:70596;outbound;lr>,{COOKIE_RR}")));
+        lenient_invite_with_record_route(&format!("<sip:10.0.0.9:70596;outbound;lr>,{COOKIE_RR}"));
     assert!(matches!(read_topology_cookie(&invite, "w0"), CookieRead::Unreadable(_)));
 }
 
 #[test]
 fn an_empty_w_pri_falls_back_to_this_worker() {
-    // `w_pri` present but empty means the proxy named no primary; the call
-    // is placed here, and `w_bak` still steers the backup.
-    let invite = invite_with_record_route(Some("<sip:10.0.0.9:5060;v=3;w_pri=;w_bak=w9;lr>"));
+    // `w_pri` present but empty (a flag: a URI parameter's value is never
+    // empty) means the proxy named no primary; the call is placed here, and
+    // `w_bak` still steers the backup.
+    let invite = invite_with_record_route(Some("<sip:10.0.0.9:5060;v=3;w_pri;w_bak=w9;lr>"));
     let topology = call_for(&invite).topology.expect("the cookie is still a cookie");
     assert_eq!((topology.pri.as_str(), topology.bak.as_str()), ("w0", "w9"));
 }

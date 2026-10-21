@@ -94,22 +94,22 @@ fn an_unedited_uri_renders_the_bytes_it_was_read_from() {
     assert_eq!(uri(text).scheme(), "sip");
 }
 
+/// `header = hname "=" hvalue` (RFC 3261 §25.1): a sip pair without its `=`
+/// refuses the URI; another scheme keeps the pair valueless and renders it
+/// back without one.
 #[test]
-fn an_escaped_header_with_no_value_survives_a_render() {
-    let one = uri("sip:a@h?X-Trace").normalized();
-    assert_eq!(one.to_string(), "sip:a@h?X-Trace");
-    assert_eq!(one.escaped_headers().collect::<Vec<_>>(), vec![("X-Trace", None)]);
-    assert_eq!(one.escaped_header("X-Trace"), None);
+fn an_escaped_header_with_no_value_is_sip_malformed_and_kept_elsewhere() {
+    assert!(Uri::parse(&SipStr::owned("sip:a@h?X-Trace")).is_err());
+    assert!(Uri::parse(&SipStr::owned("sip:a@h?a=b&X-Trace&c=d")).is_err());
+    assert_eq!(uri("sip:a@h?X-Trace=").normalized().to_string(), "sip:a@h?X-Trace=");
 
-    let mixed = uri("sip:a@h?a=b&X-Trace&c=d").normalized();
-    assert_eq!(mixed.to_string(), "sip:a@h?a=b&X-Trace&c=d");
+    let mixed = uri("im:a@h?a=b&X-Trace&c=d").normalized();
+    assert_eq!(mixed.to_string(), "im:a@h?a=b&X-Trace&c=d");
     assert_eq!(
         mixed.escaped_headers().collect::<Vec<_>>(),
         vec![("a", Some("b")), ("X-Trace", None), ("c", Some("d"))],
     );
-    // A name with an empty value is not the same value as a name without one.
-    assert_eq!(uri("sip:a@h?X-Trace=").normalized().to_string(), "sip:a@h?X-Trace=");
-    assert_ne!(uri("sip:a@h?X-Trace="), uri("sip:a@h?X-Trace"));
+    assert_eq!(mixed.escaped_header("X-Trace"), None);
 }
 
 #[test]

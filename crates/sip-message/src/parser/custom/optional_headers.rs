@@ -1,36 +1,25 @@
-//! Optional structured headers + strict re-parsers. Port of
-//! `src/sip/parsers/custom/lazy-parsers.ts`.
+//! The optional structured headers the parser reads eagerly and non-fatally,
+//! and the Date gate.
 //!
-//! Two roles:
-//!  1. [`extract_optional_indexed`] — eagerly + non-fatally parses every
-//!     optional structured header the dispatch pass located into an
-//!     [`OptionalHeaders`] of `Result`s (per docs/adr/0003: a malformed
-//!     optional header does not reject the message).
-//!  2. [`run_all_strict`] — the port of `runAllStrictLazyParsers`: re-validates
-//!     Date/From/To/Contact grammar + every optional structured header and
-//!     returns the first violation. Backs [`crate::types::SipMessage::validate_strict`].
+//! [`extract_optional_indexed`] parses every optional structured header the
+//! dispatch pass located into an [`OptionalHeaders`] of `Result`s (ADR-0003: a
+//! malformed optional header does not reject the message). The Date gate
+//! holds a Date on wire bytes to its RFC 3261 §20.17 form.
 
 use super::header_index::HeaderIndex;
-use super::scanner::is_token_char;
-use super::structured_headers::{
-    find_uri_embedded_headers_start, parse_name_addr, top_level_comma_entries,
-    validate_strict_sip_uri, ParsedNameAddr,
-};
+use super::structured_headers::top_level_comma_entries;
 use crate::error::SipParseError;
-use crate::header::{HeaderName, HeaderValue, NameAddr, RAck, ReferTo, Uri};
+use crate::header::{HeaderName, HeaderValue, NameAddr, RAck, ReferTo};
 use crate::sip_str::SipStr;
 use crate::types::{OptionalHeaders, SipHeader};
-
-fn to_name_addr(p: ParsedNameAddr) -> NameAddr {
-    NameAddr::from_parts(p.display_name, Uri::parse_or_verbatim(&p.uri), p.params)
-}
 
 // ---------------------------------------------------------------------------
 // Optional header parsers (eager + non-fatal)
 // ---------------------------------------------------------------------------
 
 /// Parse a multi-value name-addr header (flattened across instances and
-/// comma-separated entries). Any malformed entry → `Err`.
+/// comma-separated entries), each entry by the strict name-addr reader. Any
+/// malformed entry → `Err`.
 fn parse_name_addr_list(
     values: &[&SipStr],
     header_name: HeaderName,
@@ -41,19 +30,9 @@ fn parse_name_addr_list(
             if entry.is_empty() {
                 continue;
             }
-            let parsed = parse_name_addr(&v.reslice(entry));
-            if parsed.uri.is_empty() {
-                return Err(SipParseError::new(format!(
-                    "Malformed {header_name} entry: \"{entry}\""
-                )));
-            }
-            if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
-                return Err(SipParseError::new(format!(
-                    "Strict {header_name} URI: {reason} (\"{}\")",
-                    parsed.uri
-                )));
-            }
-            out.push(to_name_addr(parsed));
+            let addr = NameAddr::parse(&v.reslice(entry))
+                .map_err(|e| SipParseError::new(format!("Strict {header_name}: {}", e.reason)))?;
+            out.push(addr);
         }
     }
     Ok(out)
@@ -85,26 +64,9 @@ fn parse_refer_to_header(value: Option<&SipStr>) -> Result<Option<ReferTo>, SipP
     let Some(value) = value else {
         return Ok(None);
     };
-    let parsed = ReferTo::parse(value)
-        .map_err(|_| SipParseError::new(format!("Malformed Refer-To: \"{value}\"")))?;
-    // Strict SIP-URI on the target URI head (without embedded headers).
-    // `find_uri_embedded_headers_start` returns a byte index at the `?` (ASCII
-    // -> char boundary), so the head is a plain borrow.
-    let violation = {
-        let text = parsed.uri().text();
-        let uri_head: &str = match find_uri_embedded_headers_start(&text) {
-            None => &text,
-            Some(q) => text
-                .get(..q)
-                .ok_or_else(|| SipParseError::new(format!("Malformed Refer-To: \"{value}\"")))?,
-        };
-        validate_strict_sip_uri(uri_head)
-            .map(|reason| format!("Strict Refer-To URI: {reason} (\"{uri_head}\")"))
-    };
-    match violation {
-        Some(reason) => Err(SipParseError::new(reason)),
-        None => Ok(Some(parsed)),
-    }
+    ReferTo::parse(value)
+        .map(Some)
+        .map_err(|e| SipParseError::new(format!("Malformed Refer-To: {}", e.reason)))
 }
 
 /// Parse every optional structured header eagerly + non-fatally, from the
@@ -140,7 +102,7 @@ pub fn extract_optional(headers: &[SipHeader]) -> OptionalHeaders {
 }
 
 // ---------------------------------------------------------------------------
-// Strict re-parsers (Date / From / To / Contact)
+// The Date gate
 // ---------------------------------------------------------------------------
 
 const DOW: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -206,171 +168,15 @@ fn parse_date_value_strict(value: &str) -> Result<(), SipParseError> {
     Ok(())
 }
 
-fn parse_date_header_strict(values: &[&SipStr]) -> Result<(), SipParseError> {
+/// Why the Date the message carries is not of the RFC 3261 §20.17 form, if
+/// it is not. Several Date lines are read as one, joined with `, `.
+pub(crate) fn date_refusal(values: &[&SipStr]) -> Result<(), SipParseError> {
     let Some(first) = values.first() else {
         return Ok(());
     };
-    // sip-parser-style split at the day-of-week comma is rejoined with ", ".
     if values.len() == 1 {
         return parse_date_value_strict(first);
     }
     let joined = values.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ");
     parse_date_value_strict(&joined)
-}
-
-fn is_token_char_c(c: char) -> bool {
-    (c as u32) < 0x80 && is_token_char(c as u8)
-}
-
-/// Validate an UNQUOTED display name (tokens joined by LWS). `Bell, Alexander`
-/// fails (`,` not a token char); `J Rosenberg` passes.
-fn is_valid_unquoted_display_name(s: &str) -> bool {
-    for c in s.chars() {
-        if c == ' ' || c == '\t' {
-            continue;
-        }
-        if !is_token_char_c(c) {
-            return false;
-        }
-    }
-    true
-}
-
-fn index_of(s: &[char], needle: char, from: usize) -> Option<usize> {
-    let at = s.get(from..)?.iter().position(|&c| c == needle)?;
-    from.checked_add(at)
-}
-
-/// Validate the `<...>` envelope at `lt` (must be `<`): no LWS inside, must close.
-fn validate_angle_section(s: &[char], lt: usize, header_name: &str) -> Result<(), SipParseError> {
-    if s.get(lt) != Some(&'<') {
-        return Err(SipParseError::new(format!("Strict {header_name}: expected \"<\"")));
-    }
-    let gt = match index_of(s, '>', lt + 1) {
-        Some(g) => g,
-        None => {
-            return Err(SipParseError::new(format!("Strict {header_name}: unterminated \"<...>\"")))
-        }
-    };
-    if matches!(s.get(lt + 1), Some(' ' | '\t')) {
-        return Err(SipParseError::new(format!(
-            "Strict {header_name}: LWS inside \"<...>\" addr-spec"
-        )));
-    }
-    if matches!(gt.checked_sub(1).and_then(|k| s.get(k)), Some(' ' | '\t')) {
-        return Err(SipParseError::new(format!(
-            "Strict {header_name}: LWS inside \"<...>\" addr-spec"
-        )));
-    }
-    Ok(())
-}
-
-/// Re-scan a From/To/Contact value with stricter rules than `parse_name_addr`:
-/// non-token unquoted display name (3.1.2.15), LWS inside `<...>` (3.1.2.14),
-/// bare addr-spec carrying `?embedded` headers (3.1.2.13), missing scheme.
-fn validate_name_addr_strict(value: &str, header_name: &str) -> Result<(), SipParseError> {
-    let s: Vec<char> = value.chars().collect();
-    let len = s.len();
-    let at = |k: usize| s.get(k).copied();
-    let mut i = 0;
-    while matches!(at(i), Some(' ' | '\t')) {
-        i += 1;
-    }
-
-    // Quoted display name: tolerate trailing bytes before `<` (wsinv), but the
-    // `<...>` section (if present) must still be LWS-free.
-    if at(i) == Some('"') {
-        i += 1;
-        let mut closed = false;
-        while let Some(c) = at(i) {
-            if c == '\\' && i + 1 < len {
-                i += 2;
-                continue;
-            }
-            if c == '"' {
-                i += 1;
-                closed = true;
-                break;
-            }
-            i += 1;
-        }
-        if !closed {
-            return Err(SipParseError::new(format!(
-                "Strict {header_name}: unterminated quoted display name"
-            )));
-        }
-        return match index_of(&s, '<', i) {
-            None => Ok(()),
-            Some(lt) => validate_angle_section(&s, lt, header_name),
-        };
-    }
-
-    // Unquoted display name before `<`.
-    if let Some(lt) = index_of(&s, '<', i) {
-        let dn: String = s.iter().take(lt).skip(i).collect::<String>().trim_end().to_string();
-        if !is_valid_unquoted_display_name(&dn) {
-            return Err(SipParseError::new(format!(
-                "Strict {header_name}: non-token char in unquoted display name \"{dn}\""
-            )));
-        }
-        return validate_angle_section(&s, lt, header_name);
-    }
-
-    // Bare addr-spec. `?` in the URI head requires name-addr form (3.1.2.13).
-    let semi_or_end = index_of(&s, ';', i).unwrap_or(len);
-    let head = || s.iter().take(semi_or_end).skip(i);
-    if head().any(|&c| c == '?') {
-        return Err(SipParseError::new(format!(
-            "Strict {header_name}: bare addr-spec with embedded \"?headers\"; name-addr \"<sip:...>\" form required"
-        )));
-    }
-    // An addr-spec MUST contain a scheme colon.
-    let has_colon = head().any(|&c| c == ':');
-    if !has_colon {
-        let trimmed: String = s.iter().skip(i).collect::<String>().trim().to_string();
-        if !trimmed.is_empty() {
-            return Err(SipParseError::new(format!(
-                "Strict {header_name}: addr-spec required, got \"{trimmed}\""
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_contact_strict(values: &[&SipStr]) -> Result<(), SipParseError> {
-    for v in values {
-        for entry in top_level_comma_entries(v) {
-            if entry.is_empty() {
-                continue;
-            }
-            validate_name_addr_strict(entry, "Contact")?;
-        }
-    }
-    Ok(())
-}
-
-/// Run every strict re-parser + optional-header parser; return the first
-/// failure. Port of `runAllStrictLazyParsers`.
-pub fn run_all_strict(headers: &[SipHeader]) -> Result<(), SipParseError> {
-    let idx = HeaderIndex::build(headers);
-    parse_date_header_strict(&idx.date)?;
-    if let Some(from) = idx.from.first {
-        validate_name_addr_strict(from, "From")?;
-    }
-    if let Some(to) = idx.to.first {
-        validate_name_addr_strict(to, "To")?;
-    }
-    validate_contact_strict(&idx.contact)?;
-    let opt = extract_optional_indexed(&idx);
-    opt.p_asserted_identity?;
-    opt.p_preferred_identity?;
-    opt.diversion?;
-    opt.history_info?;
-    opt.remote_party_id?;
-    opt.geolocation?;
-    opt.geolocation_error?;
-    opt.geolocation_routing?;
-    opt.rack?;
-    opt.refer_to?;
-    Ok(())
 }

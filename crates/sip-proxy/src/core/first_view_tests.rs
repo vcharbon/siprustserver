@@ -107,7 +107,12 @@ fn cookie_uri(f: &Fixture, primary: &str) -> String {
         .strategy
         .encode_stickiness(&ProxyAddr::new(primary, 5060), &initial("INVITE", "z9hG4bKinv"))
         .unwrap();
-    let params: String = params.iter().map(|(k, v)| format!(";{k}={v}")).collect();
+    // A URI parameter's value is never empty (RFC 3261 §25.1): an empty one
+    // rides as a flag, as the proxy writes it.
+    let params: String = params
+        .iter()
+        .map(|(k, v)| if v.is_empty() { format!(";{k}") } else { format!(";{k}={v}") })
+        .collect();
     format!("sip:{PROXY_VIP}:5060;lr{params}")
 }
 

@@ -18,12 +18,14 @@ use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 
 pub(crate) mod compact_forms;
 pub mod contact_entries;
+mod dialog_ids;
 pub mod extract_fields;
 pub mod header_index;
 pub mod headers;
 pub mod optional_headers;
 mod port_garbage;
 pub(crate) mod request_uri;
+mod routes;
 pub mod scanner;
 pub mod start_line;
 pub mod structured_headers;

@@ -92,6 +92,19 @@ pub(crate) fn read_quoted(base: &SipStr, mut i: usize) -> (SipStr, usize) {
     (finish_quoted(base, rebuilt, s, run_start, bytes.len()), i)
 }
 
+/// The position after the `"` closing the quoted string opened at byte
+/// `open`, a `\` escaping the byte after it; `None` when nothing closes it.
+pub(crate) fn quoted_close(s: &[u8], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    loop {
+        match byte_at(s, i)? {
+            b'\\' => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+}
+
 fn finish_quoted(
     base: &SipStr,
     rebuilt: Option<String>,

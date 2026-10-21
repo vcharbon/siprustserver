@@ -1,16 +1,16 @@
 //! Structured SIP header extraction — quote-aware, zero-regex. Port of
 //! `src/sip/parsers/custom/structured-headers.ts`.
 //!
-//! Parses From/To, Via, Contact, CSeq and SIP URIs, plus the strict host /
-//! SIP-URI validators of the wire-grammar gates. These are the exact functions
-//! the ABNF fuzz suite drives.
+//! Scans From/To, Via, Contact and CSeq values into their parts, leniently:
+//! the reading of a message held to no wire grammar, and the Via and CSeq
+//! readings every message takes. The strict address readings are
+//! [`NameAddr::parse`](crate::header::NameAddr::parse) and
+//! [`Uri::parse`](crate::header::Uri::parse).
 //!
 //! We byte-scan the source `&str` directly: every structural delimiter in these
 //! grammars is ASCII, so a UTF-8 lead or continuation byte can never alias one,
 //! and every index we slice at lands on a char boundary. No function collects a
 //! `Vec<char>` (4x the bytes plus an allocation per call).
-
-use std::collections::BTreeMap;
 
 use crate::header::{ItemSeparator, ParamValue, Params};
 use crate::sip_str::SipStr;
@@ -52,15 +52,6 @@ pub struct ParsedContact {
 pub struct ParsedCSeq {
     pub seq: u64,
     pub method: SipStr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedUri {
-    pub scheme: SipStr,
-    pub user: Option<SipStr>,
-    pub host: SipStr,
-    pub port: Option<u64>,
-    pub params: BTreeMap<SipStr, SipStr>,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,66 +274,6 @@ pub fn parse_cseq(value: &SipStr) -> ParsedCSeq {
 }
 
 // ---------------------------------------------------------------------------
-// SIP URI parsing
-// ---------------------------------------------------------------------------
-
-/// Locate the `?` opening embedded URI-headers (RFC 3261 §19.1.1) — the one
-/// after hostport, anchored past userinfo `@` so a userinfo `?` is not
-/// misidentified. `None` when there are no embedded headers. The returned
-/// index is a BYTE offset into `uri` (always on a char boundary — `?` is
-/// ASCII), directly usable with `&uri[..q]` / `&uri[q + 1..]`.
-pub fn find_uri_embedded_headers_start(uri: &str) -> Option<usize> {
-    let s = uri.as_bytes();
-    let colon_idx = index_of(s, b':', 0)?;
-    let host_start = match index_of(s, b'@', colon_idx + 1) {
-        None => colon_idx + 1,
-        Some(a) => a + 1,
-    };
-    index_of(s, b'?', host_start)
-}
-
-pub fn parse_sip_uri_string(uri: &SipStr) -> Option<ParsedUri> {
-    let s = uri.as_bytes();
-
-    let colon_idx = index_of(s, b':', 0)?;
-    let scheme = slice_lowercased(uri, 0, colon_idx);
-    let mut i = colon_idx + 1;
-
-    let user: Option<SipStr>;
-    let host_start: usize;
-
-    let at_idx = scan_until_one_of(s, i, b"@>");
-    if byte_at(s, at_idx) == Some(b'@') {
-        user = Some(slice(uri, i, at_idx));
-        host_start = at_idx + 1;
-    } else {
-        user = None;
-        host_start = i;
-    }
-
-    let (host, port, host_end) = parse_host_port(uri, host_start);
-    i = host_end;
-
-    let mut params: BTreeMap<SipStr, SipStr> = BTreeMap::new();
-    while byte_at(s, i) == Some(b';') {
-        i += 1;
-        let name_end = scan_until_one_of(s, i, b"=;>? \t");
-        let pname = slice_lowercased(uri, i, name_end);
-        i = name_end;
-        if byte_at(s, i) == Some(b'=') {
-            i += 1;
-            let val_end = scan_until_one_of(s, i, b";>? \t");
-            params.insert(pname, slice(uri, i, val_end));
-            i = val_end;
-        } else {
-            params.insert(pname, SipStr::EMPTY);
-        }
-    }
-
-    Some(ParsedUri { scheme, user, host, port, params })
-}
-
-// ---------------------------------------------------------------------------
 // Internal helpers — byte-index scanning over the source &str
 // ---------------------------------------------------------------------------
 // Every delimiter these helpers scan for is ASCII: a UTF-8 lead/continuation
@@ -382,17 +313,6 @@ fn slice(base: &SipStr, a: usize, b: usize) -> SipStr {
 /// [`slice`] with surrounding whitespace excluded.
 fn slice_trimmed(base: &SipStr, a: usize, b: usize) -> SipStr {
     span_of(base, subslice(base.as_str(), a, b).trim())
-}
-
-/// `base[a..b]` lowercased — a span when it is already lowercase (the common
-/// case for wire param names), an owned copy only when a fold is needed.
-fn slice_lowercased(base: &SipStr, a: usize, b: usize) -> SipStr {
-    let s = subslice(base.as_str(), a, b);
-    if s.chars().any(char::is_uppercase) {
-        SipStr::owned(&s.to_lowercase())
-    } else {
-        span_of(base, s)
-    }
 }
 
 /// The text a parameter carries, as a span of the value it was read from.
@@ -597,232 +517,6 @@ fn read_one_param(base: &SipStr, mut i: usize, params: &mut Params) -> usize {
         params.push(pname, ParamValue::Flag);
     }
     i
-}
-
-// ---------------------------------------------------------------------------
-// Strict host validation
-// ---------------------------------------------------------------------------
-
-/// Validate a host already extracted by `parse_host_port`. `None` when
-/// well-formed; `Some(reason)` otherwise. Empty host passes — callers enforce
-/// non-empty where the grammar requires it.
-pub fn validate_strict_host(host: &str) -> Option<String> {
-    if host.is_empty() {
-        return None;
-    }
-    // Any `:` means it was an IPv6 host (brackets already stripped); pass.
-    if host.contains(':') {
-        return None;
-    }
-
-    let labels: Vec<&str> = host.split('.').collect();
-    let mut ipv4_shape = labels.len() == 4;
-    if ipv4_shape {
-        for label in &labels {
-            if label.is_empty() || !label.bytes().all(|b| b.is_ascii_digit()) {
-                ipv4_shape = false;
-                break;
-            }
-        }
-    }
-    if ipv4_shape {
-        for label in &labels {
-            if label.len() > 1 && label.starts_with('0') {
-                return Some(format!(
-                    "IPv4 octet \"{label}\" has leading zero (octal-confusion vector)"
-                ));
-            }
-            if label.len() > 3 {
-                return Some(format!("IPv4 octet \"{label}\" exceeds 1*3DIGIT"));
-            }
-            let n: u64 = fold_digits(label.as_bytes(), 0, label.len());
-            if n > 255 {
-                return Some(format!("IPv4 octet {n} out of range"));
-            }
-        }
-        return None;
-    }
-
-    // Hostname: every label non-empty + alphanum-start, except a single
-    // trailing empty label (the "host." absolute form).
-    for (i, label) in labels.iter().enumerate() {
-        if label.is_empty() {
-            if i == labels.len() - 1 && labels.len() > 1 {
-                continue; // trailing dot
-            }
-            return Some("empty host label".to_string());
-        }
-        if !label.bytes().next().is_some_and(|c0| c0.is_ascii_alphanumeric()) {
-            return Some(format!("host label \"{label}\" must start with alphanum"));
-        }
-    }
-    None
-}
-
-/// Count colons in a raw sent-by token; `Some(count)` when it exceeds 1 (the
-/// `host [":" port]` grammar admits at most one). IPv6 refs bypass upstream.
-pub fn detect_sent_by_multiple_colons(sent_by: &str) -> Option<usize> {
-    let count = sent_by.bytes().filter(|&b| b == b':').count();
-    if count > 1 {
-        Some(count)
-    } else {
-        None
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Strict SIP-URI grammar
-// ---------------------------------------------------------------------------
-
-/// Validate a SIP/SIPS URI string. `None` on success, `Some(reason)` on
-/// failure. Non-SIP schemes pass with only structural checks.
-pub fn validate_strict_sip_uri(uri: &str) -> Option<String> {
-    let s = uri.as_bytes();
-    if s.is_empty() {
-        return Some("empty URI".to_string());
-    }
-    // Locate scheme colon.
-    let mut i = 0usize;
-    while let Some(c) = byte_at(s, i) {
-        if c == b':' {
-            break;
-        }
-        if i == 0 {
-            if !c.is_ascii_alphabetic() {
-                return Some("scheme must start with ALPHA".to_string());
-            }
-        } else {
-            let is_alnum = c.is_ascii_alphanumeric();
-            let is_special = c == b'+' || c == b'-' || c == b'.';
-            if !is_alnum && !is_special {
-                return Some("invalid scheme character".to_string());
-            }
-        }
-        i += 1;
-    }
-    if i >= s.len() {
-        return Some("missing scheme colon".to_string());
-    }
-    // Scheme bytes are validated ASCII above, so the case-fold compare is
-    // exactly `to_lowercase()` — without minting a String per call.
-    let scheme = subslice(uri, 0, i);
-    i += 1; // past ':'
-
-    if !scheme.eq_ignore_ascii_case("sip") && !scheme.eq_ignore_ascii_case("sips") {
-        return None;
-    }
-
-    // Locate the `@` terminating userinfo, if any.
-    let mut at_idx: Option<usize> = None;
-    let mut second_at = false;
-    for (j, &c) in s.iter().enumerate().skip(i) {
-        if c == b'@' {
-            if at_idx.is_none() {
-                at_idx = Some(j);
-            } else {
-                second_at = true;
-                break;
-            }
-        } else if c == b'>' {
-            break;
-        }
-    }
-    if second_at {
-        return Some("multiple `@` in userinfo".to_string());
-    }
-
-    let host_start = match at_idx {
-        Some(a) => {
-            if a == i {
-                return Some("empty user before `@`".to_string());
-            }
-            a + 1
-        }
-        None => i,
-    };
-
-    let Some(first_host_byte) = byte_at(s, host_start) else {
-        return Some("empty hostport".to_string());
-    };
-    if first_host_byte == b':' {
-        return Some("hostport starts with `:`".to_string());
-    }
-    if first_host_byte == b';' || first_host_byte == b'?' || first_host_byte == b'>' {
-        return Some("empty hostport".to_string());
-    }
-
-    // End of hostport: first `;`, `?`, or `>`.
-    let host_end = scan_until(s, host_start, |c| matches!(c, b';' | b'?' | b'>'));
-    let hostport = || s.iter().enumerate().take(host_end).skip(host_start);
-
-    if first_host_byte == b'[' {
-        // IPv6 reference: must close with `]`.
-        let Some(k) = hostport().skip(1).find(|(_, &c)| c == b']').map(|(k, _)| k) else {
-            return Some("unclosed IPv6 reference".to_string());
-        };
-        if k == host_start + 1 {
-            return Some("empty IPv6 reference".to_string());
-        }
-        let mut after = k + 1;
-        if after < host_end {
-            if byte_at(s, after) != Some(b':') {
-                return Some("junk after `]` in hostport".to_string());
-            }
-            after += 1;
-            if let Some(reason) = validate_port_digits(s, after, host_end) {
-                return Some(reason);
-            }
-        }
-        return None;
-    }
-
-    // Plain host[:port]. Multiple unbracketed `:` = malformed.
-    let mut colon_idx: Option<usize> = None;
-    for (j, &c) in hostport() {
-        if c == b':' {
-            if colon_idx.is_none() {
-                colon_idx = Some(j);
-            } else {
-                return Some("multiple `:` in hostport".to_string());
-            }
-        }
-    }
-    let host = match colon_idx {
-        None => subslice(uri, host_start, host_end),
-        Some(c) => subslice(uri, host_start, c),
-    };
-    if host.is_empty() {
-        return Some("empty host".to_string());
-    }
-    if let Some(reason) = validate_strict_host(host) {
-        return Some(reason);
-    }
-    if let Some(c) = colon_idx {
-        if let Some(reason) = validate_port_digits(s, c + 1, host_end) {
-            return Some(reason);
-        }
-    }
-    None
-}
-
-fn validate_port_digits(s: &[u8], from: usize, to: usize) -> Option<String> {
-    if from >= to {
-        return Some("empty port".to_string());
-    }
-    let mut n: u64 = 0;
-    for &c in s.iter().take(to).skip(from) {
-        let Some(d) = char::from(c).to_digit(10) else {
-            return Some("non-digit in port".to_string());
-        };
-        n = n * 10 + u64::from(d);
-        if n > 65535 {
-            return Some("port out of range".to_string());
-        }
-    }
-    if n < 1 {
-        return Some("port out of range".to_string());
-    }
-    None
 }
 
 /// Mimic JS `decodeURIComponent`: decode `%XX` as UTF-8 bytes; `Err` on a

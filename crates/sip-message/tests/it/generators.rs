@@ -1077,9 +1077,9 @@ fn cancel_mirrors_request_uri_callid_from_to_cseq() {
 fn cancel_and_non_2xx_ack_echo_the_invite_request_uri_octet_for_octet() {
     // RFC 3261 §9.1 and §17.1.1.3: both requests carry the INVITE's
     // Request-URI, so a URI whose spelling a value model would tidy — an
-    // uppercase scheme, an escaped header with no value — leaves as the octets
-    // the INVITE was sent with.
-    let r_uri = "SIP:bob@192.0.2.20:5060;transport=TCP?X-Trace";
+    // uppercase scheme and parameter name, an escaped unreserved character —
+    // leaves as the octets the INVITE was sent with.
+    let r_uri = "SIP:bob@192.0.2.20:5060;Transport=TCP;x-tr%61ce";
     let headers = vec![
         hdr("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123"),
         hdr("Max-Forwards", "70"),
