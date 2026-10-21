@@ -11,7 +11,8 @@
 //!
 //! Its link to the broker ([`link`](cdr_consumer_runner::link)) is set up by
 //! one deadline and reconnected on any fault; `cdr_amqp_consuming` and
-//! `cdr_amqp_setup_failures_total` tell a broker out of reach from an idle queue.
+//! `cdr_amqp_links_ended_total` tell a broker out of reach, or a link that
+//! keeps dropping, from an idle queue.
 //!
 //! With `CDR_OBSERVATION_URL` set it also ships one `cdr-observation.v1` line
 //! per base JSON record to VictoriaLogs for the HA tooling's CDR join

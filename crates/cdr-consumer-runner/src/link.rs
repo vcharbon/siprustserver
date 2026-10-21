@@ -59,9 +59,9 @@ impl Drop for ShutdownOnDrop {
 }
 
 impl Target {
-    /// Opens a link by `setup_timeout`. A setup that fails or misses the
-    /// deadline counts one setup failure in `metrics`; a link counts as
-    /// consuming while it lives.
+    /// Opens a link by `setup_timeout`. A link counts as consuming in
+    /// `metrics` while it lives; a setup that fails or misses the deadline, and
+    /// a link once dropped, count one ended link.
     pub async fn open(&self, metrics: &Arc<LinkMetrics>) -> Result<Link, lapin::Error> {
         let deadline = Instant::now() + self.setup_timeout;
         let opened = match timeout_at(deadline, self.setup(deadline)).await {
@@ -80,7 +80,7 @@ impl Target {
                 _consuming: Consuming::start(metrics.clone()),
             }),
             Err(e) => {
-                metrics.setup_failures.fetch_add(1, Ordering::Relaxed);
+                metrics.ended.fetch_add(1, Ordering::Relaxed);
                 Err(e)
             }
         }
@@ -130,23 +130,24 @@ struct Opened {
 }
 
 /// The link's state on `/metrics`: whether a consume is registered, and how
-/// many setups failed, so a broker out of reach shows apart from an idle queue.
+/// many links ended, so a broker out of reach or a link that keeps dropping
+/// shows apart from an idle queue.
 #[derive(Default)]
 pub struct LinkMetrics {
     consuming: AtomicU64,
-    setup_failures: AtomicU64,
+    ended: AtomicU64,
 }
 
 impl LinkMetrics {
     pub fn prometheus_text(&self) -> String {
         let mut s = String::new();
         CONSUMING.render_value(&mut s, self.consuming.load(Ordering::Relaxed));
-        SETUP_FAILURES.render_value(&mut s, self.setup_failures.load(Ordering::Relaxed));
+        ENDED.render_value(&mut s, self.ended.load(Ordering::Relaxed));
         s
     }
 }
 
-/// Counts one consuming link while it lives.
+/// Counts one consuming link while it lives, and one ended link once dropped.
 struct Consuming(Arc<LinkMetrics>);
 
 impl Consuming {
@@ -159,6 +160,7 @@ impl Consuming {
 impl Drop for Consuming {
     fn drop(&mut self) {
         self.0.consuming.fetch_sub(1, Ordering::Relaxed);
+        self.0.ended.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -169,12 +171,12 @@ pub const CONSUMING: Family = Family::gauge(
     "1 while the consumer's consume is registered on the broker, 0 while it connects or waits to reconnect",
 );
 
-/// Setups that failed.
-pub const SETUP_FAILURES: Family = Family::counter(
-    "cdr_amqp_setup_failures_total",
+/// Links that ended.
+pub const ENDED: Family = Family::counter(
+    "cdr_amqp_links_ended_total",
     Labels::None,
-    "AMQP setups (connect, handshake, channel, queue declare, consume) that failed or missed their deadline",
+    "AMQP links that ended: a setup (connect, handshake, channel, queue declare, consume) that failed or missed its deadline, or a registered consume the broker or the network ended",
 );
 
 /// Every family [`LinkMetrics::prometheus_text`] renders, in order.
-pub const FAMILIES: &[Family] = &[CONSUMING, SETUP_FAILURES];
+pub const FAMILIES: &[Family] = &[CONSUMING, ENDED];

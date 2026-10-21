@@ -29,6 +29,8 @@ pub struct Broker {
     pub addr: SocketAddr,
     /// Connections the client shut down or closed (EOF or reset seen).
     ended_by_client: Arc<AtomicUsize>,
+    /// Queue declares received.
+    declares: Arc<AtomicUsize>,
 }
 
 impl Broker {
@@ -36,17 +38,18 @@ impl Broker {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let ended_by_client = Arc::new(AtomicUsize::new(0));
-        let ended = ended_by_client.clone();
+        let declares = Arc::new(AtomicUsize::new(0));
+        let (ended, declared) = (ended_by_client.clone(), declares.clone());
         tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
-                let ended = ended.clone();
+                let (ended, declared) = (ended.clone(), declared.clone());
                 tokio::spawn(async move {
-                    serve(socket, script).await;
+                    serve(socket, script, &declared).await;
                     ended.fetch_add(1, Ordering::SeqCst);
                 });
             }
         });
-        Self { addr, ended_by_client }
+        Self { addr, ended_by_client, declares }
     }
 
     pub fn url(&self) -> String {
@@ -55,6 +58,10 @@ impl Broker {
 
     pub fn ended_by_client(&self) -> usize {
         self.ended_by_client.load(Ordering::SeqCst)
+    }
+
+    pub fn declares(&self) -> usize {
+        self.declares.load(Ordering::SeqCst)
     }
 }
 
@@ -68,7 +75,7 @@ fn method(ch: u16, class: AMQPClass) -> Vec<u8> {
 }
 
 /// Serves `socket` as `script` says until the client ends it.
-async fn serve(socket: TcpStream, script: Script) {
+async fn serve(socket: TcpStream, script: Script, declares: &AtomicUsize) {
     let (mut rd, mut wr) = socket.into_split();
     let mut chunk = [0u8; 65536];
     if script == Script::StallHandshake {
@@ -101,7 +108,10 @@ async fn serve(socket: TcpStream, script: Script) {
         while let Ok((rest, frame)) = parse_frame(buf.as_slice()) {
             let consumed = buf.len() - rest.len();
             buf.drain(..consumed);
-            silent |= script == Script::StallDeclare && is_declare(&frame);
+            if is_declare(&frame) {
+                declares.fetch_add(1, Ordering::SeqCst);
+                silent |= script == Script::StallDeclare;
+            }
             if silent {
                 continue;
             }

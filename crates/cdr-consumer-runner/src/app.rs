@@ -78,8 +78,8 @@ fn ack_refused() -> io::Error {
     io::Error::other("the CDR ack was refused: the channel failed or the acker was used")
 }
 
-/// One link → consume pass. Returns `Err` on any AMQP fault so the outer loop
-/// reconnects; runs forever on success (the consume stream is endless).
+/// One link → consume pass. Returns `Err` on any AMQP fault and `Ok` when the
+/// broker ends the consume; the outer loop reconnects either way.
 async fn consume(
     target: &Target,
     link_metrics: &Arc<LinkMetrics>,
