@@ -21,8 +21,7 @@ use lapin::{
     types::{AMQPValue, FieldTable, LongString},
     uri::AMQPUri,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use probe_http::{ProbeRoutes, ProbeServer, ProbeState};
 use tokio::time::Instant;
 
 use crate::counting::{Metrics, Payload};
@@ -33,35 +32,15 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// Hand-rolled Prometheus exposition + liveness server (mirrors b2bua-runner).
-async fn serve_metrics(
-    addr: std::net::SocketAddr,
-    metrics: Arc<Metrics>,
-    ship: Arc<ShipMetrics>,
-) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!(addr = %listener.local_addr()?, "metrics server listening (/metrics)");
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        let metrics = metrics.clone();
-        let ship = ship.clone();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let (status, body) = if req.starts_with("GET /metrics") {
-                ("200 OK", crate::metrics_body(&metrics, &ship))
-            } else if req.starts_with("GET /healthz") {
-                ("200 OK", "ok\n".to_string())
-            } else {
-                ("404 Not Found", String::new())
-            };
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        });
+/// The `/metrics` and `/healthz` routes: the consumer's counts and the
+/// shipper's, and readiness that is always ready (the consumer takes no traffic).
+fn probe_routes(metrics: Arc<Metrics>, ship: Arc<ShipMetrics>) -> ProbeRoutes {
+    ProbeRoutes {
+        metrics: Arc::new(move || crate::metrics_body(&metrics, &ship)),
+        ready: Arc::new(|| ProbeState::Ready),
+        heap: None,
+        vrrp: None,
+        admin: None,
     }
 }
 
@@ -186,12 +165,11 @@ pub async fn run(view: Arc<dyn ObservationView>) {
         });
     let consumer = Consumer { payload, metrics: Arc::new(Metrics::default()), view, sink };
 
-    let (m, s) = (consumer.metrics.clone(), ship.clone());
-    tokio::spawn(async move {
-        if let Err(e) = serve_metrics(addr, m, s).await {
-            tracing::error!(error = %e, "metrics server error");
-        }
-    });
+    let routes = probe_routes(consumer.metrics.clone(), ship.clone());
+    let probe = ProbeServer::start(addr, routes)
+        .await
+        .unwrap_or_else(|e| panic!("failed to bind CDR_METRICS_LISTEN {addr}: {e}"));
+    tracing::info!(addr = %probe.addr(), "metrics server listening (/metrics)");
 
     // Reconnect loop: the broker may be down at startup or bounce mid-run. CDRs
     // missed while disconnected are bounded by the broker's own x-max-length.
@@ -268,5 +246,29 @@ mod tests {
             text.contains("cdr_consumed_total 1") && text.contains("cdr_parse_errors_total 1"),
             "{text}"
         );
+    }
+
+    async fn get(addr: std::net::SocketAddr, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        s.read_to_end(&mut resp).await.unwrap();
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    #[tokio::test]
+    async fn the_probe_routes_serve_the_counts_and_liveness() {
+        let c = consumer(None);
+        c.deliver(RECORD);
+        let ship = Arc::new(ShipMetrics::default());
+        let routes = probe_routes(c.metrics.clone(), ship);
+        let probe = ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
+        let metrics = get(probe.addr(), "/metrics").await;
+        assert!(
+            metrics.contains("200 OK") && metrics.contains("cdr_consumed_total 1"),
+            "{metrics}"
+        );
+        assert!(get(probe.addr(), "/healthz").await.contains("200 OK"));
     }
 }

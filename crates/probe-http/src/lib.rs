@@ -69,8 +69,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+mod accept;
 mod admin;
 
+use accept::Incoming;
 pub use admin::{AdminFn, AdminReply};
 
 /// The readiness a runner reports for `GET /readyz` (and the `/ready` alias).
@@ -125,11 +127,6 @@ pub struct ProbeRoutes {
 /// See the module docs: this is bug-stranded-fd reclamation, not DDoS defence,
 /// so it is long enough that a healthy probe/scrape never nears it.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Light backstop on concurrent connections. The cluster is internal, so this
-/// is not a throttle — just a ceiling so a runaway client can't spawn unbounded
-/// handler tasks. A handful of probes + one scraper + a flamegraph fit easily.
-const MAX_CONNECTIONS: usize = 64;
 
 /// A running probe server. Aborts its accept loop on drop, so the binding is
 /// released when the handle is dropped at process exit.
@@ -194,28 +191,12 @@ impl ProbeServer {
     }
 
     fn serve(
-        listener: TcpListener,
+        listener: impl Incoming,
         routes: Served,
         idle_timeout: Duration,
     ) -> std::io::Result<Self> {
         let local = listener.local_addr()?;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "MAX_CONNECTIONS is below the permit ceiling"
-        )]
-        let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
-        let task = tokio::spawn(async move {
-            while let Ok((stream, _peer)) = listener.accept().await {
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    continue; // at the backstop cap — drop the connection
-                };
-                let routes = routes.clone();
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    let _ = handle_conn(stream, routes, idle_timeout).await;
-                });
-            }
-        });
+        let task = tokio::spawn(accept::run(listener, routes, idle_timeout));
         Ok(Self { addr: local, task })
     }
 
@@ -226,7 +207,7 @@ impl ProbeServer {
 
 /// The routes one server answers: the runner's, and its liveness if any.
 #[derive(Clone)]
-struct Served {
+pub(crate) struct Served {
     routes: ProbeRoutes,
     live: Option<LiveFn>,
 }
@@ -237,7 +218,7 @@ impl Drop for ProbeServer {
     }
 }
 
-async fn handle_conn(
+pub(crate) async fn handle_conn(
     mut stream: TcpStream,
     served: Served,
     idle_timeout: Duration,

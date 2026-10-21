@@ -18,6 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 metric-catalogue = { path = "../metric-catalogue" }
+# The `/metrics` + `/healthz` server, shared with the runners.
+probe-http = { path = "../probe-http" }
 # Same AMQP client the b2bua-runner sink publishes with, on the running tokio
 # runtime, over a stream amqp-connect connects.
 lapin = { workspace = true }

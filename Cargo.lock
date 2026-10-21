@@ -894,6 +894,7 @@ dependencies = [
  "lapin",
  "metric-catalogue",
  "observe",
+ "probe-http",
  "serde",
  "serde_json",
  "tokio",
@@ -3601,6 +3602,7 @@ version = "0.1.0"
 dependencies = [
  "flamegraph-util",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -3,6 +3,8 @@
 use super::*;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::accept::Incoming;
+
 fn routes(body: &'static str, ready: ReadyFn) -> ProbeRoutes {
     ProbeRoutes {
         metrics: Arc::new(move || body.to_string()),
@@ -236,4 +238,51 @@ async fn a_connection_that_sends_a_request_is_not_cut() {
     .await
     .unwrap();
     assert!(get(server.addr(), "/metrics").await.contains("ok-body"));
+}
+
+/// `EMFILE`: the process is out of file descriptors.
+const EMFILE: i32 = 24;
+
+/// A listener whose first accepts fail as a process out of descriptors does.
+struct Exhausted {
+    listener: TcpListener,
+    failures: std::sync::atomic::AtomicUsize,
+}
+
+impl Incoming for Exhausted {
+    async fn accept(&self) -> std::io::Result<TcpStream> {
+        let failing =
+            self.failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        match failing {
+            Ok(_) => Err(std::io::Error::from_raw_os_error(EMFILE)),
+            Err(_) => Incoming::accept(&self.listener).await,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
+}
+
+#[tokio::test]
+async fn an_accept_error_does_not_stop_the_listener() {
+    let listener = Exhausted {
+        listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        failures: std::sync::atomic::AtomicUsize::new(2),
+    };
+    let served = Served { routes: routes("", always(ProbeState::Ready)), live: None };
+    let server = ProbeServer::serve(listener, served, IDLE_TIMEOUT).unwrap();
+    // The first connection waits out the failing accepts and is served after them.
+    let exchange = async {
+        let mut s = TcpStream::connect(server.addr()).await?;
+        s.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n").await?;
+        let mut resp = Vec::new();
+        s.read_to_end(&mut resp).await?;
+        std::io::Result::Ok(String::from_utf8_lossy(&resp).into_owned())
+    };
+    let resp = tokio::time::timeout(Duration::from_secs(5), exchange).await;
+    assert!(
+        matches!(&resp, Ok(Ok(r)) if r.contains("200 OK")),
+        "the listener stopped after accept failed: {resp:?}"
+    );
 }

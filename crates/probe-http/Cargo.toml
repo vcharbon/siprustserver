@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 # Rides tokio::time directly so the idle-cut is paused-clock controllable.
 tokio = { workspace = true }
+tracing = { workspace = true }
 # The /debug/flamegraph route (pprof sampling -> inferno SVG). Both runners
 # already depend on this directly, so it adds no new weight.
 flamegraph-util = { path = "../flamegraph-util" }
