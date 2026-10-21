@@ -58,7 +58,7 @@
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg destination allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
 //!   B2BUA_PRIVACY_SERVICE on (default) = this worker is the RFC 3323 privacy service and withholds the asserted identity a concealing Privacy names; off = the next hop is the trust boundary and the identity rides
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
-//!   B2BUA_CDR_MESSAGE_RING per-leg message-ring cap on the call record: the last N distinct SIP messages a leg received or sent (default 0 = off)
+//!   B2BUA_CDR_MESSAGE_RING per-leg message-ring cap on the call record: a leg keeps its opening (the initial INVITE up to its first final, the 2xx ACK) and the last N distinct SIP messages after it (default 0 = off)
 //!   B2BUA_CDR_CAPTURED_HEADERS header names whose values every ring entry captures, comma-separated (default empty)
 //!
 //! ## Call limiter

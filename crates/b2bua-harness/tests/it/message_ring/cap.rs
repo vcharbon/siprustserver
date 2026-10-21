@@ -100,8 +100,8 @@ async fn the_ring_off_records_nothing() {
 }
 
 /// The liveness probe this stack originates — the in-dialog OPTIONS
-/// keepalive — and its answer are not dialog history: a long call keeps its
-/// setup rows under a cap the probes alone would have overrun.
+/// keepalive — and its answer are not dialog history: they add no entry and
+/// evict none, under a cap the probes alone would have overrun.
 #[tokio::test(start_paused = true)]
 async fn keepalive_rounds_add_nothing_and_evict_nothing() {
     let h = Harness::new("message-ring-keepalive");

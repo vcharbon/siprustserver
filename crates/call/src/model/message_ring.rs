@@ -2,7 +2,8 @@
 //! stack receives or sends on a leg, in handling order, kept to a configured
 //! cap. Retransmissions are not messages of their own — a repeated datagram,
 //! inbound or outbound, adds nothing. The leg's opening (its initial INVITE
-//! transaction, [`MessageRing::push`]) is never evicted by what follows it.
+//! up to its first final, [`MessageRing::push`]) is never evicted by what
+//! follows it.
 //! Append helper: [`crate::helpers::record_message`].
 
 use serde::{Deserialize, Serialize};
@@ -76,7 +77,7 @@ impl MessageRing {
         let opening = self.opening();
         let evicted: Vec<usize> = if opening.closed {
             let pinned = opening.len + usize::from(opening.ack.is_some());
-            let excess = self.entries.len().saturating_sub(pinned + cap);
+            let excess = self.entries.len().saturating_sub(pinned.saturating_add(cap));
             (opening.len..self.entries.len())
                 .filter(|i| Some(*i) != opening.ack)
                 .take(excess)
@@ -114,7 +115,10 @@ impl MessageRing {
         let len = at + 1;
         let answered = response.code.is_some_and(|c| (200..300).contains(&c));
         let ack = answered
-            .then(|| self.entries.iter().enumerate().skip(len).find(|(_, e)| is_ack_of(e, invite)))
+            .then(|| {
+                let mut after = self.entries.iter().enumerate().skip(len);
+                after.find(|(_, e)| is_ack_of(e, invite, response))
+            })
             .flatten()
             .map(|(i, _)| i);
         Opening { len, closed: true, ack }
@@ -139,7 +143,7 @@ fn same_way(a: &MessageEntry, b: &MessageEntry) -> bool {
 }
 
 /// A final response to `invite`: its method and CSeq, travelling the other
-/// way (RFC 3261 §8.1.3.3).
+/// way (RFC 3261 §17.1.3).
 fn is_final_to(e: &MessageEntry, invite: &MessageEntry) -> bool {
     e.method == "INVITE"
         && e.cseq == invite.cseq
@@ -147,9 +151,14 @@ fn is_final_to(e: &MessageEntry, invite: &MessageEntry) -> bool {
         && !same_way(e, invite)
 }
 
-/// The ACK of a 2xx to `invite`: its CSeq number, sent the way it was.
-fn is_ack_of(e: &MessageEntry, invite: &MessageEntry) -> bool {
-    e.method == "ACK" && e.code.is_none() && e.cseq == invite.cseq && same_way(e, invite)
+/// The ACK of the 2xx `answer` to `invite`: the INVITE's CSeq number, sent
+/// its way, in the dialog the 2xx established.
+fn is_ack_of(e: &MessageEntry, invite: &MessageEntry, answer: &MessageEntry) -> bool {
+    e.method == "ACK"
+        && e.code.is_none()
+        && e.cseq == invite.cseq
+        && same_way(e, invite)
+        && e.to_tag == answer.to_tag
 }
 
 #[cfg(test)]
@@ -266,6 +275,36 @@ mod tests {
         infos(&mut ring, 6, 3, cap);
         assert_eq!(seqs(&ring), [1, 2, 5, 10, 11]);
         assert_eq!(ring.dropped, 6);
+    }
+
+    /// A forked INVITE answered twice: the ACK kept is the one of the 2xx
+    /// that closed the opening, not the straggler's.
+    #[test]
+    fn the_ack_kept_is_the_one_of_the_closing_2xx() {
+        let cap = 2;
+        let mut ring = MessageRing::default();
+        ring.push(msg(1, Relayed, "INVITE", 1, None, None), cap);
+        ring.push(msg(2, Received, "INVITE", 1, Some(200), Some("t1")), cap);
+        ring.push(msg(3, Received, "INVITE", 1, Some(200), Some("t2")), cap);
+        ring.push(msg(4, Authored, "ACK", 1, None, Some("t2")), cap);
+        ring.push(msg(5, Authored, "BYE", 2, None, Some("t2")), cap);
+        ring.push(msg(6, Received, "BYE", 2, Some(200), Some("t2")), cap);
+        ring.push(msg(7, Relayed, "ACK", 1, None, Some("t1")), cap);
+        for n in 0..3 {
+            let seq = 8 + 2 * n;
+            ring.push(msg(seq, Relayed, "INFO", 3 + n, None, Some("t1")), cap);
+            ring.push(msg(seq + 1, Received, "INFO", 3 + n, Some(200), Some("t1")), cap);
+        }
+        assert_eq!(seqs(&ring), [1, 2, 7, 12, 13]);
+    }
+
+    /// A cap past any count keeps everything.
+    #[test]
+    fn an_unbounded_cap_evicts_nothing() {
+        let mut ring = answered_caller_leg(usize::MAX);
+        infos(&mut ring, 5, 1, usize::MAX);
+        assert_eq!(seqs(&ring), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(ring.dropped, 0);
     }
 
     /// A failure final closes the opening; the ACK of a non-2xx is the
