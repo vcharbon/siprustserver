@@ -71,7 +71,7 @@ async fn a_materialised_call_numbers_its_next_admit_above_the_previous_holder_s(
     for origin in [MaterialiseOrigin::Takeover, MaterialiseOrigin::Reclaim] {
         let s = state(Clock::test_at(0));
         let mut copy = call("epoch@x", 0);
-        let replicated = copy.limiter.owe_consult(4) + 3;
+        let replicated = copy.limiter.owe_consult(4).first_change + 3;
         assert!(s.materialize_if_absent(copy.clone(), origin));
         let mut resident = s.peek(&copy.call_ref).expect("resident");
         let (next, _) = resident.limiter.number_admit();

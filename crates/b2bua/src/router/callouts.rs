@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use call::{AdmitReport, Call, CallLimiterState};
+use call::{AdmitReport, Call, CallLimiterState, ConsultAdmits};
 use serde::Serialize;
 use serde_json::json;
 
@@ -16,14 +16,15 @@ use super::RouterCtx;
 use crate::answer_deadline;
 use crate::decision::{
     CallDecisionError, CallFailureRequest, CallReleaseResponse, CallSnapshot, CallTreatment,
-    FailureInfo, RouteDecision, SipHeaderUpdates,
+    FailureInfo, SipHeaderUpdates,
 };
 use crate::decision_log::STACK_AUTHORED;
 use crate::limiter::report::{admit_report_of, LimiterAdmitResult};
-use crate::limiter::{AdmitOutcome, LimiterEntry, LimiterHeld, LimiterWorker};
+use crate::limiter::{LimiterEntry, LimiterHeld, LimiterWorker};
 use crate::metrics::AdmitSite;
 use crate::{failure_terminate, failure_unavailable};
 use b2bua_sdk::event::CallEvent;
+use route_admit::admit_route_limiters;
 use tokio::sync::mpsc;
 
 /// The call a callout answers: its `call_ref`, and the incarnation whose turn
@@ -120,40 +121,6 @@ fn record_round_trip(
     );
 }
 
-/// Replace the call's set on the cluster limiter with a route's
-/// `call_limiter` entries — the ONE fold shared by the failover and release
-/// callouts, so the two can never drift from each other. One
-/// `admit(key, change, held, entries, release_on_refusal = true)`, checked
-/// net of the set the call holds (`held`, the call's held set, which it
-/// carries): a refusal releases that set in the same step. Nothing is sent for
-/// a route stating no limiter on a call holding nothing: the report states an
-/// unsent admit of nothing, which asks for nothing. The worker answers just
-/// past the limiter's admit budget, `unavailable` when the limiter did not,
-/// so the consult's answer deadline lies past the whole chain. `Ok(report)`: the
-/// admit the fold carries — admitted, lost, superseded, or refused by a release
-/// fence (the call ended; counted as
-/// `b2bua_limiter_admit_released_total{site="fold"}`); `Err(report)`: refused
-/// on a cap — the caller owns the treatment, the call holds nothing and owes
-/// its release.
-async fn admit_route_limiters(
-    ctx: &RouterCtx,
-    key: &str,
-    held: &LimiterHeld,
-    change: u64,
-    route: &RouteDecision,
-) -> Result<AdmitReport, AdmitReport> {
-    if route.call_limiter.is_empty() && held.entries.is_empty() {
-        let outcome = AdmitOutcome::NotSent;
-        return Ok(AdmitReport { key: key.to_string(), change, entries: Vec::new(), outcome });
-    }
-    let entries = route.call_limiter.clone();
-    let report = ctx.limiter.admit(AdmitSite::Fold, key, change, held, entries, true).await;
-    match &report.outcome {
-        AdmitOutcome::Rejected { .. } => Err(report),
-        _ => Ok(report),
-    }
-}
-
 // ── /call/refer ─────────────────────────────────────────────────────────────
 
 /// Kick the async `/call/refer` round-trip and fold the decision back in as a
@@ -241,7 +208,7 @@ pub(super) fn spawn_failure_callout(
     call: &Call,
     call_ref: String,
     request: serde_json::Value,
-    limiter_change: u64,
+    admits: ConsultAdmits,
     deadline: Option<u64>,
 ) {
     let ctx2 = ctx.clone();
@@ -252,7 +219,7 @@ pub(super) fn spawn_failure_callout(
     observe::spawn_keeping_node(async move {
         let sent_at_ms = ctx2.clock.now_ms();
         let (outcome, mut payload) =
-            failure_outcome(&ctx2, &limiter, limiter_change, snapshot, &request).await;
+            failure_outcome(&ctx2, &limiter, admits, snapshot, &request).await;
         record_round_trip(&trace, &ctx2, "/call/failure", sent_at_ms, &request, outcome, &payload);
         // The fold names the deadline it answers, when its turn armed one.
         if let Some(deadline) = deadline {
@@ -276,12 +243,12 @@ pub(super) fn spawn_failure_callout(
 /// `origin`, so the a-facing mint carries none of the peer's relayed headers
 /// (ADR-0017 X2). A resolution other than a route after a refusal carries the
 /// refused admit's report in `limiter_admit`: the refusal dropped the call's
-/// set. The chain's admits are numbered from `first_change` on, one each, in
-/// the block the dispatching turn reserved for them.
+/// set. The chain's admits are numbered from `admits.first_change` on, one
+/// each, in the block the dispatching turn reserved for them.
 async fn failure_outcome(
     ctx: &Arc<RouterCtx>,
     limiter: &CallLimiterState,
-    first_change: u64,
+    admits: ConsultAdmits,
     snapshot: CallSnapshot,
     request: &serde_json::Value,
 ) -> (&'static str, serde_json::Value) {
@@ -290,9 +257,10 @@ async fn failure_outcome(
     let failed_leg_id = failure_terminate::failed_leg_id(request).to_string();
     let mut depth: u32 = 0;
     // A refused replacement released the call's set: the re-consult's admit
-    // carries the set the refusal stated (none), and a resolution other than
-    // a route carries the refusal's report.
+    // carries the set the refusal stated (none), which is all the limiter
+    // holds, and a resolution other than a route carries the refusal's report.
     let mut held = limiter.held_set();
+    let mut may_hold = admits.may_hold;
     let mut refused: Option<AdmitReport> = None;
     // Every route the limiter refused on the way, for the engine to record
     // as an attempt that dialled nothing.
@@ -300,9 +268,11 @@ async fn failure_outcome(
     let (outcome, mut payload) = loop {
         match ctx.decision.call_failure(req).await {
             Ok(CallTreatment::Route(route)) => {
-                let change = first_change + u64::from(depth);
+                let change = admits.first_change + u64::from(depth);
                 let admitted =
-                    match admit_route_limiters(ctx, limiter.key(), &held, change, &route).await {
+                    match admit_route_limiters(ctx, limiter.key(), &held, may_hold, change, &route)
+                        .await
+                    {
                         Ok(admitted) => admitted,
                         Err(report) => {
                             refused_routes.push(crate::attempts::refused_route_entry(
@@ -313,6 +283,7 @@ async fn failure_outcome(
                             let limiter_id =
                                 report.outcome.refused_on().unwrap_or_default().to_string();
                             held = report.held().unwrap_or_default();
+                            may_hold = !held.entries.is_empty();
                             refused = Some(report);
                             if route.callback_context.is_some()
                                 && depth < crate::decision::apply_route::MAX_LIMITER_FAILOVER
@@ -442,7 +413,7 @@ pub(super) fn spawn_release_callout(
     call: &Call,
     call_ref: String,
     request: serde_json::Value,
-    limiter_change: u64,
+    admits: ConsultAdmits,
     deadline: Option<u64>,
 ) {
     let ctx2 = ctx.clone();
@@ -463,7 +434,8 @@ pub(super) fn spawn_release_callout(
                     &ctx2,
                     limiter.key(),
                     &limiter.held_set(),
-                    limiter_change,
+                    admits.may_hold,
+                    admits.first_change,
                     &route,
                 )
                 .await;
@@ -638,5 +610,6 @@ pub(super) fn spawn_limiter_admit_callout(ctx: &Arc<RouterCtx>, c: LimiterAdmitC
     });
 }
 
+mod route_admit;
 #[cfg(test)]
 mod tests;

@@ -144,9 +144,24 @@ fn a_new_epoch_numbers_above_every_number_of_the_previous_one() {
 #[test]
 fn a_consult_owes_the_release_and_reserves_consecutive_numbers() {
     let mut state = CallLimiterState::uncounted("c#k".into());
-    assert_eq!(state.owe_consult(6), 1);
+    assert_eq!(state.owe_consult(6).first_change, 1);
     assert_eq!(state.owed_release(), Some("c#k"), "owed from the dispatching turn");
     assert_eq!(state.number_admit().0, 7);
+}
+
+/// A consult states whether the limiter may hold a set for the key before
+/// it: never for a call that sent nothing, always once an admit request left,
+/// even one whose answer was lost and left held empty.
+#[test]
+fn a_consult_states_whether_the_limiter_may_hold_a_set_before_it() {
+    let mut state = CallLimiterState::uncounted("c#k".into());
+    assert!(!state.owe_consult(1).may_hold, "a call that sent nothing");
+    assert!(state.owe_consult(1).may_hold, "the previous consult may have sent");
+    let mut lost = CallLimiterState::uncounted("c#k".into());
+    let (n, _) = lost.number_admit();
+    lost.apply_admit(&report(n, vec![e("x")], AdmitOutcome::Unavailable));
+    assert!(lost.held().is_empty());
+    assert!(lost.owe_consult(1).may_hold, "the lost admit may have landed");
 }
 
 #[test]
@@ -174,7 +189,7 @@ fn a_change_is_the_target_from_its_sending_turn_and_a_refusal_takes_what_is_held
 #[test]
 fn a_refused_change_takes_the_set_an_older_change_in_flight_made() {
     let mut state = CallLimiterState::admitted("c#k".into(), 1, vec![e("x")]);
-    let consult = state.owe_consult(6);
+    let consult = state.owe_consult(6).first_change;
     let n = sent(state.replace_set(vec![e("x"), e("y")], false));
     state.apply_admit(&report(n, vec![e("x"), e("y")], refused(n, "y", vec![e("z")])));
     state.apply_admit(&report(consult, vec![e("z")], AdmitOutcome::Admitted));
@@ -229,10 +244,10 @@ fn a_call_moved_onto_a_refused_set_runs_uncounted_until_held_names_it() {
     assert_eq!(state.target(), [e("x")], "a refused change is not taken");
     assert!(state.counted() && !state.fail_open() && state.runs_uncounted());
 
-    let a = state.owe_consult(1);
+    let a = state.owe_consult(1).first_change;
     state.apply_admit(&report(a, vec![e("x"), e("z")], AdmitOutcome::Admitted));
     assert!(state.runs_uncounted(), "an admitted change that does not hold y");
-    let b = state.owe_consult(1);
+    let b = state.owe_consult(1).first_change;
     state.apply_admit(&report(b, vec![e("x")], AdmitOutcome::Admitted));
     assert!(state.runs_uncounted(), "an admitted return that does not hold y");
     let c = sent(state.replace_set(vec![e("z")], true));
@@ -246,7 +261,7 @@ fn a_call_moved_onto_a_refused_set_runs_uncounted_until_held_names_it() {
 fn a_refusal_not_taken_still_leaves_the_moved_call_uncounted() {
     let mut state = CallLimiterState::admitted("c#k".into(), 1, vec![e("x")]);
     let moved = sent(state.replace_set(vec![e("x"), e("y")], true));
-    let newer = state.owe_consult(1);
+    let newer = state.owe_consult(1).first_change;
     state.apply_admit(&report(newer, vec![e("x"), e("z")], AdmitOutcome::Admitted));
     state.apply_admit(&report(moved, vec![e("x"), e("y")], refused(moved, "y", vec![e("x")])));
     assert_eq!(state.held(), [e("x"), e("z")], "the refusal's statement is older");
@@ -272,12 +287,12 @@ fn a_lost_answer_of_a_moved_call_is_repaired_by_the_next_statement() {
 #[test]
 fn a_resolution_after_a_refused_route_runs_the_call_on_its_target_again() {
     let mut state = CallLimiterState::admitted("c#k".into(), 1, vec![e("x")]);
-    let failover = state.owe_consult(1);
+    let failover = state.owe_consult(1).first_change;
     let route = vec![e("x"), e("y")];
     state.apply_fold(&report(failover, route.clone(), AdmitOutcome::Unavailable), true);
     assert_eq!(state.runs_on(), Some(&route[..]), "the call runs on its route");
     assert!(state.runs_uncounted());
-    let release = state.owe_consult(1);
+    let release = state.owe_consult(1).first_change;
     state.apply_fold(&report(release, route, refused(release, "y", vec![e("x")])), false);
     assert_eq!(state.runs_on(), None);
     assert!(!state.runs_uncounted(), "the call runs on its target, which is held");
@@ -286,7 +301,7 @@ fn a_resolution_after_a_refused_route_runs_the_call_on_its_target_again() {
 #[test]
 fn runs_on_counts_multiplicity() {
     let mut state = CallLimiterState::admitted("c#k".into(), 1, vec![e("x")]);
-    let n = state.owe_consult(1);
+    let n = state.owe_consult(1).first_change;
     let superseded = AdmitOutcome::Superseded { held: held(n, vec![e("x")]) };
     state.apply_fold(&report(n, vec![e("x"), e("x")], superseded), true);
     assert!(!state.fail_open() && state.runs_uncounted(), "the second slot of x is not held");

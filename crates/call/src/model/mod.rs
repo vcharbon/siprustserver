@@ -84,8 +84,8 @@ pub use invite_txn::{HostPort, InviteTxnHandle};
 pub use leg::{Leg, LegKind, RemoteInfo, Ring};
 pub use leg_state::{ByeDisposition, LegDisposition, LegState};
 pub use limiter::{
-    AdmitOutcome, AdmitReport, CallLimiterState, LimiterEntry, LimiterHeld, RefreshApplied,
-    Replacement, CHANGE_EPOCH,
+    AdmitOutcome, AdmitReport, CallLimiterState, ConsultAdmits, LimiterEntry, LimiterHeld,
+    RefreshApplied, Replacement, CHANGE_EPOCH,
 };
 pub use message_ring::{MessageDirection, MessageEntry, MessageRing};
 pub use obligation::{Obligation, ObligationKind};

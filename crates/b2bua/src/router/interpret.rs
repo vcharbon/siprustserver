@@ -230,33 +230,23 @@ pub(super) async fn process_result(
                     },
                 );
             }
-            FireAndForgetEffect::FailureAsyncHttp {
-                call_ref,
-                request,
-                limiter_change,
-                deadline,
-            } => {
+            FireAndForgetEffect::FailureAsyncHttp { call_ref, request, limiter, deadline } => {
                 callouts::spawn_failure_callout(
                     ctx,
                     &result.call,
                     call_ref,
                     request,
-                    limiter_change,
+                    limiter,
                     deadline,
                 );
             }
-            FireAndForgetEffect::ReleaseAsyncHttp {
-                call_ref,
-                request,
-                limiter_change,
-                deadline,
-            } => {
+            FireAndForgetEffect::ReleaseAsyncHttp { call_ref, request, limiter, deadline } => {
                 callouts::spawn_release_callout(
                     ctx,
                     &result.call,
                     call_ref,
                     request,
-                    limiter_change,
+                    limiter,
                     deadline,
                 );
             }

@@ -197,6 +197,17 @@ pub enum Replacement {
     },
 }
 
+/// The admits a consult dispatched on a call's turn may send
+/// ([`CallLimiterState::owe_consult`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConsultAdmits {
+    /// The change number of the consult's first admit; the next ones follow.
+    pub first_change: u64,
+    /// Whether the limiter may hold a set for the key as of the dispatching
+    /// turn, before the consult ([`CallLimiterState::may_hold`]).
+    pub may_hold: bool,
+}
+
 /// How a refresh answer met the call's state
 /// ([`CallLimiterState::apply_refresh`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,6 +271,13 @@ impl CallLimiterState {
     /// for it. `None` for a call that sent none.
     pub fn owed_release(&self) -> Option<&str> {
         self.release_owed.then_some(self.key.as_str())
+    }
+
+    /// Whether the limiter may hold a set for the key, whatever held states:
+    /// an admit request may have left for it, its answer lost or not yet
+    /// applied. `false` only when nothing can have landed for the key.
+    pub fn may_hold(&self) -> bool {
+        self.release_owed || self.counted()
     }
 
     /// The set the limiter last stated it holds for the call.
@@ -336,10 +354,13 @@ impl CallLimiterState {
     /// The call's turn dispatches a consult whose answer may admit a route:
     /// the call owes its release from this turn, and `n` change numbers are
     /// reserved, one per admit the consult may send (a failure consult's
-    /// chain, a release consult's one); the first one.
-    pub fn owe_consult(&mut self, n: u64) -> u64 {
+    /// chain, a release consult's one). Returns the first one, and whether the
+    /// limiter may hold a set for the key before the consult: a route stating
+    /// no limiter still sends its empty replacement when it may.
+    pub fn owe_consult(&mut self, n: u64) -> ConsultAdmits {
+        let may_hold = self.may_hold();
         self.release_owed = true;
-        self.reserve_changes(n)
+        ConsultAdmits { first_change: self.reserve_changes(n), may_hold }
     }
 
     /// A service replaces the call's admission set with `entries`, moving the
@@ -347,8 +368,8 @@ impl CallLimiterState {
     /// whatever the answer). The replacement takes the next change number and
     /// is the call's target from this turn, so a change computed before its
     /// report comes back sees it. An admit leaves, and the call owes its
-    /// release, unless nothing can have landed for the key (not counted, no
-    /// release owed) and nothing is asked.
+    /// release, unless nothing is asked and the limiter can hold nothing for
+    /// the key ([`may_hold`](Self::may_hold)).
     pub fn replace_set(&mut self, entries: Vec<LimiterEntry>, moves_call: bool) -> Replacement {
         if moves_call {
             self.runs_on = Some(entries.clone());
@@ -356,7 +377,7 @@ impl CallLimiterState {
         let change = self.next_change();
         let nothing_asked = entries.is_empty();
         self.ask(change, entries);
-        if nothing_asked && !self.counted() && !self.release_owed {
+        if nothing_asked && !self.may_hold() {
             return Replacement::NothingToSend { change };
         }
         self.release_owed = true;

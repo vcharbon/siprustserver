@@ -121,11 +121,11 @@ pub fn arm(mut result: HandlerResult, budgets: &AnswerBudgets, now_ms: i64) -> H
         result.effects.fire_and_forget.iter().filter_map(|fx| deadline_of(fx, budgets)).collect();
     for fx in &mut result.effects.fire_and_forget {
         match fx {
-            FireAndForgetEffect::FailureAsyncHttp { limiter_change, deadline, .. } => {
-                *deadline = budgets.failure.map(|_| *limiter_change);
+            FireAndForgetEffect::FailureAsyncHttp { limiter, deadline, .. } => {
+                *deadline = budgets.failure.map(|_| limiter.first_change);
             }
-            FireAndForgetEffect::ReleaseAsyncHttp { limiter_change, deadline, .. } => {
-                *deadline = budgets.release.map(|_| *limiter_change);
+            FireAndForgetEffect::ReleaseAsyncHttp { limiter, deadline, .. } => {
+                *deadline = budgets.release.map(|_| limiter.first_change);
             }
             _ => {}
         }
@@ -158,15 +158,15 @@ fn deadline_of(fx: &FireAndForgetEffect, budgets: &AnswerBudgets) -> Option<(Tim
             },
             budgets.admit,
         )),
-        FireAndForgetEffect::FailureAsyncHttp { request, limiter_change, .. } => {
+        FireAndForgetEffect::FailureAsyncHttp { request, limiter, .. } => {
             budgets.failure.map(|budget| {
                 let unanswered = crate::failure_unavailable::payload(request);
-                (TimerType::FailureAnswer { change: *limiter_change, unanswered }, budget)
+                (TimerType::FailureAnswer { change: limiter.first_change, unanswered }, budget)
             })
         }
-        FireAndForgetEffect::ReleaseAsyncHttp { limiter_change, .. } => budgets
+        FireAndForgetEffect::ReleaseAsyncHttp { limiter, .. } => budgets
             .release
-            .map(|budget| (TimerType::ReleaseAnswer { change: *limiter_change }, budget)),
+            .map(|budget| (TimerType::ReleaseAnswer { change: limiter.first_change }, budget)),
         FireAndForgetEffect::Reenter(event) => {
             answered(event).map(|timer_type| (timer_type, Duration::ZERO))
         }

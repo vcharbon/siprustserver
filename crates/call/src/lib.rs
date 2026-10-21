@@ -74,8 +74,8 @@ pub use model::{
 };
 // The call's admission state on the call limiter (ADR-0040).
 pub use model::{
-    AdmitOutcome, AdmitReport, CallLimiterState, LimiterEntry, LimiterHeld, RefreshApplied,
-    Replacement, CHANGE_EPOCH,
+    AdmitOutcome, AdmitReport, CallLimiterState, ConsultAdmits, LimiterEntry, LimiterHeld,
+    RefreshApplied, Replacement, CHANGE_EPOCH,
 };
 // Leg + dialog state.
 pub use model::{

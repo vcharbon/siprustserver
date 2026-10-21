@@ -155,14 +155,14 @@ pub enum FireAndForgetEffect {
     /// Kick the async `/call/failure` decision (b-leg failover). Carries the
     /// request JSON the seed rule built; the router calls `decision.call_failure`
     /// then re-enters via a `call-failure-result` internal event. The admits
-    /// of the failover chain are numbered from `limiter_change` on, in the
-    /// block the dispatching turn reserved. `deadline` names the answer
+    /// of the failover chain are numbered from `limiter.first_change` on, in
+    /// the block the dispatching turn reserved. `deadline` names the answer
     /// deadline the sending turn armed (ADR-0039), which the fold states;
     /// `None` until armed, and for a consult with no deadline.
     FailureAsyncHttp {
         call_ref: String,
         request: serde_json::Value,
-        limiter_change: u64,
+        limiter: call::ConsultAdmits,
         deadline: Option<u64>,
     },
     /// Kick the async `call_release` consult for a subscribed internal release
@@ -173,8 +173,9 @@ pub enum FireAndForgetEffect {
     ReleaseAsyncHttp {
         call_ref: String,
         request: serde_json::Value,
-        /// The change number a reroute's admit carries.
-        limiter_change: u64,
+        /// The change number a reroute's admit carries, and whether the
+        /// limiter may hold a set for the call before the consult.
+        limiter: call::ConsultAdmits,
         /// The change number the consult's answer deadline is armed under
         /// (`answer_deadline::arm`); `None` for an unbounded consult.
         deadline: Option<u64>,

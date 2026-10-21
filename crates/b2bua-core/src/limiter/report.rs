@@ -232,7 +232,7 @@ mod tests {
     fn a_route_fold_moves_the_call_onto_its_route_in_any_report_order() {
         let entry = |id: &str| LimiterEntry { id: id.into(), limit: 2 };
         let mut call = call_holding_x();
-        let consult = call.limiter.owe_consult(1);
+        let consult = call.limiter.owe_consult(1).first_change;
         let call::Replacement::Send { change: moved_at, .. } =
             call.limiter.replace_set(vec![entry("t")], true)
         else {

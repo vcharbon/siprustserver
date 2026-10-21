@@ -250,7 +250,7 @@ fn failure_consult(change: u64) -> FireAndForgetEffect {
             "failed_leg_id": "b-1",
             "sip_headers": [],
         }),
-        limiter_change: change,
+        limiter: call::ConsultAdmits { first_change: change, may_hold: true },
         deadline: None,
     }
 }
@@ -386,7 +386,7 @@ fn release_consult(change: u64) -> FireAndForgetEffect {
     FireAndForgetEffect::ReleaseAsyncHttp {
         call_ref: "c".into(),
         request: serde_json::json!({ "callback_context": "ctx", "event": "max_call_duration" }),
-        limiter_change: change,
+        limiter: call::ConsultAdmits { first_change: change, may_hold: true },
         deadline: None,
     }
 }

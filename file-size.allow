@@ -23,7 +23,7 @@ crates/b2bua-harness/tests/it/fake_prack.rs 810
 crates/b2bua-harness/tests/it/message_ring.rs 955
 crates/b2bua-harness/tests/it/prack_owed_at_final.rs 913
 crates/b2bua-harness/tests/it/prack_reliable_ladder.rs 877
-crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 1175
+crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 858
 crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
@@ -43,7 +43,7 @@ crates/b2bua/src/repl/s12_tests.rs 916
 crates/b2bua/src/repl/store.rs 672
 crates/b2bua/src/repl/supervisor.rs 776
 crates/b2bua/src/repl/tests.rs 827
-crates/b2bua/src/router/callouts.rs 642
+crates/b2bua/src/router/callouts.rs 615
 crates/b2bua/src/store/mod.rs 960
 crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
