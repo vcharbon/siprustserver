@@ -4,6 +4,7 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=b2bua-core) & binary(it)' <module>::`.
 
+mod ended_dialog_2xx_rules;
 mod lifecycle_transition_trace;
 mod lost_round_rules;
 mod media_leg_advertisement;

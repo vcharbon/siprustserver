@@ -3,14 +3,16 @@
 //! ([`actions`]), framework invariants, and the rule families: the CORE
 //! lifecycle set ([`defaults`]), the 18x-policy services ([`relay_first_18x`],
 //! [`promote_pem`]), REFER transfer ([`refer_transfer`]), release/reroute
-//! ([`release_reroute`]), the round a record lost ([`lost_round`]), and an
-//! operator's release ([`operator_release`]).
+//! ([`release_reroute`]), the round a record lost ([`lost_round`]), a 2xx
+//! after the dialog's BYE ([`ended_dialog_2xx`]), and an operator's release
+//! ([`operator_release`]).
 
 pub mod actions;
 pub mod capabilities;
 pub mod charging;
 pub mod defaults;
 pub mod docgen;
+pub mod ended_dialog_2xx;
 pub mod executor;
 pub mod invariants;
 pub mod lifecycle_delivery;

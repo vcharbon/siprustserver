@@ -35,7 +35,7 @@ fn uri_of(text: &str) -> Uri {
 
 /// A call bridged to `b-1`: the caller's dialog `atag`, the callee's `svc`/`bobtag`,
 /// the callee's sequence at [`RECORDED`].
-fn bridged() -> call::Call {
+pub(super) fn bridged() -> call::Call {
     let invite = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
         &GenerateOutOfDialogRequestOpts {
@@ -131,7 +131,10 @@ fn on_bobs_dialog() -> call::helpers::Resolved {
 }
 
 /// The rule that claims `event` from `b-1`, and the turn it makes.
-fn turn(call: &call::Call, event: &CallEvent) -> (Option<&'static str>, Option<HandlerResult>) {
+pub(super) fn turn(
+    call: &call::Call,
+    event: &CallEvent,
+) -> (Option<&'static str>, Option<HandlerResult>) {
     let config = B2buaConfig::default();
     let resolved = on_bobs_dialog();
     let ctx = RuleContext {
@@ -156,7 +159,7 @@ fn turn(call: &call::Call, event: &CallEvent) -> (Option<&'static str>, Option<H
 }
 
 /// The requests `result` sends toward `leg`: method and CSeq number.
-fn requests_to(result: &HandlerResult, leg: &str) -> Vec<(String, u32)> {
+pub(super) fn requests_to(result: &HandlerResult, leg: &str) -> Vec<(String, u32)> {
     result
         .effects
         .outbound
