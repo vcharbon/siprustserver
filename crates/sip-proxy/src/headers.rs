@@ -37,7 +37,11 @@ fn entry<'a>(
 ) -> RecordRouteEntry {
     let mut uri = Uri::sip(advertised.host.clone()).with_port(advertised.port);
     for (name, value) in params {
-        uri = uri.with_param(name.as_str(), ParamValue::text(value.as_str()));
+        // `pvalue = 1*paramchar` (RFC 3261 §25.1): an empty value rides as a
+        // flag, which [`cookie_params`] reads back empty.
+        let value =
+            if value.is_empty() { ParamValue::Flag } else { ParamValue::text(value.as_str()) };
+        uri = uri.with_param(name.as_str(), value);
     }
     if let Some(flag) = flag {
         uri = uri.with_flag(flag);
