@@ -19,8 +19,9 @@ fn sipflow(args: &[&str]) -> (String, String, bool) {
     )
 }
 
-/// A document whose second message carries a Date outside GMT (RFC 3261
-/// §20.17) is reported on that message alone, and the sweep counts the rest.
+/// A document whose second message carries a header name that is no token
+/// (RFC 3261 §25.1) is reported on that message alone, and the sweep counts
+/// the rest.
 #[test]
 fn a_refused_message_is_one_line_and_the_sweep_continues() {
     let path = capture();
@@ -34,7 +35,7 @@ fn a_refused_message_is_one_line_and_the_sweep_continues() {
         .map(|leg| leg["msgs"].as_array().expect("msgs").len())
         .sum();
     let raw = doc["legs"][0]["msgs"][1]["raw"].as_str().expect("text payload").to_string();
-    let refused = raw.replacen("\r\n", "\r\nDate: Sat, 13 Nov 2010 23:29:00 PST\r\n", 1);
+    let refused = raw.replacen("\r\n", "\r\nX(Bad): 1\r\n", 1);
     doc["legs"][0]["msgs"][1]["raw"] = serde_json::Value::String(refused);
 
     let dir = std::env::temp_dir()
@@ -51,6 +52,6 @@ fn a_refused_message_is_one_line_and_the_sweep_continues() {
     assert_eq!(lines.len(), 1, "one refused message: {out}");
     assert_eq!(lines[0]["capture"], "capture_1");
     assert_eq!((lines[0]["leg"].as_u64(), lines[0]["msg"].as_u64()), (Some(0), Some(1)));
-    assert!(lines[0]["reason"].as_str().is_some_and(|r| r.contains("Date")), "{}", lines[0]);
+    assert!(lines[0]["reason"].as_str().is_some_and(|r| r.contains("Header name")), "{}", lines[0]);
     assert!(err.contains(&format!("messages={total} refused=1")), "totals: {err}");
 }
