@@ -56,11 +56,14 @@ use sip_pcap::rfc::{Census, LocatedHit, SutSet};
 #[path = "sipflow/captures.rs"]
 mod captures;
 use captures::expand_inputs;
+#[path = "sipflow/census.rs"]
+mod census;
 #[path = "sipflow/get.rs"]
 mod get;
+#[path = "sipflow/reparse.rs"]
+mod reparse;
 #[path = "sipflow/walk.rs"]
 mod walk;
-use walk::{capture_of, expand_flows_documents};
 
 /// Serialize an emitted document, exiting with the derivation error a
 /// document that cannot be re-derived must never be printed past.
@@ -244,6 +247,22 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     rfc_census_jobs: usize,
 
+    /// Re-parse every message of ALREADY EMITTED flows documents — files, or
+    /// directories walked recursively for `*.flows.json` — and print one JSON
+    /// line per message the parser refuses, continuing past each, with the
+    /// totals on stderr. Reads no capture, and modifies no document.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        conflicts_with_all = ["json", "query", "query_json", "list", "full", "enrich", "rfc_census"]
+    )]
+    reparse: Vec<PathBuf>,
+
+    /// Worker threads the re-parse sweep runs, each reading one document at a
+    /// time.
+    #[arg(long, default_value_t = 4)]
+    reparse_jobs: usize,
+
     /// Rule tokens (`rfc_rules::RuleId`) named beside the census vocabulary.
     /// The census runs every rule with a body already, so naming one changes
     /// nothing the report carries.
@@ -339,8 +358,12 @@ fn main() {
         }
         return;
     }
+    if !args.reparse.is_empty() {
+        reparse::run(&args.reparse, args.reparse_jobs);
+        return;
+    }
     if !args.rfc_census.is_empty() {
-        run_rfc_census(&args.rfc_census, args.rfc_census_jobs, &args.rfc_census_with);
+        census::run(&args.rfc_census, args.rfc_census_jobs, &args.rfc_census_with);
         return;
     }
     let rfc_rules = args.rfc.then(|| match rule_set(&args.rfc_rules) {
@@ -352,7 +375,7 @@ fn main() {
     });
     if args.inputs.is_empty() {
         eprintln!(
-            "no capture given (see --help; --schema, --enrich and --rfc-census read no capture)"
+            "no capture given (see --help; --schema, --enrich, --reparse and --rfc-census read no capture)"
         );
         std::process::exit(2);
     }
@@ -788,60 +811,6 @@ fn run_query(
         }
     }
     hits
-}
-
-/// Sweep the census over flows documents and print it.
-///
-/// Every document is either scanned or recorded as a read failure: a census
-/// that dropped a document it could not parse would understate its own counts.
-fn run_rfc_census(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::RuleId]) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let files = expand_flows_documents(inputs);
-    if files.is_empty() {
-        eprintln!("no *.flows.json found under {inputs:?}");
-        std::process::exit(2);
-    }
-    let workers = jobs.clamp(1, files.len());
-    eprintln!("# rfc-census: {} document(s), {workers} worker(s)", files.len());
-
-    let next = AtomicUsize::new(0);
-    let done = AtomicUsize::new(0);
-    let census = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                let (next, done, files) = (&next, &done, &files);
-                scope.spawn(move || {
-                    let mut local = Census::with_candidates(candidates);
-                    while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        let name = path.display().to_string();
-                        let capture = capture_of(path);
-                        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(
-                            |t| serde_json::from_str::<FlowsDoc>(&t).map_err(|e| e.to_string()),
-                        ) {
-                            Ok(doc) => local.absorb(&name, &capture, &doc),
-                            Err(reason) => local.fail(&name, reason),
-                        }
-                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        if n % 500 == 0 {
-                            eprintln!("# {n}/{} scanned", files.len());
-                        }
-                    }
-                    local
-                })
-            })
-            .collect();
-        let mut merged = Census::with_candidates(candidates);
-        for handle in handles {
-            merged.merge(handle.join().expect("a census worker panicked"));
-        }
-        merged
-    });
-    let mut census = census;
-    census.sort();
-
-    eprint!("{}", census.summary());
-    println!("{}", serde_json::to_string_pretty(&census).expect("census serializes"));
 }
 
 fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args, sut: Option<&SutSet>) -> bool {
