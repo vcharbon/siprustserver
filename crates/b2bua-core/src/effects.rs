@@ -156,9 +156,11 @@ pub enum FireAndForgetEffect {
     /// request JSON the seed rule built; the router calls `decision.call_failure`
     /// then re-enters via a `call-failure-result` internal event. The admits
     /// of the failover chain are numbered from `limiter.first_change` on, in
-    /// the block the dispatching turn reserved. `deadline` names the answer
-    /// deadline the sending turn armed (ADR-0039), which the fold states;
-    /// `None` until armed, and for a consult with no deadline.
+    /// the block the dispatching turn reserved; `limiter.may_hold` states
+    /// whether the limiter may hold a set for the call before the consult.
+    /// `deadline` names the answer deadline the sending turn armed
+    /// (ADR-0039), which the fold states; `None` until armed, and for a
+    /// consult with no deadline.
     FailureAsyncHttp {
         call_ref: String,
         request: serde_json::Value,
