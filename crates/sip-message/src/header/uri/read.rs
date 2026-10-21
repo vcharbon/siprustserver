@@ -198,23 +198,24 @@ pub(crate) fn host_refusal(host: &str) -> Option<String> {
     if host.contains(':') {
         return (!is_ipv6_address(host)).then(|| format!("invalid IPv6 address {host:?}"));
     }
-    if is_ipv4_shaped(host) {
+    if is_dotted_digits(host.strip_suffix('.').unwrap_or(host)) {
         return ipv4_refusal(host);
     }
     hostname_refusal(host)
 }
 
-/// Four non-empty runs of digits joined by dots: an `IPv4address`, or no host.
-fn is_ipv4_shaped(host: &str) -> bool {
-    host.split('.').count() == 4
+/// Two or more non-empty runs of digits joined by dots: an `IPv4address`,
+/// or no host at all.
+fn is_dotted_digits(host: &str) -> bool {
+    host.contains('.')
         && host.split('.').all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `hostname = *( domainlabel "." ) toplabel [ "." ]`, where a label is
-/// alphanumerics and inner hyphens and the top label starts with a letter.
+/// alphanumerics and inner hyphens. The top label may start with a digit
+/// (RFC 1123 §2.1), the one leniency of the host grammar (ADR-0053).
 fn hostname_refusal(host: &str) -> Option<String> {
     let named = host.strip_suffix('.').filter(|h| !h.is_empty()).unwrap_or(host);
-    let mut top = None;
     for label in named.split('.') {
         let bytes = label.as_bytes();
         let ends_ok = bytes.first().is_some_and(|&b| is_alphanum(b))
@@ -222,15 +223,17 @@ fn hostname_refusal(host: &str) -> Option<String> {
         if !ends_ok || !bytes.iter().all(|&b| is_alphanum(b) || b == b'-') {
             return Some(format!("invalid host label {label:?}"));
         }
-        top = bytes.first().copied();
     }
-    (!top.is_some_and(|b| b.is_ascii_alphabetic()))
-        .then(|| format!("top label of {host:?} must start with ALPHA"))
+    None
 }
 
-/// The octets of an IPv4-shaped host: at most three digits, at most 255, and
-/// no leading zero (an octal reading of one names another host).
+/// A dotted run of digits as an `IPv4address`: four octets of at most three
+/// digits, at most 255, and no leading zero (an octal reading of one names
+/// another host).
 fn ipv4_refusal(host: &str) -> Option<String> {
+    if host.split('.').count() != 4 || host.split('.').any(str::is_empty) {
+        return Some(format!("malformed IPv4 address {host:?}"));
+    }
     for octet in host.split('.') {
         if octet.len() > 1 && octet.starts_with('0') {
             return Some(format!(
@@ -258,7 +261,7 @@ fn is_ipv6_address(text: &str) -> bool {
 fn is_rfc3261_ipv6(text: &str) -> bool {
     let hexpart = if text.contains('.') {
         let Some((hex, v4)) = text.rsplit_once(':') else { return false };
-        if !is_ipv4_shaped(v4) || ipv4_refusal(v4).is_some() {
+        if !is_dotted_digits(v4) || ipv4_refusal(v4).is_some() {
             return false;
         }
         hex

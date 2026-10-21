@@ -4,8 +4,6 @@
 //!   Request-Line:  Method SP Request-URI SP SIP-Version CRLF
 //!   Status-Line:   SIP-Version SP Status-Code SP Reason-Phrase CRLF
 
-use std::borrow::Cow;
-
 use super::scanner::{span_text, Scanner, Span, CR, LF, SP};
 use crate::error::SipParseError;
 use crate::parser::SipParserLimits;
@@ -135,17 +133,6 @@ fn parse_status_line(
     s.expect_crlf()?;
 
     Ok(StatusLine { version, status, reason })
-}
-
-/// The wire method token, uppercased only when the wire form is not already
-/// uppercase — an all-caps `INVITE` costs no allocation.
-pub fn canonical_method(image: &str, method: Span) -> Result<Cow<'_, str>, SipParseError> {
-    let raw = span_text(image, &method)?;
-    Ok(if raw.bytes().any(|b| b.is_ascii_lowercase()) {
-        Cow::Owned(raw.to_uppercase())
-    } else {
-        Cow::Borrowed(raw)
-    })
 }
 
 /// Read bytes until SP (or CR/LF for empty-reason edge cases), without

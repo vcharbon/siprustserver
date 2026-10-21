@@ -45,8 +45,10 @@ by construction. Every other reader of a URI goes through it.
   scheme lands in the userinfo, the host, the port, a URI parameter or an
   escaped header, each held to its class; anything left over refuses the URI.
   The first `@` ends the userinfo, since no later part admits one. Hosts are
-  `hostname` (labels of alphanumerics and inner hyphens, the top label
-  starting with a letter) or `IPv4address`; an IPv6 reference holds an
+  `hostname` (labels of alphanumerics and inner hyphens) or `IPv4address`; a
+  dotted run of digits is an `IPv4address` or no host. The one leniency: a top
+  label may start with a digit (RFC 1123 §2.1 relaxed the same rule for host
+  names), so `27` and `1x.27` are hostnames. An IPv6 reference holds an
   `IPv6address` as §25.1 writes it or in the RFC 4291 text form (RFC 5954, and
   RFC 5118 §4.10 asks for both), with no zone ID. A port is 1 to 65535.
   Parameter values are not checked against their parameter: `ttl=256` and
@@ -67,7 +69,8 @@ is no percent-encoding on egress: what arrives escaped stays escaped, what
 arrives raw is refused. On wire bytes the classes also hold the Call-ID
 (`word [ "@" word ]`), the From and To tags and the Via branch (`token`), the
 CSeq method (`token`) and every header name (`token`). Headers the parser does
-not read are not newly checked.
+not read are not newly checked. A method keeps the case it was written in
+(§7.1): an extension method is never uppercased.
 
 ### 4. The name-addr
 
@@ -92,8 +95,9 @@ P-Preferred-Identity, Diversion, History-Info, Remote-Party-ID, Refer-To) stay
 non-fatal: the error is their stored value. A header read on access uses the
 same reader and returns the error.
 
-The Date gate of the old opt-in pass joins the parse: a Date not in the
-§20.17 form refuses the message. The opt-in pass is gone.
+The opt-in strict pass is gone. The one exception to "strict wherever the
+parser validates" is the Date: a malformed Date never refuses the message
+(RFC 4475 §3.1.2.12 lets an element ignore it), and nothing reads it.
 
 ### 6. The lenient mode
 

@@ -163,14 +163,15 @@ impl SipParser for CustomParser {
 
         match start {
             StartLine::Request(rl) => {
-                let method = start_line::canonical_method(image, rl.method)?;
+                // A method is case-sensitive (RFC 3261 §7.1): the token as written.
+                let method = scanner::span_text(image, &rl.method)?;
                 let uri = text.span(rl.uri.start, rl.uri.len());
                 let eager: RequestEager =
-                    extract_request_fields(&idx, &uri, limits, Some(&method), mode)?;
+                    extract_request_fields(&idx, &uri, limits, Some(method), mode)?;
                 let optional = optional_headers::extract_optional_indexed(&idx);
                 Ok(SipMessage::Request(SipRequest::new(
                     RequestLine {
-                        method: crate::method::Method::from_wire(&method),
+                        method: crate::method::Method::from_wire(method),
                         uri: eager.request_uri,
                         version: text.span(rl.version.start, rl.version.len()),
                     },

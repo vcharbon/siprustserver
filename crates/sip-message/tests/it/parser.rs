@@ -3,7 +3,7 @@
 //!
 //! The accept/reject verdicts overlap `compliance_matrix.rs`; what this file
 //! adds is assertions on the *parsed field content* of the messages that
-//! parse, and the one §3.1.2 message `parse()` still reads.
+//! parse, and the two §3.1.2 messages `parse()` still reads.
 
 use std::fs;
 use std::path::PathBuf;
@@ -106,7 +106,6 @@ fn invalid_messages_rejected_by_eager_parse() {
         "embeddedLwsInUri",         // 3.1.2.8
         "multipleSPInRequestLine",  // 3.1.2.9
         "escapedHeadersInUri",      // 3.1.2.11
-        "invalidTimezone",          // 3.1.2.12
         "unencloseNameAddr",        // 3.1.2.13
         "spacesInAddrSpec",         // 3.1.2.14
         "nonTokenDisplayName",      // 3.1.2.15
@@ -123,9 +122,11 @@ fn invalid_messages_rejected_by_eager_parse() {
 // --- §3.1.2 the parser still reads ---
 
 #[test]
-fn trailing_spaces_in_the_request_line_still_read_as_a_request() {
-    let name = "trailingSpacesInRequestLine"; // 3.1.2.10
-    let msg = parse("rfc4475-invalid", name)
-        .unwrap_or_else(|e| panic!("{name} should parse: {}", e.reason));
-    assert!(matches!(msg, SipMessage::Request(_)), "{name}: expected request");
+fn trailing_spaces_and_a_malformed_date_still_read_as_a_request() {
+    // 3.1.2.10, and 3.1.2.12: a malformed Date never refuses a message.
+    for name in ["trailingSpacesInRequestLine", "invalidTimezone"] {
+        let msg = parse("rfc4475-invalid", name)
+            .unwrap_or_else(|e| panic!("{name} should parse: {}", e.reason));
+        assert!(matches!(msg, SipMessage::Request(_)), "{name}: expected request");
+    }
 }

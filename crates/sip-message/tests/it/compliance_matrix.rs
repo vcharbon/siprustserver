@@ -112,8 +112,9 @@ fn rfc4475_invalid() {
     ];
     // Reject every invalid fixture except trailingSpacesInRequestLine
     // (3.1.2.10), whose trailing SP the start-line reader leaves to the
-    // Request-URI split.
-    let lenient = set(&["trailingSpacesInRequestLine"]);
+    // Request-URI split, and invalidTimezone (3.1.2.12): a malformed Date
+    // never refuses a message (ADR-0053; RFC 4475 lets an element ignore it).
+    let lenient = set(&["trailingSpacesInRequestLine", "invalidTimezone"]);
     let reject: HashSet<&str> = names.iter().copied().filter(|n| !lenient.contains(n)).collect();
     run_category("rfc4475-invalid", &names, &reject);
 }

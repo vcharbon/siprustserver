@@ -51,7 +51,6 @@ pub struct HeaderIndex<'a> {
     pub geolocation_routing: Slot<'a>,
     pub rack: Slot<'a>,
     pub refer_to: Slot<'a>,
-    pub date: Vec<&'a SipStr>,
 }
 
 impl<'a> HeaderIndex<'a> {
@@ -82,7 +81,6 @@ impl<'a> HeaderIndex<'a> {
                 HeaderName::GeolocationRouting => idx.geolocation_routing.record(value),
                 HeaderName::RAck => idx.rack.record(value),
                 HeaderName::ReferTo => idx.refer_to.record(value),
-                HeaderName::Date => idx.date.push(value),
                 _ => {}
             }
         }

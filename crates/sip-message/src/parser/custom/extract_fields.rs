@@ -13,7 +13,6 @@ use super::contact_entries::{
 };
 use super::dialog_ids::{count_tag_params, is_call_id, read_address, tag_refusal};
 use super::header_index::HeaderIndex;
-use super::optional_headers::date_refusal;
 use super::port_garbage::has_via_port_trailing_garbage;
 use super::request_uri::read_request_uri;
 use super::routes::route_refusal;
@@ -277,7 +276,6 @@ pub fn extract_common_fields(
     let contacts = read_contacts(idx, wire, contact_reading)?;
     if wire {
         route_refusal(idx)?;
-        date_refusal(&idx.date)?;
     }
 
     let mut hops = vias.into_iter();

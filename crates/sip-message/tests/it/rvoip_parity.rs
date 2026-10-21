@@ -124,12 +124,6 @@ const EXPECTED: &[Expected] = &[
         .values(0x377fef051d494302),
     rvoip("rfc4475-invalid/escapedHeadersInUri", OnlyCustomRefuses, "RFC 3261 §19.1.1 Table 1")
         .values(0x6752bdbce2491d00),
-    rvoip(
-        "rfc4475-invalid/invalidTimezone",
-        OnlyCustomRefuses,
-        "RFC 3261 §20.17; RFC 4475 §3.1.2.12",
-    )
-    .values(0x11b637e5652ddfd6),
     rvoip("rfc4475-invalid/nonTokenDisplayName", OnlyCustomRefuses, "RFC 4475 §3.1.2.15")
         .values(0xde535a809e338700),
     rvoip("rfc4475-invalid/unencloseNameAddr", OnlyCustomRefuses, "RFC 4475 §3.1.2.13")
@@ -175,6 +169,7 @@ const EXPECTED: &[Expected] = &[
     rvoip("ipv6/v47_mixedIpv4Ipv6Vias", ToTag, ADDR_SPEC_PARAMS).values(0xd24dd170bd8db175),
     rvoip("ipv6/v48_multipleIpInSdp", FromTag, ADDR_SPEC_PARAMS).values(0xec9681ef8a5b85d8),
     rvoip("ipv6/v49_ipv4Mapped", FromTag, ADDR_SPEC_PARAMS).values(0xec9681ef8a5b85d8),
+    rvoip("rfc4475-invalid/invalidTimezone", FromTag, ADDR_SPEC_PARAMS).values(0xfcf9cfef20cb724e),
     rvoip("rfc4475-valid/escapedNulls", FromTag, ADDR_SPEC_PARAMS).values(0x8146bcc924d85594),
     rvoip("rfc4475-valid/semicolonInUserPart", FromTag, ADDR_SPEC_PARAMS)
         .values(0x1761762f9f70ab1f),
@@ -186,10 +181,7 @@ const EXPECTED: &[Expected] = &[
         .values(0x6c0069c1c9db60a1),
     // Request-URIs the oracle renders changed.
     rvoip("rfc4475-valid/semicolonInUserPart", Start, RESERVED_ESCAPE).values(0x03804767341bed84),
-    // The oracle escapes the user part's reserved characters; the production
-    // parser also reads the extension method uppercased (RFC 3261 §7.1 holds
-    // methods case-sensitive).
-    rvoip("rfc4475-valid/wideRangeValidChars", Start, RESERVED_ESCAPE).values(0xc5dd43559d2db28a),
+    rvoip("rfc4475-valid/wideRangeValidChars", Start, RESERVED_ESCAPE).values(0x1b2e91773d7da20a),
     rvoip("synthetic/cancel", Start, RESERVED_ESCAPE).values(0x35b690fec65f2844),
     rvoip("synthetic/invite-sdp", Start, RESERVED_ESCAPE).values(0xa009737edb4ccd12),
     Expected {

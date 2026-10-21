@@ -155,9 +155,10 @@ fn host_labels_follow_the_hostname_and_ipv4_grammar() {
         "sip:a@h%41.example.com",
         "sip:a@1.2.3",
         "sip:a@1.2.3.4.5",
-        "sip:a@example.123",
+        "sip:a@1.2.3.4.",
         "sip:a@example..com",
         "sip:a@256.1.1.1",
+        "sip:a@27-.example",
     ] {
         assert!(uri(bad).is_err(), "host {bad:?} accepted");
         refused("To host", &invite("To", &format!("To: <{bad}>"), ""));
@@ -165,6 +166,31 @@ fn host_labels_follow_the_hostname_and_ipv4_grammar() {
     for good in ["sip:a@example.com.", "sip:a@a-b.c9.example.com", "sip:a@192.0.2.1", "sip:a@x"] {
         assert!(uri(good).is_ok(), "host {good:?} refused: {:?}", uri(good));
     }
+}
+
+/// The one leniency of the host grammar: a top label need not start with a
+/// letter (RFC 1123 §2.1), so a host of alphanumeric labels that is no dotted
+/// run of digits is a hostname. A dotted run of digits is an IPv4 address or
+/// nothing.
+#[test]
+fn a_digits_only_top_label_is_a_hostname() {
+    let r = request(&invite("From", "From: <sip:+33612345678@27:5790;user=phone>;tag=a1", ""));
+    assert_eq!(r.from().uri().host_port(), ("27", 5790));
+    for good in ["sip:a@example.123", "sip:a@1x.27", "sip:a@27", "sip:a@9-9.27."] {
+        assert!(uri(good).is_ok(), "host {good:?} refused: {:?}", uri(good));
+    }
+}
+
+/// RFC 3261 §7.1 and §25.1: a method is case-sensitive, so an extension
+/// method keeps the case it was written in, on the request line and in the
+/// CSeq.
+#[test]
+fn an_extension_method_keeps_its_case() {
+    let raw = invite("INVITE", "Foo-Bar sip:bob@example.com SIP/2.0", "")
+        .replace("CSeq: 1 INVITE", "CSeq: 1 Foo-Bar");
+    let r = request(&raw);
+    assert_eq!(r.method().as_str(), "Foo-Bar");
+    assert_eq!(r.cseq().method().as_str(), "Foo-Bar");
 }
 
 #[test]
@@ -390,11 +416,12 @@ fn a_header_name_is_a_token() {
 }
 
 // ---------------------------------------------------------------------------
-// What the strict re-parse caught now refuses at parse
+// The Date: the one header the parser reads that never refuses the message
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_date_outside_gmt_is_refused() {
-    refused("Date", &invite("", "", "Date: Sat, 13 Nov 2010 23:29:00 PST\r\n"));
+fn a_malformed_date_never_refuses_the_message() {
+    request(&invite("", "", "Date: Sat, 13 Nov 2010 23:29:00 PST\r\n"));
+    request(&invite("", "", "Date: Sat, 3 Nov 2010 23:29:00 GMT\r\n"));
     request(&invite("", "", "Date: Sat, 13 Nov 2010 23:29:00 GMT\r\n"));
 }
