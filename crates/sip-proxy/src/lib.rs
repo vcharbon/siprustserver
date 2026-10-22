@@ -55,6 +55,7 @@ pub mod health;
 pub mod liveness;
 pub mod load_observer;
 pub mod observability;
+pub mod parse_refusals;
 mod poison;
 pub mod refusals;
 pub mod registry;

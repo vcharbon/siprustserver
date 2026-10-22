@@ -30,22 +30,27 @@ impl RequestPartial {
         &self.method
     }
 
+    /// Every Via entry, typed, top first.
     pub fn via(&self) -> &NonEmpty<Via> {
         &self.identity.via
     }
 
+    /// The From, typed.
     pub fn from(&self) -> &header::From {
         &self.identity.from
     }
 
+    /// The To, typed.
     pub fn to(&self) -> &header::To {
         &self.identity.to
     }
 
+    /// The Call-ID, typed.
     pub fn call_id(&self) -> &header::CallId {
         &self.identity.call_id
     }
 
+    /// The CSeq, typed; its method is the request line's.
     pub fn cseq(&self) -> &header::CSeq {
         &self.identity.cseq
     }
@@ -77,8 +82,9 @@ impl RequestPartial {
 }
 
 /// The partial of a refused request with method `method` whose header lines
-/// `idx` indexes. `None` when no response can answer it: an ACK (§17), or a
-/// request one of whose five fields does not pass `mode`'s rules.
+/// `idx` indexes. `None` when no response can answer it: an ACK (§17), a
+/// request one of whose five fields does not pass `mode`'s rules, or one whose
+/// CSeq names another method.
 pub(super) fn request_partial(
     method: &str,
     idx: &HeaderIndex,
@@ -90,6 +96,11 @@ pub(super) fn request_partial(
         return None;
     }
     let identity = extract_identity(idx, limits, mode).ok()?;
+    // A response's CSeq names the client transaction it answers (§17.1.3): one
+    // naming another method answers none.
+    if *identity.cseq.method() != method {
+        return None;
+    }
     Some(Box::new(RequestPartial {
         method,
         identity,

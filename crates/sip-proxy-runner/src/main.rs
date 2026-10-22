@@ -299,11 +299,12 @@ async fn run() -> Result<i32, String> {
     // The stale-payload sweep shares the probe's observer.
     let sweep_observer = observer.clone();
 
-    // The CANCEL/rtx LRU and the refusal memo are ONE instance across shards
-    // (`SharedRouting`).
+    // The CANCEL/rtx LRU, the refusal memo and the cap on parse-refusal 400s
+    // are ONE instance across shards (`SharedRouting`).
     let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
     let refusals =
         Arc::new(sip_proxy::refusals::Refusals::new(&id_gen, cfg.retry_after_jitter_sec));
+    let parse_refusals = Arc::new(sip_proxy::parse_refusals::ParseRefusals::new(&id_gen));
 
     // Named-target resolver tuning + startup prewarm. A COLD
     // name (fresh deploy, CoreDNS restart, TTL expiry) would cost the first
@@ -329,6 +330,7 @@ async fn run() -> Result<i32, String> {
         metrics: metrics.clone(),
         cancel_lru,
         refusals,
+        parse_refusals,
         self_gate: gate_dyn,
         intake_age,
         resolver: resolver_cfg,

@@ -113,10 +113,10 @@ with a failure code.
 
 Any input yields a recoverable error; only the packet is refused, and a refused request is
 answered with 400 when its parse error carries a partial (ADR-0054). A function that can fail
-on input returns an error; a signature that was infallible changes and its callers follow. A rewrite never introduces a default that changes a result
-(`unwrap_or_default`, `unwrap_or(0)`). In the B2BUA, an unreadable SDP offer is refused as an
-unacceptable offer (488); an unreadable answer fails the negotiation like an answer with no
-common format.
+on input returns an error; a signature that was infallible changes and its callers follow. A
+rewrite never introduces a default that changes a result (`unwrap_or_default`,
+`unwrap_or(0)`). In the B2BUA, an unreadable SDP offer is refused as an unacceptable offer
+(488); an unreadable answer fails the negotiation like an answer with no common format.
 
 ### 7. Locks in the shell
 

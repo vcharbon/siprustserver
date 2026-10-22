@@ -251,9 +251,13 @@ impl Owner {
                 }
             }
             // ACK with no matching server txn. One without a To-tag answers
-            // no dialog and one acknowledging this layer's own refusal ends
-            // here; a 2xx ACK always has a To-tag and passes through.
-            if req.to().tag().is_none() || self.acknowledges_refusal(&req) {
+            // no dialog and one acknowledging this layer's own refusal or
+            // parse-refusal 400 ends here; a 2xx ACK always has a To-tag and
+            // passes through.
+            if req.to().tag().is_none()
+                || self.acknowledges_refusal(&req)
+                || self.acknowledges_parse_refusal(&req)
+            {
                 return;
             }
             self.emit(TransactionEvent::Message {

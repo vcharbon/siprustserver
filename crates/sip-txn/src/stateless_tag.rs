@@ -6,7 +6,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 
 use sip_message::header::{CSeq, CallId, From, Via};
-use sip_message::{RequestPartial, SipRequest};
+use sip_message::{Method, RequestPartial, SipRequest};
 
 use crate::rng::IdGen;
 
@@ -41,6 +41,15 @@ impl StatelessTagger {
     /// as [`for_request`](Self::for_request) derives it.
     pub fn for_partial(&self, partial: &RequestPartial) -> (String, u64) {
         self.derive(partial.call_id(), partial.from(), partial.via().first(), partial.cseq())
+    }
+
+    /// Whether the ACK `ack` acknowledges a final to an INVITE whose To-tag
+    /// this tagger derived: the ACK of a non-2xx final shares its INVITE's
+    /// Call-ID, From-tag, top-Via branch and CSeq number (§17.1.1.3).
+    pub fn acknowledges_own_final(&self, ack: &SipRequest) -> bool {
+        let invite = CSeq::new(ack.cseq().seq(), Method::Invite);
+        let (tag, _) = self.derive(ack.call_id(), ack.from(), ack.via().first(), &invite);
+        ack.to().tag() == Some(tag.as_str())
     }
 
     fn derive(&self, call_id: &CallId, from: &From, top_via: &Via, cseq: &CSeq) -> (String, u64) {

@@ -11,23 +11,19 @@
 //! A copy arriving after the window, or after the memo forgot it past its
 //! capacity, is judged afresh. A CANCEL is never remembered: the CANCEL of a
 //! remembered INVITE refusal is answered 200 here, the proxy being the UAS of
-//! that INVITE (§9.2). A request the parser refused draws a 400 under the same
-//! tag derivation, never remembered, within one cap for the process
-//! ([`sip_txn::parse_refusal`]).
+//! that INVITE (§9.2).
 
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, VecDeque};
 use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
 
 use load_shed::retry_after;
 use sip_message::generators::{generate_response, GenerateError, GenerateResponseOpts};
 use sip_message::header::{HeaderValue, RetryAfter};
 use sip_message::types::SipHeader;
-use sip_message::{Method, SipParseError, SipRequest, SipResponse};
-use sip_txn::parse_refusal::{ParseRefusal, ParseRefusalCap};
+use sip_message::{Method, SipRequest, SipResponse};
 use sip_txn::timers::TIMER_B;
 use sip_txn::{IdGen, StatelessTagger};
 
@@ -55,9 +51,6 @@ pub struct Refusals {
     hasher: RandomState,
     stripes: [Mutex<Memo>; STRIPES],
     remembered: AtomicUsize,
-    /// The process's one cap on the 400s answering requests the parser
-    /// refused, shared by every recv shard.
-    parse_cap: Mutex<ParseRefusalCap>,
 }
 
 /// One refusal: when it was made, the `Retry-After` its 503 carried and the
@@ -118,32 +111,12 @@ impl Refusals {
                 })
             }),
             remembered: AtomicUsize::new(0),
-            parse_cap: Mutex::new(ParseRefusalCap::new(Duration::ZERO)),
         }
     }
 
     /// The To-tag of any final the proxy answers `req` with itself.
     pub fn to_tag(&self, req: &SipRequest) -> String {
         self.tagger.for_request(req).0
-    }
-
-    /// The fate at `now_ms` of a datagram the parser refused with `error`:
-    /// its 400, under a To-tag derived as [`to_tag`](Self::to_tag) derives
-    /// one and a Warning naming `warn_agent`, while the cap allows; never
-    /// remembered, so every copy is judged again.
-    pub fn refuse_unparsed(
-        &self,
-        error: &SipParseError,
-        warn_agent: &str,
-        now_ms: u64,
-    ) -> ParseRefusal {
-        let mut cap = crate::poison::locked(&self.parse_cap, crate::poison::PARSE_REFUSAL_CAP);
-        cap.judge(
-            error,
-            warn_agent,
-            |partial| self.tagger.for_partial(partial).0,
-            Duration::from_millis(now_ms),
-        )
     }
 
     /// Refuse `req` at `now_ms`, `retry_after_sec` being the refusing stage's

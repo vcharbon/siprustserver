@@ -10,8 +10,9 @@ use crate::config::B2buaConfig;
 /// The transaction layer's tunables for this worker: its event queue, the
 /// deployment's INVITE bounds and CANCEL policy, the worker's shared
 /// `refusals`, the ceilings on the deferred backlog
-/// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own, and
-/// no transaction for an out-of-dialog OPTIONS.
+/// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own,
+/// no transaction for an out-of-dialog OPTIONS, and the worker's advertised
+/// SIP address.
 pub(super) fn txn_config(
     config: &B2buaConfig,
     id_gen: &Arc<IdGen>,
@@ -37,10 +38,21 @@ pub(super) fn txn_config(
         // The OPTIONS health answer derives its To-tag from the request
         // (`RouterCtx::options_tagger`).
         stateless_options: true,
-        advertised: None,
+        // The worker's SIP identity names it in a Warning, never a wildcard
+        // bind address.
+        advertised: Some(hostport(&config.sip_local_ip, config.sip_local_port)),
     };
     txn_config.deferred_bound = Some(
         ceilings.unwrap_or_else(|| crate::admission::deferred_bound(txn_config.event_capacity())),
     );
     txn_config
+}
+
+/// `host:port`, an IPv6 literal host in brackets (RFC 3261 §25.1 `hostport`).
+fn hostport(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }

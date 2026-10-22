@@ -5,11 +5,14 @@
 //! requests (whose source address may be forged) draws a bounded rate of
 //! answers.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use load_shed::TokenBucket;
 use sip_message::generators::generate_invalid_request;
-use sip_message::{RequestPartial, SipParseError, SipResponse};
+use sip_message::{SipParseError, SipResponse};
+
+use crate::StatelessTagger;
 
 /// The 400s an ingress sends back to back before the rate binds.
 pub const PARSE_REFUSAL_BURST: u32 = 100;
@@ -48,30 +51,31 @@ impl ParseRefusalCap {
         }
     }
 
-    /// The fate of the datagram `error` refused, at `now`: answered under the
-    /// To-tag `to_tag` derives from its partial, with `warn_agent` naming
-    /// this element in the Warning, while the cap holds a token.
-    pub fn judge(
-        &mut self,
-        error: &SipParseError,
-        warn_agent: &str,
-        to_tag: impl FnOnce(&RequestPartial) -> String,
-        now: Duration,
-    ) -> ParseRefusal {
-        let Some(partial) = error.partial() else { return ParseRefusal::Dropped };
-        if self.bucket.try_take(now).is_err() {
-            return ParseRefusal::Capped;
-        }
-        let source = (String::new(), 0);
-        match generate_invalid_request(
-            partial,
-            &error.reason,
-            warn_agent,
-            &to_tag(partial),
-            &source,
-        ) {
-            Ok(response) => ParseRefusal::Answer(Box::new(response)),
-            Err(_) => ParseRefusal::Dropped,
-        }
+    /// Take one token at `now`; whether there was one.
+    pub fn try_take(&mut self, now: Duration) -> bool {
+        self.bucket.try_take(now).is_ok()
+    }
+}
+
+/// The fate of the datagram from `source` that `error` refused. Without a
+/// partial it is dropped before `take` is asked for a token; with one and a
+/// token, it is answered under the To-tag `tagger` derives from the request
+/// (§8.2.6.2), naming `agent()` in the Warning.
+pub fn refuse(
+    error: &SipParseError,
+    source: SocketAddr,
+    tagger: &StatelessTagger,
+    agent: impl FnOnce() -> String,
+    take: impl FnOnce() -> bool,
+) -> ParseRefusal {
+    let Some(partial) = error.partial() else { return ParseRefusal::Dropped };
+    if !take() {
+        return ParseRefusal::Capped;
+    }
+    let to_tag = tagger.for_partial(partial).0;
+    let source = (source.ip().to_string(), source.port());
+    match generate_invalid_request(partial, &error.reason, &agent(), &to_tag, &source) {
+        Ok(response) => ParseRefusal::Answer(Box::new(response)),
+        Err(_) => ParseRefusal::Dropped,
     }
 }

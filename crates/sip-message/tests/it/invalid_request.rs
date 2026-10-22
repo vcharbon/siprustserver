@@ -95,7 +95,7 @@ fn crlf_and_quotes_cannot_break_out_of_the_header() {
 /// `%`, `\`, controls and every byte past ASCII become `?`, one per byte.
 #[test]
 fn every_other_byte_becomes_a_question_mark() {
-    assert_eq!(warning_value(399, AGENT, "zo\u{eb}\t%0D\\~"), "399 192.0.2.1:5060 \"zo???0D??\"");
+    assert_eq!(warning_value(399, AGENT, "zo\u{eb}\t%0D\\~"), "399 192.0.2.1:5060 \"zo????0D??\"");
 }
 
 #[test]

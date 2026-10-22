@@ -30,6 +30,7 @@ fn shared() -> SharedRouting {
         strategy: Arc::new(sip_proxy::ForwardAllStrategy::new(ProxyAddr::new("127.0.0.1", 5070))),
         registry: Arc::new(StaticWorkerRegistry::from_entries(vec![])),
         refusals: Arc::new(Refusals::new(&id_gen, 5)),
+        parse_refusals: Arc::new(sip_proxy::parse_refusals::ParseRefusals::new(&id_gen)),
         id_gen,
         metrics: Arc::new(ProxyMetrics::new()),
         cancel_lru: Arc::new(CancelBranchLru::with_clock(clock.clone())),

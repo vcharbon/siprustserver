@@ -126,7 +126,7 @@ impl Owner {
             parser,
             events_tx,
             metrics,
-            parse_refusals: ParseRefusals::new(&config.id_gen),
+            parse_refusals: ParseRefusals::new(&config.id_gen, config.advertised),
             id_gen: config.id_gen,
             self_release_watch: HashSet::new(),
             txn_index: HashMap::new(),

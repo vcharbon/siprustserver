@@ -22,19 +22,21 @@ pub const INVALID_REQUEST_REASON: &str = "Invalid Request";
 const MISCELLANEOUS_WARNING: u16 = 399;
 
 /// `400 Invalid Request` to the request `partial` holds: Via, From, To,
-/// Call-ID and CSeq echoed as received, `to_tag` added to a To that has none
-/// (§8.2.6.2), and `Warning: 399 <warn_agent> "<reason>"` naming the refusal.
+/// Call-ID and CSeq echoed as received, the top Via stamped with the packet's
+/// `source` host and port (§18.2.1, RFC 3581 §4), `to_tag` added to a To that
+/// has none (§8.2.6.2), and `Warning: 399 <warn_agent> "<reason>"` naming the
+/// refusal.
 pub fn generate_invalid_request(
     partial: &RequestPartial,
     reason: &str,
     warn_agent: &str,
     to_tag: &str,
-    _source: &(String, u16),
+    source: &(String, u16),
 ) -> Result<SipResponse, GenerateError> {
     let mut draft =
         ResponseDraft::new(INVALID_REQUEST_STATUS, SipStr::from_static(INVALID_REQUEST_REASON));
-    for via in partial.via_lines() {
-        draft = echo_via(draft, via.clone(), None);
+    for (i, via) in partial.via_lines().iter().enumerate() {
+        draft = echo_via(draft, via.clone(), (i == 0).then_some(source));
     }
     draft = draft.push_raw(HeaderName::From, partial.from_line().clone());
     draft = echo_to(

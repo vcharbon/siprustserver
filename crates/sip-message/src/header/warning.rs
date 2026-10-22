@@ -2,29 +2,26 @@
 //! `warn-code SP warn-agent SP warn-text` values, the warn-agent naming the
 //! element that added the warning (`hostport` or a pseudonym token).
 
-/// The most bytes a warn-text built by [`warning_value`] holds, its
-/// escapes included and its quotes excluded.
+/// The most bytes a warn-text built by [`warning_value`] holds, its quotes
+/// excluded.
 pub const WARN_TEXT_MAX: usize = 200;
 
-/// One warning-value: `code SP agent SP warn-text`, the warn-text being
-/// `text` as a quoted-string of printable ASCII: `"` and `\` escaped as
-/// quoted-pairs, every other byte outside SP..`~` written `%XX`, and the
-/// escaped text cut at [`WARN_TEXT_MAX`] bytes between two escapes.
+/// One warning-value: `code SP agent SP warn-text`, the warn-text being the
+/// first [`WARN_TEXT_MAX`] bytes of `text` in quotes, every byte outside
+/// ASCII letters, digits, space and `.,:;-_()/=+'@[]<>` replaced by `?`. No
+/// byte of `text` can close the quoted-string or the header line.
 pub fn warning_value(code: u16, agent: &str, text: &str) -> String {
-    let mut warn_text = String::with_capacity(text.len().min(WARN_TEXT_MAX));
-    for byte in text.bytes() {
-        let escaped = match byte {
-            b'"' => String::from("\\\""),
-            b'\\' => String::from("\\\\"),
-            b' '..=b'~' => char::from(byte).to_string(),
-            _ => format!("%{byte:02X}"),
-        };
-        if warn_text.len().saturating_add(escaped.len()) > WARN_TEXT_MAX {
-            break;
-        }
-        warn_text.push_str(&escaped);
-    }
+    let warn_text: String = text
+        .bytes()
+        .take(WARN_TEXT_MAX)
+        .map(|byte| if is_plain(byte) { char::from(byte) } else { '?' })
+        .collect();
     format!("{code} {agent} \"{warn_text}\"")
+}
+
+/// A byte a warn-text keeps as it is.
+fn is_plain(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b" .,:;-_()/=+'@[]<>".contains(&byte)
 }
 
 /// The warn-agent of every warning-value of a `Warning` header line, in order.

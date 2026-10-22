@@ -62,8 +62,9 @@ pub struct ParsedHeaders {
     pub content_length: Option<u64>,
     /// The first line that broke the grammar or a gate; the split read past it.
     pub refusal: Option<SipParseError>,
-    /// Whether a refused line named Via, From, To, Call-ID or CSeq: a field a
-    /// response echoes is then missing from `headers`.
+    /// Whether a refused line named Via, From, To, Call-ID or CSeq, or had a
+    /// name that did not read: a field a response echoes may then be missing
+    /// from `headers`.
     pub echoed_line_refused: bool,
 }
 
@@ -79,9 +80,9 @@ fn is_echoed(name: &HeaderName) -> bool {
 enum Line {
     /// It passed, and is in the list.
     Kept,
-    /// It broke the grammar or a gate; the scanner is past it. `name` is the
-    /// header it named, when its name read.
-    Refused { error: SipParseError, name: Option<HeaderName> },
+    /// It broke the grammar or a gate; the scanner is past it. `echoed` when
+    /// it named a field a response echoes, or its name did not read.
+    Refused { error: SipParseError, echoed: bool },
 }
 
 /// Scan the ordered **as-wire** header names from a raw datagram — RFC 3261
@@ -155,8 +156,8 @@ pub fn parse_headers(
         }
         match parse_line(s, text, limits, &mut parsed) {
             Ok(Line::Kept) => {}
-            Ok(Line::Refused { error, name }) => {
-                parsed.echoed_line_refused |= name.as_ref().is_some_and(is_echoed);
+            Ok(Line::Refused { error, echoed }) => {
+                parsed.echoed_line_refused |= echoed;
                 parsed.refusal.get_or_insert(error);
             }
             Err(limit) => return Err(parsed.refusal.unwrap_or(limit)),
@@ -167,14 +168,10 @@ pub fn parse_headers(
 }
 
 /// The rest of a refused line consumed, folds included, so the split resumes
-/// at the next line.
-fn refused(
-    s: &mut Scanner,
-    error: SipParseError,
-    name: Option<HeaderName>,
-) -> Result<Line, SipParseError> {
+/// at the next line. `echoed` as [`Line::Refused`] states it.
+fn refused(s: &mut Scanner, error: SipParseError, echoed: bool) -> Result<Line, SipParseError> {
     s.read_header_value()?;
-    Ok(Line::Refused { error, name })
+    Ok(Line::Refused { error, echoed })
 }
 
 /// Parse the header line at the scanner, pushing it to `parsed` when it
@@ -186,13 +183,15 @@ fn parse_line(
     parsed: &mut ParsedHeaders,
 ) -> Result<Line, SipParseError> {
     let image = text.as_str();
+    // A name that does not read may have been any header, the five a response
+    // echoes included.
     let raw_name = match read_header_name(s) {
         Ok(raw_name) => raw_name,
-        Err(error) => return refused(s, error, None),
+        Err(error) => return refused(s, error, true),
     };
     if raw_name.is_empty() {
         let error = SipParseError::new(format!("Empty header name at position {}", s.pos()));
-        return refused(s, error, None);
+        return refused(s, error, true);
     }
     let name_bytes = image.as_bytes().get(raw_name.clone());
     if limits.wire_grammar && !name_bytes.is_some_and(|n| n.iter().all(|&b| is_token_char(b))) {
@@ -200,7 +199,7 @@ fn parse_line(
             "Header name is not a token at position {}",
             raw_name.start
         ));
-        return refused(s, error, None);
+        return refused(s, error, true);
     }
 
     let name = expand_compact_form(text, raw_name);
@@ -209,7 +208,7 @@ fn parse_line(
     // against a candidate list.
     let known = HeaderName::known(&name);
     if let Err(error) = s.expect(COLON) {
-        return refused(s, error, known);
+        return refused(s, error, known.as_ref().is_some_and(is_echoed));
     }
     s.skip_lws();
 
@@ -236,7 +235,7 @@ fn parse_line(
     if let Some(known) = known {
         if let Some(error) = gate_refusal(&known, &name, &trimmed_value, &mut parsed.content_length)
         {
-            return Ok(Line::Refused { error, name: Some(known) });
+            return Ok(Line::Refused { error, echoed: is_echoed(&known) });
         }
     }
 
@@ -275,6 +274,12 @@ fn gate_refusal(
         return Some(SipParseError::new(format!("Unterminated quoted-string in {name} header")));
     }
 
+    // A quoted-string holds no CR or LF but its folding, which the split has
+    // already unfolded (RFC 3261 §25.1 qdtext and quoted-pair).
+    if is_quoted_string_header(known) && has_line_break_in_quotes(value) {
+        return Some(SipParseError::new(format!("CR or LF in a quoted-string in {name} header")));
+    }
+
     // Digest credentials must be comma-separated name=value pairs
     // (CVE-2023-28098).
     if is_authorization_header(known) && !is_valid_digest_credentials(value) {
@@ -307,6 +312,26 @@ fn is_quoted_string_header(name: &HeaderName) -> bool {
 
 fn is_authorization_header(name: &HeaderName) -> bool {
     matches!(name, HeaderName::Authorization | HeaderName::ProxyAuthorization)
+}
+
+/// True iff a CR or LF stands inside a quoted-string of `value`, escaped or
+/// not.
+fn has_line_break_in_quotes(value: &str) -> bool {
+    let mut in_quote = false;
+    let mut escaped = false;
+    for c in value.bytes() {
+        if in_quote && (c == CR || c == LF) {
+            return true;
+        }
+        if escaped {
+            escaped = false;
+        } else if in_quote && c == b'\\' {
+            escaped = true;
+        } else if c == b'"' {
+            in_quote = !in_quote;
+        }
+    }
+    false
 }
 
 /// True iff `value` contains an unterminated quoted-string. Inside a quote,

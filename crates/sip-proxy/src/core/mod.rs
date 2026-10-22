@@ -41,6 +41,7 @@ use crate::health::FirstView;
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
 use crate::observability::{ProxyMetrics, UdpShardStats};
+use crate::parse_refusals::ParseRefusals;
 use crate::refusals::Refusals;
 use crate::registry::WorkerRegistry;
 use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig};
@@ -105,6 +106,8 @@ pub(crate) struct ProxyCoreParts {
     pub cancel_lru: Arc<CancelBranchLru>,
     /// The answers to requests the proxy refuses itself, shared by every shard.
     pub refusals: Arc<Refusals>,
+    /// The answers to datagrams the parser refused, shared by every shard.
+    pub parse_refusals: Arc<ParseRefusals>,
     pub clock: Clock,
     pub metrics: Arc<ProxyMetrics>,
     pub self_gate: Arc<dyn ProxySelfGate>,
@@ -142,6 +145,7 @@ pub struct ProxyCore {
     registry: Arc<dyn WorkerRegistry>,
     cancel_lru: Arc<CancelBranchLru>,
     refusals: Arc<Refusals>,
+    parse_refusals: Arc<ParseRefusals>,
     clock: Clock,
     metrics: Arc<ProxyMetrics>,
     self_gate: Arc<dyn ProxySelfGate>,
@@ -190,6 +194,7 @@ impl ProxyCore {
             registry: parts.registry,
             cancel_lru: parts.cancel_lru,
             refusals: parts.refusals,
+            parse_refusals: parts.parse_refusals,
             clock: parts.clock,
             metrics: parts.metrics,
             self_gate: parts.self_gate,

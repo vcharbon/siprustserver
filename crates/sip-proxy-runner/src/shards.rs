@@ -11,6 +11,7 @@ use sip_proxy::cancel_lru::CancelBranchLru;
 use sip_proxy::health::{FirstView, HealthProbe, HealthProbeConfig};
 use sip_proxy::liveness::ShardPulse;
 use sip_proxy::load_observer::WorkerLoadObserver;
+use sip_proxy::parse_refusals::ParseRefusals;
 use sip_proxy::refusals::Refusals;
 use sip_proxy::registry::control::WorkerRegistryControl;
 use sip_proxy::registry::WorkerRegistry;
@@ -33,6 +34,7 @@ pub struct SharedRouting {
     pub metrics: Arc<ProxyMetrics>,
     pub cancel_lru: Arc<CancelBranchLru>,
     pub refusals: Arc<Refusals>,
+    pub parse_refusals: Arc<ParseRefusals>,
     pub self_gate: Arc<dyn ProxySelfGate>,
     pub intake_age: IntakeAgeRecorder,
     pub resolver: ResolverConfig,
@@ -55,6 +57,7 @@ impl SharedRouting {
         .metrics(self.metrics.clone())
         .cancel_lru(self.cancel_lru.clone())
         .refusals(self.refusals.clone())
+        .parse_refusals(self.parse_refusals.clone())
         .self_gate(self.self_gate.clone())
         .intake_age(self.intake_age.clone())
         .resolver_config(self.resolver)

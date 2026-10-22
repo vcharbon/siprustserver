@@ -11,6 +11,7 @@ use crate::cancel_lru::CancelBranchLru;
 use crate::health::FirstView;
 use crate::liveness::ShardPulse;
 use crate::observability::ProxyMetrics;
+use crate::parse_refusals::ParseRefusals;
 use crate::refusals::Refusals;
 use crate::registry::WorkerRegistry;
 use crate::resolver::{HostResolver, ResolverConfig, SystemResolver};
@@ -30,6 +31,7 @@ pub struct ProxyCoreBuilder {
     cancel_lru: Option<Arc<CancelBranchLru>>,
     id_gen: Arc<IdGen>,
     refusals: Option<Arc<Refusals>>,
+    parse_refusals: Option<Arc<ParseRefusals>>,
     clock: Option<Clock>,
     metrics: Option<Arc<ProxyMetrics>>,
     self_gate: Option<Arc<dyn ProxySelfGate>>,
@@ -59,6 +61,7 @@ impl ProxyCoreBuilder {
             cancel_lru: None,
             id_gen,
             refusals: None,
+            parse_refusals: None,
             clock: None,
             metrics: None,
             self_gate: None,
@@ -100,6 +103,13 @@ impl ProxyCoreBuilder {
     /// builder's generator.
     pub fn refusals(mut self, refusals: Arc<Refusals>) -> Self {
         self.refusals = Some(refusals);
+        self
+    }
+    /// The answers to datagrams the parser refused. Pass ONE to every recv
+    /// shard so the cap on their 400s bounds the process; the default is a
+    /// private one, its secret drawn from the builder's generator.
+    pub fn parse_refusals(mut self, parse_refusals: Arc<ParseRefusals>) -> Self {
+        self.parse_refusals = Some(parse_refusals);
         self
     }
     pub fn metrics(mut self, metrics: Arc<ProxyMetrics>) -> Self {
@@ -168,6 +178,8 @@ impl ProxyCoreBuilder {
         let clock = self.clock.unwrap_or_else(Clock::system);
         let traces = self.traces.unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
         let refusals = self.refusals.unwrap_or_else(|| Arc::new(Refusals::new(&self.id_gen, 0)));
+        let parse_refusals =
+            self.parse_refusals.unwrap_or_else(|| Arc::new(ParseRefusals::new(&self.id_gen)));
         ProxyCore::new(ProxyCoreParts {
             endpoint,
             advertised: self.advertised,
@@ -178,6 +190,7 @@ impl ProxyCoreBuilder {
                 .cancel_lru
                 .unwrap_or_else(|| Arc::new(CancelBranchLru::with_clock(clock.clone()))),
             refusals,
+            parse_refusals,
             clock,
             metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
             self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
