@@ -339,15 +339,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "re-offer-m-line-count-monotonic": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 1,
-      "decided": 1,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "record-route-placement": {
       "hits": 0,
       "documents": 0,
@@ -426,22 +417,6 @@
       "by_role": {},
       "relayed": 0,
       "buckets": {}
-    },
-    "sdp-origin-continuity": {
-      "hits": 1,
-      "documents": 1,
-      "occasions": 1,
-      "decided": 1,
-      "by_role": {
-        "platform": 1
-      },
-      "by_side": {
-        "peer": 1
-      },
-      "relayed": 0,
-      "buckets": {
-        "sdp origin names another session": 1
-      }
     },
     "tag-consistency": {
       "hits": 0,
@@ -667,31 +642,6 @@
       "request_branch": "z9hG4bK-b0001",
       "response_vias": 1,
       "request_vias": 2
-    },
-    {
-      "document": "capture.pcap.gz#selected",
-      "capture": "capture.pcap.gz",
-      "rule": "sdp-origin-continuity",
-      "group": 0,
-      "leg": 1,
-      "call_id": "1-call-a-0001@198.51.100.5",
-      "emitter": "198.51.100.2:5060",
-      "emitter_role": "platform",
-      "side": "peer",
-      "taker": "192.0.2.10:5072",
-      "cseq": 201,
-      "anchor_msg": 7,
-      "relayed": false,
-      "origin_msg": 7,
-      "origin_hop": 0,
-      "origin_ts_us": 1704067211436781,
-      "prior_origin_msg": 2,
-      "origin_line": "o=anon 3238003208 375266564 IN IP4 198.51.100.9",
-      "prior_origin_line": "o=anon 432354 968093 IN IP4 198.51.100.5",
-      "same_session": false,
-      "body_changed": true,
-      "session_version": 375266564,
-      "prior_session_version": 968093
     }
   ],
   "failures": [],

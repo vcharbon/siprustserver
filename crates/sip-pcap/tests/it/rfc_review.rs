@@ -183,7 +183,7 @@ fn the_rule_set_is_named_and_an_unknown_rule_is_refused() {
         sipflow(&["--sut", "192.0.2.10", "--rfc", "--rfc-rules", "all", "--list"]);
     assert!(ok, "{stderr}");
     assert!(stderr.contains("rules=all"), "{stderr}");
-    assert!(stderr.contains("sdp-origin-continuity: 1 hit(s)"), "{stderr}");
+    assert!(stderr.contains("no-ack-to-dialog-creating-2xx: 2 hit(s)"), "{stderr}");
     assert!(!stderr.contains("serial-register"), "a rule with no occasion is not listed\n{stderr}");
 
     let (_, stderr, ok) = sipflow(&["--rfc", "--rfc-rules", "no-such-rule"]);

@@ -28,6 +28,15 @@ fn dialog_of(msg: &Msg) -> Option<(&str, &str)> {
     Some(if from <= to { (from, to) } else { (to, from) })
 }
 
+/// The tag the sender of `msg` holds in the dialog: the From tag of a request,
+/// the To tag of a response (RFC 3261 §12.1).
+fn local_tag(msg: &Msg) -> Option<&str> {
+    match msg.status() {
+        None => msg.from_tag.as_deref(),
+        Some(_) => msg.to_tag.as_deref(),
+    }
+}
+
 /// One session stream of one agent: every description it sent there, readable
 /// or not, in send order.
 pub(super) struct SessionStream {
@@ -44,14 +53,18 @@ pub(super) struct SessionStream {
 ///
 /// A description on a message with no To tag (an initial INVITE, a retry after
 /// a challenge) continues the TAGLESS stream. The first description the agent
-/// sends on a dialog opens that dialog's stream with the tagless descriptions
-/// sent so far as its prior — an INVITE's description is the prior of every
-/// dialog its forks create — and the dialog's later descriptions continue it
-/// alone. A tagless description sent after a dialog's stream opened is no step
-/// of that dialog.
+/// sends on a dialog opens that dialog's stream; where the agent holds the
+/// tagless request's own tag there — it is that dialog's caller — the tagless
+/// descriptions sent so far are its prior: an INVITE's description is the prior
+/// of every dialog its forks create. The dialog's later descriptions continue
+/// it alone. A tagless description sent after a dialog's stream opened is no
+/// step of that dialog, and a response an agent forwards on a dialog it is not
+/// the caller of continues no request of its own.
 #[derive(Default)]
 pub(super) struct SessionStreams<'a> {
     tagless: Vec<usize>,
+    /// The From tag of the agent's tagless requests.
+    tagless_tag: Option<&'a str>,
     dialogs: BTreeMap<(&'a str, &'a str), SessionStream>,
 }
 
@@ -60,12 +73,13 @@ impl<'a> SessionStreams<'a> {
     pub(super) fn push(&mut self, msg: &'a Msg, mi: usize) {
         let Some(dialog) = dialog_of(msg) else {
             self.tagless.push(mi);
+            self.tagless_tag = self.tagless_tag.or(msg.from_tag.as_deref());
             return;
         };
-        let tagless = &self.tagless;
+        let prior = if local_tag(msg) == self.tagless_tag { self.tagless.as_slice() } else { &[] };
         self.dialogs
             .entry(dialog)
-            .or_insert_with(|| SessionStream { msgs: tagless.clone(), own_from: tagless.len() })
+            .or_insert_with(|| SessionStream { msgs: prior.to_vec(), own_from: prior.len() })
             .msgs
             .push(mi);
     }

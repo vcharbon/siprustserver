@@ -7,6 +7,7 @@ mod answer;
 mod description;
 mod revision;
 mod round;
+mod stream;
 
 const ALICE: &str = "10.0.0.1:5060";
 const BOB: &str = "10.0.0.2:5070";
