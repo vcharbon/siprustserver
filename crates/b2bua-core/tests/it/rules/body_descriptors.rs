@@ -31,7 +31,7 @@ fn described() -> Body {
 }
 
 /// Alice ↔ b-1, both dialogs confirmed.
-fn bridged() -> call::Call {
+pub(super) fn bridged() -> call::Call {
     let mut call = test_call();
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     call.a_leg.dialogs = vec![a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
@@ -48,7 +48,7 @@ fn bridged() -> call::Call {
     call
 }
 
-fn sent_request(result: &HandlerResult, leg: &str) -> SipRequest {
+pub(super) fn sent_request(result: &HandlerResult, leg: &str) -> SipRequest {
     result
         .effects
         .outbound
@@ -61,7 +61,7 @@ fn sent_request(result: &HandlerResult, leg: &str) -> SipRequest {
         .expect("a request on the leg")
 }
 
-fn values(req: &SipRequest, name: &str) -> Vec<String> {
+pub(super) fn values(req: &SipRequest, name: &str) -> Vec<String> {
     req.raw(HeaderName::from(name)).map(str::to_string).collect()
 }
 

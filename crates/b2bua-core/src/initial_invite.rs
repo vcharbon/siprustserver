@@ -15,7 +15,6 @@ use sip_ids::TurnIds;
 use sip_message::emergency::is_emergency_request;
 use sip_message::generators::CapabilitySet;
 use sip_message::header::{HeaderClass, HeaderName};
-use sip_message::write_check::{self, WriteRefusal};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 
 use crate::config::B2buaConfig;
@@ -274,9 +273,9 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// own is none. `cause` is the termination record's: the decision layer's
 /// refusal, or the stack's own admission. A failure final carries the
 /// deployment's `advertisement` for a minted final under the decision's
-/// statements. A reason phrase the wire cannot carry gives way to the
-/// status's default, and a header line it cannot carry whole is left out;
-/// each is reported.
+/// statements. Stated text the wire cannot carry is left out where every
+/// authored final is built ([`relay::response_to_a_leg`]); an add left out
+/// here is reported the same way.
 #[allow(clippy::too_many_arguments)]
 pub fn reject_call(
     mut call: Call,
@@ -291,19 +290,12 @@ pub fn reject_call(
     cause: TerminationCause,
 ) -> HandlerResult {
     let mut skipped = Vec::new();
-    let reason = match reason.map(|r| write_check::reason_phrase(&r).map(|()| r)) {
-        Some(Ok(stated)) => stated,
-        Some(Err(refusal)) => {
-            skipped.push(refusal);
-            default_reason(status).to_string()
-        }
-        None => default_reason(status).to_string(),
-    };
+    let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
     // A redirect whose target does not read cannot be authored: the caller dials
     // what a 3xx Contact names, so an invented one sends it at an address the
     // decision never stated. Answer the plain server error instead — the
     // re-entry carries no contacts, so it always terminates.
-    let mut extra_headers = match build_reject_headers(update_headers, contacts, &mut skipped) {
+    let mut extra_headers = match build_reject_headers(update_headers, contacts) {
         Ok(headers) => headers,
         Err(err) => {
             tracing::warn!(
@@ -408,12 +400,10 @@ pub fn build_request(invite: &SipRequest) -> NewCallRequest {
 /// redirect authors from its typed target list.
 /// Errs when a redirect target does not read — the whole redirect is refused,
 /// never partially authored (dropping the unreadable entry would send the caller
-/// at whichever targets happened to parse). A stated name whose lines the wire
-/// cannot carry whole is left out, its refusal pushed onto `skipped`.
+/// at whichever targets happened to parse).
 fn build_reject_headers(
     update_headers: Option<&SipHeaderUpdates>,
     contacts: &[RedirectContact],
-    skipped: &mut Vec<WriteRefusal>,
 ) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
     let mut out: Vec<SipHeader> = Vec::new();
     if let Some(map) = update_headers {
@@ -423,12 +413,6 @@ fn build_reject_headers(
                 continue;
             }
             if val.adds() {
-                continue;
-            }
-            if let Err(refusal) =
-                val.lines().iter().try_for_each(|v| write_check::header_line(name, v))
-            {
-                skipped.push(refusal);
                 continue;
             }
             for v in val.lines() {

@@ -95,3 +95,52 @@ fn a_part_line_with_a_line_break_is_left_out_of_the_body() {
     assert!(text.contains("<loc@example.invalid>"), "{text}");
     assert!(!text.contains("z9hG4bKinjected"), "{text}");
 }
+
+/// The leg minted with `new_from` / `new_to` stated, and what was left out.
+fn rewritten(
+    new_from: &str,
+    new_to: &str,
+) -> Result<(SipRequest, Vec<WriteRefusal>), super::UnreadableAddress> {
+    let mut skipped = Vec::new();
+    let (_leg, effect) = build_b_leg(
+        CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+        "b-1",
+        &a_leg_invite_carrying(&[]),
+        ("192.0.2.7".to_string(), 5060),
+        None,
+        Some(new_from),
+        Some(new_to),
+        &B2buaConfig::default(),
+        &mut TurnIds::fixed(0x643),
+        None,
+        &[],
+        &CapabilitySet::default(),
+        None,
+        &[],
+        &[],
+        None,
+        true,
+        0,
+        &mut skipped,
+    )?;
+    match effect.body {
+        OutboundBody::Request(r) => Ok((r, skipped)),
+        OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("an INVITE"),
+    }
+}
+
+/// An identity replace the wire cannot carry keeps the relayed identity and
+/// is handed back; the other replace applies. One that does not read still
+/// refuses the leg.
+#[test]
+fn an_identity_with_a_line_break_keeps_the_relayed_one() {
+    let a = a_leg_invite_carrying(&[]);
+    let split = format!("\"x{SPLITTING}\" <sip:mallory@example.com>");
+    let (invite, skipped) = rewritten(&split, "<sip:bob@example.com>").expect("the leg is built");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(invite.from().uri(), a.from().uri(), "the relayed identity stands");
+    assert_eq!(invite.from().display(), None);
+    assert_eq!(invite.to().uri().user(), Some("bob"));
+    assert_eq!(invite.via().len(), 1);
+    assert!(rewritten("<sip:mallory@example.com", "<sip:bob@example.com>").is_err());
+}

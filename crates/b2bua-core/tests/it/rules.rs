@@ -4031,7 +4031,6 @@ mod service_timers {
 }
 
 mod declared_capabilities;
-
 // ── the keepalive ledger ceiling (arming side) ────────────────────────────────
 
 /// A `RuleContext` for `event` on `call` at `now_ms`, acting on the a-leg.
@@ -5120,3 +5119,4 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
 mod charging_in_dialog;
 
 mod body_descriptors;
+mod stated_text_skips;

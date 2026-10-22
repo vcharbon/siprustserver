@@ -7,7 +7,7 @@ use call::helpers::RelayPeer;
 use call::Call;
 use std::ops::ControlFlow;
 
-use crate::effects::HandlerEffects;
+use crate::effects::{BufferedObservabilityEffect, HandlerEffects};
 use crate::rules::relay;
 use b2bua_sdk::model::{Body, MessageTransform, RuleAction, RuleContext};
 use sip_message::SipHeader;
@@ -126,6 +126,11 @@ impl ActionExecutor<'_> {
             }
             RuleAction::TerminateLeg { leg_id, end } => {
                 self.terminate_leg(call, fx, ctx, leg_id, *end);
+            }
+            RuleAction::ReportStatedTextSkipped { detail } => {
+                fx.buffered.push(BufferedObservabilityEffect::StatedTextSkipped {
+                    detail: detail.clone(),
+                });
             }
             RuleAction::Merge { .. }
             | RuleAction::Split { .. }

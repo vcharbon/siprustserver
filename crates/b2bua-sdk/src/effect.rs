@@ -4,6 +4,8 @@
 use call::{TimerScopeKind, TimerType};
 use sip_message::Method;
 
+use crate::model::RuleAction;
+
 /// The category every action ([`crate::model::RuleAction`]) belongs to
 /// (ADR-0016 X9). [`crate::model::RuleAction::effect_kind`] is a **total** map
 /// onto this — the compiler's exhaustiveness check forces each present and future action into exactly one category, so a
@@ -94,6 +96,80 @@ impl Effect {
             | Effect::Provisional { .. } => EffectKind::LegMessage,
             Effect::LifecycleCommand { .. } => EffectKind::CallLifecycleCommand,
             Effect::GuardTimer { .. } => EffectKind::GuardTimer,
+        }
+    }
+}
+
+impl RuleAction {
+    /// The single [`EffectKind`] this action contributes (ADR-0016 X9). Total by
+    /// construction: a new `RuleAction` variant will not compile until it is
+    /// categorised here, so a machine-bound rule's declared `effects` can be
+    /// verified against what its handler actually emits. Categorisation follows
+    /// the **attribution principle** — a message the rule authors toward a leg is
+    /// a [`EffectKind::LegMessage`] (including the leg-creating INVITE and a
+    /// rule-driven BYE/CANCEL); only the global-machine commands
+    /// (`BeginTermination`/`TerminateCall`/`Merge`/`Split`) are a
+    /// [`EffectKind::CallLifecycleCommand`].
+    pub fn effect_kind(&self) -> EffectKind {
+        match self {
+            // Leg messages — service-authored SIP toward a leg (originate / relay
+            // / respond / provisional / leg create / rule-driven teardown).
+            RuleAction::RelayToPeer { .. }
+            | RuleAction::RelayToLeg { .. }
+            | RuleAction::RelayFirstBare180 { .. }
+            | RuleAction::RelayFailureToALeg { .. }
+            | RuleAction::RespondToALeg { .. }
+            | RuleAction::AnswerALegNewDialog { .. }
+            | RuleAction::Respond { .. }
+            | RuleAction::RefuseGlare { .. }
+            | RuleAction::AckLeg { .. }
+            | RuleAction::AckLostRound { .. }
+            | RuleAction::ReleaseStraggler2xx { .. }
+            | RuleAction::CreateLeg { .. }
+            | RuleAction::DestroyLeg { .. }
+            | RuleAction::CancelLeg { .. }
+            | RuleAction::CancelPendingReinvite { .. }
+            | RuleAction::RejectPendingReinvite { .. }
+            | RuleAction::TerminateLeg { .. }
+            | RuleAction::SendRequestToLeg { .. }
+            | RuleAction::SendProvisionalToLeg { .. }
+            | RuleAction::SendReinvite { .. }
+            | RuleAction::SendNotify { .. } => EffectKind::LegMessage,
+            // Call-lifecycle commands — the one service → global hop (X3).
+            RuleAction::BeginTermination { .. }
+            | RuleAction::TerminateCall { .. }
+            | RuleAction::Merge { .. }
+            | RuleAction::Split { .. } => EffectKind::CallLifecycleCommand,
+            // Guard timers.
+            RuleAction::ScheduleTimer { .. }
+            | RuleAction::CancelTimer { .. }
+            | RuleAction::CancelAllTimers => EffectKind::GuardTimer,
+            // Cursor moves — the transition itself / machine deactivation.
+            RuleAction::SetState { .. } | RuleAction::ClearState { .. } => EffectKind::CursorMove,
+            // Bookkeeping — local data writes / async kicks / reports, no wire
+            // output.
+            RuleAction::ConfirmDialog { .. }
+            | RuleAction::MapUnshownDialog { .. }
+            | RuleAction::AddCdrEvent { .. }
+            | RuleAction::ReportStatedTextSkipped { .. }
+            | RuleAction::DeactivateRule { .. }
+            | RuleAction::CacheSdpOnLegDialog { .. }
+            | RuleAction::TrackEarlyDialog { .. }
+            | RuleAction::SetPolicyUpdateBody { .. }
+            | RuleAction::SetPromotePem { .. }
+            | RuleAction::SetTransfer { .. }
+            | RuleAction::ReferAsyncHttp { .. }
+            | RuleAction::ServiceHttpRequest { .. }
+            | RuleAction::FailureAsyncHttp { .. }
+            | RuleAction::ReleaseAsyncHttp { .. }
+            | RuleAction::SetSubscriptions { .. }
+            | RuleAction::MarkDecision { .. }
+            | RuleAction::SetReroute { .. }
+            | RuleAction::SetFeatures { .. }
+            | RuleAction::SetStatedHeaders { .. }
+            | RuleAction::MergeCallExt { .. }
+            | RuleAction::ReplaceAdmissionSet { .. }
+            | RuleAction::ResolveCancelledReinvite { .. } => EffectKind::Bookkeeping,
         }
     }
 }

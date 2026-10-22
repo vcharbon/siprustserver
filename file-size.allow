@@ -28,7 +28,7 @@ crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
 crates/b2bua-runner-kit/src/lib.rs 621
 crates/b2bua-sdk/src/config.rs 884
-crates/b2bua-sdk/src/model.rs 1259
+crates/b2bua-sdk/src/model.rs 1195
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
 crates/b2bua/src/limiter/release_queue.rs 513

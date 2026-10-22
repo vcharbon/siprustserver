@@ -341,6 +341,9 @@ impl ActionExecutor<'_> {
             })
             .collect();
         relay::describe_body(&mut extra_headers, body, descriptors);
+        // A stated line the wire cannot carry whole is left out: the request
+        // still leaves (a BYE above all, its leg already recorded as ending).
+        let extra_headers = relay::writable_lines(&format!("{method} to a leg"), extra_headers, fx);
         let branch = self.turn.ids.new_branch();
         let Some(leg) = leg_at(call, leg_id) else {
             *call = unsent;

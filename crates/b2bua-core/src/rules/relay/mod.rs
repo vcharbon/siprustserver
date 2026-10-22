@@ -44,6 +44,7 @@ mod repeat;
 mod sdp_dialogs;
 mod sdp_session;
 mod session_timer;
+mod stated_text;
 mod unbuilt;
 
 #[cfg(test)]
@@ -67,6 +68,7 @@ pub(crate) use owed_answer::{
 };
 pub(crate) use repeat::retransmitted_2xx;
 pub(crate) use session_timer::{settle_session_timer, TIMER};
+pub(crate) use stated_text::writable_lines;
 pub(crate) use unbuilt::unbuilt;
 
 // One session per dialog, whoever authored the description (RFC 3264 §8).

@@ -87,6 +87,16 @@ pub fn response_to_a_leg(
         // An opening description (the INVITE's own responses) consults no policy.
         &crate::config::AsWritten,
     );
+    // An authored final's stated text the wire cannot carry is left out, so
+    // the caller still gets its final; a relayed one carries a peer's parsed
+    // lines, which hold no line break.
+    let (reason, extra_headers) = match provenance {
+        Provenance::Authored => (
+            super::stated_text::writable_reason("final to the caller", status, reason, fx),
+            super::stated_text::writable_lines("final to the caller", extra_headers, fx),
+        ),
+        Provenance::Relayed | Provenance::Probe => (reason.to_string(), extra_headers),
+    };
     let opts = GenerateResponseOpts {
         to_tag,
         contact: contact.filter(|_| response_states_own_contact(&Method::Invite, status)),
@@ -95,7 +105,7 @@ pub fn response_to_a_leg(
         extra_headers,
         incoming_source,
     };
-    let resp = match generators::generate_response(a_leg_invite, status, reason, &opts) {
+    let resp = match generators::generate_response(a_leg_invite, status, &reason, &opts) {
         Ok(resp) => resp,
         Err(e) => {
             *call = unsent;

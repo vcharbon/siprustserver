@@ -7,9 +7,12 @@
 use std::sync::Arc;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{HeaderUpdate, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{
+    CallTreatment, HeaderUpdate, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
+};
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::features::StatedHeaders;
+use call::header_update::SipHeaderUpdates;
 use sip_message::header::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -89,4 +92,50 @@ async fn a_stated_line_with_a_line_break_is_skipped_and_counted() {
         assert!(defect.starts_with(&format!("model defect {DEFECT}")), "{defect}");
     }
     assert!(counted >= 1, "the skip is counted");
+}
+
+/// The `/call/failure` consult answers the callee's refusal with a reject
+/// whose reason phrase and one header line carry a line break: the caller
+/// still gets its final, under the status's default phrase and without that
+/// line, and both skips are counted.
+#[tokio::test(start_paused = true)]
+async fn a_failover_reject_with_a_line_break_still_answers_the_caller() {
+    let mut s = B2buaScene::with_b2bua("stated-line-failover-reject", |bob_port| {
+        let engine = ScriptedDecisionEngine::builder()
+            .fallback(move |_| {
+                let mut route = route_to("127.0.0.1", bob_port);
+                route.callback_context = Some("ctx".into());
+                NewCallResponse::Route(route)
+            })
+            .on_failure(|_| {
+                let mut headers = SipHeaderUpdates::new();
+                headers.insert("X-Split".into(), set(&[SPLITTING]));
+                headers.insert("X-Kept".into(), set(&["fine"]));
+                CallTreatment::Reject(RejectDecision {
+                    reject_code: 486,
+                    reject_reason: Some(format!("Busy{SPLITTING}")),
+                    update_headers: Some(headers),
+                    service_ext: Default::default(),
+                    label: None,
+                })
+            })
+            .build();
+        B2buaSut::builder(Arc::new(engine))
+    })
+    .await;
+
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    s.bob.receive("INVITE").await.respond(486, "Busy Here").await;
+    s.bob.receive("ACK").await;
+    let fin = call.expect(486).await;
+    assert_eq!(fin.reason(), "Busy Here", "the status's default phrase");
+    assert_eq!(fin.raw(HeaderName::from("X-Kept")).collect::<Vec<_>>(), ["fine"]);
+    assert_eq!(fin.raw(HeaderName::from("X-Split")).count(), 0);
+    assert_eq!(fin.via().len(), 1);
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+
+    let defects = s.b2bua.take_model_violations();
+    let counted = s.b2bua.metrics().model_defects_total(DEFECT);
+    let _report = s.finish().await;
+    assert_eq!(counted, 2, "the phrase and the line: {defects:?}");
 }

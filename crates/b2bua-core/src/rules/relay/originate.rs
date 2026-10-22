@@ -21,6 +21,7 @@ use super::body::{media_type, sdp, source_content_type};
 use super::egress::apply_b_leg_egress;
 use super::identity::{leg_contact, leg_via, CallMarks};
 use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
+use super::stated_text::writable;
 use b2bua_sdk::model::Body;
 
 /// What an override's bytes are to the originator's body, the one place an
@@ -138,9 +139,9 @@ fn minted_body(
     (body, content_type, described)
 }
 
-/// Whether the wire carries `line` whole; a refusal is pushed onto `skipped`.
-fn writable(line: &MsgHeader, skipped: &mut Vec<WriteRefusal>) -> bool {
-    match write_check::header_line(&line.name, &line.value) {
+/// Whether `text` fits a header value; a refusal is pushed onto `skipped`.
+fn fits_a_line(text: &str, skipped: &mut Vec<WriteRefusal>) -> bool {
+    match write_check::header_value(text) {
         Ok(()) => true,
         Err(refusal) => {
             skipped.push(refusal);
@@ -244,11 +245,13 @@ pub fn build_b_leg(
         Some(text) => address("new_ruri", text)?,
         None => a_leg_invite.request_uri().clone(),
     };
-    let from_addr = match new_from {
+    // An identity the wire cannot carry whole keeps the relayed one, skipped
+    // and handed back; one that does not read refuses the leg.
+    let from_addr = match new_from.filter(|text| fits_a_line(text, skipped)) {
         Some(text) => identity("new_from", text)?,
         None => NameAddr::new(a_leg_invite.from().uri().clone()),
     };
-    let to_addr = match new_to {
+    let to_addr = match new_to.filter(|text| fits_a_line(text, skipped)) {
         Some(text) => identity("new_to", text)?,
         None => NameAddr::new(a_leg_invite.to().uri().clone()),
     };
