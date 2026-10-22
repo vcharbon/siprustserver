@@ -155,6 +155,46 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(outcome.target, Some(ProxyAddr::new("uas.example", 5060)));
 }
 
+// RFC 3261 §16.3: a Request-URI of a scheme that names no host is no target
+// this hop resolves; the request is answered 416, never forwarded.
+#[tokio::test]
+async fn a_worker_outbound_request_uri_naming_no_host_is_refused() {
+    let reg: Arc<dyn WorkerRegistry> =
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
+    let net = SimulatedSignalingNetwork::new(1);
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
+    let metrics = Arc::new(ProxyMetrics::new());
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+        .clock(Clock::test_at(0))
+        .metrics(metrics.clone())
+        .build(ep);
+    let raw = format!(
+        "OPTIONS urn:service:sos SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKurn;lg=a;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+To: <sip:sos@example.com>\r\n\
+Call-ID: urn-1@{W1_POD}\r\n\
+CSeq: 2 OPTIONS\r\n\
+Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+
+    let outcome = core.route_request_from(&msg, format!("{W1_POD}:5060").parse().unwrap()).await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
+    assert_eq!(outcome.target, None);
+    assert_eq!(metrics.reject_count("unsupported_uri_scheme"), 1);
+}
+
 // The un-NAT'd fast path still works: source IS the registered worker.
 #[tokio::test]
 async fn pod_direct_worker_source_is_still_worker_outbound() {

@@ -8,7 +8,7 @@
 //! - the RFC 6442 headers keep what they were written with.
 
 use sip_message::header::{
-    network_host, Geolocation, GeolocationError, HeaderValue, ParamValue, Uri, Via,
+    network_host, Geolocation, GeolocationError, HeaderValue, ParamValue, RouteEntry, Uri, Via,
 };
 use sip_message::remote_target::rewrite_hostport;
 use sip_message::{CustomParser, SipMessage, SipParser, SipStr};
@@ -114,7 +114,7 @@ fn only_a_port_a_parameter_or_a_separator_follows_the_sent_by_host() {
     for (good, host, port) in [
         ("SIP/2.0/UDP [2001:db8::1] ;branch=z9hG4bK-hg1", "2001:db8::1", None),
         ("SIP/2.0/UDP example.com : 5070 ;branch=z9hG4bK-hg1", "example.com", Some(5070)),
-        ("SIP/2.0/UDP example.com", "example.com", None),
+        ("SIP/2.0/UDP example.com\t;branch=z9hG4bK-hg1", "example.com", None),
     ] {
         let msg = with_via(good).unwrap_or_else(|e| panic!("{good}: {e}"));
         let top = msg.via().first();
@@ -192,6 +192,16 @@ fn a_request_uri_or_contact_of_another_scheme_is_read() {
     let contact = invite("sip:bob@example.com", VIA, "")
         .replace("<sip:alice@192.0.2.1:5060>", "<urn:ietf:params:x:y>");
     parse(&contact).unwrap_or_else(|e| panic!("urn Contact: {e}"));
+}
+
+/// A route is a hop a request is sent to: a URI that names no host is none.
+#[test]
+fn a_route_of_another_scheme_names_no_hop() {
+    for line in ["Route: <urn:service:sos>\r\n", "Record-Route: <http://example.com/a>\r\n"] {
+        assert!(parse(&invite("sip:bob@example.com", VIA, line)).is_err(), "{line:?} accepted");
+    }
+    assert!(RouteEntry::parse(&SipStr::owned("<urn:service:sos>")).is_err());
+    assert!(RouteEntry::parse(&SipStr::owned("<sip:p.example.com;lr>")).is_ok());
 }
 
 // ---------------------------------------------------------------------------
