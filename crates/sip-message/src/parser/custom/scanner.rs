@@ -90,7 +90,7 @@ impl BareBreak {
 /// A header line ends with CRLF and nowhere else; the parser refuses a block
 /// holding a bare CR or LF here, before any line of it is read, so no reader
 /// past this point meets one (ADR-0053). The block still ends at the first
-/// empty line however it is terminated, the head end [`crate::sniff::head_end`]
+/// empty line however it is terminated, the head end `crate::sniff::head_end`
 /// shares.
 ///
 /// Splitting first is what lets the body stay raw bytes while the header block
