@@ -2,6 +2,16 @@
 //! `warn-code SP warn-agent SP warn-text` values, the warn-agent naming the
 //! element that added the warning (`hostport` or a pseudonym token).
 
+/// The most bytes a warn-text built by [`warning_value`] holds, its
+/// escapes included and its quotes excluded.
+pub const WARN_TEXT_MAX: usize = 200;
+
+/// One warning-value: `code SP agent SP warn-text`, the warn-text being
+/// `text` as a quoted-string.
+pub fn warning_value(code: u16, agent: &str, text: &str) -> String {
+    format!("{code} {agent} \"{text}\"")
+}
+
 /// The warn-agent of every warning-value of a `Warning` header line, in order.
 /// A value that is not `code agent text` is skipped.
 pub fn warn_agents(value: &str) -> Vec<&str> {

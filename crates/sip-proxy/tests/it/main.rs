@@ -15,6 +15,7 @@ mod load_balancer;
 mod load_balancer_routing;
 mod no_panic_lane;
 mod options_e2e;
+mod parse_refusal;
 mod per_call_trace;
 mod probe_period;
 mod refused_invite_copies;

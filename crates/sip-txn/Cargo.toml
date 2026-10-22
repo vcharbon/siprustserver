@@ -20,6 +20,8 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 sip-retransmit = { path = "../sip-retransmit" }
 sip-message = { path = "../sip-message" }
+# The token bucket capping the 400s to refused requests.
+load-shed = { path = "../load-shed" }
 # The transaction kinds and timeouts its events name, shared with the TU.
 call = { path = "../call" }
 metric-catalogue = { path = "../metric-catalogue" }

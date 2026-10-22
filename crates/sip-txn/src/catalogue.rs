@@ -62,7 +62,19 @@ pub const SERVER_FINAL_UNSEEN_BRANCH: Family = Family::counter(
 pub const PARSE_ERRORS: Family = Family::counter(
     "b2bua_txn_parse_errors_total",
     Labels::None,
-    "Inbound datagrams the SIP parser rejected and the transaction layer dropped: a malformed-traffic flood or a parser regression.",
+    "Inbound datagrams the SIP parser refused and the transaction layer dropped unanswered (a response, an ACK, a request no response can echo, a limit): a malformed-traffic flood or a parser regression.",
+);
+
+pub const PARSE_REFUSALS_ANSWERED: Family = Family::counter(
+    "b2bua_txn_parse_refusals_answered_total",
+    Labels::None,
+    "Inbound requests the SIP parser refused and the transaction layer answered with a stateless 400 (RFC 3261 section 8.2.6).",
+);
+
+pub const PARSE_REFUSALS_CAPPED: Family = Family::counter(
+    "b2bua_txn_parse_refusals_capped_total",
+    Labels::None,
+    "Inbound requests the SIP parser refused that a 400 could answer, dropped because the token bucket capping those 400s was empty.",
 );
 
 pub const PARSE_PANICS: Family = Family::counter(

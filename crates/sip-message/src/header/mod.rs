@@ -74,5 +74,5 @@ pub(crate) use uri::host_refusal;
 pub use uri::{HostPort, Uri, UriRole};
 pub use value::{Folding, HeaderValue};
 pub use via::{Rport, Via, BRANCH_MAGIC_COOKIE};
-pub use warning::warn_agents;
+pub use warning::{warn_agents, warning_value, WARN_TEXT_MAX};
 pub use wire::Wire;

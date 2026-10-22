@@ -57,7 +57,11 @@ pub struct GenerateResponseOpts {
 /// Echo one Via line. The topmost records what the receiving side observed
 /// (RFC 3261 §18.2.1, RFC 3581 §4); a line needing no stamp — or folding
 /// several hops onto one line — is echoed byte for byte.
-fn echo_via(draft: ResponseDraft, line: SipStr, source: Option<&(String, u16)>) -> ResponseDraft {
+pub(super) fn echo_via(
+    draft: ResponseDraft,
+    line: SipStr,
+    source: Option<&(String, u16)>,
+) -> ResponseDraft {
     let Some((host, port)) = source else {
         return draft.push_raw(HeaderName::Via, line);
     };
@@ -80,7 +84,7 @@ fn echo_via(draft: ResponseDraft, line: SipStr, source: Option<&(String, u16)>) 
 /// dialog) is echoed, otherwise `to_tag` is added when supplied, else a
 /// deterministic fallback — a worker must never panic building a response
 /// (that kills the handler task and leaks the dialog).
-fn echo_to(
+pub(super) fn echo_to(
     draft: ResponseDraft,
     line: SipStr,
     status: u16,

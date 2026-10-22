@@ -4735,6 +4735,7 @@ dependencies = [
  "bytes",
  "call",
  "getrandom 0.4.3",
+ "load-shed",
  "lock-poison",
  "metric-catalogue",
  "metric-values",

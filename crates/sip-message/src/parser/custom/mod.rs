@@ -23,6 +23,7 @@ pub mod extract_fields;
 pub mod header_index;
 pub mod headers;
 pub mod optional_headers;
+pub mod partial;
 mod port_garbage;
 pub(crate) mod request_uri;
 mod routes;

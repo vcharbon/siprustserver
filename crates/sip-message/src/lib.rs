@@ -82,6 +82,7 @@ pub use multipart::{
 };
 /// RFC 3261 §7.3.3 compact-form expansion, probed one name at a time.
 pub use parser::custom::compact_forms::compact_form_canonical;
+pub use parser::custom::partial::RequestPartial;
 pub use parser::custom::{hydrate_request, CustomParser};
 pub use parser::{Framing, SipParser, SipParserLimits};
 pub use projection::HeaderProjection;

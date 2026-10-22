@@ -105,9 +105,15 @@ pub(crate) struct MetricsInner {
     /// Responses that left carrying the generator's fallback To-tag because
     /// nothing here had a tag bound for them.
     pub fallback_to_tag_used: AtomicU64,
-    /// Inbound datagrams the parser rejected and the layer dropped: a
+    /// Inbound datagrams the parser refused and the layer dropped unanswered
+    /// (a response, an ACK, a request no response can echo, a limit): a
     /// malformed-traffic flood or a parser regression.
     pub parse_errors: AtomicU64,
+    /// Refused requests answered with a stateless 400.
+    pub parse_refusals_answered: AtomicU64,
+    /// Refused requests a 400 could answer, dropped because the cap on those
+    /// 400s was spent.
+    pub parse_refusals_capped: AtomicU64,
     /// Inbound datagrams the parser panicked on and the layer dropped: each
     /// one is a parser defect.
     pub parse_panics: AtomicU64,
@@ -155,6 +161,8 @@ impl MetricsInner {
             to_tag_filled: AtomicU64::new(0),
             fallback_to_tag_used: AtomicU64::new(0),
             parse_errors: AtomicU64::new(0),
+            parse_refusals_answered: AtomicU64::new(0),
+            parse_refusals_capped: AtomicU64::new(0),
             parse_panics: AtomicU64::new(0),
             unanswered_forgotten: AtomicU64::new(0),
             released_unanswered_forgotten: AtomicU64::new(0),
@@ -370,9 +378,20 @@ impl TransactionMetrics {
         self.inner.fallback_to_tag_used.load(Ordering::Relaxed)
     }
 
-    /// Inbound packets the parser rejected and dropped (counter).
+    /// Inbound packets the parser refused and the layer dropped unanswered
+    /// (counter).
     pub fn parse_errors(&self) -> u64 {
         self.inner.parse_errors.load(Ordering::Relaxed)
+    }
+
+    /// Refused requests answered with a stateless 400 (counter).
+    pub fn parse_refusals_answered(&self) -> u64 {
+        self.inner.parse_refusals_answered.load(Ordering::Relaxed)
+    }
+
+    /// Answerable refused requests dropped by the cap on 400s (counter).
+    pub fn parse_refusals_capped(&self) -> u64 {
+        self.inner.parse_refusals_capped.load(Ordering::Relaxed)
     }
 
     /// Inbound packets the parser panicked on and dropped (counter).

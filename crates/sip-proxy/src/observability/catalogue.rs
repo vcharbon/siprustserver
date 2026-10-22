@@ -15,6 +15,9 @@ use super::peer_failures::{PeerFailureKind, PeerScope};
 use crate::resolver::{outcome, refresh_outcome};
 use crate::self_gate::ShedReason;
 
+mod parse;
+pub use parse::{PARSE_ERRORS, PARSE_PANICS, PARSE_REFUSALS_ANSWERED, PARSE_REFUSALS_CAPPED};
+
 /// `direction:result`, every direction then every result.
 const MESSAGE_LABELS: [&str; Direction::ALL.len() * MessageResult::ALL.len()] = [
     "inbound:forwarded",
@@ -245,12 +248,6 @@ pub const SEND_FAILURES: Family = Family::counter(
     "Outbound datagrams the endpoint failed to send.",
 );
 
-pub const PARSE_PANICS: Family = Family::counter(
-    "sip_proxy_parse_panics_total",
-    Labels::None,
-    "Inbound datagrams the SIP parser panicked on and the recv shard dropped; each one is a parser defect, expected 0.",
-);
-
 pub const POISONED_LOCK_RECOVERIES: Family = Family::counter(
     "sip_proxy_poisoned_lock_recoveries_total",
     Labels::Product(&[Dim::new("lock", &crate::poison::LOCKS)]),
@@ -462,6 +459,9 @@ pub const PROXY: &[Family] = &[
     RESOLVER_CACHE_SIZE,
     SEND_FAILURES,
     PARSE_PANICS,
+    PARSE_ERRORS,
+    PARSE_REFUSALS_ANSWERED,
+    PARSE_REFUSALS_CAPPED,
     POISONED_LOCK_RECOVERIES,
     UDP_QUEUE_DEPTH,
     UDP_QUEUE_MAX,

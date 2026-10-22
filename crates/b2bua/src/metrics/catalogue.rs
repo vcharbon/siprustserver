@@ -249,6 +249,8 @@ pub const TXN: &[Family] = &[
     txn::RETRANSMIT_BUF_BYTES,
     txn::SERVER_FINAL_UNSEEN_BRANCH,
     txn::PARSE_ERRORS,
+    txn::PARSE_REFUSALS_ANSWERED,
+    txn::PARSE_REFUSALS_CAPPED,
     txn::PARSE_PANICS,
     txn::POISONED_LOCK_RECOVERIES,
     txn::SEND_ERRORS,

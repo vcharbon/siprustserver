@@ -32,7 +32,7 @@ pub fn read_contact_entry(entry: &SipStr) -> ContactEntry {
     }
     match Contact::parse(entry) {
         Ok(contact) => ContactEntry::Readable(Box::new(contact)),
-        Err(SipParseError { reason }) => ContactEntry::Unreadable { reason },
+        Err(SipParseError { reason, .. }) => ContactEntry::Unreadable { reason },
     }
 }
 

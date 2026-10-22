@@ -117,6 +117,33 @@ pub fn extract_common_fields(
     mode: ExtractMode,
     contact_reading: ContactReading,
 ) -> Result<CoreHeaders, SipParseError> {
+    let identity = extract_identity(idx, limits, mode)?;
+    let wire = mode == ExtractMode::Wire;
+    let contacts = read_contacts(idx, wire, contact_reading)?;
+    if wire && contact_reading == ContactReading::Strict {
+        route_refusal(idx)?;
+    }
+    let Identity { from, to, call_id, cseq, via } = identity;
+    Ok(CoreHeaders::new(from, to, call_id, cseq, via, contacts))
+}
+
+/// The fields every response to a message echoes (RFC 3261 §8.2.6.2), typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Identity {
+    pub from: header::From,
+    pub to: header::To,
+    pub call_id: header::CallId,
+    pub cseq: header::CSeq,
+    pub via: NonEmpty<header::Via>,
+}
+
+/// From, To, Call-ID, CSeq and every Via entry of `idx`, each held to the
+/// rules of `mode`.
+pub(super) fn extract_identity(
+    idx: &HeaderIndex,
+    limits: &SipParserLimits,
+    mode: ExtractMode,
+) -> Result<Identity, SipParseError> {
     let wire = mode == ExtractMode::Wire;
 
     // From/To/Call-ID/CSeq appear exactly once; only Via may repeat.
@@ -275,27 +302,21 @@ pub fn extract_common_fields(
         ));
     }
 
-    let contacts = read_contacts(idx, wire, contact_reading)?;
-    if wire && contact_reading == ContactReading::Strict {
-        route_refusal(idx)?;
-    }
-
     let mut hops = vias.into_iter();
     let top = hops.next().ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
 
-    Ok(CoreHeaders::new(
-        header::From::new(from),
-        header::To::new(to),
-        header::CallId::new(call_id),
+    Ok(Identity {
+        from: header::From::new(from),
+        to: header::To::new(to),
+        call_id: header::CallId::new(call_id),
         // The lenient read saturates a sequence number past `u32`; the wire
         // read refused it above.
-        header::CSeq::new(
+        cseq: header::CSeq::new(
             u32::try_from(cseq_parsed.seq).unwrap_or(u32::MAX),
             Method::from_wire(&cseq_parsed.method),
         ),
-        NonEmpty::from_parts(top, hops.collect()),
-        contacts,
-    ))
+        via: NonEmpty::from_parts(top, hops.collect()),
+    })
 }
 
 /// The sent-by colon count when a Via segment carries more than one colon

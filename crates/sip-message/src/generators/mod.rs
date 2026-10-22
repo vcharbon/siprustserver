@@ -27,6 +27,7 @@
 //!   - [`bye`] — BYE of a dialog a 2xx created that nothing above holds (§15.1.1)
 //!   - [`cancel`] — CANCEL of an outstanding INVITE (§9.1)
 //!   - [`response`] — UAS responses echoing the request (§8.2.6.2)
+//!   - [`invalid_request`] — the stateless 400 to a request the parser refused
 //!   - [`relay`] — B2BUA relay transparency + rebuilt responses (§16.6)
 
 mod emit;
@@ -38,6 +39,7 @@ pub mod cancel;
 pub mod capabilities;
 pub mod contact_policy;
 pub mod in_dialog;
+pub mod invalid_request;
 pub mod methods;
 pub mod out_of_dialog;
 pub mod relay;
@@ -59,6 +61,9 @@ pub use contact_policy::{
 };
 pub use error::GenerateError;
 pub use in_dialog::{generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogResult};
+pub use invalid_request::{
+    generate_invalid_request, INVALID_REQUEST_REASON, INVALID_REQUEST_STATUS,
+};
 pub use methods::{InDialogMethod, OutOfDialogMethod};
 pub use out_of_dialog::{generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts};
 pub use relay::{

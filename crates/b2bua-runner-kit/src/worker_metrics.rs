@@ -110,6 +110,8 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::RETRANSMIT_BUF_BYTES.render_value(&mut s, m.retransmit_buf_bytes());
     c::SERVER_FINAL_UNSEEN_BRANCH.render_value(&mut s, m.server_final_unseen_branch());
     c::PARSE_ERRORS.render_value(&mut s, m.parse_errors());
+    c::PARSE_REFUSALS_ANSWERED.render_value(&mut s, m.parse_refusals_answered());
+    c::PARSE_REFUSALS_CAPPED.render_value(&mut s, m.parse_refusals_capped());
     c::PARSE_PANICS.render_value(&mut s, m.parse_panics());
     let recoveries = &sip_txn::LOCK_RECOVERIES;
     c::POISONED_LOCK_RECOVERIES.render(&mut s, |series| recoveries.count_at(series.at(0)));

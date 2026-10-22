@@ -15,12 +15,14 @@ use super::catalogue;
 
 mod face;
 mod no_target;
+mod parse;
 mod pool;
 mod slots;
 mod udp_shard;
 use crate::resolver::{outcome, refresh_outcome};
 pub use face::{Face, UntrustedClaim};
 pub use no_target::NoTargetDrop;
+use parse::ParseCounts;
 use slots::{bump, read};
 pub use udp_shard::UdpShardStats;
 
@@ -215,8 +217,8 @@ pub struct ProxyMetrics {
     /// `sip_messages_total{outbound,forwarded}` counts hand-off to the send
     /// path, so this is the delta dashboards need under overload.
     send_failures: AtomicU64,
-    /// Inbound datagrams the parser panicked on and a recv shard dropped.
-    parse_panics: AtomicU64,
+    /// The datagrams the parser refused or panicked on.
+    parse: ParseCounts,
     /// Endpoint receive-queue stats, one slot per recv shard, published by
     /// each core's maintenance tick — without them a tail-dropping queue shows
     /// 100% forwarded. Keyed by shard index so N reuse-port cores don't stomp
@@ -265,7 +267,7 @@ impl Default for ProxyMetrics {
             resolver_refresh: Default::default(),
             resolver_cache_size: Default::default(),
             send_failures: Default::default(),
-            parse_panics: Default::default(),
+            parse: Default::default(),
             udp_shards: Default::default(),
             pool: Default::default(),
             recv_shards_stalled: Default::default(),
@@ -384,16 +386,6 @@ impl ProxyMetrics {
         self.send_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// One inbound datagram the parser panicked on, dropped.
-    pub fn record_parse_panic(&self) {
-        self.parse_panics.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Inbound datagrams the parser panicked on (counter).
-    pub fn parse_panics(&self) -> u64 {
-        self.parse_panics.load(Ordering::Relaxed)
-    }
-
     /// Record one per-peer failure of `kind` against `peer` in `scope`
     /// (`sip_proxy_peer_failures_total{peer,scope,kind}`; cardinality-bounded,
     /// see [`crate::observability::peer_failures::PeerFailures`]).
@@ -491,7 +483,7 @@ impl ProxyMetrics {
         c::RESOLVER_REFRESH.render(&mut s, |series| read(&self.resolver_refresh, series.at(0)));
         c::RESOLVER_CACHE_SIZE.render_value(&mut s, load(&self.resolver_cache_size));
         c::SEND_FAILURES.render_value(&mut s, load(&self.send_failures));
-        c::PARSE_PANICS.render_value(&mut s, load(&self.parse_panics));
+        self.parse.render(&mut s);
         c::POISONED_LOCK_RECOVERIES.render(&mut s, |l| crate::poison::RECOVERIES.count_at(l.at(0)));
         self.udp_totals().render(&mut s);
         c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));

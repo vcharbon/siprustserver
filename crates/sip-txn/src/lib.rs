@@ -49,6 +49,7 @@ pub mod event;
 pub mod layer;
 pub mod metrics;
 pub mod parse_guard;
+pub mod parse_refusal;
 mod poison;
 pub mod pulse;
 pub mod rng;
