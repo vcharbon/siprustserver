@@ -1,7 +1,8 @@
 //! The host grammar a message is read with:
 //!
 //! - an IPv6 reference holds an RFC 4291 text address (RFC 5954 §4.1 replaces
-//!   the RFC 3261 `IPv6address`), wherever a host is read;
+//!   the RFC 3261 `IPv6address`), wherever a host is read, with the one extra
+//!   colon RFC 5118 §4.10 tolerates;
 //! - the Via sent-by is read by the URI's host reader, on the wire and typed;
 //! - a URI of a scheme other than sip, sips or tel is opaque;
 //! - a `received` is stamped when the source address differs from the sent-by;
@@ -10,6 +11,7 @@
 use sip_message::header::{
     network_host, Geolocation, GeolocationError, HeaderValue, ParamValue, RouteEntry, Uri, Via,
 };
+use sip_message::ip_literal::ip_host;
 use sip_message::remote_target::rewrite_hostport;
 use sip_message::{CustomParser, SipMessage, SipParser, SipParserLimits, SipStr};
 
@@ -84,6 +86,26 @@ fn an_rfc_4291_address_reads_in_every_host_position() {
         assert_eq!(msg.via().first().host_port(), (good, 5070));
         let typed = typed_via(&via).unwrap_or_else(|e| panic!("{via}: {e}"));
         assert_eq!(typed.host_port(), (good, 5070));
+    }
+}
+
+/// RFC 5118 §4.10 has a parser tolerate one form beyond RFC 4291: three
+/// colons before an IPv4 tail, read as `::`. The text is kept as written and
+/// names the `::` form's address; no other extra colon is tolerated.
+#[test]
+fn the_extra_colon_before_an_ipv4_tail_is_tolerated_and_nothing_else() {
+    let written = "2001:db8:::192.0.2.1";
+    let u = uri(&format!("sip:bob@[{written}]")).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(u.host(), written);
+    assert_eq!(u.to_string(), format!("sip:bob@[{written}]"));
+    assert_eq!(ip_host(u.host()), ip_host("2001:db8::192.0.2.1"));
+    let msg = with_via(&format!("SIP/2.0/UDP [{written}]:5060;branch=z9hG4bK-hg1"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(msg.via().first().host(), written);
+    for refused in ["1:2:::3", "2001:db8::::192.0.2.1"] {
+        assert!(uri(&format!("sip:bob@[{refused}]")).is_err(), "[{refused}] accepted");
+        let via = format!("SIP/2.0/UDP [{refused}]:5060;branch=z9hG4bK-hg1");
+        assert!(with_via(&via).is_err(), "{via} accepted");
     }
 }
 
@@ -224,14 +246,11 @@ fn tel_keeps_its_number_and_parameters() {
 }
 
 #[test]
-fn a_request_uri_or_contact_of_another_scheme_is_read() {
+fn a_request_uri_of_another_scheme_is_read() {
     let raw = invite("urn:nena:service:sos", VIA, "");
     let msg = parse(&raw).unwrap_or_else(|e| panic!("urn Request-URI: {e}"));
     let SipMessage::Request(req) = msg else { panic!("a request") };
     assert_eq!(req.request_uri().to_string(), "urn:nena:service:sos");
-    let contact = invite("sip:bob@example.com", VIA, "")
-        .replace("<sip:alice@192.0.2.1:5060>", "<urn:ietf:params:x:y>");
-    parse(&contact).unwrap_or_else(|e| panic!("urn Contact: {e}"));
 }
 
 /// A route is a hop a request is sent to: a URI that names no host is none.

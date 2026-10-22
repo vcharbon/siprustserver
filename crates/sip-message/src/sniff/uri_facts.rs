@@ -33,12 +33,3 @@ impl UriFacts {
         }
     }
 }
-
-/// The Request-URI's routing facts when it names a host RFC 3263 §4
-/// resolves; `None` for a response, a URI no reader accepts, or one of a
-/// scheme read opaque (`urn:`, `http:` …).
-pub fn request_uri_target(raw: &[u8]) -> Option<UriFacts> {
-    let text = super::request_uri(raw)?;
-    let uri = crate::header::Uri::parse(&crate::sip_str::SipStr::owned(&text)).ok()?;
-    uri.opaque_part().is_none().then(|| UriFacts::of(&uri))
-}

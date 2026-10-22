@@ -94,7 +94,7 @@ fn own_record_route_spans(raw: &[u8], emitter: &str) -> Vec<Range<usize>> {
     let Some(addr) = endpoint_addr(emitter) else { return Vec::new() };
     let names_emitter = |hop: &sniff::UriFacts| {
         hop.port == addr.port()
-            && hop.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip == addr.ip())
+            && sip_message::ip_literal::ip_host(&hop.host).is_some_and(|ip| ip == addr.ip())
     };
     sniff::route_rows(raw, "Record-Route")
         .into_iter()

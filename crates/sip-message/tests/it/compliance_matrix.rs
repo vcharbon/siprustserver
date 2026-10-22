@@ -169,14 +169,14 @@ fn rfc5118_ipv6() {
         "v47_mixedIpv4Ipv6Vias",
         "v48_multipleIpInSdp",
         "v49_ipv4Mapped",
+        // RFC 5118 §4.10: the extra colon before an IPv4 tail is tolerated.
+        "v410a_extraColon",
         "v410b_correctIpv4InIpv6",
     ];
     run_category("ipv6", &valid, &HashSet::new()); // all must parse
 
-    // v42: unbracketed IPv6 in R-URI. v410a: the extra colon RFC 3261's
-    // `IPv6address` admits; RFC 5954 §4.1 replaces that rule with RFC 3986's.
-    let invalid = ["v42_ipv6NoBrackets", "v410a_extraColon"];
-    run_category("ipv6", &invalid, &set(&invalid));
+    let invalid = ["v42_ipv6NoBrackets"];
+    run_category("ipv6", &invalid, &set(&invalid)); // unbracketed IPv6 in R-URI
 }
 
 // ---------------------------------------------------------------------------

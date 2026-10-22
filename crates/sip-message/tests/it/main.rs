@@ -10,6 +10,7 @@ mod ack_2xx_from_invite;
 mod ack_non_2xx_in_dialog;
 mod compliance_matrix;
 mod contact_set;
+mod dialog_contact;
 mod draft_round_trip;
 mod generated;
 mod generators;

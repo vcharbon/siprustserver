@@ -11,6 +11,7 @@
 use super::contact_entries::{
     contact_entry_spans, read_contact_entry, read_contact_entry_lenient, ContactEntry,
 };
+use super::dialog_contact::{can_establish_dialog, dialog_contact_refusal};
 use super::dialog_ids::{count_tag_params, is_call_id, read_address, tag_refusal};
 use super::header_index::HeaderIndex;
 use super::request_uri::read_request_uri;
@@ -338,6 +339,11 @@ pub fn extract_request_fields(
 
     // Contact cardinality on dialog-creating requests.
     if wire {
+        if let Some(method) = method.filter(|m| can_establish_dialog(m)) {
+            if let Some(refusal) = dialog_contact_refusal(common.contacts(), method) {
+                return Err(refusal);
+            }
+        }
         if let Some(method) = method {
             let dialog_creating = method.eq_ignore_ascii_case("INVITE")
                 || method.eq_ignore_ascii_case("SUBSCRIBE")
@@ -409,6 +415,12 @@ pub fn extract_response_fields(
     }
     if mode == ExtractMode::Wire {
         let cseq_method = common.cseq().method().as_str().to_string();
+        if reading == ContactReading::Strict && can_establish_dialog(&cseq_method) {
+            let what = format!("A {status} response to {cseq_method}");
+            if let Some(refusal) = dialog_contact_refusal(common.contacts(), &what) {
+                return Err(refusal);
+            }
+        }
         if reading == ContactReading::Strict
             && (cseq_method == "INVITE" || cseq_method == "SUBSCRIBE" || cseq_method == "REFER")
         {

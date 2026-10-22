@@ -55,8 +55,10 @@ by construction. Every other reader of a URI goes through it.
   Contact, Route, Record-Route, Via, Refer-To) keeps the RFC 3261 top label,
   so no resolver reads `2130706433`, `0x7f.0.0.1` or `0177` as an IPv4
   literal. An IPv6 reference holds an
-  `IPv6address` in the RFC 4291 text form only (RFC 5954 §4.1 replaces the
-  §25.1 rule), with no zone ID. A port is 1 to 65535. The same host reader
+  `IPv6address` in the RFC 4291 text form (RFC 5954 §4.1 replaces the §25.1
+  rule), with no zone ID, plus the one form RFC 5118 §4.10 has a parser
+  tolerate: three colons directly before a dotted-quad IPv4 tail, kept as
+  written and read as `::` wherever an address is derived from the host. A port is 1 to 65535. The same host reader
   reads a Via sent-by, whose host or `]` is followed only by a port, LWS, `;`
   or `,`.
   Parameter values are not checked against their parameter: `ttl=256` and
@@ -108,6 +110,9 @@ On wire bytes, a URI or name-addr that does not read refuses the message for
 the Request-URI, From, To, Contact, Route and Record-Route. Route and
 Record-Route are read at parse time, except on a final of 300 or more, which
 establishes no dialog (§12.1.1): there, like its Contact, they are not read.
+The Contact of an INVITE, SUBSCRIBE, NOTIFY or REFER, and of a 1xx or 2xx to
+one, names a dialog's remote target and is a SIP or SIPS URI (§8.1.1.8,
+§12.1.1); elsewhere a Contact of any scheme reads.
 Identity headers that fail the grammar (P-Asserted-Identity,
 P-Preferred-Identity, Diversion, History-Info, Remote-Party-ID, Refer-To …)
 are a non-fatal `Err`, and the entry is not used. A header read on access uses

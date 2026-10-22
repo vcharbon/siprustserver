@@ -55,7 +55,7 @@ use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
-use message_facts::{record_route_set, remote_tag_of, set_if_empty};
+use message_facts::{record_route_set, remote_tag_of, request_uri_target, set_if_empty};
 
 mod message_facts;
 
@@ -277,7 +277,7 @@ impl Obligation for MidDialogWireDestination {
             let strict = req.dialog.route_set.first().filter(|r| !r.loose).cloned();
             let target = match strict.or_else(|| routes.into_iter().next()) {
                 Some(first) => Some((first, true)),
-                None => sniff::request_uri_target(head).map(|u| (u, false)),
+                None => request_uri_target(head).map(|u| (u, false)),
             };
             let Some((target, from_route)) = target else {
                 out.push(finding(Decision::Undecidable("no readable target at this vantage")));

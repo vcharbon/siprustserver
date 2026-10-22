@@ -18,6 +18,7 @@ use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 
 pub(crate) mod compact_forms;
 pub mod contact_entries;
+mod dialog_contact;
 mod dialog_ids;
 pub mod extract_fields;
 pub mod header_index;

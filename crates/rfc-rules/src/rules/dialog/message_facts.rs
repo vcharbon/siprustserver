@@ -1,7 +1,9 @@
 //! What one message says about the dialog it rides, read off its tags and
 //! its header block: the peer's tag, the dialog URIs, the Record-Route stack.
 
+use sip_message::header::Uri;
 use sip_message::sniff::{self, UriFacts};
+use sip_message::SipStr;
 
 use crate::wire::{Kind, Msg};
 
@@ -40,4 +42,12 @@ pub(super) fn record_route_set(msg: &Msg) -> Vec<UriFacts> {
         .and_then(|h| sniff::route_uris(h, "Record-Route"))
         .filter(|set| set.iter().all(|hop| hop.addressable))
         .unwrap_or_default()
+}
+
+/// The routing facts of the Request-URI in `head` when its URI names a host
+/// RFC 3263 §4 resolves; `None` for a URI no reader accepts or one whose
+/// scheme names no host (`urn:`, `http:` …, [`Uri::opaque_part`]).
+pub(super) fn request_uri_target(head: &[u8]) -> Option<UriFacts> {
+    let uri = Uri::parse(&SipStr::owned(&sniff::request_uri(head)?)).ok()?;
+    uri.opaque_part().is_none().then(|| sniff::request_uri_facts(head)).flatten()
 }

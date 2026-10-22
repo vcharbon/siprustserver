@@ -144,10 +144,9 @@ impl Reading {
 /// `host` with an IP address in canonical text, so the two parsers' renderings
 /// of one address compare equal.
 fn canonical_host(host: &str) -> String {
-    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
-    match bare.parse::<IpAddr>() {
-        Ok(IpAddr::V6(v6)) => format!("[{v6}]"),
-        Ok(IpAddr::V4(v4)) => v4.to_string(),
-        Err(_) => host.to_string(),
+    match crate::ip_literal::ip_host(host) {
+        Some(IpAddr::V6(v6)) => format!("[{v6}]"),
+        Some(IpAddr::V4(v4)) => v4.to_string(),
+        None => host.to_string(),
     }
 }

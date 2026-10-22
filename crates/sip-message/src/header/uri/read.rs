@@ -12,13 +12,12 @@
 //!
 //! The same host reader reads a Via sent-by ([`read_sent_by`]).
 
-use std::net::Ipv6Addr;
-
 use crate::char_class::{
     is_alphanum, is_hnv_char, is_paramchar, is_password_char, is_uri_char, is_user_char,
     run_refusal,
 };
 use crate::error::SipParseError;
+use crate::ip_literal::ipv6_address;
 use crate::sip_str::SipStr;
 
 use super::super::params::{parse_semicolon_params, ParamValue, Params, URI_PARAMS};
@@ -320,9 +319,10 @@ fn ipv4_refusal(host: &str) -> Option<String> {
 }
 
 /// `IPv6address` in the RFC 4291 §2.2 text form, the one RFC 5954 §4.1 puts
-/// in place of the RFC 3261 §25.1 rule. No zone ID.
+/// in place of the RFC 3261 §25.1 rule, or the extra-colon form RFC 5118
+/// §4.10 tolerates ([`ipv6_address`]). No zone ID.
 fn is_ipv6_address(text: &str) -> bool {
-    text.parse::<Ipv6Addr>().is_ok()
+    ipv6_address(text).is_some()
 }
 
 /// A `tel` URI (RFC 3966), read structurally: every byte of the URI character
