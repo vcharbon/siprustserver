@@ -2,8 +2,9 @@
 //! stack last sent on a dialog a BYE has since ended, or is ending, still draws
 //! its ACK — the re-INVITE's transaction outlives the dialog's usage (RFC 5407
 //! §2), and its answerer retransmits the 2xx until it is acknowledged. An offer
-//! the 2xx makes is answered with every stream rejected (RFC 3264 §6): the
-//! session it would describe is over. The dialog's BYE is already sent or
+//! the 2xx makes is answered with every stream rejected (RFC 3264 §6), in the
+//! session this stack stated on the dialog (§8): the session it would describe
+//! is over. The dialog's BYE is already sent or
 //! answered, so no second one follows; a repeat of the 2xx is
 //! `re-ack-retransmitted-2xx`'s, with the same ACK.
 
@@ -53,10 +54,19 @@ fn ack_2xx(ctx: &RuleContext) -> Option<RuleHandleResult> {
         local_ip: ctx.config.sip_local_ip.clone(),
         now_ms: ctx.now_ms,
     };
+    // The answer continues the session this stack stated on the dialog (RFC
+    // 3264 §8).
+    let origin = ctx
+        .call
+        .b_legs()
+        .iter()
+        .find(|l| l.leg_id == ctx.source_leg_id)
+        .and_then(|l| relay::next_origin_in_dialog(l, &dialog.peer_tag));
     let answer = (!relay::acked_invite_carries_offer(dialog))
         .then(|| resp.sdp())
         .flatten()
         .and_then(|offer| sip_message::sdp_answer::reject_offer(offer, &options))
+        .and_then(|bytes| relay::in_dialog_session(bytes, origin.as_deref()))
         .map(|bytes| Body::own(bytes, None));
     let leg_id = ctx.source_leg_id.to_string();
     Some(RuleHandleResult::new(vec![RuleAction::AckLeg { leg_id, body: answer }]))

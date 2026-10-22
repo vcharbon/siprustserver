@@ -18,15 +18,25 @@
 //! which even an unchanged description is the next version ([`note_request`]
 //! names the requests that open none). What the peer then describes travels
 //! back to that author in the author's stream order, without the slots the
-//! author never described ([`sip_message::in_author_order`]). Before confirmation (the initial
-//! INVITE, its provisionals and final) a description opens the session.
+//! author never described ([`sip_message::in_author_order`]). Before
+//! confirmation (the initial INVITE, its provisionals and final) the first
+//! description in a dialog opens its session; a later one there by another
+//! author, or under another sess-id, is restated as that session's next
+//! version (one early dialog, one session).
+//!
+//! What a peer receives continues what it last received: the author's own
+//! next description that skips a version the peer never received (an offer
+//! the stack refused or absorbed) is restated — a repeat of what the peer
+//! holds at that version, a change at the next.
+//!
 //! Inside an early dialog, a description of the stack's own that already
 //! states the next version of the session the dialog carries (an answer it
 //! composed as that session's author would) leaves as written and counts as a
 //! version the stack stated; the author's later descriptions in that dialog
 //! are then restated above it as on a confirmed one. Each early dialog of a
-//! leg the stack opened keeps its own session state until one of them
-//! confirms (RFC 3261 §12.1.2).
+//! leg keeps its own session state until one of them confirms (RFC 3261
+//! §12.1.2): a leg the stack dialled tells them apart by the peer's tag, the
+//! caller's leg by this stack's.
 //!
 //! A description inside a dialog leaves in the form the service's
 //! [`SdpFormPolicy`] gives it from what the seam knows ([`SdpCrossing`]): as
@@ -39,6 +49,8 @@
 use std::borrow::Cow;
 
 use call::{Call, DialogId, Leg, LegSdpSession, LegState};
+
+use super::sdp_dialogs::{early_dialog_mut, enter_early_dialog};
 use sip_message::SdpOrigin;
 
 use crate::config::{SdpCrossing, SdpForm, SdpFormPolicy};
@@ -71,8 +83,8 @@ impl<'a> From<&'a b2bua_sdk::model::BodyAuthor> for Author<'a> {
 /// Where a description stands in the offer/answer exchange of its dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Carried {
-    /// In the initial INVITE or its provisionals and final: it opens the
-    /// session.
+    /// In the initial INVITE or its provisionals and final: the first in a
+    /// dialog opens the session; a later one continues it.
     Opening,
     /// In a later request of the dialog, or the initial ACK.
     InDialog,
@@ -120,12 +132,17 @@ impl Carried {
 }
 
 /// `body`, typed `content_type` and written by `author`, as it leaves on
-/// `leg_id` inside its dialog whose remote tag is `dialog` (`None`: the leg's
-/// one dialog, or none yet) where it stands `carried`, with that dialog's
-/// session state updated to what it says. While `leg_id` is an unconfirmed leg
-/// this stack opened, each of its early dialogs carries its own state, the
-/// opening INVITE's until something crosses it; the leg keeps the opening state
-/// and [`adopt_confirmed_dialog`] hands it the confirming dialog's. A body that carries no session description leaves as it is.
+/// `leg_id` inside its dialog `dialog` (`None`: the leg's one dialog, or none
+/// yet) where it stands `carried`, with that dialog's session state updated to
+/// what it says. While `leg_id` is unconfirmed, each of its early dialogs
+/// carries its own state: on a leg this stack dialled the opening INVITE's
+/// until something crosses it, told apart by the peer's tag; on the caller's
+/// leg none until a description crosses it, told apart by this stack's tag
+/// (RFC 3261 §12.1.2). The leg keeps the opening state, and
+/// [`adopt_confirmed_dialog`](super::adopt_confirmed_dialog) /
+/// [`adopt_answered_caller_dialog`](super::adopt_answered_caller_dialog) hand it
+/// the confirming dialog's. A body that carries no session description leaves as
+/// it is.
 /// A version at the top of its range has no next one: a description that would
 /// be restated above it leaves as written, and opens the session anew where the
 /// stack had stated no version of its own (RFC 3264 §8 — never a wrapped one).
@@ -134,7 +151,7 @@ impl Carried {
 pub fn continue_on_leg(
     call: &mut Call,
     leg_id: &str,
-    dialog: Option<&str>,
+    dialog: Option<&DialogId>,
     author: Author<'_>,
     carried: Carried,
     body: Vec<u8>,
@@ -143,38 +160,20 @@ pub fn continue_on_leg(
 ) -> Vec<u8> {
     let call_restated = has_restated(call);
     let formed = Formed { policy, call_restated };
-    let Some(opening) = dialog.and_then(|tag| enter_early_dialog(call, leg_id, tag)) else {
+    let caller = call.a_leg.leg_id == leg_id;
+    let Some(opening) = dialog.and_then(|id| enter_early_dialog(call, leg_id, caller, id)) else {
         return continue_session(call, leg_id, author, carried, body, content_type, formed);
     };
     let out = continue_session(call, leg_id, author, carried, body, content_type, formed);
-    if let (Some(tag), Some(leg)) = (dialog, call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)) {
+    if let (Some(id), Some(leg)) = (dialog, leg_mut(call, leg_id)) {
         let exchanges_opened = leg.sdp_session.exchanges_opened;
         let own =
             std::mem::replace(&mut leg.sdp_session, LegSdpSession { exchanges_opened, ..opening });
-        if let Some(d) = call::helpers::callee_dialog_mut(leg, tag) {
+        if let Some(d) = early_dialog_mut(leg, caller, id) {
             d.sdp_session = Some(own);
         }
     }
     out
-}
-
-/// Puts the state early dialog `tag` of the unconfirmed leg `leg_id` carries in
-/// the leg's place and returns the leg's own (the opening state), or `None`
-/// where `leg_id` is not an unconfirmed leg this stack opened with such a
-/// dialog.
-fn enter_early_dialog(call: &mut Call, leg_id: &str, tag: &str) -> Option<LegSdpSession> {
-    let leg = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)?;
-    if leg.dialogs.confirmed().is_some() {
-        return None;
-    }
-    let mut own = call::helpers::callee_dialog_mut(leg, tag)?.sdp_session.take();
-    if let Some(own) = own.as_mut() {
-        own.exchanges_opened = leg.sdp_session.exchanges_opened;
-    }
-    Some(match own {
-        Some(own) => std::mem::replace(&mut leg.sdp_session, own),
-        None => leg.sdp_session.clone(),
-    })
 }
 
 /// [`continue_on_leg`] on the session state in the leg's place.
@@ -218,24 +217,33 @@ fn continue_session(
         && carried.in_dialog()
         && matches!(leg.state(), LegState::Trying | LegState::Early)
         && stated(leg).is_some_and(|s| states_next_version(sdp, &s.origin));
-    let restated = (carried.in_dialog()
-        && match leg.state() {
+    let own = continues_itself(&leg.sdp_session, author, &session_id);
+    let skips = own && skips_a_version(&leg.sdp_session, sdp);
+    let in_session = match carried {
+        Carried::Opening => leg.sdp_session.sent_origin.is_some(),
+        _ if carried.in_dialog() => match leg.state() {
             LegState::Confirmed => true,
-            LegState::Trying | LegState::Early => leg.sdp_session.restated,
+            LegState::Trying | LegState::Early => leg.sdp_session.restated || skips,
             LegState::Terminated => false,
-        }
-        && !already_stated
-        && !continues_itself(&leg.sdp_session, author, &session_id))
-    .then(|| stated(leg))
-    .flatten()
-    .and_then(|stated| {
-        if carried == Carried::Answering && repeats(&leg.sdp_session, author, repeat_key.as_deref())
-        {
-            restate_session_again(sdp, &stated)
-        } else {
-            restate_session(sdp, &stated)
-        }
-    });
+        },
+        _ => false,
+    };
+    let restated = (in_session && !already_stated && (!own || skips))
+        .then(|| stated(leg))
+        .flatten()
+        .and_then(|stated| {
+            let repeat = if skips {
+                repeats_what_was_held(&leg.sdp_session, sdp)
+            } else {
+                carried == Carried::Answering
+                    && repeats(&leg.sdp_session, author, repeat_key.as_deref())
+            };
+            if repeat {
+                restate_session_again(sdp, &stated)
+            } else {
+                restate_session(sdp, &stated)
+            }
+        });
     let reformed = carried.in_dialog()
         && formed.policy.form(&SdpCrossing {
             by_peer: matches!(author, Author::Leg(_)),
@@ -276,6 +284,7 @@ fn continue_session(
     if let Some(now) = StatedSession::of(&out) {
         state.sent_origin = Some(now.origin);
         state.sent_media = now.media;
+        state.sent_description = parse_origin(&out).map(|o| o.body_excluding_origin);
     }
     let out = match reformed.then(|| canonical_form(&out)).flatten() {
         Some(canonical) => Cow::Owned(canonical),
@@ -289,37 +298,6 @@ fn continue_session(
     joined.extend_from_slice(&out);
     joined.extend(body.iter().skip(range.end));
     joined
-}
-
-/// The session state the early dialog with peer tag `peer_tag` carries, handed
-/// to `leg` as that dialog confirms it; nothing where the dialog carries the
-/// opening state. Whatever that dialog carries, the leg keeps the restatements
-/// its other forks and its own state carried: the call's fact outlives the
-/// retired forks.
-pub fn adopt_confirmed_dialog(leg: &mut Leg, peer_tag: &str) {
-    let restated = leg.sdp_session.has_restated
-        || leg.dialogs.iter().any(|d| d.sdp_session.as_ref().is_some_and(|s| s.has_restated));
-    if let Some(mut own) =
-        call::helpers::callee_dialog_mut(leg, peer_tag).and_then(|d| d.sdp_session.take())
-    {
-        own.exchanges_opened = leg.sdp_session.exchanges_opened;
-        leg.sdp_session = own;
-    }
-    leg.sdp_session.has_restated |= restated;
-}
-
-/// The `o=` value of the next version of the session `leg`'s dialog whose
-/// remote tag is `remote_tag` carries: the last one this stack stated there,
-/// one up. `None` where the stack stated none there, or the version has no
-/// next one.
-pub fn next_origin_in_dialog(leg: &Leg, remote_tag: &str) -> Option<String> {
-    let early = (leg.state() != LegState::Confirmed)
-        .then(|| call::helpers::callee_dialog(leg, remote_tag))
-        .flatten()
-        .and_then(|d| d.sdp_session.as_ref());
-    let stated = early.unwrap_or(&leg.sdp_session).sent_origin.as_deref()?;
-    let line = origin_of(stated)?.next_version_line()?;
-    Some(line.strip_prefix("o=")?.to_string())
 }
 
 /// Count the offer/answer exchange `req`, received from `leg_id`'s peer,
@@ -380,7 +358,7 @@ fn states_next_version(sdp: &[u8], stated: &str) -> bool {
 }
 
 /// The origin an `o=` value states.
-fn origin_of(value: &str) -> Option<SdpOrigin> {
+pub(super) fn origin_of(value: &str) -> Option<SdpOrigin> {
     parse_origin(format!("v=0\r\no={value}\r\n").as_bytes())
 }
 
@@ -396,6 +374,28 @@ fn continues_itself(state: &LegSdpSession, author: Author<'_>, session_id: &str)
         }
         Author::Stack => false,
     }
+}
+
+/// Whether `sdp`, its author's own continuation of the session `state`
+/// carries, states a version above the one after the version the peer holds:
+/// a version the author spent where the peer never received it (an offer
+/// this stack refused or absorbed). What the peer receives continues what it
+/// last received (RFC 3264 §8), so such a description is restated.
+fn skips_a_version(state: &LegSdpSession, sdp: &[u8]) -> bool {
+    let (Some(now), Some(held)) =
+        (parse_origin(sdp), state.sent_origin.as_deref().and_then(origin_of))
+    else {
+        return false;
+    };
+    now.identifies_same_session(&held)
+        && held.session_version.checked_add(1).is_some_and(|next| now.session_version > next)
+}
+
+/// Whether `sdp` describes, apart from its `o=` line, what the peer last
+/// received under `state`: a repeat, kept at the version the peer holds.
+fn repeats_what_was_held(state: &LegSdpSession, sdp: &[u8]) -> bool {
+    let now = parse_origin(sdp).map(|o| o.body_excluding_origin);
+    now.is_some() && now == state.sent_description
 }
 
 /// `sdp`, written by the peer of `from` and going to `to`, in the stream order
@@ -446,7 +446,7 @@ fn has_restated(call: &Call) -> bool {
     })
 }
 
-fn leg_mut<'a>(call: &'a mut Call, leg_id: &str) -> Option<&'a mut Leg> {
+pub(super) fn leg_mut<'a>(call: &'a mut Call, leg_id: &str) -> Option<&'a mut Leg> {
     std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()).find(|l| l.leg_id == leg_id)
 }
 

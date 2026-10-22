@@ -669,10 +669,10 @@ pub enum RuleAction {
         headers: Vec<(String, String)>,
     },
     /// Broker an unadopted leg's SDP onto the a-leg as an **unreliable** `1xx`
-    /// (RFC 3262 §3 early media — no `Require: 100rel`/`RSeq`). Only the a-leg has
-    /// a stored UAS INVITE to answer; other targets are skipped. `to_tag` set ⇒ an
-    /// ephemeral forked early dialog (used verbatim, not persisted); absent ⇒ the
-    /// B2BUA's own early identity (reuse or mint+persist the a-dialog tag).
+    /// (RFC 3262 §3 early media). Only the a-leg is answered. The early media rides
+    /// an early dialog of its own (RFC 3261 §12.1.2): under `to_tag`, else one the
+    /// B2BUA picks (its own where the caller saw none, else fresh). A callee answers
+    /// under another tag, its 2xx ending that early dialog (RFC 3264 §8).
     /// `p_early_media` stamps the RFC 5009 `P-Early-Media` header when set.
     SendProvisionalToLeg {
         leg_id: String,

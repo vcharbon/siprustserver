@@ -72,10 +72,14 @@ pub fn response_to_a_leg(
         }
     }
     let a_leg = call.a_leg.leg_id.clone();
+    // The caller-facing dialog the response names (RFC 3261 §12.1.1).
+    let dialog = to_tag
+        .clone()
+        .map(|our_tag| call::DialogId { our_tag, peer_tag: call.a_leg_invite.from_tag.clone() });
     let body = super::sdp_session::continue_on_leg(
         call,
         &a_leg,
-        None,
+        dialog.as_ref(),
         author,
         super::sdp_session::Carried::of(&Method::Invite, Some(status), false),
         body,

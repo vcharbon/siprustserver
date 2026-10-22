@@ -108,7 +108,7 @@ async fn announcement_happy_path() {
         "destination gets alice's offer"
     );
     dest_uas.respond(180, "Ringing").await;
-    call.expect(180).await;
+    let ringing = call.expect(180).await;
     dest_uas.respond(200, "OK").with_sdp(DEST_SDP).await;
 
     // Alice is answered with the destination's SDP and bridged.
@@ -118,6 +118,14 @@ async fn announcement_happy_path() {
         DEST_SDP,
         "A answered with the destination SDP"
     );
+    // The media server's early media and the destination's answer are two
+    // sessions, so they ride two caller-facing dialogs (RFC 3261 §12.1.2, RFC
+    // 3264 §8): the destination rings and answers under a tag of its own, and
+    // its 2xx confirms that dialog alone.
+    let early_media = pem.to().tag().expect("the 183 names an early dialog").to_string();
+    let answered = final_200.to().tag().expect("the 2xx names its dialog").to_string();
+    assert_ne!(early_media, answered, "the answer confirms the callee's dialog, not the MRF's");
+    assert_eq!(ringing.to().tag(), Some(answered.as_str()), "the callee rings in its own dialog");
     let mut alice_dialog = call.ack().await;
     dest.receive("ACK").await;
 

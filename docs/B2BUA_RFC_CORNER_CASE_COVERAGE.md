@@ -190,6 +190,10 @@ Severity = operational risk if the behaviour is wrong.
 | EARLY-MEDIA-1 | 3262 §5 | Reliable 183+SDP early media | Bridge to A-leg before 200 | high | ✅ | promote_pem suite, fake_prack |
 | EARLY-MEDIA-2 | 3264 §8 | Early→final SDP change | Re-anchor without dropping media | med | ✅ | promote_pem `resync_sdp_changed` |
 | EARLY-MEDIA-4 | 3262 §5 | 183-SDP is the answer (not offer) | PRACK carries no body | high | ✅ | rfc-audit `prack-answers-1xx-offer` |
+| EARLY-MEDIA-5 | 3261 §12.1.2, 3264 §8 | A media leg's early media, then the callee's answer | The media leg's early media rides a caller-facing early dialog of its own; the callee rings and answers under another tag, its 2xx confirming that dialog alone | high | ✅ | `announcement_happy_path`, media_leg_provisional suite |
+| EARLY-MEDIA-6 | 3264 §8 | A second author's description on one caller-facing early dialog | Restated as the next version of the session the dialog carries | med | ✅ | `another_authors_opening_description_continues_the_early_dialogs_session` |
+| SDP-VERSION-1 | 3264 §8 | Author spends a version on an offer the stack refuses or absorbs | What the far party receives continues what it last received: a repeat at the held version, a change at the next | med | ✅ | `a_version_the_caller_never_received_is_not_skipped_over`, `a_skipped_version_on_a_confirmed_dialog_is_restated_above_the_held_one` |
+| SDP-VERSION-2 | 3264 §8 | Stack-composed answer (every stream rejected) on a dialog the stack opened | Continues the stack's session there, next version | med | ✅ | `the_rejecting_answer_continues_the_session_the_stack_stated` |
 
 ### UPDATE (RFC 3311) & glare
 

@@ -45,9 +45,15 @@ impl ActionExecutor<'_> {
                 local_ip: self.config.sip_local_ip.clone(),
                 now_ms: self.now_ms,
             };
+            // In the session this stack stated on the dialog (§8).
+            let origin = call::helpers::find_leg(call, leg_id).and_then(|leg| {
+                let tag = leg.dialogs.established()?.peer_tag.clone();
+                relay::next_origin_in_dialog(leg, &tag)
+            });
             let answer = resp
                 .sdp()
                 .and_then(|offer| sip_message::sdp_answer::reject_offer(offer, &options))
+                .and_then(|bytes| relay::in_dialog_session(bytes, origin.as_deref()))
                 .unwrap_or_default();
             let content_type = (!answer.is_empty()).then(relay::sdp);
             self.ack_leg(

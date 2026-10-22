@@ -110,7 +110,8 @@ pub use sdp_form::canonical_form;
 /// it cuts a description at its `m=` lines byte for byte and reads every value
 /// through `sdp_doc`.
 pub use sdp_session::{
-    in_author_order, restate_session, restate_session_again, stamp_session, Restated, StatedSession,
+    in_author_order, restate_session, restate_session_again, stamp_session, under_origin, Restated,
+    StatedSession,
 };
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sip_str::{SharedText, SipStr};

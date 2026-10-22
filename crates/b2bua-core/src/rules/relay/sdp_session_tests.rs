@@ -6,9 +6,10 @@ use sip_message::header::MediaType;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser, SipStr};
 
-use super::{adopt_confirmed_dialog, continue_on_leg, next_origin_in_dialog, Author, Carried};
+use super::{continue_on_leg, Author, Carried};
 use crate::config::{AsWritten, B2buaConfig, SdpCrossing, SdpForm, SdpFormPolicy};
 use crate::initial_invite::build_initial_call;
+use crate::rules::relay::{adopt_confirmed_dialog, next_origin_in_dialog};
 use crate::test_call::{invite, src};
 
 /// A service policy that re-serializes a peer's description once the call has
@@ -87,6 +88,15 @@ fn send_in(
         Some(&ct()),
         policy(form),
     );
+    String::from_utf8(out).unwrap()
+}
+
+/// What reaches `b-1` of `body`, written by `author`, inside its early dialog
+/// `f1`.
+fn in_f1(c: &mut Call, author: Author<'_>, carried: Carried, body: &str) -> String {
+    let f1 = call::DialogId { our_tag: String::new(), peer_tag: "f1".into() };
+    let body = body.as_bytes().to_vec();
+    let out = continue_on_leg(c, "b-1", Some(&f1), author, carried, body, Some(&ct()), &AsWritten);
     String::from_utf8(out).unwrap()
 }
 
@@ -580,18 +590,7 @@ fn forked() -> Call {
 
 /// The stack's own answer inside `f1` of `b-1`, stating `origin`.
 fn answer_in_f1(c: &mut Call, origin: &str) -> String {
-    let body = sdp(origin, 10000);
-    let out = continue_on_leg(
-        c,
-        "b-1",
-        Some("f1"),
-        Author::Stack,
-        Carried::InDialog,
-        body.as_bytes().to_vec(),
-        Some(&ct()),
-        policy(SdpForm::AsWritten),
-    );
-    String::from_utf8(out).unwrap()
+    in_f1(c, Author::Stack, Carried::InDialog, &sdp(origin, 10000))
 }
 
 /// A description of the stack's own that already states the next version of
@@ -606,17 +605,9 @@ fn a_stack_description_stating_the_next_version_leaves_as_written() {
         answer_in_f1(&mut c, "alice 1 3 IN IP4 192.0.2.1"),
         sdp("alice 1 3 IN IP4 192.0.2.1", 10000)
     );
-    let relayed = continue_on_leg(
-        &mut c,
-        "b-1",
-        Some("f1"),
-        Author::Leg("a"),
-        Carried::InDialog,
-        sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
-        Some(&ct()),
-        policy(SdpForm::AsWritten),
-    );
-    assert_eq!(o_line(&String::from_utf8(relayed).unwrap()), "o=alice 1 4 IN IP4 192.0.2.1");
+    let reoffer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
+    let relayed = in_f1(&mut c, Author::Leg("a"), Carried::InDialog, &reoffer);
+    assert_eq!(o_line(&relayed), "o=alice 1 4 IN IP4 192.0.2.1");
 }
 
 /// What the stack states inside one early dialog is that dialog's: the leg and
@@ -657,28 +648,10 @@ fn each_early_dialog_keeps_its_own_session() {
 #[test]
 fn a_relayed_early_exchange_survives_confirmation() {
     let mut c = forked();
-    continue_on_leg(
-        &mut c,
-        "b-1",
-        Some("f1"),
-        Author::Leg("a"),
-        Carried::InDialog,
-        vec![],
-        None,
-        policy(SdpForm::AsWritten),
-    );
+    in_f1(&mut c, Author::Leg("a"), Carried::InDialog, "");
     let answer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
-    let out = continue_on_leg(
-        &mut c,
-        "b-1",
-        Some("f1"),
-        Author::Leg("a"),
-        Carried::answering(&Method::Update, 200),
-        answer.clone().into_bytes(),
-        Some(&ct()),
-        policy(SdpForm::AsWritten),
-    );
-    assert_eq!(String::from_utf8(out).unwrap(), answer);
+    let out = in_f1(&mut c, Author::Leg("a"), Carried::answering(&Method::Update, 200), &answer);
+    assert_eq!(out, answer);
     adopt_confirmed_dialog(&mut c.b_legs[0], "f1");
     assert_eq!(
         c.b_legs[0].sdp_session.sent_origin.as_deref(),
@@ -692,16 +665,8 @@ fn a_relayed_early_exchange_survives_confirmation() {
 #[test]
 fn a_relayed_description_does_not_leak_into_another_fork() {
     let mut c = forked();
-    continue_on_leg(
-        &mut c,
-        "b-1",
-        Some("f1"),
-        Author::Leg("a"),
-        Carried::answering(&Method::Update, 200),
-        sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
-        Some(&ct()),
-        policy(SdpForm::AsWritten),
-    );
+    let answer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
+    in_f1(&mut c, Author::Leg("a"), Carried::answering(&Method::Update, 200), &answer);
     adopt_confirmed_dialog(&mut c.b_legs[0], "f2");
     assert_eq!(
         c.b_legs[0].sdp_session.sent_origin.as_deref(),
@@ -864,16 +829,8 @@ fn the_calls_restatement_is_recorded_on_the_leg_it_crossed() {
 fn a_restatement_in_a_losing_fork_stays_the_calls() {
     let mut c = forked();
     answer_in_f1(&mut c, "alice 1 2 IN IP4 192.0.2.1");
-    continue_on_leg(
-        &mut c,
-        "b-1",
-        Some("f1"),
-        Author::Leg("a"),
-        Carried::InDialog,
-        sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
-        Some(&ct()),
-        policy(SdpForm::AsWritten),
-    );
+    let reoffer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
+    in_f1(&mut c, Author::Leg("a"), Carried::InDialog, &reoffer);
     adopt_confirmed_dialog(&mut c.b_legs[0], "f2");
     for d in c.b_legs[0].dialogs.iter_mut() {
         d.state = if d.peer_tag == "f2" {
@@ -911,7 +868,7 @@ fn the_calls_restatement_is_read_through_an_early_dialog() {
         let out = continue_on_leg(
             c,
             "b-1",
-            Some("f1"),
+            Some(&call::DialogId { our_tag: String::new(), peer_tag: "f1".into() }),
             Author::Leg("a"),
             Carried::answering(&Method::Update, 200),
             peer_sdp(&format!("alice 1 {version} IN IP4 192.0.2.1"), 10002).into_bytes(),
@@ -961,3 +918,6 @@ fn the_policy_sees_each_in_dialog_crossing_as_it_stands() {
         "the opening description is not asked about"
     );
 }
+
+#[path = "sdp_session_caller_tests.rs"]
+mod caller;

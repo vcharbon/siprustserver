@@ -70,6 +70,8 @@ impl ActionExecutor<'_> {
             .then(|| resp.sdp())
             .flatten()
             .and_then(|offer| {
+                // In the session the fork's dialog carries: the INVITE's (§8).
+                let origin = relay::next_origin_in_dialog(leg, &tag);
                 sip_message::sdp_answer::reject_offer(
                     offer,
                     &sip_message::BuildHeldSdpOptions {
@@ -77,6 +79,7 @@ impl ActionExecutor<'_> {
                         now_ms: self.now_ms,
                     },
                 )
+                .and_then(|bytes| relay::in_dialog_session(bytes, origin.as_deref()))
             });
         let ack_branch = released
             .as_ref()

@@ -124,13 +124,17 @@ impl ActionExecutor<'_> {
         // moves the answered one's (RFC 3264 §8).
         let dialog = From::parse(&SipStr::owned(&pending.source_from))
             .ok()
-            .and_then(|from| from.tag().map(str::to_string));
+            .and_then(|from| from.tag().map(str::to_string))
+            .map(|peer_tag| call::DialogId {
+                our_tag: shown_tag_of(&pending).unwrap_or_default(),
+                peer_tag,
+            });
         let relay_body = match &holder {
             PendingHolder::Retired(_) => r.body.clone(),
             PendingHolder::Dialog(_) => relay::continue_on_leg(
                 call,
                 target_leg,
-                dialog.as_deref(),
+                dialog.as_ref(),
                 relay::Author::Leg(source_leg_id),
                 relay::Carried::answering(&Method::from_wire(&r.cseq_method), status),
                 r.body.clone(),

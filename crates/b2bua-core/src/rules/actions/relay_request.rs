@@ -182,7 +182,7 @@ impl ActionExecutor<'_> {
         let body = relay::continue_on_leg(
             call,
             target_leg,
-            Some(&target_dialog.peer_tag),
+            Some(&target_dialog.id()),
             relay::Author::Leg(ctx.source_leg_id),
             relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),

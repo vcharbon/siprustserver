@@ -185,3 +185,18 @@ fn a_2xx_whose_relayed_ack_is_still_owed_is_left_to_its_originator() {
     let (rule, _) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
     assert_ne!(rule, Some("ack-2xx-on-ended-dialog"));
 }
+
+/// The answer the stack composes continues the session it stated on that
+/// dialog (RFC 3264 §8): the version after the one its INVITE stated, under
+/// the same `o=` identity, never a session of its own minted for the ACK.
+#[test]
+fn the_rejecting_answer_continues_the_session_the_stack_stated() {
+    let (mut call, reinvite, _) = reinvite_then_bye();
+    let leg = call.b_legs.iter_mut().find(|l| l.leg_id == "b-1").expect("the callee's leg");
+    leg.sdp_session.sent_origin = Some("- 708 708 IN IP4 10.10.0.9".into());
+    leg.sdp_session.sent_media = vec!["audio 4000 RTP/AVP 0".into()];
+    let (_, result) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
+    let (_, answer) = ack_to_bob(&result.expect("a turn"));
+    assert!(answer.contains("\r\no=- 708 709 IN IP4 10.10.0.9\r\n"), "{answer}");
+    assert!(answer.contains("m=audio 0 "), "{answer}");
+}

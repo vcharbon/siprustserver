@@ -67,11 +67,11 @@ pub(crate) fn ack_answer_on_leg(
     let sdp = ack.sdp()?;
     let dialog = call::helpers::find_leg(call, leg_id)
         .and_then(|l| l.dialogs.confirmed())
-        .map(|d| d.peer_tag.clone());
+        .map(call::Dialog::id);
     Some(continue_on_leg(
         call,
         leg_id,
-        dialog.as_deref(),
+        dialog.as_ref(),
         author,
         Carried::InDialog,
         sdp.to_vec(),

@@ -34,11 +34,11 @@ impl ActionExecutor<'_> {
         // The ACK rides the leg's dialog: the one a 2xx established.
         let dialog = call::helpers::find_leg(call, leg_id)
             .and_then(|l| l.dialogs.established())
-            .map(|d| d.peer_tag.clone());
+            .map(call::Dialog::id);
         let body = relay::continue_on_leg(
             call,
             leg_id,
-            dialog.as_deref(),
+            dialog.as_ref(),
             author,
             relay::Carried::InDialog,
             body,

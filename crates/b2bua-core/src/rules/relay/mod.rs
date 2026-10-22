@@ -40,6 +40,7 @@ mod owed_answer;
 mod passthrough;
 mod provisional_withhold;
 mod repeat;
+mod sdp_dialogs;
 mod sdp_session;
 mod session_timer;
 mod unbuilt;
@@ -63,10 +64,10 @@ pub(crate) use session_timer::{settle_session_timer, TIMER};
 pub(crate) use unbuilt::unbuilt;
 
 // One session per dialog, whoever authored the description (RFC 3264 §8).
-pub use sdp_session::{
-    adopt_confirmed_dialog, continue_on_leg, next_origin_in_dialog, note_request, opened, Author,
-    Carried,
+pub use sdp_dialogs::{
+    adopt_answered_caller_dialog, adopt_confirmed_dialog, in_dialog_session, next_origin_in_dialog,
 };
+pub use sdp_session::{continue_on_leg, note_request, opened, Author, Carried};
 
 // Wire routing for what those emit.
 pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};

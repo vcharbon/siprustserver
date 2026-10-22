@@ -197,7 +197,7 @@ impl ActionExecutor<'_> {
             body: relay::continue_on_leg(
                 call,
                 leg_id,
-                Some(&dialog.peer_tag),
+                Some(&dialog.id()),
                 author,
                 relay::Carried::InDialog,
                 body.to_vec(),
@@ -355,7 +355,7 @@ impl ActionExecutor<'_> {
             body: relay::continue_on_leg(
                 call,
                 leg_id,
-                Some(&dialog.peer_tag),
+                Some(&dialog.id()),
                 author,
                 relay::Carried::of(&Method::from_wire(method), None, true),
                 body.to_vec(),

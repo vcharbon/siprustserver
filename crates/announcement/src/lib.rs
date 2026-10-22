@@ -15,14 +15,16 @@
 //! 1. **init** seeds the cursor at `OfferingMrf` and launches an unadopted
 //!    `media` leg toward the MRF (in parallel with setup).
 //! 2. **@OfferingMrf**, on the media leg's `200 OK`: brokers the MRF's SDP onto
-//!    the caller as an unreliable `183` (early media), opens the MSCML control
-//!    channel with an INFO `<play>`, and advances to `Announcing`.
+//!    the caller as an unreliable `183` (early media) on an early dialog of its
+//!    own, opens the MSCML control channel with an INFO `<play>`, and advances
+//!    to `Announcing`.
 //! 3. **@Announcing**, on the MRF's INFO MSCML `<response>` success: BYEs the
 //!    media leg, dials the real destination (an adopted leg), and **deactivates**
 //!    the machine (ADR-0016 X9 — the terminal `[*]`). The destination is now a
 //!    normal adopted leg, so the framework's core `confirm-dialog` rule answers
-//!    the caller with its SDP and bridges the two — no announcement rule needed,
-//!    and no dead cursor lingers on the bridged call.
+//!    the caller with its SDP, under a tag of its own whose dialog the 2xx
+//!    confirms (the early media's ends with it), and bridges the two — no
+//!    announcement rule needed, and no dead cursor lingers on the bridged call.
 //! 4. **@Announcing**, on a `<response>` **failure** (max-duration abort, no-answer,
 //!    a final-announcement reject): a reject-teardown — send the caller its 4xx on
 //!    the early dialog and terminate. The caller never got a 2xx, so this leans on

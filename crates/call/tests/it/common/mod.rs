@@ -18,8 +18,10 @@ use sip_retransmit::Class;
 
 mod emission;
 mod provisional;
+mod sdp_session;
 use emission::{arb_own_notify, arb_retained_emission, arb_unacked_2xx};
 use provisional::{arb_owed_answer, arb_provisional};
+use sdp_session::arb_sdp_session;
 
 // ── Representative fixture (port of fixture.ts) ─────────────────────────────
 
@@ -141,6 +143,9 @@ pub fn representative_call() -> Call {
         sdp_session: LegSdpSession {
             sent_origin: Some("bob 202 3 IN IP4 203.0.113.42".into()),
             sent_media: vec!["audio 20000 RTP/AVP 8".into(), "video 0 RTP/AVP 96".into()],
+            sent_description: Some(
+                "v=0\ns=-\nm=audio 20000 RTP/AVP 8\nm=video 0 RTP/AVP 96".into(),
+            ),
             sent_slots: vec![Some(0), None],
             sent_slots_author: Some("b-3".into()),
             restated_from: Some("1 carol 303 1 IN IP4 192.0.2.3".into()),
@@ -653,42 +658,6 @@ fn arb_leg() -> BoxedStrategy<Leg> {
             },
         )
         .boxed()
-}
-
-fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
-    (
-        proptest::option::of("[a-z0-9 .]{1,40}"),
-        proptest::collection::vec("[a-z]{1,8} [0-9]{1,5} [A-Z/]{1,8} [0-9 ]{1,12}", 0..3),
-        proptest::collection::vec(proptest::option::of(0u32..4), 0..3),
-        (proptest::option::of("(a|b-[0-9]{1,2})"), proptest::option::of("[a-z0-9 .]{1,40}")),
-        proptest::option::of("(a|b-[0-9]{1,2})"),
-        proptest::option::of("[0-9]{1,20}"),
-        (any::<bool>(), any::<u32>(), any::<bool>()),
-    )
-        .prop_map(
-            |(
-                sent_origin,
-                sent_media,
-                sent_slots,
-                (sent_slots_author, restated_from),
-                session_author,
-                session_id,
-                (restated, exchanges_opened, has_restated),
-            )| {
-                LegSdpSession {
-                    sent_origin,
-                    sent_media,
-                    sent_slots,
-                    sent_slots_author,
-                    restated_from,
-                    session_author,
-                    session_id,
-                    restated,
-                    exchanges_opened,
-                    has_restated,
-                }
-            },
-        )
 }
 
 fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {

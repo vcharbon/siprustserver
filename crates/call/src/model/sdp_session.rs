@@ -13,6 +13,10 @@ pub struct LegSdpSession {
     pub sent_origin: Option<String>,
     /// The `m=` values of that description, in order.
     pub sent_media: Vec<String>,
+    /// That description apart from its `o=` line: a later one equal to it
+    /// repeats it (RFC 3264 §8 keeps a repeat at its version).
+    #[serde(default)]
+    pub sent_description: Option<String>,
     /// Where that description restated another author's: for each of its
     /// m-lines, the position of the author's stream it carries (`None` for a
     /// slot kept rejected). Empty when it left as its author wrote it.

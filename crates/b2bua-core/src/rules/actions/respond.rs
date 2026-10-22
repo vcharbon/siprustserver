@@ -72,10 +72,16 @@ impl ActionExecutor<'_> {
                 })
                 .flatten();
             let content_type = content_type.and_then(relay::media_type);
+            // The dialog the request rides: its To-tag is ours, its From-tag
+            // the peer's.
+            let dialog = req.from().tag().map(|peer_tag| call::DialogId {
+                our_tag: req.to().tag().unwrap_or_default().to_string(),
+                peer_tag: peer_tag.to_string(),
+            });
             let body = relay::continue_on_leg(
                 call,
                 ctx.source_leg_id,
-                req.from().tag(),
+                dialog.as_ref(),
                 relay::Author::Stack,
                 relay::Carried::of(req.method(), Some(status), req.to().tag().is_some()),
                 body.to_vec(),
@@ -326,15 +332,17 @@ impl ActionExecutor<'_> {
     /// (RFC 3262 §3 early media). Only the a-leg has a stored UAS INVITE to
     /// answer; a non-a target or a non-1xx status is skipped. `to_tag` set ⇒ the
     /// caller's early identity, stated by the service; absent ⇒ the B2BUA's own
-    /// (reuse/mint).
+    /// ([`Self::media_face_tag`]): the early media of the leg `author` names
+    /// rides an early dialog of its own, apart from the callee's.
     ///
     /// Either way the tag the caller is SHOWN has an a-dialog: the a-dialog's
     /// own where it held none the caller saw — a b-leg confirm may have minted
     /// one before she saw anything — so the non-2xx final ending this
     /// transaction answers under a tag she is in (§17.2.1); an early dialog of
     /// its own beside a tag she already holds, which keeps its record
-    /// (§12.1.2). Only a 2xx supersedes them, under A2
-    /// ([`Self::answer_a_leg_new_dialog`]).
+    /// (§12.1.2). A 2xx confirms the callee's dialog and ends the others
+    /// (`adopt_a_tag`), under A2 ([`Self::answer_a_leg_new_dialog`]) where the
+    /// service states it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_provisional_to_leg(
         &mut self,
@@ -358,30 +366,7 @@ impl ActionExecutor<'_> {
         if relay::provisional_after_final(call, fx, status) {
             return;
         }
-        // `to_tag` provided → the service states the caller's early identity: it
-        // seeds the a-dialog, re-stamps one a b-leg confirm minted before any
-        // caller-facing response carried it, and beside a tag the caller was
-        // already shown opens an early dialog of its own (RFC 3261 §12.1.2).
-        // Absent → the B2BUA's own early identity: reuse the existing a-dialog
-        // tag or mint and persist one.
-        let to_tag = match to_tag {
-            Some(t) => {
-                let primary = self.ensure_a_dialog_with(call, Some(t.to_string()));
-                let held = call::helpers::caller_dialog(call, t).is_some();
-                if !held && call::helpers::a_tag_shown(call, &primary) {
-                    super::dialog_track::open_early_a_dialog(call, t);
-                } else if !held {
-                    // The a-leg's own dialog was never shown: the caller
-                    // knows it under no tag, so it takes the stated one.
-                    if let Some(d) = super::dialog_track::own_a_dialog_mut(call) {
-                        d.our_tag = t.to_string();
-                    }
-                    call.a_leg.own_tag = Some(t.to_string());
-                }
-                t.to_string()
-            }
-            None => self.ensure_a_dialog(call),
-        };
+        let to_tag = self.early_media_tag(call, to_tag, author);
         // SDP early-media body defaults to application/sdp (mirrors the request path).
         let content_type = content_type
             .and_then(relay::media_type)

@@ -200,6 +200,15 @@ pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// `sdp` stated under `origin`, an `o=` value (the next version of a session
+/// its author already stated on the dialog, RFC 3264 §8), every other byte as
+/// written. `None` where `sdp` has no readable `o=` line.
+pub fn under_origin(sdp: &[u8], origin: &str) -> Option<Vec<u8>> {
+    let current = parse_origin(sdp)?;
+    let text = String::from_utf8_lossy(sdp);
+    Some(text.replacen(&current.raw_origin_line, &format!("o={origin}"), 1).into_bytes())
+}
+
 /// `sdp` as the first description of a session this stack opens at `stamp`:
 /// its `o=` sess-id and sess-version both `stamp` (RFC 4566 §5.2 suggests a
 /// timestamp for both), every other byte as written. `None` where `sdp` has

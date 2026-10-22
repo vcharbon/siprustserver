@@ -132,9 +132,101 @@ impl ActionExecutor<'_> {
                 fronts.any(|f| f.leg_id == b_leg_id)
             }
         };
-        let a_face = if already_published { self.turn.ids.new_tag() } else { primary };
+        // A media leg's early media holds the primary as its own dialog: the
+        // callee's dialog is another session, under another tag (RFC 3264 §8).
+        let primary_shows_media =
+            caller_dialog(call, &primary).is_some_and(|d| fronts_media(call, d));
+        let a_face = if already_published || primary_shows_media {
+            self.turn.ids.new_tag()
+        } else {
+            primary
+        };
         self.map_a_face(call, &a_face, b_leg_id, b_tag);
         a_face
+    }
+
+    /// The caller-facing tag an early-media provisional whose body `author`
+    /// wrote is shown under. `stated` → the service states the caller's early
+    /// identity: it seeds the a-dialog, re-stamps one a b-leg confirm minted
+    /// before any caller-facing response carried it, and beside a tag the
+    /// caller was already shown opens an early dialog of its own (RFC 3261
+    /// §12.1.2). Absent → [`Self::media_face_tag`]. Either way a media leg's
+    /// early media holds its dialog alone (RFC 3264 §8).
+    pub(super) fn early_media_tag(
+        &mut self,
+        call: &mut Call,
+        stated: Option<&str>,
+        author: relay::Author<'_>,
+    ) -> String {
+        let media = match author {
+            relay::Author::Leg(leg) if leg != call.a_leg.leg_id => Some(leg),
+            _ => None,
+        };
+        let Some(t) = stated else {
+            return match media {
+                Some(media) => self.media_face_tag(call, media),
+                None => self.ensure_a_dialog(call),
+            };
+        };
+        let primary = self.ensure_a_dialog_with(call, Some(t.to_string()));
+        let held = caller_dialog(call, t).is_some();
+        if !held && call::helpers::a_tag_shown(call, &primary) {
+            open_early_a_dialog(call, t);
+        } else if !held {
+            // The a-leg's own dialog was never shown: the caller knows it
+            // under no tag, so it takes the stated one.
+            if let Some(d) = own_a_dialog_mut(call) {
+                d.our_tag = t.to_string();
+            }
+            call.a_leg.own_tag = Some(t.to_string());
+        }
+        if let Some(media) = media {
+            self.front_media(call, t, media);
+        }
+        t.to_string()
+    }
+
+    /// The caller-facing tag the early media of the media leg `media_leg` is
+    /// shown under when the service states none: the dialog already fronting
+    /// that leg; else the a-leg's own dialog where the caller was shown
+    /// nothing under it and it fronts no callee, so a non-2xx final still
+    /// answers under a tag she holds (RFC 3261 §17.2.1); else an early dialog
+    /// of its own beside the tags she holds. Either way that dialog fronts
+    /// the media leg alone: a callee's provisionals and its 2xx go out under
+    /// another tag ([`Self::a_face_tag`]), and the 2xx ends the media leg's
+    /// early dialog (RFC 3261 §12.1.2, RFC 3264 §8).
+    pub(super) fn media_face_tag(&mut self, call: &mut Call, media_leg: &str) -> String {
+        let fronted = call
+            .a_leg
+            .dialogs
+            .iter()
+            .find(|d| d.is_live() && d.fronts.iter().any(|f| f.leg_id == media_leg));
+        if let Some(d) = fronted {
+            return d.our_tag.clone();
+        }
+        let primary = self.ensure_a_dialog(call);
+        let free = caller_dialog(call, &primary).is_some_and(|d| !d.shown && d.fronts.is_empty());
+        let tag = if free { primary } else { self.turn.ids.new_tag() };
+        open_early_a_dialog(call, &tag);
+        self.front_media(call, &tag, media_leg);
+        tag
+    }
+
+    /// Record that the caller-facing dialog `tag` shows the early media of
+    /// the media leg `media_leg`: it fronts that leg's dialog, so no callee
+    /// is shown under it ([`Self::a_face_tag`]). Nothing for a leg that is
+    /// not a media leg or holds no dialog.
+    pub(super) fn front_media(&mut self, call: &mut Call, tag: &str, media_leg: &str) {
+        let media_tag = call
+            .b_legs
+            .iter()
+            .find(|l| l.leg_id == media_leg)
+            .filter(|l| call::helpers::leg_kind(l) == call::LegKind::Media)
+            .and_then(|l| l.dialogs.carrying().or_else(|| l.dialogs.iter().next()))
+            .map(|d| d.peer_tag.clone());
+        if let Some(peer_tag) = media_tag {
+            self.map_a_face(call, tag, media_leg, &peer_tag);
+        }
     }
 
     /// Ensure the a-leg has a dialog of its own with a stable B2BUA-minted tag
@@ -239,6 +331,16 @@ impl ActionExecutor<'_> {
     }
 }
 
+/// Whether the caller-facing dialog `d` fronts a media leg's dialog.
+fn fronts_media(call: &Call, d: &Dialog) -> bool {
+    d.fronts.iter().any(|f| {
+        call.b_legs
+            .iter()
+            .find(|l| l.leg_id == f.leg_id)
+            .is_some_and(|l| call::helpers::leg_kind(l) == call::LegKind::Media)
+    })
+}
+
 /// The a-leg's own dialog ([`call::Leg::own_tag`]), to update.
 pub(super) fn own_a_dialog_mut(call: &mut Call) -> Option<&mut Dialog> {
     let own = call.a_leg.own_tag.clone()?;
@@ -281,7 +383,8 @@ pub(super) fn open_early_a_dialog(call: &mut Call, tag: &str) {
 /// it, so a
 /// request the caller sends on an early dialog the answer abandoned matches no
 /// live dialog and draws `481` (RFC 3261 §12.2.2), while the finals of those
-/// relays still reach her (§8.1.3.3).
+/// relays still reach her (§8.1.3.3). The answered dialog's session state
+/// becomes the leg's.
 pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
     if caller_dialog(call, tag).is_none() {
         let Some(own) = call.a_leg.own_tag.as_deref().and_then(|t| caller_dialog(call, t)) else {
@@ -301,6 +404,9 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
         }
     }
     call.a_leg.own_tag = Some(tag.to_string());
+    // The answered dialog's session is the leg's from now on (RFC 3264 §8).
+    let caller_tag = call.a_leg_invite.from_tag.clone();
+    relay::adopt_answered_caller_dialog(&mut call.a_leg, tag, &caller_tag);
 }
 
 /// The dialog's remote target: the URI of the peer's Contact (RFC 3261
