@@ -198,7 +198,7 @@ async fn a_retry_on_a_challenged_identity(name: &str, retry: Retry) {
     let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
     bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     let taken = backup.live_call(&call_ref).expect("the backup serves the taken-over retry");
     assert_eq!(taken.incarnation(), served.incarnation(), "the takeover copy is the retry");

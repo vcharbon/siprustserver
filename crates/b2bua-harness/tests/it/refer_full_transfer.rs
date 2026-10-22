@@ -25,6 +25,9 @@ use sip_message::header::{Contact, Event, HeaderValue, ParamValue, SubscriptionS
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// The transfer target's answer to its INVITE: its own session, which its
+/// later answers on that dialog continue (RFC 3264 §8).
+const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // C's active answer to the c-realign re-INVITE (sendrecv on C's real port). The
 // a-realign re-INVITE toward A must carry *this* body (the one-way-audio guard).
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -118,7 +121,7 @@ async fn refer_allow_full_happy() {
 
     // C answers initial INVITE 200; B2BUA ACKs.
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -205,10 +208,10 @@ async fn refer_allow_full_c_reliable_provisional_is_acknowledged_by_the_stack() 
             .contains("100rel"),
         "the transfer target is offered 100rel",
     );
-    charlie_uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
+    charlie_uas.respond(183, "Session Progress").reliable(1).with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("PRACK").await.respond(200, "OK").await;
 
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -275,7 +278,7 @@ async fn refer_allow_full_a_reject_realign() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -340,7 +343,7 @@ async fn refer_allow_full_a_glare_reinvite() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -422,7 +425,7 @@ async fn refer_allow_full_a_bye_during_a_realign() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -493,7 +496,7 @@ async fn refer_allow_full_a_reinvite_timeout() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;

@@ -27,8 +27,11 @@ use tokio::time::Instant;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// The transfer target's answer to its INVITE: its own session, which its
+/// later answers on that dialog continue (RFC 3264 §8).
+const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
-const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 /// 8·T1: how long a request waits behind an unanswered NOTIFY.
 const ANSWER_CAP: Duration = Duration::from_millis(4_000);
@@ -112,7 +115,7 @@ async fn the_final_notify_waits_for_the_answer_to_the_immediate_one() {
     let mut immediate = bob.receive("NOTIFY").await;
     assert_subscription(&immediate, "active");
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     // The transfer goes on meanwhile: C is realigned.
     let c_realign = charlie.receive("INVITE").await;
@@ -149,7 +152,7 @@ async fn the_final_notify_leaves_at_the_cap_when_the_immediate_one_is_unanswered
     let mut immediate = bob.receive("NOTIFY").await;
     let sent = Instant::now();
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     let c_realign = charlie.receive("INVITE").await;
 

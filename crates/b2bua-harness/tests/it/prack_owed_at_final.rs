@@ -668,7 +668,7 @@ async fn a_losing_forks_delayed_offer_is_pracked_at_the_2xx_and_the_winners_ack_
 
     let mut reinv = dialog.send_request(InDialogMethod::Invite).send().await;
     let mut re_uas = bob.receive("INVITE").await;
-    re_uas.respond(200, "OK").with_sdp(BOB_OFFER).await;
+    re_uas.respond(200, "OK").with_sdp(FORK2_OFFER).await;
     let ok = reinv.expect(200).await;
     dialog.ack_for(ok.cseq().seq(), Some(ALICE_REANSWER)).await;
     let re_ack = bob.receive("ACK").await;

@@ -159,7 +159,9 @@ impl MediaState {
     }
 
     /// Both sides: `offer` rides an originated INVITE, `answer` every answer we
-    /// send (a caller that also answers realign re-INVITEs — the refer alice).
+    /// send. Where both ride one dialog, `answer` continues the session `offer`
+    /// opened — same `o=` identity, the next `sess-version` (RFC 3264 §8); a
+    /// caller answering on its own dialog uses [`Self::offer`] alone.
     pub fn full(offer: &'static str, answer: &'static str) -> Self {
         Self { offer: Some(offer), answer: Some(answer) }
     }

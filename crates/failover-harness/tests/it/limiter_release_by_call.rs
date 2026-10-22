@@ -515,7 +515,7 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     let counted_again = fh.settle_terminal(async || rig.holds() == [1, 1, 0]).await;
     assert!(
@@ -607,7 +607,7 @@ async fn the_reap_releases_a_terminal_deferred_after_the_backup_served_a_request
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_secs(1)).await;
     assert!(backup.metrics().creations_total() > creations_before, "backup served the re-INVITE");
@@ -684,7 +684,7 @@ async fn a_primary_back_inside_the_ttl_discharges_the_served_terminal_and_the_re
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_secs(1)).await;
     let deferred_at = fh.now_ms();

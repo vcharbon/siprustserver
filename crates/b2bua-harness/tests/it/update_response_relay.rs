@@ -31,6 +31,8 @@ use sip_message::generators::InDialogMethod;
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=sendonly\r\n";
+/// Bob's hold re-offer: his own session, the next version (RFC 3264 §8).
+const BOB_REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=sendonly\r\n";
 
 /// Established call → alice UPDATEs → the B2BUA relays → bob answers **481**.
 /// The 481 must be relayed back to alice (dropped, it would leave alice to time
@@ -90,7 +92,7 @@ async fn relayed_update_481_from_answering_side_reaches_bob() {
     assert_eq!(b2bua.active_calls(), 1, "call established");
 
     // ── bob UPDATEs; alice rejects 481; the 481 reaches bob ──
-    let mut update = bob_dialog.request(InDialogMethod::Update, Some(REOFFER)).await;
+    let mut update = bob_dialog.request(InDialogMethod::Update, Some(BOB_REOFFER)).await;
     alice.receive("UPDATE").await.respond(481, "Call/Transaction Does Not Exist").await;
     update.expect(481).await;
     assert_eq!(b2bua.active_calls(), 1, "b→a UPDATE 481 kept the call up");

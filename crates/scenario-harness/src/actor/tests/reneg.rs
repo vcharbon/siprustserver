@@ -31,7 +31,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
                 role: "alice",
                 agent: alice.clone(),
                 // Alice answers bob's realign re-INVITE with SDP (full media).
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
@@ -50,7 +50,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
                 role: "bob",
                 agent: bob.clone(),
                 disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
-                media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                media: MediaState::answer(ANSWER_SDP),
                 // Bob ALSO re-INVITEs on the same gate — the glare.
                 goals: vec![Goal::new(both_confirmed.clone(), GoalStep::Reinvite)],
                 invite_targets: vec![],
@@ -110,7 +110,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
             ActorSpec {
                 role: "alice",
                 agent: alice.clone(),
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
@@ -129,7 +129,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
                 role: "bob",
                 agent: bob.clone(),
                 disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
-                media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                media: MediaState::answer(ANSWER_SDP),
                 // Bob collides with an UPDATE on the same gate.
                 goals: vec![Goal::new(both_confirmed.clone(), GoalStep::Update)],
                 invite_targets: vec![],
@@ -194,7 +194,7 @@ async fn early_update_on_the_reliable_early_dialog() {
             ActorSpec {
                 role: "alice",
                 agent: alice.clone(),
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: Some(plan) }),

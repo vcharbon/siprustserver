@@ -25,11 +25,13 @@ use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
-const REOFFER2: &str = "v=0\r\no=bob 3 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n";
-const LATE_OFFER: &str = "v=0\r\no=alice 3 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30003 RTP/AVP 0\r\n";
-const LATE_ANSWER: &str = "v=0\r\no=bob 4 4 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30004 RTP/AVP 0\r\n";
+/// Later descriptions, numbered per party's session (RFC 3264 §8): alice's
+/// `REANSWER`, `LATE_OFFER`; bob's `REOFFER`, `REOFFER2`, `LATE_ANSWER`.
+const REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const REOFFER2: &str = "v=0\r\no=bob 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n";
+const LATE_OFFER: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30003 RTP/AVP 0\r\n";
+const LATE_ANSWER: &str = "v=0\r\no=bob 1 4 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30004 RTP/AVP 0\r\n";
 
 /// Bob holds the ACK for his first re-INVITE's 2xx and re-INVITEs again (the
 /// second INVITE overtakes the ACK, RFC 3261 §14.1). The B2BUA must answer the newcomer 491 locally and leave
@@ -206,7 +208,7 @@ async fn reinvite_toward_the_unacked_face_is_491ed() {
     let mut reinv3 = alice_dialog.request(InDialogMethod::Invite, Some(LATE_OFFER)).await;
     let mut bob_uas3 = bob.receive("INVITE").await;
     assert!(!bob_uas3.request().body().is_empty(), "alice's retried offer reaches bob");
-    bob_uas3.respond(200, "OK").with_sdp(LATE_ANSWER).await;
+    bob_uas3.respond(200, "OK").with_sdp(REOFFER2).await;
     reinv3.expect(200).await;
     alice_dialog.ack(None).await;
     bob.receive("ACK").await;
@@ -257,7 +259,7 @@ async fn caller_reinvite_overtaking_the_initial_ack_is_491ed() {
     let initial_cseq = call.invite_cseq();
 
     // ── her re-INVITE overtakes that ACK → 491, answered locally ──
-    let mut early = call.send_request(InDialogMethod::Invite).with_sdp(REOFFER2).send().await;
+    let mut early = call.send_request(InDialogMethod::Invite).with_sdp(REANSWER).send().await;
     early.expect(491).await;
     assert_eq!(b2bua.active_calls(), 1, "a 491'd re-INVITE must not disturb the call");
 
@@ -266,11 +268,11 @@ async fn caller_reinvite_overtaking_the_initial_ack_is_491ed() {
     bob.receive("ACK").await;
 
     // ── the §14.1 retry renegotiates normally ──
-    let mut retry = alice_dialog.request(InDialogMethod::Invite, Some(REOFFER2)).await;
+    let mut retry = alice_dialog.request(InDialogMethod::Invite, Some(REANSWER)).await;
     let retry_cseq = alice_dialog.local_cseq();
     let mut bob_uas = bob.receive("INVITE").await;
     assert!(!bob_uas.request().body().is_empty(), "alice's retried offer reaches bob");
-    bob_uas.respond(200, "OK").with_sdp(LATE_ANSWER).await;
+    bob_uas.respond(200, "OK").with_sdp(REOFFER).await;
     retry.expect(200).await;
     alice_dialog.ack_for(retry_cseq, None).await;
     bob.receive("ACK").await;
@@ -333,11 +335,11 @@ async fn callee_reinvite_before_the_initial_ack_is_491ed() {
     bob.receive("ACK").await;
 
     // ── bob's §14.1 retry now relays to alice and completes ──
-    let mut retry = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER2)).await;
+    let mut retry = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
     let retry_cseq = retry.sent_invite().expect("the re-INVITE bob just sent").cseq().seq();
     let mut alice_uas = alice.receive("INVITE").await;
     assert!(!alice_uas.request().body().is_empty(), "bob's retried offer reaches alice");
-    alice_uas.respond(200, "OK").with_sdp(LATE_ANSWER).await;
+    alice_uas.respond(200, "OK").with_sdp(REANSWER).await;
     retry.expect(200).await;
     bob_dialog.ack_for(retry_cseq, None).await;
     alice.receive("ACK").await;

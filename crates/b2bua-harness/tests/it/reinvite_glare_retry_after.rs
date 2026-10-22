@@ -25,9 +25,11 @@ use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
-const REOFFER2: &str = "v=0\r\no=bob 3 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n";
+/// Each party's later descriptions: its own session, the next version (RFC
+/// 3264 §8).
+const BOB_V2: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const ALICE_V2: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const BOB_V3: &str = "v=0\r\no=bob 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n";
 
 const FIXED: RetryAfterRange = RetryAfterRange { min_sec: 2, max_sec: 2 };
 const SPREAD: RetryAfterRange = RetryAfterRange { min_sec: 3, max_sec: 7 };
@@ -72,7 +74,7 @@ async fn caller_overtakes_the_initial_ack(
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
 
-    let mut early = call.send_request(InDialogMethod::Invite).with_sdp(REOFFER2).send().await;
+    let mut early = call.send_request(InDialogMethod::Invite).with_sdp(ALICE_V2).send().await;
     let refused = early.expect(491).await;
 
     let mut alice_dialog = call.ack().await;
@@ -127,12 +129,12 @@ async fn a_newcomer_before_its_reinvite_ack_carries_a_value_in_the_range() {
     bob.receive("ACK").await;
     let mut bob_dialog = uas.dialog();
 
-    let mut reinv1 = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut reinv1 = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V2)).await;
     let cseq1 = reinv1.sent_invite().expect("the re-INVITE bob just sent").cseq().seq();
-    alice.receive("INVITE").await.respond(200, "OK").with_sdp(REANSWER).await;
+    alice.receive("INVITE").await.respond(200, "OK").with_sdp(ALICE_V2).await;
     reinv1.expect(200).await;
 
-    let mut reinv2 = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER2)).await;
+    let mut reinv2 = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V3)).await;
     let refused = reinv2.expect(491).await;
     let secs: u32 = stated_by_response(&refused, "Retry-After")
         .expect("the 491 carries a Retry-After")
@@ -207,11 +209,11 @@ async fn a_newcomer_while_its_first_awaits_the_final_is_refused_500() {
     bob.receive("ACK").await;
     let mut bob_dialog = uas.dialog();
 
-    let mut reinv1 = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut reinv1 = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V2)).await;
     let cseq1 = reinv1.sent_invite().expect("the re-INVITE bob just sent").cseq().seq();
     let mut alice_uas = alice.receive("INVITE").await;
 
-    let mut reinv2 = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER2)).await;
+    let mut reinv2 = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V3)).await;
     let refused = reinv2.expect(500).await;
     let secs: u32 = stated_by_response(&refused, "Retry-After")
         .expect("the 500 carries a Retry-After")
@@ -219,7 +221,7 @@ async fn a_newcomer_while_its_first_awaits_the_final_is_refused_500() {
         .expect("delta-seconds");
     assert!(secs <= 10, "{secs}");
 
-    alice_uas.respond(200, "OK").with_sdp(REANSWER).await;
+    alice_uas.respond(200, "OK").with_sdp(ALICE_V2).await;
     reinv1.expect(200).await;
     bob_dialog.ack_for(cseq1, None).await;
     alice.receive("ACK").await;
@@ -250,13 +252,13 @@ async fn a_newcomer_after_its_cancelled_reinvite_carries_no_retry_after() {
     bob.receive("ACK").await;
     let mut bob_dialog = uas.dialog();
 
-    let mut reinv1 = bob_dialog.reinvite(Some(REOFFER)).await;
+    let mut reinv1 = bob_dialog.reinvite(Some(BOB_V2)).await;
     let mut alice_uas = alice.receive("INVITE").await;
     let mut cxl = reinv1.cancel().await;
     cxl.expect(200).await;
     reinv1.expect(487).await;
 
-    let mut reinv2 = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER2)).await;
+    let mut reinv2 = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V3)).await;
     let refused = reinv2.expect(491).await;
     assert_eq!(stated_by_response(&refused, "Retry-After"), None);
 
@@ -290,13 +292,13 @@ async fn a_crossing_reinvite_491_carries_no_retry_after() {
     bob.receive("ACK").await;
     let mut bob_dialog = uas.dialog();
 
-    let mut alice_reinv = alice_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut alice_reinv = alice_dialog.request(InDialogMethod::Invite, Some(ALICE_V2)).await;
     let mut bob_uas = bob.receive("INVITE").await;
-    let mut bob_reinv = bob_dialog.request(InDialogMethod::Invite, Some(REANSWER)).await;
+    let mut bob_reinv = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V2)).await;
     let refused = bob_reinv.expect(491).await;
     assert_eq!(stated_by_response(&refused, "Retry-After"), None);
 
-    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    bob_uas.respond(200, "OK").with_sdp(BOB_V2).await;
     alice_reinv.expect(200).await;
     alice_dialog.ack(None).await;
     bob.receive("ACK").await;
@@ -328,7 +330,7 @@ async fn a_newcomer_toward_a_face_owed_our_ack_carries_no_retry_after() {
     call.expect(200).await;
     let mut bob_dialog = uas.dialog();
 
-    let mut early = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut early = bob_dialog.request(InDialogMethod::Invite, Some(BOB_V2)).await;
     let refused = early.expect(491).await;
     assert_eq!(stated_by_response(&refused, "Retry-After"), None);
 
@@ -344,7 +346,7 @@ async fn a_newcomer_toward_a_face_owed_our_ack_carries_no_retry_after() {
 }
 
 const MEDIA_ANSWER: &str = "v=0\r\no=media 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30005 RTP/AVP 0\r\n";
-const ALICE_REALIGN: &str = "v=0\r\no=alice 3 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+const ALICE_REALIGN: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
 /// A release reroute is in flight while alice's first re-INVITE still awaits
 /// bob's final; her second re-INVITE is glare against her own unanswered
@@ -388,7 +390,7 @@ async fn a_newcomer_during_a_reroute_over_its_unanswered_reinvite_is_refused_500
 
     // Alice re-INVITEs just before the cap; bob holds his answer.
     h.advance(Duration::from_secs(59)).await;
-    let mut reinv1 = alice_dialog.request(InDialogMethod::Invite, Some(REANSWER)).await;
+    let mut reinv1 = alice_dialog.request(InDialogMethod::Invite, Some(ALICE_V2)).await;
     let cseq1 = alice_dialog.local_cseq();
     let mut bob_uas = bob.receive("INVITE").await;
 
@@ -396,7 +398,7 @@ async fn a_newcomer_during_a_reroute_over_its_unanswered_reinvite_is_refused_500
     h.advance(Duration::from_secs(2)).await;
     let mut media_uas = media.receive("INVITE").await;
 
-    let mut reinv2 = alice_dialog.request(InDialogMethod::Invite, Some(REANSWER)).await;
+    let mut reinv2 = alice_dialog.request(InDialogMethod::Invite, Some(ALICE_V2)).await;
     let refused = reinv2.expect(500).await;
     let secs: u32 = stated_by_response(&refused, "Retry-After")
         .expect("the 500 carries a Retry-After")
@@ -405,7 +407,7 @@ async fn a_newcomer_during_a_reroute_over_its_unanswered_reinvite_is_refused_500
     assert!(secs <= 10, "{secs}");
 
     // Bob answers alice's first re-INVITE; the reroute then completes.
-    bob_uas.respond(200, "OK").with_sdp(REOFFER).await;
+    bob_uas.respond(200, "OK").with_sdp(BOB_V2).await;
     reinv1.expect(200).await;
     alice_dialog.ack_for(cseq1, None).await;
     bob.receive("ACK").await;

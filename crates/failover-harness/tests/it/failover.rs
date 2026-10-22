@@ -271,7 +271,7 @@ async fn hydrated_takeover_copy_self_releases_without_leaking() {
     let mut bob_uas = bob.receive("INVITE").await; // re-INVITE relayed to bob via proxy
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await;
 
@@ -576,7 +576,7 @@ async fn reboot_reclaim_exactly_one_owner_after_self_release() {
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await; // ← external: the failed-over re-INVITE succeeds
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
 
     // ── Once it has served that re-INVITE, the acting-backup releases its live
@@ -1437,7 +1437,7 @@ async fn skew_ahead_backup_no_immediate_options_at_takeover() {
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await; // the failed-over re-INVITE succeeds
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
 
     // ── THE GATE: strictly NO keepalive OPTIONS reaches bob in the window right

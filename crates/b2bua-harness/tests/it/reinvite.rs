@@ -43,7 +43,7 @@ async fn failed_reinvite_keeps_dialog_state() {
     assert_eq!(b2bua.active_calls(), 1, "call established");
 
     // ── alice re-INVITEs; bob rejects 488 with NO provisional ──
-    let mut reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut reinv = dialog.request(InDialogMethod::Invite, Some(ALICE_REVISED)).await;
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(488, "Not Acceptable Here").await;
 
@@ -91,7 +91,7 @@ async fn a_relayed_reinvite_481_is_reported_and_leaves_the_call_up() {
     assert_eq!(b2bua.active_calls(), 1, "call established");
 
     // alice re-INVITEs; bob answers 481 — relayed to alice, nothing torn down.
-    let mut reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut reinv = dialog.request(InDialogMethod::Invite, Some(ALICE_REVISED)).await;
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(481, "Call/Transaction Does Not Exist").await;
     reinv.expect(481).await;
@@ -135,7 +135,7 @@ async fn reinvite_18x_then_488_keeps_call() {
     assert_eq!(b2bua.active_calls(), 1, "call established");
 
     // ── alice re-INVITEs; bob sends 183 (provisional) THEN 488 (final) ──
-    let mut reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut reinv = dialog.request(InDialogMethod::Invite, Some(ALICE_REVISED)).await;
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(183, "Session Progress").await;
 
@@ -170,8 +170,10 @@ async fn reinvite_18x_then_488_keeps_call() {
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+/// Each party's second description: its own session, the next version (RFC
+/// 3264 §8).
+const BOB_REVISED: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const ALICE_REVISED: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 /// re-INVITE from the caller with a delayed offer: alice sends a bodyless
 /// re-INVITE, bob answers 200 with the SDP offer, alice ACKs with the answer.
@@ -201,7 +203,7 @@ async fn alice_reinvite() {
     assert!(bob_uas.request().body().is_empty(), "re-INVITE relayed to bob with no body");
 
     // Bob answers 200 with the SDP offer.
-    bob_uas.respond(200, "OK").with_sdp(REOFFER).await;
+    bob_uas.respond(200, "OK").with_sdp(BOB_REVISED).await;
 
     // Alice receives the 200 with the SDP offer.
     let ok = reinv.expect(200).await;
@@ -209,7 +211,7 @@ async fn alice_reinvite() {
 
     // Alice ACKs the re-INVITE 2xx with the SDP answer; bob receives the relayed
     // ACK carrying the answer.
-    dialog.ack(Some(REANSWER)).await;
+    dialog.ack(Some(ALICE_REVISED)).await;
     let bob_ack = bob.receive("ACK").await;
     assert!(!bob_ack.request().body().is_empty(), "ACK answer relayed to bob");
 
@@ -247,14 +249,14 @@ async fn bob_reinvite() {
     let mut bob_dialog = uas.dialog();
 
     // ── bob re-INVITEs with the SDP offer ──
-    let mut reinv = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut reinv = bob_dialog.request(InDialogMethod::Invite, Some(BOB_REVISED)).await;
 
     // Alice receives the relayed re-INVITE carrying the offer.
     let mut alice_uas = alice.receive("INVITE").await;
     assert!(!alice_uas.request().body().is_empty(), "re-INVITE offer relayed to alice");
 
     // Alice answers 200 with the SDP answer.
-    alice_uas.respond(200, "OK").with_sdp(REANSWER).await;
+    alice_uas.respond(200, "OK").with_sdp(ALICE_REVISED).await;
 
     // Bob receives the 200 with the answer.
     let ok = reinv.expect(200).await;
@@ -298,21 +300,21 @@ async fn crossing_reinvite_glare() {
     let mut bob_dialog = uas.dialog();
 
     // ── alice re-INVITEs first (this one wins) ──
-    let mut alice_reinv = alice_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut alice_reinv = alice_dialog.request(InDialogMethod::Invite, Some(ALICE_REVISED)).await;
 
     // Bob receives alice's relayed re-INVITE (the pending inbound INVITE now
     // sits on bob's dialog).
     let mut bob_uas = bob.receive("INVITE").await;
 
     // ── bob sends his own re-INVITE before answering — it loses the glare ──
-    let mut bob_reinv = bob_dialog.request(InDialogMethod::Invite, Some(REANSWER)).await;
+    let mut bob_reinv = bob_dialog.request(InDialogMethod::Invite, Some(BOB_REVISED)).await;
 
     // The B2BUA rejects bob's crossing re-INVITE 491 Request Pending (it never
     // reaches alice).
     bob_reinv.expect(491).await;
 
-    // Bob now answers alice's re-INVITE 200 OK with the SDP answer.
-    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    // Bob now answers alice's re-INVITE 200 OK with his last description.
+    bob_uas.respond(200, "OK").with_sdp(BOB_REVISED).await;
 
     // Alice receives the 200 for her re-INVITE.
     let ok = alice_reinv.expect(200).await;

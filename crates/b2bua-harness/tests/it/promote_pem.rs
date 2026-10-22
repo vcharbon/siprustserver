@@ -172,7 +172,7 @@ async fn resync_sdp_changed() {
     assert!(allow.contains("INVITE"), "Allow on resync re-INVITE, got {}", allow.to_wire());
     assert!(req.header::<Supported>().is_some(), "Supported on resync re-INVITE");
 
-    resync.respond(200, "OK").with_sdp(EARLY).await;
+    resync.respond(200, "OK").with_sdp(OFFER).await;
     // B2BUA's ACK to alice's 200 closes the window.
     alice.receive("ACK").await;
 
@@ -342,7 +342,7 @@ async fn forking_resync() {
         String::from_utf8_lossy(resync.request().body()).contains("m=audio 30000"),
         "resync re-INVITE carries the winning fork SDP",
     );
-    resync.respond(200, "OK").with_sdp(EARLY).await;
+    resync.respond(200, "OK").with_sdp(OFFER).await;
     alice.receive("ACK").await;
 
     hangup(&mut dialog, &bob).await;
@@ -509,7 +509,8 @@ async fn second_update_in_the_window_over_a_pending_one(
 
     bob_u1.respond(200, "OK").with_sdp(REANSWER).await;
     u1.expect(200).await;
-    uas.respond(200, "OK").with_sdp(EARLY).await;
+    // The final states bob's session as the UPDATE left it (RFC 3264 §8).
+    uas.respond(200, "OK").with_sdp(REANSWER).await;
     bob.receive("ACK").await;
     hangup(&mut dialog, &bob).await;
     settle_until(|| b2bua.is_reaped()).await;

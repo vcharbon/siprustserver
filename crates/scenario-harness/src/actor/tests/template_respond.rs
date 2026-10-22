@@ -30,7 +30,7 @@ async fn scripted_reinvite_answer_holds_settle_until_ack() {
                 role: "alice",
                 agent: alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Reinvite),
@@ -184,7 +184,7 @@ async fn scripted_bye_answer_tears_down_cleanly() {
 /// re-surfacing idempotence is pinned by the unit test below.)
 #[tokio::test(start_paused = true)]
 async fn ack_body_override_rides_the_reinvite_ack() {
-    const CUSTOM_ACK_SDP: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
+    const CUSTOM_ACK_SDP: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
 
     let h = Harness::new("actor-ack-body-override").describe(
         "ExpectResponse{ack_body} on a delayed-offer re-INVITE 2xx: the \

@@ -24,6 +24,8 @@ use sip_net_testkit::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+/// Alice's second description (`REOFFER`) and bob's (`REANSWER`), each
+/// continuing its party's session whichever end offers (RFC 3264 §8).
 const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
@@ -220,13 +222,13 @@ async fn the_answering_party_rejects_the_callees_reinvite() {
     let mut bob_dialog = uas.dialog();
     let mut reinv = bob_dialog
         .send_request(InDialogMethod::Invite)
-        .with_sdp(REOFFER)
+        .with_sdp(REANSWER)
         .with_header("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, PRACK")
         .with_header("Supported", "100rel")
         .send()
         .await;
     let mut re_uas = alice.receive("INVITE").await;
-    re_uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(REANSWER).await;
+    re_uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(REOFFER).await;
     reinv.expect(183).await;
 
     // ── bob withholds his PRACK past the bound: nothing from this stack ──

@@ -102,13 +102,13 @@ impl ActorScenario for Refer {
 
         let actors = vec![
             // Alice originates through the SUT, answers the a-realign
-            // re-INVITE reactively (offer on her INVITE, answer SDP on every
-            // realign 200 — RFC 3264 §5), and BYEs once the merge completes.
+            // re-INVITE reactively (her own session on every realign 200 —
+            // RFC 3264 §5, §8), and BYEs once the merge completes.
             ActorSpec {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,
@@ -256,7 +256,7 @@ impl ActorScenario for ReferCharlieReject {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,
@@ -588,12 +588,12 @@ impl ActorScenario for Reinvite {
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
         let actors = vec![
             // Alice originates, ACKs the delayed-offer re-INVITE's 2xx with her
-            // answer SDP reactively, and BYEs once the renegotiation completes.
+            // own session reactively, and BYEs once the renegotiation completes.
             ActorSpec {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,

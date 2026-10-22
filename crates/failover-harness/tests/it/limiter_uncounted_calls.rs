@@ -145,7 +145,7 @@ async fn a_call_failing_open_counts_on_the_node_it_is_resident_on() {
     );
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     let shed = fh.settle_terminal(async || backup.metrics().limiter().uncounted_calls() == 0).await;
     assert!(shed, "the takeover copy's self-release leaves the backup's gauge");

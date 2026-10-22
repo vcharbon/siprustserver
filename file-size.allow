@@ -47,7 +47,7 @@ crates/b2bua/src/router/callouts.rs 615
 crates/b2bua/src/store/mod.rs 960
 crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
-crates/callshapes/src/plan.rs 1186
+crates/callshapes/src/plan.rs 1174
 crates/call/tests/it/common/mod.rs 992
 crates/call/tests/it/model_helpers.rs 937
 crates/e2e-core/src/infra.rs 622

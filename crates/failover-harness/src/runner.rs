@@ -494,12 +494,12 @@ async fn drive_generic(
             }
         }
         Party::Callee => {
-            let sdp = needs_answer.then_some(OFFER);
+            let sdp = needs_answer.then_some(ANSWER);
             let mut tx = bob_dialog.request(method, sdp).await;
             let mut peer = alice.receive(m).await;
             obs.req(Who::Alice, peer.request());
             if needs_answer {
-                peer.respond(200, "OK").with_sdp(ANSWER).await;
+                peer.respond(200, "OK").with_sdp(OFFER).await;
             } else {
                 peer.respond(200, "OK").await;
             }

@@ -18,7 +18,7 @@ use std::time::Duration;
 use failover_harness::{assert_call_fully_over, WorkerHealth};
 use sip_message::generators::InDialogMethod;
 
-use crate::call_terminate_on_backup::{establish, Established, OFFER};
+use crate::call_terminate_on_backup::{establish, Established, ANSWER, OFFER};
 
 /// How long the replication between the two nodes takes to settle.
 const SETTLE: Duration = Duration::from_millis(500);
@@ -111,7 +111,7 @@ async fn the_copy_keeps_its_round_through_the_primarys_ending() {
     est.proxy.set_health(&p_ord, WorkerHealth::Dead);
     est.fh.advance(Duration::from_millis(200)).await;
     est.fh.stall(&b_ord, &p_ord);
-    let mut round = est.bob_dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    let mut round = est.bob_dialog.request(InDialogMethod::Invite, Some(ANSWER)).await;
     let mut at_alice = est.alice.receive("INVITE").await;
     round.expect(100).await;
     est.fh.advance(Duration::from_millis(300)).await;
@@ -139,7 +139,7 @@ async fn the_copy_keeps_its_round_through_the_primarys_delete() {
     est.proxy.set_health(&p_ord, WorkerHealth::Dead);
     est.fh.advance(Duration::from_millis(200)).await;
     est.fh.stall(&b_ord, &p_ord);
-    let mut round = est.bob_dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    let mut round = est.bob_dialog.request(InDialogMethod::Invite, Some(ANSWER)).await;
     let mut at_alice = est.alice.receive("INVITE").await;
     round.expect(100).await;
     est.fh.advance(Duration::from_millis(300)).await;

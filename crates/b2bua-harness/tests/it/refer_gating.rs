@@ -26,6 +26,9 @@ use sip_message::header::{Contact, Event, HeaderValue, MediaType, ParamValue, Su
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// The transfer target's answer to its INVITE: its own session, which its
+/// later answers on that dialog continue (RFC 3264 §8).
+const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // A's re-INVITE offer (a distinct media port so the relayed body is recognisable).
 const AREINVITE: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const AREINVITE_ANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -259,7 +262,7 @@ async fn refer_gating_a_reinvite_c_realigning() {
 
     // C answers its initial INVITE 200; B2BUA ACKs.
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     let mut charlie_dialog = charlie_uas.dialog();
 
@@ -281,7 +284,8 @@ async fn refer_gating_a_reinvite_c_realigning() {
     charlie.receive("ACK").await;
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
-    a_realign.respond(200, "OK").with_sdp(ANSWER).await;
+    // A answers with her own session's last description, the glared offer.
+    a_realign.respond(200, "OK").with_sdp(AREINVITE).await;
     alice.receive("ACK").await;
 
     // Merge complete — A BYE tears down both peers.
@@ -602,7 +606,7 @@ async fn refer_gating_second_refer_c_realigning() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     let mut charlie_dialog = charlie_uas.dialog();
 
@@ -627,7 +631,7 @@ async fn refer_gating_second_refer_c_realigning() {
     charlie.receive("ACK").await;
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
-    a_realign.respond(200, "OK").with_sdp(ANSWER).await;
+    a_realign.respond(200, "OK").with_sdp(OFFER).await;
     alice.receive("ACK").await;
 
     let mut alice_bye = alice_dialog.bye().await;

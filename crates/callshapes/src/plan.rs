@@ -312,9 +312,6 @@ pub struct ShapePlan {
 pub(crate) struct Build {
     pub(crate) caller_goals: Vec<Goal>,
     pub(crate) caller_feed: CtxFeed,
-    /// Upgraded to `full` (answer SDP) when a stage answers renegotiations
-    /// reactively (re-INVITE scripts, the post-transfer realign).
-    caller_needs_answer_sdp: bool,
     pub(crate) callees: Vec<ActorSpec>,
     pub(crate) phases: Vec<BarrierPhase>,
     pub(crate) expect: Expect,
@@ -565,7 +562,6 @@ impl ShapePlan {
         let mut b = Build {
             caller_goals: Vec::new(),
             caller_feed: CtxFeed { ringing_gate: self.ringing_gate, ..CtxFeed::default() },
-            caller_needs_answer_sdp: false,
             callees: Vec::new(),
             phases: Vec::new(),
             expect: Expect::answered(),
@@ -632,16 +628,13 @@ impl ShapePlan {
             Teardown::None => {} // legal only for terminals — validate() gates
         }
 
-        let media = if b.caller_needs_answer_sdp {
-            MediaState::full(OFFER_SDP, ANSWER_SDP)
-        } else {
-            MediaState::offer(OFFER_SDP)
-        };
+        // The caller answers every renegotiation with its own session (RFC
+        // 3264 §8): the description its INVITE offered.
         let mut actors = vec![ActorSpec {
             role: "alice",
             agent: env.alice.clone(),
             disposition: Disposition::Caller,
-            media,
+            media: MediaState::offer(OFFER_SDP),
             goals: b.caller_goals,
             invite_targets: vec![("bob", env.bob.clone())],
             via: None,
@@ -1031,7 +1024,6 @@ impl ShapePlan {
                 if caller {
                     b.caller_feed.on_reinvite_ok =
                         Feed::new(Some("time_to_reinvite_200"), Some("reinvited"));
-                    b.caller_needs_answer_sdp = true;
                 }
                 b.gate = renegs_reached("reinvited", role, b.add_renegs(role, n));
             }
@@ -1151,10 +1143,6 @@ impl ShapePlan {
             delayed: vec![],
             claim: None,
         });
-
-        // The caller answers the post-transfer realign re-INVITE reactively
-        // (answer SDP on every realign 200 — RFC 3264 §5).
-        b.caller_needs_answer_sdp = true;
 
         if happy {
             b.phases.push(phase("referred", |s| {

@@ -25,6 +25,9 @@ use sip_message::header::{Contact, Event, HeaderValue, ParamValue, SubscriptionS
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// The transfer target's answer to its INVITE: its own session, which its
+/// later answers on that dialog continue (RFC 3264 §8).
+const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // C's active answer to the c-realign re-INVITE (sendrecv on C's real port). The
 // a-realign re-INVITE toward A must carry *this* body (not the initial held
 // answer) — the one-way-audio guard (slice5-refer-design.md §4).
@@ -135,7 +138,7 @@ async fn refer_allow_c_realign_happy() {
     charlie_uas.respond(180, "Ringing").await;
 
     // C answers initial INVITE 200; B2BUA ACKs (it is C's UAC).
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     // NOTIFY 200 terminated (final).
@@ -200,7 +203,7 @@ async fn refer_allow_c_realign_c_reject_488() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -268,7 +271,7 @@ async fn refer_allow_c_realign_c_timeout() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -337,7 +340,7 @@ async fn refer_allow_c_realign_c_glare() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     let mut charlie_dialog = charlie_uas.dialog();
 
@@ -410,7 +413,7 @@ async fn refer_allow_c_realign_b_non_bye() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -479,7 +482,7 @@ async fn refer_allow_c_realign_carries_the_answer_whole() {
     refer.expect(202).await;
     bob.receive("NOTIFY").await.respond(200, "OK").await;
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     bob.receive("NOTIFY").await.respond(200, "OK").await;
 

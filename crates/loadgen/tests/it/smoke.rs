@@ -2133,7 +2133,7 @@ impl ActorScenario for ByeWithContact {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,
@@ -2319,7 +2319,7 @@ impl ActorScenario for NumberPlanRefer {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,

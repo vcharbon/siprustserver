@@ -623,7 +623,7 @@ async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
     let mut bob_uas = bob.receive("INVITE").await; // relayed to bob via the backup + proxy
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await; // ← external: the failed-over re-INVITE succeeds
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await;
 

@@ -294,7 +294,10 @@ const F1_REOFFER: &str = "v=0\r\no=bob 11 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 
 const F2_ANSWER: &str = "v=0\r\no=bob 22 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
 const F2_REANSWER: &str = "v=0\r\no=bob 22 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20022 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
 const ALICE_HOLD: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
-const ALICE_HELD: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+/// Alice's answer in the answered dialog: the next version of the session
+/// that dialog carries, which her hold in fork 2's dialog never stepped (RFC
+/// 3261 §12, RFC 3264 §8).
+const ALICE_HELD: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
 
 /// The `o=` session version of `body`.
 fn o_version(body: &[u8]) -> u64 {
