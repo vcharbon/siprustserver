@@ -207,8 +207,8 @@ fn an_answer_re_typing_the_offered_stream_is_flagged_on_the_answerer() {
 }
 
 #[test]
-fn an_origin_that_leaves_the_session_is_advisory_and_positioned() {
-    assert!(live(RuleId::SdpOriginContinuity).force_advisory());
+fn an_origin_that_leaves_the_session_gates_and_is_positioned() {
+    assert!(!live(RuleId::SdpOriginContinuity).force_advisory(), "a MUST gates");
     assert_eq!(
         live(RuleId::SdpOriginContinuity).subject(),
         HashSet::from([UaRole::Uac, UaRole::Uas])
@@ -546,7 +546,7 @@ fn an_unrecorded_senders_origin_break_is_named_at_the_taker() {
     assert_eq!(origin[0].lane, BOB);
     assert_eq!(origin[0].charged.as_deref(), Some(SUT));
     assert_eq!(origin[0].offending, Some(6), "offending points at the answering ACK");
-    assert!(origin[0].advisory);
+    assert!(!origin[0].advisory, "the origin break gates");
 
     // Clean continuity draws nothing.
     let continued = AUDIO_OFFER.replace("o=alice 424242 1", "o=alice 424242 2");
