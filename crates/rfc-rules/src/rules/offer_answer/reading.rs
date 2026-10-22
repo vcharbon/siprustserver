@@ -11,6 +11,7 @@ use super::records::{
     AckRound, AckSighting, AgentKey, AgentState, AnswerDue, Answered, DelayedAck, OfferStep,
     OriginStep, ReAnswer, Round, RoundKey,
 };
+use super::stream::{steps_the_session, SessionStream};
 
 /// Whether the description a response carries BINDS as the round's answer on
 /// its dialog: a final does (§13.2.1), and so does a reliable provisional — one
@@ -55,8 +56,11 @@ fn offer_answer_method(method: &str) -> bool {
 /// readers judge what an agent knew when it acted: `offer_steps` says which of
 /// an agent's own rounds were still open at the moment it sent each offer (an
 /// agent's `answered` map is its final state and cannot answer that), and
-/// `sent_streams` is the agent's own descriptions in send order whatever their
-/// `o=` lines say (`origin_steps` skips the ones no origin reader accepts).
+/// `sent_streams` is the agent's own descriptions in send order, one stream
+/// per dialog ([`SessionStreams`](super::stream::SessionStreams)), whatever
+/// their `o=` lines say (`origin_steps` skips the ones no origin reader
+/// accepts). The three readers of an agent's later descriptions against its
+/// earlier ones read those streams and nothing else.
 #[derive(Default)]
 pub(super) struct Reading<'a> {
     pub(super) docs: Vec<Option<Doc>>,
@@ -64,9 +68,12 @@ pub(super) struct Reading<'a> {
     pub(super) described: Vec<bool>,
     pub(super) acks: Vec<AckSighting<'a>>,
     pub(super) answers: Vec<Answered<'a>>,
+    /// Every description an agent sent against its previous one with a
+    /// readable `o=` line on the same session stream. Read by
+    /// [`SdpOriginContinuity`](super::SdpOriginContinuity).
     pub(super) origin_steps: Vec<OriginStep<'a>>,
-    /// Descriptions an agent sent whose `o=` line no reader accepts, after its
-    /// origin stream had already started.
+    /// Descriptions an agent sent whose `o=` line no reader accepts, after a
+    /// readable one on the same session stream.
     pub(super) unreadable_origins: Vec<OriginStep<'a>>,
     /// Every offer an agent SENT, with what was pending when it went out. Read
     /// by [`NoNewOfferWhileOfferPending`](super::NoNewOfferWhileOfferPending).
@@ -82,13 +89,13 @@ pub(super) struct Reading<'a> {
     /// answer is owed in it — with the offer it owed. Read by
     /// [`DelayedOfferAnsweredInAck`](super::DelayedOfferAnsweredInAck).
     pub(super) delayed_acks: Vec<DelayedAck<'a>>,
-    /// Per agent and call, the indexes into the view's `msgs` of the readable
-    /// descriptions that agent SENT, ascending. Read by
+    /// Per agent, call and dialog, the descriptions that agent SENT that are
+    /// steps of a session, in send order. Read by
     /// [`ReOfferMLineCountMonotonic`](super::ReOfferMLineCountMonotonic)
-    /// (consecutive pairs) and
+    /// (consecutive readable pairs) and
     /// [`PayloadTypeMappingStable`](super::PayloadTypeMappingStable) (the
     /// payload-type bindings the whole stream states).
-    pub(super) sent_streams: Vec<Vec<usize>>,
+    pub(super) sent_streams: Vec<SessionStream>,
 }
 
 impl<'a> Reading<'a> {
@@ -105,8 +112,38 @@ impl<'a> Reading<'a> {
                 seen.absorb(&mut agents, mi, msg, msg.dst.as_str(), false);
             }
         }
-        seen.sent_streams = agents.into_values().map(|s| s.sent_docs).collect();
+        for stream in agents.into_values().flat_map(|s| s.streams.into_streams()) {
+            seen.note_origins(msgs, &stream);
+            seen.sent_streams.push(stream);
+        }
         seen
+    }
+
+    /// Record each of a stream's own descriptions against its predecessor with
+    /// a readable `o=` line — none before the first such description.
+    fn note_origins(&mut self, msgs: &'a [Msg], stream: &SessionStream) {
+        let mut prior = None;
+        for (i, &mi) in stream.msgs.iter().enumerate() {
+            let has_origin = self.docs[mi].as_ref().is_some_and(|d| d.origin.is_some());
+            if let Some(prior) = prior.filter(|_| i >= stream.own_from) {
+                let msg = &msgs[mi];
+                let step = OriginStep {
+                    msg: mi,
+                    src: msg.src.as_str(),
+                    dst: msg.dst.as_str(),
+                    cseq: msg.cseq,
+                    prior,
+                };
+                if has_origin {
+                    self.origin_steps.push(step);
+                } else {
+                    self.unreadable_origins.push(step);
+                }
+            }
+            if has_origin {
+                prior = Some(mi);
+            }
+        }
     }
 
     /// The agent's own most recent offer still awaiting an answer, as of the
@@ -173,28 +210,8 @@ impl<'a> Reading<'a> {
         let has_doc = readable
             || (self.described[mi] && msg.status().is_none_or(|status| binds(status, msg)));
 
-        if sent && has_doc {
-            if readable {
-                state.sent_docs.push(mi);
-            }
-            let has_origin = self.docs[mi].as_ref().is_some_and(|d| d.origin.is_some());
-            if let Some(prior) = state.last_origin {
-                let step = OriginStep {
-                    msg: mi,
-                    src: msg.src.as_str(),
-                    dst: msg.dst.as_str(),
-                    cseq: msg.cseq,
-                    prior,
-                };
-                if has_origin {
-                    self.origin_steps.push(step);
-                } else {
-                    self.unreadable_origins.push(step);
-                }
-            }
-            if has_origin {
-                state.last_origin = Some(mi);
-            }
+        if sent && has_doc && steps_the_session(msg) {
+            state.streams.push(msg, mi);
         }
 
         match &msg.kind {

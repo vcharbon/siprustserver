@@ -648,6 +648,33 @@ fn a_re_offer_after_an_options_is_judged_against_the_last_session_description() 
     assert!(body_changed);
 }
 
+/// A failure final's body lists capabilities (RFC 3261 §21.4.26), no answer:
+/// the callee's next answer continues its session from the 2xx before it.
+#[test]
+fn a_failure_final_body_is_no_step_of_the_session_stream() {
+    let msgs = vec![
+        req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+        resp(2, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_ANSWER)),
+        req(3, ALICE, BOB, "ACK", 1, Some("bt"), None),
+        req(4, ALICE, BOB, "INVITE", 2, Some("bt"), Some(T38_OFFER)),
+        resp(5, BOB, ALICE, 488, 2, "INVITE", Some(CAPABILITIES)),
+        req(6, ALICE, BOB, "ACK", 2, Some("bt"), None),
+        req(7, ALICE, BOB, "INVITE", 3, Some("bt"), Some(T38_OFFER)),
+        resp(8, BOB, ALICE, 200, 3, "INVITE", Some(T38_ANSWER)),
+        req(9, ALICE, BOB, "ACK", 3, Some("bt"), None),
+    ];
+    for rule in [
+        &SdpOriginContinuity as &dyn Obligation,
+        &ReOfferMLineCountMonotonic,
+        &PayloadTypeMappingStable,
+    ] {
+        let out = run(rule, &msgs);
+        assert!(out.iter().all(|f| f.anchor != 4), "{out:?}");
+        let f: Vec<&Finding> = out.iter().filter(|f| f.violated()).collect();
+        assert!(f.is_empty(), "{f:?}");
+    }
+}
+
 /// The two-media call, an OPTIONS whose 200 carries the capability set, then
 /// a re-INVITE re-stating both streams.
 fn options_mid_two_media_call() -> Vec<Msg> {

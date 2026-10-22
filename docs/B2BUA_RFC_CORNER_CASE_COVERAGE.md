@@ -214,7 +214,7 @@ Severity = operational risk if the behaviour is wrong.
 | SDP-NOINTERSECT-1 | 3264 §6.1 | Empty codec intersection | Reject stream; all-reject → 488 | high | 🟡 | media `empty_codec_intersection_is_rejected` (unit); add call-level 488 |
 | SDP-CANTBRIDGE-1 | 3264 §6 | Unbridgeable transport (e.g. SCTP) | Reject/488, never relay dead media | high | ❌ | add `unbridgeable_media_488` |
 | SDP-PT-STABLE-1 | 3264 §8.3.2 | Re-offer rebinds dynamic PT | PT→codec map stable for session | med | ✅ | rfc-audit `payload-type-mapping-stable` |
-| SDP-ORIGIN-1 | 3264 §8 | `o=` continuity per leg | Same username/sess-id, version+1 | med | ✅ (advisory) | rfc-audit `sdp-origin-continuity`, sdp_diff |
+| SDP-ORIGIN-1 | 3264 §8 | `o=` continuity per dialog (each forked dialog its own session; OPTIONS and failure-final bodies no step) | Same `o=` identity, version +1 (or unchanged when identical) | med | ✅ | rfc-audit `sdp-origin-continuity` (gating), sdp_diff |
 | SDP-PARSE-1 | 3264 §5 | Malformed SDP | 488, don't relay invalid | med | ✅ | rfc-audit `sdp-body-parseable`, parser torture |
 
 ---

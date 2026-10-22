@@ -53,6 +53,7 @@ mod reading;
 mod records;
 mod revision;
 mod round;
+mod stream;
 
 pub use answer::{
     AnswerMLineCountMatchesOffer, AnswerMediaTypeMatchesOffer, AnswerStreamMatchesOffer,
@@ -83,9 +84,9 @@ crate::registry::rules! {
     /// stream's media type and transport — rejecting it means port 0, never re-typing it. Charges
     /// the answerer.
     AnswerStreamMatchesOffer = "answer-stream-matches-offer";
-    /// RFC 4566 §5.2 / RFC 3264 §8: every session description an agent sends on one call keeps the
-    /// `o=` identity and moves `sess-version` by exactly what changed. Charges the description's
-    /// sender.
+    /// RFC 4566 §5.2 / RFC 3264 §8: every session description an agent sends on one dialog keeps
+    /// the `o=` identity and moves `sess-version` by exactly what changed. Charges the
+    /// description's sender.
     SdpOriginContinuity = "sdp-origin-continuity";
     /// RFC 3264 §5: an agent holds one offer of its own outstanding at a time on a call — the next
     /// waits for the answer to the last. Charges the offer's sender.
@@ -105,16 +106,16 @@ crate::registry::rules! {
     /// RFC 3264 §6: an answer rejecting a stream still lists a media format on its `m=` line — a
     /// bare `m=audio 0 RTP/AVP` is no description at all. Charges the answerer.
     RejectedStreamMinimalAnswer = "rejected-stream-minimal-answer";
-    /// RFC 3264 §8: an agent's later description on a call carries at least as many `m=` lines as
-    /// the one before — a removed stream keeps its slot at port 0. Charges the description's
+    /// RFC 3264 §8: an agent's later description on a dialog carries at least as many `m=` lines
+    /// as the one before — a removed stream keeps its slot at port 0. Charges the description's
     /// sender.
     ReOfferMLineCountMonotonic = "re-offer-m-line-count-monotonic";
     /// RFC 3264 §8: a stream offered at port 0 is answered at port 0 — a disabled stream stays
     /// disabled. Charges the answerer.
     ZeroPortPropagation = "zero-port-propagation";
     /// RFC 3264 §8.3.2: once an agent's description binds a payload type to an encoding, its later
-    /// descriptions on that call keep the binding — the peer caches it. Charges the description's
-    /// sender.
+    /// descriptions on that dialog keep the binding — the peer caches it. Charges the
+    /// description's sender.
     PayloadTypeMappingStable = "payload-type-mapping-stable", relayable;
     /// RFC 3264 §5-6 / RFC 4566 §5: a body sent as `application/sdp` satisfies the offer/answer
     /// grammar. Charges the sender that minted it.

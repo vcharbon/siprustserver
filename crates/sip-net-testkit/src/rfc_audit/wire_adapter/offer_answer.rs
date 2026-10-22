@@ -16,7 +16,6 @@ pub(super) const LIVE: &[Live] = &[
     // Origin continuity is per originator: a proxy's stream interleaves both agents' origins.
     Live::emitter(RuleId::SdpOriginContinuity, sdp_origin_continuity)
         .roles(&[UaRole::Uac, UaRole::Uas])
-        .advisory()
         .skip(Skip::RelayLanes),
     Live::either_end(RuleId::NoNewOfferWhileOfferPending, no_new_offer_while_offer_pending)
         .advisory()
@@ -169,7 +168,7 @@ fn sdp_origin_continuity(f: &rfc_rules::Finding, cid: &str) -> String {
         )
     };
     format!(
-        "Sent \"{origin_line}\" after \"{prior_origin_line}\" on the same call (callId \
+        "Sent \"{origin_line}\" after \"{prior_origin_line}\" on the same dialog (callId \
          {cid}, CSeq {cseq}) — {offence} — RFC 4566 §5.2 / RFC 3264 §8",
         cseq = f.cseq,
     )

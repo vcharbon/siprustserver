@@ -1,5 +1,6 @@
-//! An agent's later descriptions on a call against its earlier ones (RFC 3264 §8,
-//! RFC 4566 §5.2).
+//! An agent's later descriptions on a dialog against its earlier ones (RFC 3264
+//! §8, RFC 4566 §5.2), read off its session streams
+//! ([`SessionStreams`](super::stream::SessionStreams)).
 
 use sip_message::sdp_doc;
 
@@ -12,7 +13,7 @@ use super::reading::Reading;
 use super::records::OriginStep;
 
 /// **RFC 4566 §5.2 / RFC 3264 §8 — every session description an agent sends on
-/// one call describes the SAME session, and its `sess-version` counts the
+/// one dialog describes the SAME session, and its `sess-version` counts the
 /// revisions.**
 /// `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>`
 /// identifies it: a later description repeats all five identity
@@ -24,8 +25,12 @@ use super::records::OriginStep;
 /// leaves the peer unable to tell a re-offer from a repeat.
 ///
 /// Charges the description's SENDER, against its own previous description on
-/// that call. A description whose `o=` line no reader accepts settles nothing —
-/// the stream's predecessor is the last one that did.
+/// that dialog — the description of the INVITE that created it where the
+/// dialog has none yet. Each dialog is its own session (RFC 3261 §12), so two
+/// forked dialogs of one INVITE never continue each other. An `OPTIONS` body and
+/// a failure final's describe capabilities, no session (RFC 3261 §11.2,
+/// §21.4.26), and are no step at all. A description whose `o=` line no reader
+/// accepts settles nothing — the stream's predecessor is the last one that did.
 pub struct SdpOriginContinuity;
 
 impl Obligation for SdpOriginContinuity {
@@ -85,9 +90,9 @@ impl Obligation for SdpOriginContinuity {
 /// dropped one, and the peer applies the answer to the wrong streams.
 ///
 /// Charges the description's SENDER, against its own previous description on
-/// that call — answers included, since the table is the agent's whatever
-/// message carries it. A description this vantage carried no body for is no
-/// step of the stream at all.
+/// that dialog's session stream — answers included, since the table is the
+/// agent's whatever message carries it. A description this vantage carried no
+/// body for, or could not read, is no step of the stream at all.
 pub struct ReOfferMLineCountMonotonic;
 
 impl Obligation for ReOfferMLineCountMonotonic {
@@ -95,13 +100,13 @@ impl Obligation for ReOfferMLineCountMonotonic {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for stream in &seen.sent_streams {
-            for step in stream.windows(2) {
-                let (prior, msg) = (step[0], step[1]);
-                let (Some(before), Some(now)) =
-                    (seen.docs[prior].as_ref(), seen.docs[msg].as_ref())
-                else {
-                    continue;
-                };
+            let mut prior: Option<usize> = None;
+            for (i, &msg) in stream.msgs.iter().enumerate() {
+                let Some(now) = seen.docs[msg].as_ref() else { continue };
+                let step = prior.filter(|_| i >= stream.own_from);
+                prior = Some(msg);
+                let Some(prior) = step else { continue };
+                let Some(before) = seen.docs[prior].as_ref() else { continue };
                 let (prior_m_lines, m_lines) = (before.doc.media.len(), now.doc.media.len());
                 let decision = if m_lines >= prior_m_lines {
                     Decision::Compliant
@@ -150,9 +155,9 @@ fn same_binding(media_type: &str, one: &str, other: &str) -> bool {
 /// The finding quotes the encodings the wire stated.
 ///
 /// Charges the description's SENDER, against the bindings its own earlier
-/// descriptions on that call stated. Every description it sends is an occasion,
-/// the first included: the binding a description makes in one `m=` block binds
-/// the rest of it too. One finding per description, naming every re-bound
+/// descriptions on that dialog's session stream stated. Every description it
+/// sends is an occasion, the first included: the binding a description makes in
+/// one `m=` block binds the rest of it too. One finding per description, naming every re-bound
 /// payload type.
 pub struct PayloadTypeMappingStable;
 
@@ -163,8 +168,9 @@ impl Obligation for PayloadTypeMappingStable {
         for stream in &seen.sent_streams {
             // Payload type → the encoding text this agent first bound it to.
             let mut bound: Vec<(String, String)> = Vec::new();
-            for &mi in stream {
+            for (i, &mi) in stream.msgs.iter().enumerate() {
                 let Some(doc) = seen.docs[mi].as_ref() else { continue };
+                let own = i >= stream.own_from;
                 let mut payload_types = Vec::new();
                 let mut prior_encodings = Vec::new();
                 let mut encodings = Vec::new();
@@ -181,6 +187,9 @@ impl Obligation for PayloadTypeMappingStable {
                             Some(_) => {}
                         }
                     }
+                }
+                if !own {
+                    continue;
                 }
                 let decision = if payload_types.is_empty() {
                     Decision::Compliant

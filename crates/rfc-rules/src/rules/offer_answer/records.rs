@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::stream::SessionStreams;
+
 /// One agent's offer/answer state on one call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct AgentKey<'a> {
@@ -158,7 +160,8 @@ pub(super) struct OfferStep<'a> {
     pub(super) pending_cseq: u32,
 }
 
-/// One description an agent SENT, against the one it sent before on that call.
+/// One description an agent SENT, against the one it sent before on that
+/// session stream.
 #[derive(Debug)]
 pub(super) struct OriginStep<'a> {
     /// Index into the view's `msgs`.
@@ -167,7 +170,7 @@ pub(super) struct OriginStep<'a> {
     pub(super) dst: &'a str,
     pub(super) cseq: u32,
     /// Index into the view's `msgs` of the agent's previous description with a
-    /// readable `o=` line on this call — its origin stream's predecessor.
+    /// readable `o=` line on that session stream — its predecessor.
     pub(super) prior: usize,
 }
 
@@ -184,11 +187,7 @@ pub(super) struct AgentState<'a> {
     /// 3262 §5): its round closed by PRACK, so the 2xx's description is no
     /// offer the ACK owes an answer to.
     pub(super) offered_reliably: BTreeSet<(u32, bool, &'a str)>,
-    /// Index into the view's `msgs` of this agent's last SENT description with
-    /// a readable `o=` line on this call.
-    pub(super) last_origin: Option<usize>,
-    /// Indexes into the view's `msgs` of EVERY readable description this agent
-    /// sent on this call, ascending — the stream
+    /// The descriptions this agent SENT on this call, per dialog — the streams
     /// [`Reading::sent_streams`](super::reading::Reading::sent_streams) publishes.
-    pub(super) sent_docs: Vec<usize>,
+    pub(super) streams: SessionStreams<'a>,
 }
