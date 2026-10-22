@@ -6,7 +6,7 @@
 use sip_message::generators;
 use sip_message::SipHeader as MsgHeader;
 
-use super::originate::apply_withheld_option_tags;
+use super::option_tags::apply_withheld_option_tags;
 
 /// The option tag naming the session timer (RFC 4028 §3).
 pub(crate) const TIMER: &str = "timer";

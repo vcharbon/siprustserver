@@ -9,9 +9,8 @@ use sip_ids::TurnIds;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
 };
-use sip_message::header::{
-    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, NameAddr, TokenListHeader,
-};
+use sip_message::header::{self, ChargingVector, HeaderClass, HeaderName, HeaderValue, NameAddr};
+use sip_message::write_check::{self, WriteRefusal};
 use sip_message::{hops, SipHeader as MsgHeader, SipRequest, SipStr};
 
 use crate::config::B2buaConfig;
@@ -21,6 +20,7 @@ use super::address::{address, identity, UnreadableAddress};
 use super::body::{media_type, sdp, source_content_type};
 use super::egress::apply_b_leg_egress;
 use super::identity::{leg_contact, leg_via, CallMarks};
+use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
 use b2bua_sdk::model::Body;
 
 /// What an override's bytes are to the originator's body, the one place an
@@ -102,15 +102,18 @@ fn override_descriptors(a_leg_invite: &SipRequest, body: &Body) -> Vec<(String, 
 /// The body the minted INVITE carries, its media type, and the entity headers
 /// the INVITE states for it: the source's body, an override's bytes with the
 /// lines describing them ([`override_descriptors`]), or an override's session
-/// description beside its attached parts, headed by those lines.
+/// description beside its attached parts, headed by those lines. A part line
+/// the wire cannot carry whole is left out and pushed onto `skipped`.
 fn minted_body(
     a_leg_invite: &SipRequest,
     body_override: Option<&Body>,
+    skipped: &mut Vec<WriteRefusal>,
 ) -> (Vec<u8>, Option<header::MediaType>, Vec<(String, String)>) {
     if let Some((body, parts)) = body_override.and_then(|b| Some((b, b.parts.as_ref()?))) {
         let ct = source_content_type(a_leg_invite, body);
         let described = override_descriptors(a_leg_invite, body);
         let attached = sip_message::attach_parts(ct.as_deref(), &described, &body.bytes, parts);
+        skipped.extend(attached.refused);
         let content_type = attached.content_type.as_deref().and_then(media_type);
         return (attached.body, content_type, attached.headers);
     }
@@ -135,81 +138,22 @@ fn minted_body(
     (body, content_type, described)
 }
 
+/// Whether the wire carries `line` whole; a refusal is pushed onto `skipped`.
+fn writable(line: &MsgHeader, skipped: &mut Vec<WriteRefusal>) -> bool {
+    match write_check::header_line(&line.name, &line.value) {
+        Ok(()) => true,
+        Err(refusal) => {
+            skipped.push(refusal);
+            false
+        }
+    }
+}
+
 /// True iff `header_updates` names `header` with no value — a caller stating
 /// that this name does not ride, which the §16.6 relay and the configured
 /// carry-through both honour so a withheld name has one meaning on every path.
 fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> bool {
     header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
-}
-
-/// The call's own offer on an originated leg's assembled headers: the
-/// `Supported` set states every tag in `offered`, once — an absent line comes
-/// into being for them, a line already naming them all is left byte-identical.
-fn apply_offered_option_tags(extra_headers: &mut Vec<MsgHeader>, offered: &[String]) {
-    if offered.is_empty() {
-        return;
-    }
-    let name = <header::kind::Supported as header::kind::HeaderKind>::name();
-    let lines: Vec<TokenListHeader<header::kind::Supported>> = extra_headers
-        .iter()
-        .filter(|h| name.matches(&h.name))
-        .filter_map(|h| TokenListHeader::parse(&h.value).ok())
-        .collect();
-    let stated = TokenListHeader::combine(lines).unwrap_or_else(TokenListHeader::empty);
-    if offered.iter().all(|tag| stated.contains(tag)) {
-        return;
-    }
-    let widened = offered.iter().fold(stated, |s, tag| s.with(tag.as_str()));
-    extra_headers.retain(|h| !name.matches(&h.name));
-    extra_headers.push(MsgHeader {
-        name: SipStr::owned(name.as_wire_str()),
-        value: SipStr::owned(&widened.to_wire()),
-    });
-}
-
-/// The call-scoped withhold on an originated leg's assembled headers: the
-/// `Supported` and `Require` sets are narrowed by `withheld`, and a set the
-/// narrowing empties drops its header — a withheld tag leaves ONE wire form on
-/// every leg the call originates, whichever mint assembled it. Lines not naming
-/// a withheld tag are left byte-identical.
-pub(crate) fn apply_withheld_option_tags(extra_headers: &mut Vec<MsgHeader>, withheld: &[String]) {
-    if withheld.is_empty() {
-        return;
-    }
-    narrow_token_set::<header::kind::Supported>(extra_headers, withheld);
-    narrow_token_set::<header::kind::Require>(extra_headers, withheld);
-}
-
-/// Narrow one token-set header's lines by `withheld`, in place: no line, or
-/// none naming a withheld tag, leaves the headers untouched; otherwise the
-/// lines collapse to ONE restated line without the withheld tags (several
-/// lines of a set-like header are one set, RFC 3261 §7.3.1), and a set left
-/// empty drops its header — an emptied set claims nothing, which is what an
-/// absent line already says (§20.37).
-fn narrow_token_set<K: header::kind::TokenKind>(
-    extra_headers: &mut Vec<MsgHeader>,
-    withheld: &[String],
-) {
-    let name = K::name();
-    let lines: Vec<TokenListHeader<K>> = extra_headers
-        .iter()
-        .filter(|h| name.matches(&h.name))
-        .filter_map(|h| TokenListHeader::<K>::parse(&h.value).ok())
-        .collect();
-    let Some(set) = TokenListHeader::combine(lines) else {
-        return;
-    };
-    if !withheld.iter().any(|tag| set.contains(tag)) {
-        return;
-    }
-    let kept = withheld.iter().fold(set, |s, tag| s.without(tag));
-    extra_headers.retain(|h| !name.matches(&h.name));
-    if !kept.is_empty() {
-        extra_headers.push(MsgHeader {
-            name: SipStr::owned(name.as_wire_str()),
-            value: SipStr::owned(&kept.to_wire()),
-        });
-    }
 }
 
 /// The INVITE that dialled `leg`, as it left the stack (after every edit a
@@ -279,6 +223,9 @@ pub fn build_b_leg(
     // The turn's clock (ms): the `Timestamp` the INVITE states where the
     // originator's stated one (RFC 3261 §20.38).
     now_ms: i64,
+    // Where a stated line the wire cannot carry whole lands instead of the
+    // INVITE (ADR-0053): a header line, a part line, a charging host.
+    skipped: &mut Vec<WriteRefusal>,
 ) -> Result<(Leg, OutboundSipEffect), UnreadableAddress> {
     let stamp = generators::timestamp_value(now_ms);
     let scope = if caller_invite_pending {
@@ -305,31 +252,34 @@ pub fn build_b_leg(
         Some(text) => identity("new_to", text)?,
         None => NameAddr::new(a_leg_invite.to().uri().clone()),
     };
-    let (body, content_type, entity_headers) = minted_body(a_leg_invite, body_override);
+    let (body, content_type, entity_headers) = minted_body(a_leg_invite, body_override, skipped);
     // `(name, Some(v))` sets, `(name, None)` removes — either way the name is the
     // caller's and no relayed or configured copy of it rides (see [`removed`]).
     // Neither reaches a STRUCTURAL name (RFC 3261 §16.6): the generator owns
     // those on the leg it mints, so a decision stating one would ride BESIDE the
     // stack's line rather than replace it — two `Max-Forwards`, and a budget the
     // decision could refill.
+    // A set the wire cannot carry whole is skipped, as though never stated.
     let mut extra_headers: Vec<MsgHeader> = header_updates
         .iter()
         .filter(|(n, _)| HeaderName::class_of(n) != HeaderClass::Structural)
         .filter_map(|(n, v)| {
             v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
         })
+        .filter(|h| writable(h, skipped))
         .collect();
     // The entity headers the minted body states for itself; a name the decision
     // stated stands, and a structural name is the generator's.
     let decided = extra_headers.clone();
     for (name, value) in entity_headers {
         let header = HeaderName::from(name.as_str());
+        let line = MsgHeader { name: SipStr::owned(&name), value: SipStr::owned(&value) };
         if HeaderName::class_of(&name) != HeaderClass::Structural
             && !decided.iter().any(|h| header.matches(&h.name))
             && !removed(header_updates, &header)
+            && writable(&line, skipped)
         {
-            extra_headers
-                .push(MsgHeader { name: SipStr::owned(&name), value: SipStr::owned(&value) });
+            extra_headers.push(line);
         }
     }
     // Advertise this face's capability set on the originated b-leg INVITE (RFC
@@ -409,10 +359,13 @@ pub fn build_b_leg(
         if !extra_headers.iter().any(|h| name.matches(&h.name)) && !removed(header_updates, &name) {
             let host = charging.generated_at.clone().unwrap_or_else(|| config.sip_local_ip.clone());
             let icid = format!("{}-{}", ids.new_tag(), leg_id);
-            extra_headers.push(MsgHeader {
+            let line = MsgHeader {
                 name: SipStr::owned(name.as_wire_str()),
                 value: SipStr::owned(&ChargingVector::new(icid, host).to_wire()),
-            });
+            };
+            if writable(&line, skipped) {
+                extra_headers.push(line);
+            }
         }
     }
 

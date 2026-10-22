@@ -440,8 +440,8 @@ pub fn body(raw: &[u8]) -> Option<&[u8]> {
 
 /// The offset just past the empty line that ends the header block (RFC 3261
 /// §7), `None` where the datagram has none. CRLF is the line terminator
-/// (§25.1); a bare CR or LF is accepted as the parser accepts it, so the
-/// parser and this reader end the head at the same byte.
+/// (§25.1); a bare CR or LF ends a line as in the parser's block split, which
+/// ends the head at the same byte and then refuses it.
 pub fn head_end(raw: &[u8]) -> Option<usize> {
     let at = |i: usize| raw.get(i).copied();
     let mut i = 0;

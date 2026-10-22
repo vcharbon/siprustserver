@@ -24,7 +24,32 @@ fn edits(
             .flat_map(|(_, l)| lines(l))
             .collect()
     };
-    restated(&sets, carried_of, Vec::new)
+    restated(&sets, carried_of, Vec::new, &mut Vec::new())
+}
+
+/// A statement the wire cannot carry whole is skipped and handed back; the
+/// message keeps the lines of that name it carried, and every other
+/// statement applies.
+#[test]
+fn a_statement_with_a_line_break_or_a_non_token_name_is_skipped() {
+    let set = map(&[
+        ("X-A", HeaderUpdate::Set(lines(&["ok\r\nVia: SIP/2.0/UDP 192.0.2.66"]))),
+        ("X/Bad", HeaderUpdate::Set(lines(&["v"]))),
+        ("X-B", HeaderUpdate::Add(lines(&["fine", "a\0b"]))),
+        ("X-C", HeaderUpdate::Set(lines(&["kept"]))),
+    ]);
+    let sets = [&set];
+    let mut skipped = Vec::new();
+    let carried_of = |name: HeaderName| -> Vec<String> {
+        if name.matches("X-A") {
+            lines(&["carried"])
+        } else {
+            Vec::new()
+        }
+    };
+    let edited = restated(&sets, carried_of, Vec::new, &mut skipped);
+    assert_eq!(edited, Some(vec![("X-C".to_string(), lines(&["kept"]))]));
+    assert_eq!(skipped.len(), 3, "{skipped:?}");
 }
 
 /// A draft recording the edits it receives, by name.
@@ -197,6 +222,7 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
         None,
         true,
         0,
+        &mut Vec::new(),
     )
     .expect("the leg is built");
     call.b_legs.push(leg);
@@ -254,6 +280,7 @@ fn an_ended_legs_own_set_stays_with_the_call() {
         None,
         true,
         0,
+        &mut Vec::new(),
     )
     .expect("the leg is built");
     call::testkit::stage_leg(&mut leg, call::LegState::Terminated);

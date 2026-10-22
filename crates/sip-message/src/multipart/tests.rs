@@ -293,7 +293,10 @@ fn without_a_description_one_part_is_the_body() {
     assert_eq!(several.headers, [("MIME-Version".to_string(), "1.0".to_string())]);
 
     let none = attach(None, &[], b"", &[]);
-    assert_eq!(none, Attached { content_type: None, headers: Vec::new(), body: Vec::new() });
+    assert_eq!(
+        none,
+        Attached { content_type: None, headers: Vec::new(), body: Vec::new(), refused: Vec::new() }
+    );
     let bare = attach(Some("application/sdp"), &[], &sdp().payload, &[]);
     assert_eq!(bare.content_type.as_deref(), Some("application/sdp"));
     assert!(bare.headers.is_empty(), "a description alone is no MIME entity of ours");
@@ -439,4 +442,31 @@ fn a_boundary_of_any_length_frames_its_parts() {
     for boundary in ["b".repeat(70), "b".repeat(2000)] {
         assert_eq!(decompose(framed(&boundary).as_bytes(), &boundary).len(), 1);
     }
+}
+
+/// A part line the wire cannot carry whole — a CR or LF in a value, a name
+/// off `token` — is never framed: compose refuses it, attach leaves it out
+/// and names it.
+#[test]
+fn a_part_line_with_a_line_break_is_never_framed() {
+    let split = location().with_header("X-Note", "a\r\nContent-Type: text/plain");
+    assert!(matches!(
+        compose("multipart/mixed", &[split.clone(), data()]),
+        Err(MultipartError::Unwritable(_))
+    ));
+    let bad_type = MultipartPart::new("text/plain\r\nX-Evil: 1", b"x".to_vec());
+    assert!(matches!(
+        compose("multipart/mixed", &[bad_type.clone(), data()]),
+        Err(MultipartError::Unwritable(_))
+    ));
+
+    let attached = attach(None, &[], b"", &[split, bad_type, data()]);
+    assert_eq!(attached.refused.len(), 2, "{:?}", attached.refused);
+    let text = String::from_utf8_lossy(&attached.body);
+    assert!(!text.contains("X-Note") && !text.contains("X-Evil"), "{text}");
+    assert!(text.contains("<loc@example.invalid>"), "the part rides without the line: {text}");
+    assert!(text.contains("<data@example.invalid>"), "{text}");
+    let one = attach(None, &[], b"", &[location().with_header("X/Bad", "v")]);
+    assert_eq!(one.refused.len(), 1);
+    assert!(one.headers.iter().all(|(name, _)| name != "X/Bad"), "{:?}", one.headers);
 }

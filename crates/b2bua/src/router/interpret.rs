@@ -55,6 +55,13 @@ pub(super) async fn process_result(
         refresh_period: ctx.limiter.refresh_period(),
     };
     let result = crate::landing::land(result, &landing, now_ms);
+    // Stated text the turn's messages left out is a defect of the model that
+    // stated it, reported whichever node sends them.
+    for eff in &result.effects.buffered {
+        if let BufferedObservabilityEffect::StatedTextSkipped { detail } = eff {
+            crate::model_invariants::stated_text_skipped(&ctx.metrics, &result.call, detail);
+        }
+    }
     // The record this turn lands states the model invariants, against the
     // one the previous turn landed.
     if ctx.config.model_invariants {
@@ -189,6 +196,8 @@ pub(super) async fn process_result(
             BufferedObservabilityEffect::TerminationUnrecorded => {
                 ctx.metrics.bump_termination_unrecorded()
             }
+            // Reported as the turn landed.
+            BufferedObservabilityEffect::StatedTextSkipped { .. } => {}
         }
     }
 

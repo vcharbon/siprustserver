@@ -45,19 +45,17 @@ impl Wire {
         let _ = write!(self.buf, "{n}");
     }
 
-    /// Append `s` as an RFC 3261 quoted-string: wrapped in `"`, with `\` and
-    /// `"` backslash-escaped so the value survives a re-parse unchanged.
+    /// Append `s` as an RFC 3261 quoted-string: wrapped in `"`, with `\`, `"`
+    /// and every control byte `qdtext` excludes backslash-escaped as a
+    /// `quoted-pair`, so the value survives a re-parse unchanged. A CR or LF
+    /// fits neither and is written as given: the freeze refuses the line.
     pub fn quoted(&mut self, s: &str) {
         self.buf.push(b'"');
-        for chunk in s.split_inclusive(['\\', '"']) {
-            match chunk.as_bytes().split_last() {
-                Some((&last @ (b'\\' | b'"'), init)) => {
-                    self.buf.extend_from_slice(init);
-                    self.buf.push(b'\\');
-                    self.buf.push(last);
-                }
-                _ => self.buf.extend_from_slice(chunk.as_bytes()),
+        for &b in s.as_bytes() {
+            if matches!(b, b'\\' | b'"' | 0x00..=0x08 | 0x0b | 0x0c | 0x0e..=0x1f | 0x7f) {
+                self.buf.push(b'\\');
             }
+            self.buf.push(b);
         }
         self.buf.push(b'"');
     }

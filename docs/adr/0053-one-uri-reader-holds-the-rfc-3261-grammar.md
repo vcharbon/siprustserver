@@ -79,6 +79,10 @@ Headers the parser does not read are not newly checked. A method keeps the case
 it was written in (§7.1): an extension method is never uppercased, and its CSeq
 names it in the same case; a known method matches in any case.
 
+A header line ends with CRLF and nowhere else, in and out: the parser refuses
+a bare CR or LF anywhere in the header block, and no writer puts a CR or LF
+inside a line (`src/write_check.rs`).
+
 ### 4. The name-addr
 
 `NameAddr::parse_as` reads `( name-addr / addr-spec ) *( SEMI generic-param )`

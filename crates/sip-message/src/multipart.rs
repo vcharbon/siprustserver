@@ -11,11 +11,15 @@
 //! - **The boundary is derived from the parts.** A body composed twice from the
 //!   same parts frames identically, so a replay is reproducible; a delimiter
 //!   that would appear inside a payload is extended until it cannot.
+//! - **A part header line is written whole or not at all.** Its name is a
+//!   `token` and its value holds no CR, LF or NUL (RFC 2045 §3), or the line
+//!   is refused, never framed.
 
 use serde::{Deserialize, Serialize};
 
 use crate::header::{HeaderClass, HeaderName, HeaderValue, MediaType, ParamValue};
 use crate::sip_str::SipStr;
+use crate::write_check::WriteRefusal;
 
 /// One entity part: its media type, any further entity headers it states, and
 /// its content.
@@ -79,6 +83,8 @@ pub enum MultipartError {
     /// The caller stated a boundary that occurs inside a part's payload, so the
     /// delimiter would split a part rather than separate two.
     BoundaryInPayload { boundary: String },
+    /// A part's `Content-Type` or header line cannot be written whole.
+    Unwritable(WriteRefusal),
 }
 
 impl std::fmt::Display for MultipartError {
@@ -91,6 +97,7 @@ impl std::fmt::Display for MultipartError {
             MultipartError::BoundaryInPayload { boundary } => {
                 write!(f, "the stated boundary {boundary:?} occurs inside a part's payload")
             }
+            MultipartError::Unwritable(refusal) => write!(f, "a part line: {refusal}"),
         }
     }
 }
@@ -110,6 +117,9 @@ pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed
     }
     if parts.is_empty() {
         return Err(MultipartError::NoParts);
+    }
+    if let Some(refusal) = parts.iter().find_map(part_refusal) {
+        return Err(MultipartError::Unwritable(refusal));
     }
     let stated = media
         .as_ref()
@@ -163,13 +173,15 @@ fn frame(boundary: &str, parts: &[MultipartPart]) -> Vec<u8> {
 }
 
 /// A message body built by [`attach`]: the bytes, the `Content-Type` that
-/// describes them (`None` for no body), and the further entity headers the
-/// message itself states for them, `(name, value)` in emission order.
+/// describes them (`None` for no body), the further entity headers the
+/// message itself states for them, `(name, value)` in emission order, and
+/// what of the parts was left out because it cannot be written whole.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attached {
     pub content_type: Option<String>,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    pub refused: Vec<WriteRefusal>,
 }
 
 /// The body carrying the session description of `body` (typed `content_type`,
@@ -186,29 +198,31 @@ pub struct Attached {
 /// A body carrying a part states `MIME-Version: 1.0` on the message (RFC 2045
 /// §4). The description keeps its own entity headers in wire order, a bare
 /// one those the message stated for it. A part's own `Content-Type` header
-/// types it; its `MIME-Version` and any structural header never ride.
+/// types it; its `MIME-Version` and any structural header never ride. A part
+/// header line that cannot be written whole is left out, and so is a part
+/// whose `Content-Type` cannot; each is named in [`Attached::refused`].
 pub fn attach(
     content_type: Option<&str>,
     entity_headers: &[(String, String)],
     body: &[u8],
     parts: &[MultipartPart],
 ) -> Attached {
+    let mut refused = Vec::new();
     let mut all: Vec<MultipartPart> = Vec::with_capacity(parts.len() + 1);
     all.extend(
         entity_parts(content_type, entity_headers, body)
             .into_iter()
             .find(|part| !part.payload.is_empty() && is_sdp(&part.content_type)),
     );
-    all.extend(parts.iter().map(normalized));
+    all.extend(parts.iter().filter_map(|part| writable(normalized(part), &mut refused)));
+    let mime = if parts.is_empty() { Vec::new() } else { vec![mime_version()] };
     match all.as_slice() {
-        [] => Attached { content_type: None, headers: Vec::new(), body: Vec::new() },
+        [] => Attached { content_type: None, headers: Vec::new(), body: Vec::new(), refused },
         [one] => Attached {
             content_type: Some(one.content_type.clone()),
-            headers: if parts.is_empty() { Vec::new() } else { vec![mime_version()] }
-                .into_iter()
-                .chain(one.headers.iter().cloned())
-                .collect(),
+            headers: mime.into_iter().chain(one.headers.iter().cloned()).collect(),
             body: one.payload.clone(),
+            refused,
         },
         several => {
             let boundary = derive_boundary(several);
@@ -216,6 +230,7 @@ pub fn attach(
                 content_type: Some(format!("multipart/mixed;boundary={boundary}")),
                 headers: vec![mime_version()],
                 body: frame(&boundary, several),
+                refused,
             }
         }
     }
@@ -460,6 +475,9 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 mod entity;
 
 use entity::{part_header, part_header_spans, part_headers_beyond};
+
+mod part_lines;
+use part_lines::{part_refusal, writable};
 
 #[cfg(test)]
 mod tests;

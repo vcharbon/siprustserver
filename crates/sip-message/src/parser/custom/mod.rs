@@ -86,6 +86,9 @@ impl CustomParser {
     /// message passes — the reading a message fragment (RFC 3420) takes.
     pub fn parse_header_fields(&self, raw: &[u8]) -> Result<Vec<SipHeader>, SipParseError> {
         let block = scanner::header_block(raw);
+        if let Some(bare) = block.bare_break {
+            return Err(bare.refusal());
+        }
         let text = decode_image(head(raw, block.end)?);
         let mut s = Scanner::new(text.as_str().as_bytes());
         parse_start_line(&mut s, text.as_str(), &self.limits)?;
@@ -123,6 +126,10 @@ impl SipParser for CustomParser {
         // and a slice of `raw` rather than a copy), and only the header block
         // becomes the text image every span points into.
         let block = scanner::header_block(&raw);
+        // A bare CR or LF leaves the line structure in doubt: never answered.
+        if let Some(bare) = block.bare_break {
+            return Err(bare.refusal());
+        }
         let body_at = block.end;
         let text = decode_image(head(&raw, body_at)?);
         let image = text.as_str();

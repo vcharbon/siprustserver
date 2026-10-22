@@ -126,6 +126,24 @@ pub enum BufferedObservabilityEffect {
     /// terminal states no cause. The router counts it as
     /// `termination_unrecorded`.
     TerminationUnrecorded,
+    /// Text stated from outside the stack — a header line, a reason phrase,
+    /// a part line — did not fit its place on the wire and was left out of
+    /// the message, `detail` naming it. The router reports it as the model
+    /// defect [`crate::turn_notes::STATED_TEXT_FITS`].
+    StatedTextSkipped {
+        detail: String,
+    },
+}
+
+impl BufferedObservabilityEffect {
+    /// One [`StatedTextSkipped`](Self::StatedTextSkipped) per refusal of
+    /// `skipped`, each named by `what` was being written.
+    pub fn skipped(what: &str, skipped: Vec<sip_message::write_check::WriteRefusal>) -> Vec<Self> {
+        skipped
+            .into_iter()
+            .map(|refusal| Self::StatedTextSkipped { detail: format!("{what}: {refusal}") })
+            .collect()
+    }
 }
 
 /// Fire-and-forget effects — detached work / re-entrant events.

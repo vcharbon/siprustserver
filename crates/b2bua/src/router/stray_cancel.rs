@@ -26,7 +26,10 @@ pub(super) async fn reject_stray_cancel(
     // A message of the leg the CANCEL resolved to: it takes the call's stated
     // headers.
     let mut refusal = build_481(req, to_tag).ok()?;
-    crate::rules::stated_headers::stamp_response(call, leg_id, &mut refusal);
+    for skipped in crate::rules::stated_headers::stamp_response(call, leg_id, &mut refusal) {
+        let detail = format!("stated header: {skipped}");
+        crate::model_invariants::stated_text_skipped(&ctx.metrics, call, &detail);
+    }
     let _ = ctx.txn.send_response(refusal.clone(), *src).await;
     Some(refusal)
 }

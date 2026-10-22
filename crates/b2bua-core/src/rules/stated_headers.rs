@@ -12,28 +12,41 @@
 //!
 //! The stamp runs once, at the end of the turn, and a retained emission is the
 //! message as it left: the stamp rebinds a retained copy of a message it changes.
+//!
+//! A statement the wire cannot carry whole — a name off `token`, a line
+//! holding a CR, LF or NUL (ADR-0053) — is skipped: the message keeps the
+//! lines of that name it carried, and the skip is handed back for the caller
+//! to report as a model defect.
 
 use call::features::StatedHeaders;
 use call::header_update::{HeaderUpdate, SipHeaderUpdates};
 use call::{Call, LegKind};
 use sip_message::draft::StartKind;
 use sip_message::header::{HeaderName, Restatement};
+use sip_message::write_check::{self, WriteRefusal};
 use sip_message::{Method, SipRequest, SipResponse};
 
-use crate::effects::{HandlerResult, OutboundBody, OutboundSipEffect};
+use crate::effects::{BufferedObservabilityEffect, HandlerResult, OutboundBody, OutboundSipEffect};
 
 /// Stamp every outbound message of `result` with its call's stated headers,
-/// rebinding any retained copy of a message the stamp changes.
+/// rebinding any retained copy of a message the stamp changes. Each statement
+/// skipped is reported once ([`BufferedObservabilityEffect::StatedTextSkipped`]).
 pub fn stamp_outbound(mut result: HandlerResult) -> HandlerResult {
+    let mut skipped: Vec<WriteRefusal> = Vec::new();
     for effect in &mut result.effects.outbound {
         let before = image(effect);
-        stamp(&result.call, effect);
+        for refusal in stamp(&result.call, effect) {
+            if !skipped.contains(&refusal) {
+                skipped.push(refusal);
+            }
+        }
         if let (Some(was), Some(now)) = (before, image(effect)) {
             if was != now {
                 call::helpers::restate_retained(&mut result.call, &was, &now);
             }
         }
     }
+    result.effects.buffered.extend(BufferedObservabilityEffect::skipped("stated header", skipped));
     result
 }
 
@@ -59,42 +72,51 @@ fn image(effect: &OutboundSipEffect) -> Option<Vec<u8>> {
     }
 }
 
-/// Stamp `effect` with what `call`'s stated headers state for it. A retained
-/// datagram is left as it is: its bytes were stamped before they were retained.
-pub fn stamp(call: &Call, effect: &mut OutboundSipEffect) {
+/// Stamp `effect` with what `call`'s stated headers state for it, handing
+/// back the statements skipped. A retained datagram is left as it is: its
+/// bytes were stamped before they were retained.
+#[must_use]
+pub fn stamp(call: &Call, effect: &mut OutboundSipEffect) -> Vec<WriteRefusal> {
+    let mut skipped = Vec::new();
     let Some(leg_id) = effect.leg_id.as_deref() else {
-        return;
+        return skipped;
     };
     match &mut effect.body {
         OutboundBody::Request(req) => {
-            if let Some(stamped) = stamped_request(call, leg_id, req) {
+            if let Some(stamped) = stamped_request(call, leg_id, req, &mut skipped) {
                 *req = stamped;
             }
         }
-        OutboundBody::Response(resp) => stamp_response(call, leg_id, resp),
+        OutboundBody::Response(resp) => skipped = stamp_response(call, leg_id, resp),
         OutboundBody::Datagram(_) => {}
     }
+    skipped
 }
 
 /// Stamp `resp`, sent on `leg_id`, with what `call`'s stated headers state
-/// for it.
-pub fn stamp_response(call: &Call, leg_id: &str, resp: &mut SipResponse) {
-    if let Some(stamped) = stamped_response(call, leg_id, resp) {
+/// for it, handing back the statements skipped.
+#[must_use]
+pub fn stamp_response(call: &Call, leg_id: &str, resp: &mut SipResponse) -> Vec<WriteRefusal> {
+    let mut skipped = Vec::new();
+    if let Some(stamped) = stamped_response(call, leg_id, resp, &mut skipped) {
         *resp = stamped;
     }
+    skipped
 }
 
 /// Stamp `answer`, the stack's own answer to `req`, with what `call`'s stated
 /// headers state for it on the leg `req` arrived on (the leg holding its
-/// Call-ID).
-pub fn stamp_answer(call: &Call, req: &SipRequest, answer: &mut SipResponse) {
+/// Call-ID), handing back the statements skipped.
+#[must_use]
+pub fn stamp_answer(call: &Call, req: &SipRequest, answer: &mut SipResponse) -> Vec<WriteRefusal> {
     let call_id = req.call_id().as_str();
     let leg = std::iter::once(&call.a_leg)
         .chain(call.b_legs.iter())
         .find(|l| l.call_id == call_id)
         .map(|l| l.leg_id.clone());
-    if let Some(leg_id) = leg {
-        stamp_response(call, &leg_id, answer);
+    match leg {
+        Some(leg_id) => stamp_response(call, &leg_id, answer),
+        None => Vec::new(),
     }
 }
 
@@ -112,17 +134,27 @@ fn carried<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
     lines.map(str::to_string).collect()
 }
 
-fn stamped_request(call: &Call, leg_id: &str, req: &SipRequest) -> Option<SipRequest> {
+fn stamped_request(
+    call: &Call,
+    leg_id: &str,
+    req: &SipRequest,
+    skipped: &mut Vec<WriteRefusal>,
+) -> Option<SipRequest> {
     let (stated, kind) = reaching(call, leg_id)?;
     let launched = kind != LegKind::A && req.method() == Method::Invite && req.to().tag().is_none();
     let mut sets = vec![&stated.every_message];
     if launched {
         sets.push(&stated.launched_invite);
     }
-    restated(&sets, |name| carried(req.raw(name)), || req.thaw())?.freeze().ok()
+    restated(&sets, |name| carried(req.raw(name)), || req.thaw(), skipped)?.freeze().ok()
 }
 
-fn stamped_response(call: &Call, leg_id: &str, resp: &SipResponse) -> Option<SipResponse> {
+fn stamped_response(
+    call: &Call,
+    leg_id: &str,
+    resp: &SipResponse,
+    skipped: &mut Vec<WriteRefusal>,
+) -> Option<SipResponse> {
     if resp.status() == 100 {
         return None;
     }
@@ -135,7 +167,7 @@ fn stamped_response(call: &Call, leg_id: &str, resp: &SipResponse) -> Option<Sip
     if final_to_initial {
         sets.push(&stated.originator_finals);
     }
-    restated(&sets, |name| carried(resp.raw(name)), || resp.thaw())?.freeze().ok()
+    restated(&sets, |name| carried(resp.raw(name)), || resp.thaw(), skipped)?.freeze().ok()
 }
 
 /// `lines` once `update` is applied: a set's lines, none for a removal, an
@@ -151,11 +183,14 @@ fn applied(update: &HeaderUpdate, lines: Vec<String>) -> Vec<String> {
 /// The message's draft with `sets` applied in order — each set's statement of
 /// a name resolved against what the sets before it left — or `None` where the
 /// message already carries the result. Names compare case-insensitively;
-/// `carried` reads the message's lines of a name, `thaw` opens its draft.
+/// `carried` reads the message's lines of a name, `thaw` opens its draft. A
+/// name whose resolved lines the wire cannot carry whole keeps its carried
+/// lines, its refusal pushed onto `skipped`.
 fn restated<D: Draft>(
     sets: &[&SipHeaderUpdates],
     carried: impl Fn(HeaderName) -> Vec<String>,
     thaw: impl FnOnce() -> D,
+    skipped: &mut Vec<WriteRefusal>,
 ) -> Option<D> {
     let mut names: Vec<&str> = Vec::new();
     for name in sets.iter().flat_map(|set| set.keys()) {
@@ -176,8 +211,12 @@ fn restated<D: Draft>(
                 lines = applied(update, lines);
             }
         }
-        if lines != start {
-            edits.push((header, lines));
+        if lines == start {
+            continue;
+        }
+        match lines.iter().try_for_each(|l| write_check::header_line(header.as_wire_str(), l)) {
+            Ok(()) => edits.push((header, lines)),
+            Err(refusal) => skipped.push(refusal),
         }
     }
     if edits.is_empty() {
@@ -194,6 +233,7 @@ fn restated<D: Draft>(
 /// draft.
 trait Draft: Sized {
     fn remove_all(self, name: &HeaderName) -> Self;
+    /// Append a line [`restated`] has already checked the wire carries whole.
     fn push_line(self, name: HeaderName, line: String) -> Self;
 }
 
@@ -207,35 +247,49 @@ impl<S: StartKind> Draft for sip_message::draft::Draft<S> {
 }
 
 /// The INVITE `effect` mints on `leg`, with every add of `adds` whose name it
-/// carries no line of; the leg's handles hold the INVITE as it leaves.
+/// carries no line of; the leg's handles hold the INVITE as it leaves. Hands
+/// back the adds skipped.
+#[must_use]
 pub fn add_to_minted(
     leg: &mut call::Leg,
     effect: &mut OutboundSipEffect,
     adds: &[(String, Vec<String>)],
-) {
+) -> Vec<WriteRefusal> {
+    let mut skipped = Vec::new();
     if adds.is_empty() {
-        return;
+        return skipped;
     }
     if let OutboundBody::Request(req) = &mut effect.body {
         let was = req.image().to_vec();
-        *req = with_adds(req.clone(), adds);
+        *req = with_adds(req.clone(), adds, &mut skipped);
         call::helpers::restate_leg_invite(leg, &was, req.image());
     }
+    skipped
 }
 
 /// `req` with every add of `adds` whose name it carries no line of: the
-/// lines a builder states only where the built message lacks the name.
-pub fn with_adds(req: SipRequest, adds: &[(String, Vec<String>)]) -> SipRequest {
+/// lines a builder states only where the built message lacks the name. An
+/// add skipped is pushed onto `skipped`.
+pub fn with_adds(
+    req: SipRequest,
+    adds: &[(String, Vec<String>)],
+    skipped: &mut Vec<WriteRefusal>,
+) -> SipRequest {
     let set = as_adds(adds);
-    restated(&[&set], |name| carried(req.raw(name)), || req.thaw())
+    restated(&[&set], |name| carried(req.raw(name)), || req.thaw(), skipped)
         .and_then(|d| d.freeze().ok())
         .unwrap_or(req)
 }
 
-/// `resp` with every add of `adds` whose name it carries no line of.
-pub fn response_with_adds(resp: SipResponse, adds: &[(String, Vec<String>)]) -> SipResponse {
+/// `resp` with every add of `adds` whose name it carries no line of. An add
+/// skipped is pushed onto `skipped`.
+pub fn response_with_adds(
+    resp: SipResponse,
+    adds: &[(String, Vec<String>)],
+    skipped: &mut Vec<WriteRefusal>,
+) -> SipResponse {
     let set = as_adds(adds);
-    restated(&[&set], |name| carried(resp.raw(name)), || resp.thaw())
+    restated(&[&set], |name| carried(resp.raw(name)), || resp.thaw(), skipped)
         .and_then(|d| d.freeze().ok())
         .unwrap_or(resp)
 }

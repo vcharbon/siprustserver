@@ -65,6 +65,7 @@ pub mod site;
 pub mod sniff;
 pub mod trace_sample;
 pub mod worker_report;
+pub mod write_check;
 
 /// The body and image type the public surface hands out and takes back.
 pub use bytes::Bytes;

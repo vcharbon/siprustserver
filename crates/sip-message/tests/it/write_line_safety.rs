@@ -75,6 +75,48 @@ fn a_clean_draft_freezes_and_agrees_with_its_reparse() {
     frozen_agrees_with_reparse(SipMessage::Request(msg));
     let resp = response().thaw().with_status(486, "Busy Here").freeze().expect("freeze");
     frozen_agrees_with_reparse(SipMessage::Response(resp));
+    let generated = generate_response(&request(), 180, "Ringing", &GenerateResponseOpts::default())
+        .expect("generate");
+    frozen_agrees_with_reparse(SipMessage::Response(generated));
+}
+
+/// A typed value's text reaches the wire escaped as its position asks: a
+/// control byte in a display name is a `quoted-pair`, and the name reads
+/// back unchanged.
+#[test]
+fn typed_text_freezes_escaped_and_reads_back_unchanged() {
+    let from = request().from().clone().with_display("Ali\"ce \\ \u{1}");
+    let to = request().to().clone().with_param("x", ParamValue::text("a b;c"));
+    let contact = header::Contact::from_uri(Uri::sip_user("alice", "192.0.2.10"));
+    let msg = request().thaw().set(from).set(to).set(contact).freeze().expect("freeze");
+    assert_eq!(msg.from().display(), Some("Ali\"ce \\ \u{1}"));
+    let reparsed = match CustomParser::new().parse(msg.image()) {
+        Ok(SipMessage::Request(r)) => r,
+        other => panic!("re-parses: {other:?}"),
+    };
+    assert_eq!(reparsed.from().display(), Some("Ali\"ce \\ \u{1}"));
+    assert_eq!(reparsed.to().params().value("x"), Some("a b;c"));
+    frozen_agrees_with_reparse(SipMessage::Request(msg));
+}
+
+/// A line stated from outside the stack is refused before it is written, so
+/// a caller skips that line alone.
+#[test]
+fn a_checked_raw_entry_refuses_what_the_wire_cannot_carry() {
+    use sip_message::draft::Entry;
+    assert!(Entry::checked_raw(HeaderName::from("X-Ok"), "fine").is_ok());
+    for (name, value) in [
+        ("X-Test", format!("ok\r\n{INJECTED_VIA}")),
+        ("X-Test", "a\rb".to_string()),
+        ("X-Test", "a\0b".to_string()),
+        ("X/Bad", "value".to_string()),
+        ("X-A: b\r\nVia", "value".to_string()),
+    ] {
+        assert!(
+            Entry::checked_raw(HeaderName::from(name), value.as_str()).is_err(),
+            "{name:?}: {value:?}"
+        );
+    }
 }
 
 /// The 2-Via split: the value's CRLF would start a Via line the frozen object

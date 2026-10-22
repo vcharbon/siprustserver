@@ -80,7 +80,10 @@ pub(super) async fn admit(
     let Ok(mut answer) = answer else { return Gate::Answered { answer: None, in_order } };
     // An in-call answer is a message of the leg it resolved to: it takes the
     // call's stated headers.
-    crate::rules::stated_headers::stamp_response(call, leg_id, &mut answer);
+    for skipped in crate::rules::stated_headers::stamp_response(call, leg_id, &mut answer) {
+        let detail = format!("stated header: {skipped}");
+        crate::model_invariants::stated_text_skipped(&ctx.metrics, call, &detail);
+    }
     let _ = ctx.txn.send_response(answer.clone(), *src).await;
     Gate::Answered { answer: Some(Box::new(answer)), in_order }
 }

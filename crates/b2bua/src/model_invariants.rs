@@ -79,7 +79,7 @@ pub const INVARIANTS: &[(&str, Check)] = &[
 /// Every name a violation is counted under: each invariant of
 /// [`INVARIANTS`], then each defect a turn reports
 /// ([`crate::turn_notes::DEFECTS`]), in that order.
-pub const NAMES: [&str; 25] = [
+pub const NAMES: [&str; 26] = [
     "dialog-named-once",
     "one-confirmed-dialog-per-leg",
     "confirmed-a-leg-one-dialog",
@@ -105,6 +105,7 @@ pub const NAMES: [&str; 25] = [
     crate::turn_notes::TERMINATION_RECORDED,
     crate::turn_notes::KEEPALIVE_WITHIN_CADENCE,
     crate::turn_notes::REQUEST_KEEPS_ITS_LEG,
+    crate::turn_notes::STATED_TEXT_FITS,
 ];
 
 /// Check every invariant on `turn`, reporting each one violated, named with
@@ -130,6 +131,16 @@ pub fn defect(metrics: &B2buaMetrics, defect: &Defect) {
     report(metrics, defect.name, &defect.call.call_ref, head, &defect.detail, || {
         format!("{:#?}", defect.call)
     });
+}
+
+/// Report text stated from outside the stack that `call`'s message could not
+/// carry and left out, `detail` naming it, as the defect
+/// [`crate::turn_notes::STATED_TEXT_FITS`]: kept in the record, logged and
+/// counted on `metrics`.
+pub fn stated_text_skipped(metrics: &B2buaMetrics, call: &Call, detail: &str) {
+    let name = crate::turn_notes::STATED_TEXT_FITS;
+    let head = format!("model defect {name}: {detail}");
+    report(metrics, name, &call.call_ref, head, detail, || format!("{call:#?}"));
 }
 
 /// One violation of `name` on `call_ref`, headed `head` with `detail`: kept

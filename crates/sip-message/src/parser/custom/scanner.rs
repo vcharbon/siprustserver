@@ -50,17 +50,48 @@ pub fn span_text<'a>(image: &'a str, span: &Span) -> Result<&'a str, SipParseErr
         .ok_or_else(|| SipParseError::new(format!("span {span:?} outside the message image")))
 }
 
-/// Where the header block ends and how many lines it holds.
+/// Where the header block ends, how many lines it holds, and the first line
+/// break in it that is no CRLF.
 pub struct HeaderBlock {
     /// Byte offset just past the blank line, in raw-datagram coordinates.
     pub end: usize,
     /// Line count, including the start line — the header list's capacity.
     pub lines: usize,
+    /// The first CR or LF that is not half of a CRLF, if any.
+    pub bare_break: Option<BareBreak>,
+}
+
+/// A CR or LF standing alone where only CRLF ends a line (RFC 3261 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BareBreak {
+    /// Its offset in the datagram.
+    pub at: usize,
+    /// `CR` or `LF`.
+    pub byte: u8,
+}
+
+impl BareBreak {
+    /// The refusal of a message holding this break: its line structure is in
+    /// doubt, so no response can answer it.
+    pub fn refusal(&self) -> SipParseError {
+        let name = if self.byte == CR { "CR" } else { "LF" };
+        SipParseError::new(format!(
+            "bare {name} at position {}: a header line ends with CRLF (RFC 3261 §7)",
+            self.at
+        ))
+    }
 }
 
 /// Locate the blank line that ends the header block — the message's
-/// header/body split. `end` is `raw.len()` when the datagram ends without a
-/// blank line (the lenient EOF case [`Scanner::at_end_of_headers`] accepts).
+/// header/body split — and the first bare CR or LF before it. `end` is
+/// `raw.len()` when the datagram ends without a blank line (the lenient EOF
+/// case [`Scanner::at_end_of_headers`] accepts).
+///
+/// A header line ends with CRLF and nowhere else; the parser refuses a block
+/// holding a bare CR or LF here, before any line of it is read, so no reader
+/// past this point meets one (ADR-0053). The block still ends at the first
+/// empty line however it is terminated, the head end [`crate::sniff::head_end`]
+/// shares.
 ///
 /// Splitting first is what lets the body stay raw bytes while the header block
 /// alone becomes the decoded text image: a binary body can never be mangled by
@@ -69,15 +100,20 @@ pub struct HeaderBlock {
 pub fn header_block(raw: &[u8]) -> HeaderBlock {
     let mut s = Scanner::new(raw);
     let mut lines: usize = 0;
+    let mut bare_break = None;
     loop {
         if s.at_end() {
-            return HeaderBlock { end: raw.len(), lines };
+            return HeaderBlock { end: raw.len(), lines, bare_break };
         }
         let line = s.take_while(|b| b != CR && b != LF);
-        s.skip_if(CR);
-        s.skip_if(LF);
+        let at = s.pos();
+        let cr = s.skip_if(CR);
+        let lf = s.skip_if(LF);
+        if cr != lf && bare_break.is_none() {
+            bare_break = Some(BareBreak { at, byte: if cr { CR } else { LF } });
+        }
         if line.is_empty() {
-            return HeaderBlock { end: s.pos(), lines };
+            return HeaderBlock { end: s.pos(), lines, bare_break };
         }
         lines = lines.saturating_add(1);
     }
@@ -192,31 +228,28 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// The line ending at the cursor, as its length: CRLF, or a bare LF
-    /// (lenient). `None` elsewhere.
-    fn eol_len(&self) -> Option<usize> {
-        match self.peek()? {
-            CR if self.peek_at(1) == Some(LF) => Some(2),
-            LF => Some(1),
-            _ => None,
-        }
+    /// Whether a line ends at the cursor: CRLF, the only line end (RFC 3261
+    /// §7). A bare CR or LF never reaches a reader: [`header_block`] finds it
+    /// first and the message is refused.
+    fn at_crlf(&self) -> bool {
+        self.peek() == Some(CR) && self.peek_at(1) == Some(LF)
     }
 
     /// Read the rest of the line until CRLF, unfolding continuation lines
-    /// (CRLF + WSP) to a single SP. Consumes the final CRLF. Accepts bare LF.
-    /// An unfolded line is the only shape that cannot be expressed as a span.
-    /// One pass, constant stack: each line is copied once into the unfolded
-    /// value, whatever the number of continuation lines.
+    /// (CRLF + WSP) to a single SP. Consumes the final CRLF. An unfolded line
+    /// is the only shape that cannot be expressed as a span. One pass,
+    /// constant stack: each line is copied once into the unfolded value,
+    /// whatever the number of continuation lines.
     pub fn read_header_value(&mut self) -> Result<HeaderValue, SipParseError> {
         let mut line = self.pos;
         let mut unfolded: Option<String> = None;
         while !self.at_end() {
-            let Some(eol) = self.eol_len() else {
+            if !self.at_crlf() {
                 self.bump(1);
                 continue;
-            };
+            }
             let end = self.pos;
-            self.bump(eol);
+            self.bump(2);
             if !self.peek().is_some_and(is_wsp) {
                 return self.finish_value(line..end, unfolded);
             }
@@ -254,10 +287,10 @@ impl<'a> Scanner<'a> {
         })
     }
 
-    /// Expect and consume CRLF (also accepts bare LF). Errors otherwise.
+    /// Expect and consume CRLF. Errors otherwise.
     pub fn expect_crlf(&mut self) -> Result<(), SipParseError> {
-        self.skip_if(CR);
-        if self.skip_if(LF) {
+        if self.at_crlf() {
+            self.bump(2);
             return Ok(());
         }
         Err(SipParseError::new(format!("Expected CRLF at position {}", self.pos)))
@@ -276,16 +309,17 @@ impl<'a> Scanner<'a> {
     }
 
     /// At the blank line marking end of headers? (Each header's trailing CRLF
-    /// is already consumed by `read_header_value`, so this is a single CRLF /
-    /// bare LF — or EOF.)
+    /// is already consumed by `read_header_value`, so this is a single CRLF —
+    /// or EOF.)
     pub fn at_end_of_headers(&self) -> bool {
-        self.at_end() || self.eol_len().is_some()
+        self.at_end() || self.at_crlf()
     }
 
-    /// Consume the blank line (single CRLF or bare LF).
+    /// Consume the blank line's CRLF.
     pub fn consume_end_of_headers(&mut self) {
-        self.skip_if(CR);
-        self.skip_if(LF);
+        if self.at_crlf() {
+            self.bump(2);
+        }
     }
 }
 

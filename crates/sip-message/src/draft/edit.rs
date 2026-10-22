@@ -14,6 +14,7 @@ use crate::error::SipParseError;
 use crate::header::{ContentLength, HeaderName, HeaderValue, MediaType, Via};
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
+use crate::write_check::WriteRefusal;
 
 use super::entry::Entry;
 use super::list::HeaderList;
@@ -29,6 +30,9 @@ pub enum IncompleteDraft {
     Missing(Vec<HeaderName>),
     /// A header is present but does not read as the value its name promises.
     Unreadable(SipParseError),
+    /// A line cannot be written whole: a header name off `token`, or a CR or
+    /// LF inside the start line or a header value (ADR-0053).
+    Unwritable(WriteRefusal),
 }
 
 impl std::fmt::Display for IncompleteDraft {
@@ -42,6 +46,7 @@ impl std::fmt::Display for IncompleteDraft {
                 Ok(())
             }
             IncompleteDraft::Unreadable(e) => write!(f, "draft header is unreadable: {}", e.reason),
+            IncompleteDraft::Unwritable(e) => write!(f, "draft line is unwritable: {e}"),
         }
     }
 }
@@ -149,17 +154,20 @@ impl<S: StartKind> Draft<S> {
         self
     }
 
-    /// Append a line whose value is carried verbatim: not parsed, not
-    /// validated, memcpy'd at freeze exactly as it was given. This is how a
+    /// Append a line whose value is carried verbatim: not parsed, memcpy'd at
+    /// freeze exactly as it was given. This is how a
     /// value the model has no type for reaches the wire — an extension header,
     /// a line echoed octet for octet from the message being answered or
     /// relayed, an option a caller states as text — and it is the seam every
     /// generator recipe lowers such a value onto.
     ///
     /// `freeze` still gates the mandatory headers and reads the ones the typed
-    /// core comes from, so a raw line in one of those fails the freeze; a value
+    /// core comes from, so a raw line in one of those, or one holding a CR or
+    /// LF, fails the freeze; a value
     /// that must go out invalid leaves through
-    /// [`render_unchecked`](Self::render_unchecked).
+    /// [`render_unchecked`](Self::render_unchecked). A line from outside the
+    /// stack goes in through [`Entry::checked_raw`], which refuses it before
+    /// it is written, so only that line is lost.
     pub fn push_raw(mut self, name: HeaderName, value: impl Into<SipStr>) -> Self {
         self.entries.push(Entry::raw(name, value));
         self
@@ -292,13 +300,16 @@ impl<S: StartKind> Draft<S> {
 
     // --- leaving the draft ---
 
-    /// The message. Fails only when a mandatory header is absent, or when a
+    /// The message. Fails only when a mandatory header is absent, when a
     /// header present on the draft cannot be read as the value its name
-    /// promises.
+    /// promises, or when a line cannot be written whole.
     pub fn freeze(self) -> Result<S::Message, IncompleteDraft> {
         let draft = self.complete()?;
 
         let rendered = render::<S>(&draft.start, &draft.entries, &draft.body);
+        if let Some(refusal) = rendered.refusal {
+            return Err(IncompleteDraft::Unwritable(refusal));
+        }
         let outside = || {
             IncompleteDraft::Unreadable(SipParseError::new(
                 "the render's body offset is past its bytes",
@@ -325,11 +336,14 @@ impl<S: StartKind> Draft<S> {
     /// never reads. Byte-identical to `freeze()?.raw`.
     pub fn freeze_bytes(self) -> Result<Bytes, IncompleteDraft> {
         let draft = self.complete()?;
-        Ok(Bytes::from(render_bytes::<S>(&draft.start, &draft.entries, &draft.body)))
+        render_bytes::<S>(&draft.start, &draft.entries, &draft.body)
+            .map(Bytes::from)
+            .map_err(IncompleteDraft::Unwritable)
     }
 
     /// The wire bytes of this draft in whatever state it is in: no mandatory
-    /// header check, no Content-Length correction, no typed message produced.
+    /// header check, no line check, no Content-Length correction, no typed
+    /// message produced.
     /// Invalidity can leave the stack this way and no other, which is what
     /// keeps "a typed message is always valid" true.
     ///

@@ -17,7 +17,7 @@ use sip_message::SipRequest;
 use crate::config::B2buaConfig;
 use crate::decision::{header_lines, no_answer_deadline};
 use crate::destination_allowlist::{classify_admission, AdmissionVerdict};
-use crate::effects::{HandlerEffects, HandlerResult};
+use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
 use crate::rules::capabilities;
 use crate::rules::relay;
 use crate::timer_arm::arm;
@@ -247,7 +247,9 @@ pub fn admitted(
     // A decision field that does not read has no destination behind it: refuse
     // the route rather than originate toward a fabricated address. The
     // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
-    // field; the malformed text itself stays off the wire.
+    // field; the malformed text itself stays off the wire. A stated line the
+    // wire cannot carry whole is left off the INVITE and reported.
+    let mut skipped = Vec::new();
     let (mut leg, mut effect) = match relay::build_b_leg(
         relay::CallMarks::of(&call),
         leg_id,
@@ -267,6 +269,7 @@ pub fn admitted(
         None,
         call.a_leg.invite_final_sent.is_none(),
         now_ms,
+        &mut skipped,
     ) {
         Ok(built) => built,
         Err(err) => {
@@ -292,7 +295,12 @@ pub fn admitted(
 
     // The route's adds yield to the INVITE as minted.
     let adds = route.update_headers.as_ref().map(b2bua_sdk::header_update::header_adds);
-    crate::rules::stated_headers::add_to_minted(&mut leg, &mut effect, &adds.unwrap_or_default());
+    skipped.extend(crate::rules::stated_headers::add_to_minted(
+        &mut leg,
+        &mut effect,
+        &adds.unwrap_or_default(),
+    ));
+    fx.buffered.extend(BufferedObservabilityEffect::skipped("routed INVITE", skipped));
 
     // After the mint read the armed strategy's withhold: the fallback the
     // INVITE was minted under is the one the call now runs.

@@ -7,7 +7,7 @@ use call::helpers::{add_cdr_event, add_originated_b_leg};
 use call::{Call, CdrEvent, LegKind, TerminationCause};
 use sip_message::header::HeaderName;
 
-use crate::effects::HandlerEffects;
+use crate::effects::{BufferedObservabilityEffect, HandlerEffects};
 use crate::rules::capabilities;
 use crate::rules::relay;
 use b2bua_sdk::model::{AttemptOpening, Body, RuleContext};
@@ -79,6 +79,8 @@ impl ActionExecutor<'_> {
         // decision can name no destination: an address field that does not read.
         // The leg is not created and no INVITE goes out — originating on
         // a fabricated target would dial an address the decision never stated.
+        // A stated line the wire cannot carry whole is left off and reported.
+        let mut skipped = Vec::new();
         let (mut leg, mut effect) = match relay::build_b_leg(
             relay::CallMarks::of(call),
             &leg_id,
@@ -98,6 +100,7 @@ impl ActionExecutor<'_> {
             kind,
             call.a_leg.invite_final_sent.is_none(),
             self.now_ms,
+            &mut skipped,
         ) {
             Ok(built) => built,
             Err(err) => {
@@ -128,7 +131,12 @@ impl ActionExecutor<'_> {
             &mut leg,
             &mut effect,
         );
-        crate::rules::stated_headers::add_to_minted(&mut leg, &mut effect, header_adds);
+        skipped.extend(crate::rules::stated_headers::add_to_minted(
+            &mut leg,
+            &mut effect,
+            header_adds,
+        ));
+        fx.buffered.extend(BufferedObservabilityEffect::skipped("originated INVITE", skipped));
         let author = match body_override {
             Some(body) => relay::Author::from(&body.author),
             None => relay::Author::Leg(&call.a_leg.leg_id),

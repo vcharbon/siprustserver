@@ -93,11 +93,15 @@ pub(crate) fn read_quoted(base: &SipStr, mut i: usize) -> (SipStr, usize) {
 }
 
 /// The position after the `"` closing the quoted string opened at byte
-/// `open`, a `\` escaping the byte after it; `None` when nothing closes it.
+/// `open`, a `\` escaping the byte after it; `None` when nothing closes it
+/// before a CR or LF, escaped or not (RFC 3261 §25.1: `qdtext` and
+/// `quoted-pair` exclude both).
 pub(crate) fn quoted_close(s: &[u8], open: usize) -> Option<usize> {
     let mut i = open + 1;
     loop {
         match byte_at(s, i)? {
+            b'\r' | b'\n' => return None,
+            b'\\' if matches!(byte_at(s, i + 1), Some(b'\r' | b'\n')) => return None,
             b'\\' => i += 2,
             b'"' => return Some(i + 1),
             _ => i += 1,

@@ -42,9 +42,13 @@ pub const KEEPALIVE_WITHIN_CADENCE: &str = "keepalive-armed-within-one-cadence";
 /// The leg an in-dialog request was being built for left the record while
 /// it was built; the request is not sent.
 pub const REQUEST_KEEPS_ITS_LEG: &str = "request-keeps-its-leg";
+/// Text stated from outside the stack did not fit its place on the wire and
+/// was left out of the message
+/// ([`crate::effects::BufferedObservabilityEffect::StatedTextSkipped`]).
+pub const STATED_TEXT_FITS: &str = "stated-text-fits-its-position";
 
 /// Every defect a turn reports, by name.
-pub const DEFECTS: [&str; 9] = [
+pub const DEFECTS: [&str; 10] = [
     PRACK_HAS_A_LEG,
     PRACK_HAS_A_DIALOG,
     UNDECLARED_TRANSITION,
@@ -54,6 +58,7 @@ pub const DEFECTS: [&str; 9] = [
     TERMINATION_RECORDED,
     KEEPALIVE_WITHIN_CADENCE,
     REQUEST_KEEPS_ITS_LEG,
+    STATED_TEXT_FITS,
 ];
 
 /// A defect a turn met mid-way: a step that found the record unable to carry

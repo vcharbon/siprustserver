@@ -143,6 +143,7 @@ Content-Length: 0\r\n\r\n";
             None,
             true,
             0,
+            &mut Vec::new(),
         )
     }
 

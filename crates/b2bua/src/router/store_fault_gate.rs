@@ -99,7 +99,10 @@ pub(super) async fn refuse_on_store_fault(
         .flatten();
     if let Some(mut resp) = refusal {
         if let Some(call) = resident {
-            crate::rules::stated_headers::stamp_answer(call, req, &mut resp);
+            for skipped in crate::rules::stated_headers::stamp_answer(call, req, &mut resp) {
+                let detail = format!("stated header: {skipped}");
+                crate::model_invariants::stated_text_skipped(&ctx.metrics, call, &detail);
+            }
         }
         let _ = ctx.txn.send_response(resp, src).await;
     }

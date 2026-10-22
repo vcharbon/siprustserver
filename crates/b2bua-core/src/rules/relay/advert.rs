@@ -142,6 +142,7 @@ CSeq: 314 INVITE\r\n"
             None,
             true,
             0,
+            &mut Vec::new(),
         )
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
@@ -389,6 +390,7 @@ Content-Length: 0\r\n\r\n";
             None,
             true,
             0,
+            &mut Vec::new(),
         )
         .expect("nothing to refuse");
         let OutboundBody::Request(out) = effect.body else { panic!("a request") };
@@ -421,6 +423,7 @@ Content-Length: 0\r\n\r\n";
             None,
             true,
             0,
+            &mut Vec::new(),
         )
         .expect("nothing to refuse");
         let OutboundBody::Request(out) = effect.body else { panic!("a request") };

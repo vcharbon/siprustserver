@@ -94,6 +94,9 @@ enum Line {
 /// canonical names). Used to recover the captured name-form for near-verbatim
 /// replay after the parser has already canonicalized `SipHeader.name`.
 pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<String> {
+    if super::scanner::header_block(raw).bare_break.is_some() {
+        return Vec::new();
+    }
     let image = decode(raw);
     let mut s = Scanner::new(image.as_bytes());
     if super::start_line::parse_start_line(&mut s, &image, limits).is_err() {
@@ -274,12 +277,6 @@ fn gate_refusal(
         return Some(SipParseError::new(format!("Unterminated quoted-string in {name} header")));
     }
 
-    // A quoted-string holds no CR or LF but its folding, which the split has
-    // already unfolded (RFC 3261 §25.1 qdtext and quoted-pair).
-    if is_quoted_string_header(known) && has_line_break_in_quotes(value) {
-        return Some(SipParseError::new(format!("CR or LF in a quoted-string in {name} header")));
-    }
-
     // Digest credentials must be comma-separated name=value pairs
     // (CVE-2023-28098).
     if is_authorization_header(known) && !is_valid_digest_credentials(value) {
@@ -312,26 +309,6 @@ fn is_quoted_string_header(name: &HeaderName) -> bool {
 
 fn is_authorization_header(name: &HeaderName) -> bool {
     matches!(name, HeaderName::Authorization | HeaderName::ProxyAuthorization)
-}
-
-/// True iff a CR or LF stands inside a quoted-string of `value`, escaped or
-/// not.
-fn has_line_break_in_quotes(value: &str) -> bool {
-    let mut in_quote = false;
-    let mut escaped = false;
-    for c in value.bytes() {
-        if in_quote && (c == CR || c == LF) {
-            return true;
-        }
-        if escaped {
-            escaped = false;
-        } else if in_quote && c == b'\\' {
-            escaped = true;
-        } else if c == b'"' {
-            in_quote = !in_quote;
-        }
-    }
-    false
 }
 
 /// True iff `value` contains an unterminated quoted-string. Inside a quote,
