@@ -209,6 +209,7 @@ mod spiral_through_a_forking_proxy;
 mod spiral_through_a_third_party_proxy;
 mod spiral_through_the_front_proxy;
 mod stated_headers;
+mod stated_line_safety;
 mod stated_refusal;
 mod stateful_proxy_fixture;
 mod store_fault;
