@@ -16,6 +16,7 @@ mod generators;
 mod header_cardinality;
 mod header_registry_typing;
 mod header_round_trip;
+mod host_grammar;
 mod invalid_request;
 mod lazy_headers;
 mod line_endings;
