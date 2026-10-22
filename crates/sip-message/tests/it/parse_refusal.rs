@@ -164,11 +164,55 @@ fn the_split_reads_past_a_line_breaking_the_grammar() {
     assert!(err.partial().is_some(), "the five after the bad line still read: {err:?}");
 }
 
+/// A line whose name does not read may have been one of the five: no partial.
 #[test]
-fn the_split_reads_past_a_name_with_an_illegal_byte() {
+fn a_line_whose_name_does_not_read_leaves_no_partial() {
     let err = refusal(&invite_with(&["X-B\u{1}ad: x"]));
     assert!(err.reason.starts_with("Illegal byte 0x1"), "{}", err.reason);
-    assert!(err.partial().is_some(), "{err:?}");
+    assert!(err.partial().is_none(), "{err:?}");
+}
+
+/// The real top Via under a name that does not read, above a good Via: the
+/// 400 would go up the wrong hop.
+#[test]
+fn a_via_whose_name_does_not_read_leaves_no_partial() {
+    let lines: Vec<String> = invite_lines("INVITE sip:bob@example.com SIP/2.0", &[])
+        .into_iter()
+        .flat_map(|l| {
+            if l.starts_with("Via:") {
+                vec!["Via\u{1}: SIP/2.0/UDP 192.0.2.99;branch=z9hG4bK-real-top".to_string(), l]
+            } else {
+                vec![l]
+            }
+        })
+        .collect();
+    let err = refusal(&wire(&lines));
+    assert!(err.partial().is_none(), "{err:?}");
+}
+
+#[test]
+fn a_header_name_that_is_no_token_leaves_no_partial() {
+    let err = refusal(&invite_with(&["T(o: <sip:mallory@example.com>"]));
+    assert!(err.reason.starts_with("Header name is not a token"), "{}", err.reason);
+    assert!(err.partial().is_none(), "{err:?}");
+}
+
+/// A CSeq naming another method than the request line answers no client
+/// transaction: the request is refused unanswered.
+#[test]
+fn a_cseq_naming_another_method_leaves_no_partial() {
+    let err = refusal(&invite_replacing("CSeq", "CSeq: 1 ACK"));
+    assert!(err.reason.contains("does not match request method"), "{}", err.reason);
+    assert!(err.partial().is_none(), "{err:?}");
+}
+
+/// RFC 3261 §25.1: a quoted-string admits no CR or LF but its folding, which
+/// the split has already unfolded.
+#[test]
+fn a_bare_cr_in_a_quoted_display_name_is_refused() {
+    let err =
+        refusal(&invite_replacing("From", "From: \"Ali\rce\" <sip:alice@example.com>;tag=a1"));
+    assert!(err.partial().is_none(), "the From is not echoed: {err:?}");
 }
 
 #[test]

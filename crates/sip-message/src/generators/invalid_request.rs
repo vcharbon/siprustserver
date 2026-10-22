@@ -29,6 +29,7 @@ pub fn generate_invalid_request(
     reason: &str,
     warn_agent: &str,
     to_tag: &str,
+    _source: &(String, u16),
 ) -> Result<SipResponse, GenerateError> {
     let mut draft =
         ResponseDraft::new(INVALID_REQUEST_STATUS, SipStr::from_static(INVALID_REQUEST_REASON));

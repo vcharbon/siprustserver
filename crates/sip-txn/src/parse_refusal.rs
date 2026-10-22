@@ -62,7 +62,14 @@ impl ParseRefusalCap {
         if self.bucket.try_take(now).is_err() {
             return ParseRefusal::Capped;
         }
-        match generate_invalid_request(partial, &error.reason, warn_agent, &to_tag(partial)) {
+        let source = (String::new(), 0);
+        match generate_invalid_request(
+            partial,
+            &error.reason,
+            warn_agent,
+            &to_tag(partial),
+            &source,
+        ) {
             Ok(response) => ParseRefusal::Answer(Box::new(response)),
             Err(_) => ParseRefusal::Dropped,
         }

@@ -9,6 +9,7 @@ use crate::common;
 use common::*;
 use sip_message::{CustomParser, HeaderName, SipMessage, SipParser, SipResponse};
 use sip_txn::parse_refusal::PARSE_REFUSAL_BURST;
+use sip_txn::TransactionConfig;
 
 const TRANSIT: u64 = 5;
 
@@ -92,12 +93,37 @@ async fn a_malformed_invite_is_answered_400_each_copy_and_its_ack_draws_nothing(
     stack.inject(&ack_to_400("z9hG4bK-bad-1", &tags[0])).await;
     elapse_ms(2 * TRANSIT + 1).await;
     assert!(drain_raw(&stack).is_empty(), "the ACK draws nothing");
+    assert!(stack.drain_events().is_empty(), "the ACK to the layer's own 400 ends here");
     assert_eq!(stack.txn.metrics().active_transactions(), 0, "the ACK opens none");
 
     let m = stack.txn.metrics();
     assert_eq!(m.parse_refusals_answered(), 2);
     assert_eq!(m.parse_refusals_capped(), 0);
     assert_eq!(m.parse_errors(), 0, "no refusal dropped");
+}
+
+/// The warn-agent is the advertised address, not the bind address; the top
+/// Via records the packet's source (RFC 3581 §4).
+#[tokio::test(start_paused = true)]
+async fn the_400_names_the_advertised_address_and_stamps_the_source() {
+    let config =
+        TransactionConfig { advertised: Some("b2bua.example.com:5070".to_string()), ..config() };
+    let stack = Stack::build_with_config(TRANSIT, 64, config).await;
+    let invite = String::from_utf8(malformed_invite("z9hG4bK-adv", FROM))
+        .unwrap()
+        .replace(";branch=z9hG4bK-adv", ";branch=z9hG4bK-adv;rport");
+    stack.inject(invite.as_bytes()).await;
+    elapse_ms(2 * TRANSIT + 1).await;
+    let sent = drain_raw(&stack);
+    assert_eq!(sent.len(), 1, "answered");
+    let resp = response(&sent[0]);
+    let warning: Vec<_> = resp.raw_text(HeaderName::Warning).collect();
+    assert!(
+        warning[0].as_str().starts_with("399 b2bua.example.com:5070 \""),
+        "{}",
+        warning[0].as_str()
+    );
+    assert_eq!(resp.top_via().rport(), Some(sip_message::header::Rport::Observed(5555)));
 }
 
 #[tokio::test(start_paused = true)]

@@ -1,7 +1,8 @@
 //! The stateless answer to a refused request (RFC 3261 §8.2.6): `400 Invalid
 //! Request`, Via / From / To / Call-ID / CSeq echoed as received, a To-tag
 //! added when the To has none, and a Warning naming the refusal whose
-//! warn-text is printable ASCII, escaped and capped.
+//! warn-text keeps letters, digits, space and plain punctuation, every other
+//! byte replaced, and is capped.
 
 use sip_message::generators::generate_invalid_request;
 use sip_message::header::{warning_value, WARN_TEXT_MAX};
@@ -27,22 +28,27 @@ fn refusal(to: &str) -> SipParseError {
 fn answer(to: &str) -> Vec<u8> {
     let err = refusal(to);
     let partial = err.partial().expect("the five read: a partial");
-    generate_invalid_request(partial, &err.reason, AGENT, "t400").expect("built").image().to_vec()
+    let source = ("198.51.100.7".to_string(), 40000);
+    generate_invalid_request(partial, &err.reason, AGENT, "t400", &source)
+        .expect("built")
+        .image()
+        .to_vec()
 }
 
+/// The top Via records the packet's source (RFC 3261 §18.2.1, RFC 3581 §4).
 #[test]
 fn the_400_echoes_the_five_and_names_the_refusal() {
     let image = String::from_utf8(answer("<sip:bob@example.com>")).expect("text");
     assert_eq!(
         image,
         "SIP/2.0 400 Invalid Request\r\n\
-         Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-refused;rport\r\n\
+         Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-refused;rport=40000;received=198.51.100.7\r\n\
          Via: SIP/2.0/UDP 192.0.2.20:5060;branch=z9hG4bK-lower\r\n\
          From: \"Alice\" <sip:alice@example.com>;tag=a1\r\n\
          To: <sip:bob@example.com>;tag=t400\r\n\
          Call-ID: refused-1@192.0.2.10\r\n\
          CSeq: 7 INVITE\r\n\
-         Warning: 399 192.0.2.1:5060 \"Invalid Max-Forwards numeric value: \\\"abc\\\"\"\r\n\
+         Warning: 399 192.0.2.1:5060 \"Invalid Max-Forwards numeric value: ?abc?\"\r\n\
          Content-Length: 0\r\n\r\n"
     );
 }
@@ -72,33 +78,30 @@ fn warn_text(value: &str) -> &str {
 }
 
 #[test]
-fn quotes_and_backslashes_are_escaped() {
-    assert_eq!(
-        warning_value(399, AGENT, "a \"b\" \\c"),
-        "399 192.0.2.1:5060 \"a \\\"b\\\" \\\\c\""
-    );
+fn letters_digits_space_and_plain_punctuation_are_kept() {
+    let kept = "Az09 .,:;-_()/=+'@[]<>";
+    assert_eq!(warning_value(399, AGENT, kept), format!("399 192.0.2.1:5060 \"{kept}\""));
+}
+
+/// No byte of the reason can close the quoted-string or the header line.
+#[test]
+fn crlf_and_quotes_cannot_break_out_of_the_header() {
+    let value = warning_value(399, AGENT, "a\"\r\nVia: x\\\"");
+    assert_eq!(value, "399 192.0.2.1:5060 \"a???Via: x??\"");
+    assert_eq!(value.matches('"').count(), 2);
+    assert!(!value.contains('\r') && !value.contains('\n'));
+}
+
+/// `%`, `\`, controls and every byte past ASCII become `?`, one per byte.
+#[test]
+fn every_other_byte_becomes_a_question_mark() {
+    assert_eq!(warning_value(399, AGENT, "zo\u{eb}\t%0D\\~"), "399 192.0.2.1:5060 \"zo???0D??\"");
 }
 
 #[test]
-fn bytes_beyond_printable_ascii_are_percent_encoded() {
-    assert_eq!(
-        warning_value(399, AGENT, "zo\u{eb}\t\r\n~"),
-        "399 192.0.2.1:5060 \"zo%C3%AB%09%0D%0A~\""
-    );
-}
-
-#[test]
-fn the_warn_text_is_capped_without_cutting_an_escape() {
-    let quotes = warning_value(399, AGENT, &"\"".repeat(300));
-    let text = warn_text(&quotes);
-    assert!(text.len() <= WARN_TEXT_MAX && text.len() > WARN_TEXT_MAX - 2, "{}", text.len());
-    assert_eq!(text.len() % 2, 0, "each escape whole: {text}");
-
-    let accents = warning_value(399, AGENT, &"\u{eb}".repeat(300));
-    let text = warn_text(&accents);
-    assert!(text.len() <= WARN_TEXT_MAX && text.len() > WARN_TEXT_MAX - 3, "{}", text.len());
-    assert_eq!(text.len() % 3, 0, "each escape whole: {text}");
-
+fn the_warn_text_is_capped() {
     let plain = warning_value(399, AGENT, &"a".repeat(300));
     assert_eq!(warn_text(&plain).len(), WARN_TEXT_MAX);
+    let accents = warning_value(399, AGENT, &"\u{eb}".repeat(300));
+    assert_eq!(warn_text(&accents), "?".repeat(WARN_TEXT_MAX));
 }

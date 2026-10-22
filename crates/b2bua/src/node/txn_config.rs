@@ -37,6 +37,7 @@ pub(super) fn txn_config(
         // The OPTIONS health answer derives its To-tag from the request
         // (`RouterCtx::options_tagger`).
         stateless_options: true,
+        advertised: None,
     };
     txn_config.deferred_bound = Some(
         ceilings.unwrap_or_else(|| crate::admission::deferred_bound(txn_config.event_capacity())),

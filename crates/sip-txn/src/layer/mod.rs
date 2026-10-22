@@ -42,6 +42,7 @@ mod bind;
 mod call_txns;
 mod client;
 mod client_give_up;
+mod config;
 mod events;
 mod handle;
 mod ingress;

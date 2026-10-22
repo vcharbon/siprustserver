@@ -108,7 +108,8 @@ pub fn message(raw: &[u8], d: &mut Digest) {
 /// The 400 answering a refused request, built from its partial.
 fn invalid_request(error: &sip_message::SipParseError, d: &mut Digest) {
     let Some(partial) = error.partial() else { return };
-    let built = generate_invalid_request(partial, &error.reason, "192.0.2.1:5060", "t400");
+    let source = ("198.51.100.7".to_string(), 40000);
+    let built = generate_invalid_request(partial, &error.reason, "192.0.2.1:5060", "t400", &source);
     d.note("invalid-request", &built.map(|r| r.image().to_vec()));
 }
 
