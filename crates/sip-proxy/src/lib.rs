@@ -52,6 +52,7 @@ pub mod core;
 pub mod face;
 pub mod headers;
 pub mod health;
+pub mod intake_shed;
 pub mod liveness;
 pub mod load_observer;
 pub mod observability;

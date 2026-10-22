@@ -6,10 +6,18 @@ use sip_message::Bytes;
 use sip_net::Arrival;
 use std::net::SocketAddr;
 
+use crate::observability::ProxyMetrics;
+
 const WATERMARK: usize = 8;
 
 fn src() -> SocketAddr {
     "192.0.2.9:5060".parse().unwrap()
+}
+
+/// The hook at [`WATERMARK`], and the metrics it counts its drops in.
+fn shed_hook() -> (PreIngressHook, Arc<ProxyMetrics>) {
+    let metrics = Arc::new(ProxyMetrics::new());
+    (intake_shed_hook(WATERMARK, metrics.clone()), metrics)
 }
 
 /// The hook's verdict on `raw` arriving at queue depth `depth`.
@@ -61,39 +69,69 @@ From: <sip:alice@example.com>;tag=a1\r\n\
 To: <sip:bob@example.com>;tag=b2\r\n\
 Call-ID: shed@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
 
+/// Bytes the parser refuses with nothing a 400 could echo.
+const GARBAGE: &[u8] = b"\x00 not SIP";
+
+/// A new INVITE the parser refuses on a gate (a non-numeric Expires) with
+/// every field a 400 echoes intact.
+const ANSWERABLE: &[u8] = b"INVITE sip:bob@192.0.2.20:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-answerable\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: answerable@192.0.2.10\r\nCSeq: 1 INVITE\r\nExpires: x\r\nContent-Length: 0\r\n\r\n";
+
 #[test]
 fn below_the_watermark_everything_is_admitted() {
-    let hook = intake_shed_hook(WATERMARK);
+    let (hook, _) = shed_hook();
     for raw in [NEW_INVITE, IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
         assert_eq!(judge(&hook, raw, WATERMARK - 1), PreIngressAction::Accept);
     }
 }
 
 /// The hook parses every datagram it is given, below the watermark too, and
-/// leaves the parse on the arrival for the core; a datagram the parser
-/// refuses is queued with its refusal, which the core answers or drops.
+/// leaves the parse on the arrival for the core; below the watermark a
+/// datagram the parser refuses is queued with its refusal, which the core
+/// answers or drops.
 #[test]
 fn every_datagram_is_parsed_on_the_receive_path() {
-    let hook = intake_shed_hook(WATERMARK);
+    let (hook, _) = shed_hook();
     for depth in [0, WATERMARK] {
         for raw in [IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
             let mut arrival = Arrival::new(Bytes::from_static(raw));
             assert_eq!(hook(&mut arrival, src(), depth), PreIngressAction::Accept);
             assert!(matches!(arrival.parsed(), Some(Ok(Ok(_)))), "{depth}: {:?}", arrival.parsed());
         }
-        let mut garbage = Arrival::new(Bytes::from_static(b"\x00 not SIP"));
-        assert_eq!(hook(&mut garbage, src(), depth), PreIngressAction::Accept);
-        assert!(matches!(garbage.parsed(), Some(Ok(Err(_)))), "{depth}: {:?}", garbage.parsed());
     }
+    let mut garbage = Arrival::new(Bytes::from_static(GARBAGE));
+    assert_eq!(hook(&mut garbage, src(), 0), PreIngressAction::Accept);
+    assert!(matches!(garbage.parsed(), Some(Ok(Err(_)))), "{:?}", garbage.parsed());
 }
 
 #[test]
-fn at_the_watermark_only_the_new_non_emergency_invite_is_dropped() {
-    let hook = intake_shed_hook(WATERMARK);
+fn at_the_watermark_only_the_new_non_emergency_invite_is_shed() {
+    let (hook, metrics) = shed_hook();
     assert_eq!(judge(&hook, NEW_INVITE, WATERMARK), PreIngressAction::Drop);
     for admitted in [IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
         assert_eq!(judge(&hook, admitted, WATERMARK), PreIngressAction::Accept);
     }
+    assert_eq!((metrics.intake_shed(), metrics.intake_unanswerable()), (1, 0));
+}
+
+/// At the watermark a datagram no response can answer (ADR-0054 §4) is
+/// dropped at intake and counted apart from the shed, and as the parse error
+/// the core would have counted; a refusal a 400 can answer is queued for the
+/// core's capped answer. Below the watermark both are queued.
+#[test]
+fn at_the_watermark_an_unanswerable_datagram_is_dropped_and_an_answerable_one_queued() {
+    let (hook, metrics) = shed_hook();
+    assert_eq!(judge(&hook, GARBAGE, WATERMARK - 1), PreIngressAction::Accept);
+    assert_eq!(judge(&hook, ANSWERABLE, WATERMARK - 1), PreIngressAction::Accept);
+    assert_eq!(judge(&hook, GARBAGE, WATERMARK), PreIngressAction::Drop);
+    assert_eq!(judge(&hook, ANSWERABLE, WATERMARK), PreIngressAction::Accept);
+    assert_eq!(metrics.intake_unanswerable(), 1);
+    assert_eq!(metrics.parse_errors(), 1);
+    assert_eq!(metrics.intake_shed(), 0);
 }
 
 /// The shed reads the To-tag exactly as the parser does (RFC 3261 §20.39,
@@ -103,7 +141,7 @@ fn at_the_watermark_only_the_new_non_emergency_invite_is_dropped() {
 #[test]
 fn the_shed_reads_the_to_tag_as_the_parser_does() {
     use sip_message::{CustomParser, SipMessage, SipParser};
-    let hook = intake_shed_hook(WATERMARK);
+    let (hook, _) = shed_hook();
     let mut misread = Vec::new();
     for (to, tag, verdict) in [
         ("To: \"tag=FAKE\" <sip:bob@example.com>", None, PreIngressAction::Drop),
@@ -126,7 +164,7 @@ fn the_shed_reads_the_to_tag_as_the_parser_does() {
 
 #[test]
 fn deeper_than_the_watermark_still_sheds_new_invites() {
-    let hook = intake_shed_hook(WATERMARK);
+    let (hook, _) = shed_hook();
     assert_eq!(judge(&hook, NEW_INVITE, WATERMARK * 100), PreIngressAction::Drop);
 }
 

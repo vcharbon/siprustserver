@@ -14,6 +14,8 @@ use sip_message::method::Method;
 use super::catalogue;
 
 mod face;
+mod hmac;
+mod intake;
 mod no_target;
 mod parse;
 mod pool;
@@ -21,6 +23,8 @@ mod slots;
 mod udp_shard;
 use crate::resolver::{outcome, refresh_outcome};
 pub use face::{Face, UntrustedClaim};
+pub use hmac::HmacFailureReason;
+use intake::IntakeCounts;
 pub use no_target::NoTargetDrop;
 use parse::ParseCounts;
 use slots::{bump, read};
@@ -91,29 +95,6 @@ impl RoutingDecisionKind {
             RoutingDecisionKind::Cancel => "cancel",
             RoutingDecisionKind::AckHop => "ack_hop",
             RoutingDecisionKind::Reject => "reject",
-        }
-    }
-}
-
-/// Why an HMAC verify failed, for `sip_proxy_hmac_failures_total{reason}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HmacFailureReason {
-    Missing,
-    Decode,
-    Mismatch,
-}
-
-impl HmacFailureReason {
-    /// Every reason, in declaration order.
-    pub const ALL: [HmacFailureReason; 3] =
-        [HmacFailureReason::Missing, HmacFailureReason::Decode, HmacFailureReason::Mismatch];
-
-    /// The `reason` label.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            HmacFailureReason::Missing => "missing",
-            HmacFailureReason::Decode => "decode",
-            HmacFailureReason::Mismatch => "mismatch",
         }
     }
 }
@@ -225,6 +206,8 @@ pub struct ProxyMetrics {
     /// one gauge; rendered as the cross-shard aggregate (sum). Not hot:
     /// written every sweep tick, read at render.
     udp_shards: Mutex<BTreeMap<usize, UdpShardStats>>,
+    /// The datagrams the receive path drops at the intake watermark.
+    intake: IntakeCounts,
     /// The worker pool: health counts, empty, discovery health.
     pool: pool::PoolGauges,
     /// Recv shards currently past the stall threshold (see `liveness`).
@@ -269,6 +252,7 @@ impl Default for ProxyMetrics {
             send_failures: Default::default(),
             parse: Default::default(),
             udp_shards: Default::default(),
+            intake: Default::default(),
             pool: Default::default(),
             recv_shards_stalled: Default::default(),
             face_messages: Default::default(),
@@ -486,6 +470,7 @@ impl ProxyMetrics {
         self.parse.render(&mut s);
         c::POISONED_LOCK_RECOVERIES.render(&mut s, |l| crate::poison::RECOVERIES.count_at(l.at(0)));
         self.udp_totals().render(&mut s);
+        self.intake.render(&mut s);
         c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));
         self.pool.render_pool(&mut s);
 

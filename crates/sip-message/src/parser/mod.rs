@@ -50,6 +50,10 @@ pub struct SipParserLimits {
     pub max_header_length: usize,
     /// Max bytes of the Request-URI in the start line.
     pub max_uri_length: usize,
+    /// Max lines of the header block, the start line and folded continuation
+    /// lines included. It bounds the work and memory one parse can take; a
+    /// message past it is refused before any header is read.
+    pub max_header_lines: usize,
     /// Case-insensitive transport allowlist of the topmost Via, the hop this
     /// element answers. Fail-closed by default.
     pub allowed_transports: BTreeSet<String>,
@@ -82,6 +86,7 @@ impl Default for SipParserLimits {
         Self {
             max_header_length: 2048,
             max_uri_length: 2048,
+            max_header_lines: 100,
             allowed_transports: ["UDP", "TCP", "TLS", "SCTP", "WS", "WSS"]
                 .iter()
                 .map(|s| s.to_string())

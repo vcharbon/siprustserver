@@ -262,11 +262,12 @@ sip-proxy-runner sip_proxy_udp_queue_depth gauge fixed {}
 sip-proxy-runner sip_proxy_udp_queue_max gauge fixed {}
 sip-proxy-runner sip_proxy_udp_enqueued_total counter fixed {}
 sip-proxy-runner sip_proxy_udp_tail_dropped_total counter fixed {}
-sip-proxy-runner sip_proxy_intake_shed_total counter fixed {}
 sip-proxy-runner sip_proxy_udp_send_would_block_total counter fixed {}
 sip-proxy-runner sip_proxy_udp_kernel_rx_dropped_total counter fixed {}
 sip-proxy-runner sip_proxy_udp_pre_ingress_panics_total counter fixed {}
 sip-proxy-runner sip_proxy_udp_recv_errors_total counter fixed {}
+sip-proxy-runner sip_proxy_intake_shed_total counter fixed {}
+sip-proxy-runner sip_proxy_intake_unanswerable_total counter fixed {}
 sip-proxy-runner sip_proxy_recv_shards_stalled gauge fixed {}
 sip-proxy-runner sip_proxy_worker_pool_empty gauge fixed {}
 sip-proxy-runner sip_proxy_discovery_no_client gauge fixed {}

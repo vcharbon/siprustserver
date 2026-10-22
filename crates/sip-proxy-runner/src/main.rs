@@ -241,8 +241,9 @@ async fn run() -> Result<i32, String> {
     // packets against it, so the self-gate's intake age is a difference of two
     // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::checked_system().map_err(|e| e.to_string())?;
+    let metrics = Arc::new(ProxyMetrics::new());
     let Sockets { metrics: metrics_listener, shards, probe: probe_ep } =
-        bind_sockets(&cfg, &clock).await?;
+        bind_sockets(&cfg, &clock, &metrics).await?;
 
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(
@@ -252,7 +253,6 @@ async fn run() -> Result<i32, String> {
         .map_err(|e| format!("bad PROXY_HMAC_KEY: {e}"))?,
     );
     let observer = Arc::new(WorkerLoadObserver::new(cfg.observer));
-    let metrics = Arc::new(ProxyMetrics::new());
     let id_gen = Arc::new(entropy::keyed_id_gen()?);
 
     // Proxy-self ELU/CPS admission gate. On by default; the ELU

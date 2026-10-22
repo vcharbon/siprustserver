@@ -11,6 +11,7 @@
 //! not look identical to one that asked for nothing.
 
 use crate::header::HeaderName;
+use crate::sip_str::SipStr;
 use crate::types::SipRequest;
 
 /// The wire name of the sampling-rate override header.
@@ -32,7 +33,8 @@ pub enum TraceSample {
 /// a repeated header states two rates, and letting a later line raise the first
 /// would make the override order-dependent.
 pub fn trace_sample(req: &SipRequest) -> TraceSample {
-    let Some(raw) = req.raw(HeaderName::from(TRACE_SAMPLE_HEADER)).next() else {
+    let Some(raw) = req.raw(HeaderName::Other(SipStr::from_static(TRACE_SAMPLE_HEADER))).next()
+    else {
         return TraceSample::Absent;
     };
     match raw.trim().parse::<f64>() {

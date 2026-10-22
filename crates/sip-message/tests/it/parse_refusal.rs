@@ -249,6 +249,24 @@ fn a_header_past_the_length_limit_leaves_no_partial() {
     assert!(err.partial().is_none(), "{err:?}");
 }
 
+/// A header block past the line limit is refused before any header is read,
+/// with no partial: 12 000 legal one-letter headers in one datagram. A block
+/// at the limit parses.
+#[test]
+fn a_header_block_past_the_line_limit_is_refused_unanswered() {
+    let limit = SipParserLimits::default().max_header_lines;
+    let crowd = vec!["X:a"; 12_000];
+    let err = CustomParser::new().parse(&invite_with(&crowd)).expect_err("refused");
+    assert_eq!(err.reason, format!("header block of 12009 lines exceeds limit {limit}"));
+    assert!(err.partial().is_none(), "{err:?}");
+
+    // The INVITE's own lines: request line, Via and seven more.
+    let at_limit = vec!["X:a"; limit - 9];
+    assert!(CustomParser::new().parse(&invite_with(&at_limit)).is_ok(), "{limit} lines parse");
+    let past = vec!["X:a"; limit - 8];
+    assert!(CustomParser::new().parse(&invite_with(&past)).is_err(), "{limit} + 1 lines");
+}
+
 /// Behind a refused line, the limit still stops the split unanswered; the
 /// refused line stays the one reported.
 #[test]

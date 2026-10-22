@@ -18,6 +18,7 @@ mod options_e2e;
 mod parse_refusal;
 mod per_call_trace;
 mod probe_period;
+mod receive_path_parse;
 mod refused_invite_copies;
 mod rfc_proxy_compliance;
 mod select_failure_503;

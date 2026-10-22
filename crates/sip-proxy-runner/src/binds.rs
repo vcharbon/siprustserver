@@ -4,15 +4,17 @@
 //! ports.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
+use sip_proxy::intake_shed::{intake_shed_hook, intake_shed_watermark};
+use sip_proxy::ProxyMetrics;
 
 use crate::config::{ExternalFace, ProxyConfig};
-use crate::intake_shed::{intake_shed_hook, intake_shed_watermark};
 
 /// The proxy's sockets.
 pub struct Sockets {
@@ -47,7 +49,12 @@ pub struct ShardSockets {
 /// loop starts later (ProbeServer::serve_on) — the bind is the lock.
 ///
 /// `Err` names the first socket that did not bind: the boot stops on it.
-pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Result<Sockets, String> {
+/// `proxy_metrics` counts what the signaling sockets' intake hook drops.
+pub async fn bind_sockets(
+    cfg: &ProxyConfig,
+    clock: &Clock,
+    proxy_metrics: &Arc<ProxyMetrics>,
+) -> Result<Sockets, String> {
     let net = RealSignalingNetwork::new();
     let (listen_sa, metrics_sa, queue_max) = (cfg.listen, cfg.metrics, cfg.queue_max);
     let (udp_sndbuf, udp_rcvbuf, recv_shards) = (cfg.udp_sndbuf, cfg.udp_rcvbuf, cfg.recv_shards);
@@ -73,7 +80,8 @@ pub async fn bind_sockets(cfg: &ProxyConfig, clock: &Clock) -> Result<Sockets, S
     // Every signaling bind (both faces, all shards) carries the selective
     // intake-shed hook — a blind tail-drop at the queue cap would otherwise
     // kill emergency and in-dialog traffic first-come-first-served.
-    let intake_shed = intake_shed_hook(intake_shed_watermark(queue_max, cfg.intake_shed_pct));
+    let watermark = intake_shed_watermark(queue_max, cfg.intake_shed_pct);
+    let intake_shed = intake_shed_hook(watermark, proxy_metrics.clone());
     let with_buffers = |mut opts: BindUdpOpts| {
         if let Some(bytes) = udp_sndbuf {
             opts = opts.with_send_buffer(bytes);

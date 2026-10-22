@@ -11,7 +11,6 @@ pub struct UdpShardStats {
     pub queue_max: u64,
     pub enqueued: u64,
     pub tail_dropped: u64,
-    pub intake_shed: u64,
     pub send_would_block: u64,
     /// Datagrams the kernel dropped on the shard's sockets before the recv
     /// pump read them (a full `SO_RCVBUF`).
@@ -35,14 +34,13 @@ impl UdpShardStats {
         stats
     }
 
-    /// Render the stats as the `sip_proxy_udp_*` families and the intake shed.
+    /// Render the stats as the `sip_proxy_udp_*` families.
     pub(super) fn render(&self, s: &mut String) {
         use crate::observability::catalogue as c;
         c::UDP_QUEUE_DEPTH.render_value(s, self.queue_depth);
         c::UDP_QUEUE_MAX.render_value(s, self.queue_max);
         c::UDP_ENQUEUED.render_value(s, self.enqueued);
         c::UDP_TAIL_DROPPED.render_value(s, self.tail_dropped);
-        c::INTAKE_SHED.render_value(s, self.intake_shed);
         c::UDP_SEND_WOULD_BLOCK.render_value(s, self.send_would_block);
         c::UDP_KERNEL_RX_DROPPED.render_value(s, self.kernel_rx_dropped);
         c::UDP_PRE_INGRESS_PANICS.render_value(s, self.pre_ingress_panics);
@@ -56,7 +54,6 @@ impl UdpShardStats {
             queue_max: ep.queue_max() as u64,
             enqueued: c.enqueued,
             tail_dropped: c.tail_dropped,
-            intake_shed: c.pre_ingress_dropped,
             send_would_block: c.send_would_block,
             kernel_rx_dropped: c.kernel_rx_dropped,
             pre_ingress_panics: c.pre_ingress_panics,
@@ -90,7 +87,6 @@ impl std::ops::AddAssign for UdpShardStats {
         self.queue_max += o.queue_max;
         self.enqueued += o.enqueued;
         self.tail_dropped += o.tail_dropped;
-        self.intake_shed += o.intake_shed;
         self.send_would_block += o.send_would_block;
         self.kernel_rx_dropped += o.kernel_rx_dropped;
         self.pre_ingress_panics += o.pre_ingress_panics;

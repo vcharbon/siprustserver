@@ -15,7 +15,9 @@ use super::peer_failures::{PeerFailureKind, PeerScope};
 use crate::resolver::{outcome, refresh_outcome};
 use crate::self_gate::ShedReason;
 
+mod intake;
 mod parse;
+pub use intake::{INTAKE_SHED, INTAKE_UNANSWERABLE};
 pub use parse::{PARSE_ERRORS, PARSE_PANICS, PARSE_REFUSALS_ANSWERED, PARSE_REFUSALS_CAPPED};
 
 /// `direction:result`, every direction then every result.
@@ -278,12 +280,6 @@ pub const UDP_TAIL_DROPPED: Family = Family::counter(
     "Datagrams tail-dropped by the full inbound queue(s), summed over recv shards and both faces.",
 );
 
-pub const INTAKE_SHED: Family = Family::counter(
-    "sip_proxy_intake_shed_total",
-    Labels::None,
-    "New non-emergency INVITEs dropped by the depth-watermark pre-ingress shed (the selective last-line guard below the admission layer).",
-);
-
 pub const UDP_SEND_WOULD_BLOCK: Family = Family::counter(
     "sip_proxy_udp_send_would_block_total",
     Labels::None,
@@ -467,11 +463,12 @@ pub const PROXY: &[Family] = &[
     UDP_QUEUE_MAX,
     UDP_ENQUEUED,
     UDP_TAIL_DROPPED,
-    INTAKE_SHED,
     UDP_SEND_WOULD_BLOCK,
     UDP_KERNEL_RX_DROPPED,
     UDP_PRE_INGRESS_PANICS,
     UDP_RECV_ERRORS,
+    INTAKE_SHED,
+    INTAKE_UNANSWERABLE,
     RECV_SHARDS_STALLED,
     WORKER_POOL_EMPTY,
     DISCOVERY_NO_CLIENT,

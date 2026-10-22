@@ -5,13 +5,13 @@ use metric_catalogue::{Family, Labels};
 pub const PARSE_PANICS: Family = Family::counter(
     "sip_proxy_parse_panics_total",
     Labels::None,
-    "Inbound datagrams the SIP parser panicked on and the recv shard dropped; each one is a parser defect, expected 0.",
+    "Inbound datagrams the SIP parser panicked on, dropped at intake or by the recv shard; each one is a parser defect, expected 0.",
 );
 
 pub const PARSE_ERRORS: Family = Family::counter(
     "sip_proxy_parse_errors_total",
     Labels::None,
-    "Inbound datagrams the SIP parser refused and the recv shard dropped unanswered (a response, an ACK, a request no response can echo, a limit): a malformed-traffic flood or a parser regression.",
+    "Inbound datagrams the SIP parser refused, dropped unanswered at intake or by the recv shard (a response, an ACK, a request no response can echo, a limit): a malformed-traffic flood or a parser regression.",
 );
 
 pub const PARSE_REFUSALS_ANSWERED: Family = Family::counter(

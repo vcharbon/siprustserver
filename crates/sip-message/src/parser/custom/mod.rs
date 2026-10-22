@@ -70,6 +70,23 @@ pub fn hydrate_request(
     Ok(SipRequest::new(start, MessageCore::new(headers, eager.common, optional, body, image)))
 }
 
+/// The header block of `raw`, refused when it holds more lines than
+/// [`SipParserLimits::max_header_lines`]: one scan of the head, before any
+/// header is decoded or read. The refusal carries no partial.
+fn bounded_header_block(
+    raw: &[u8],
+    limits: &SipParserLimits,
+) -> Result<scanner::HeaderBlock, SipParseError> {
+    let block = scanner::header_block(raw);
+    if block.lines > limits.max_header_lines {
+        return Err(SipParseError::new(format!(
+            "header block of {} lines exceeds limit {}",
+            block.lines, limits.max_header_lines
+        )));
+    }
+    Ok(block)
+}
+
 /// The production parser. Built with `SipParserLimits`.
 #[derive(Debug, Clone)]
 pub struct CustomParser {
@@ -85,7 +102,7 @@ impl CustomParser {
     /// header fields returned without the mandatory-field extraction a whole
     /// message passes — the reading a message fragment (RFC 3420) takes.
     pub fn parse_header_fields(&self, raw: &[u8]) -> Result<Vec<SipHeader>, SipParseError> {
-        let block = scanner::header_block(raw);
+        let block = bounded_header_block(raw, &self.limits)?;
         if let Some(bare) = block.bare_break {
             return Err(bare.refusal());
         }
@@ -125,7 +142,8 @@ impl SipParser for CustomParser {
         // Split first, decode second: the body stays raw bytes (binary-safe,
         // and a slice of `raw` rather than a copy), and only the header block
         // becomes the text image every span points into.
-        let block = scanner::header_block(&raw);
+        // A limit is never answered: no partial.
+        let block = bounded_header_block(&raw, limits)?;
         // A bare CR or LF leaves the line structure in doubt: never answered.
         if let Some(bare) = block.bare_break {
             return Err(bare.refusal());

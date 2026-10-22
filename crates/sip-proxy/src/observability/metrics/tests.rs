@@ -58,7 +58,6 @@ fn a_dual_face_shard_sums_both_faces() {
         queue_max: 16,
         enqueued: v,
         tail_dropped: v,
-        intake_shed: v,
         send_would_block: v,
         kernel_rx_dropped: v,
         pre_ingress_panics: v,

@@ -4,7 +4,7 @@
 //! of continuation lines.
 
 use sip_message::header::HeaderName;
-use sip_message::{CustomParser, SipMessage, SipParser};
+use sip_message::{CustomParser, SipMessage, SipParser, SipParserLimits};
 
 fn invite_with_subject(subject: &str) -> Vec<u8> {
     format!(
@@ -52,7 +52,8 @@ fn trailing_empty_continuation_lines_trim_away() {
 
 /// A datagram's worth of empty continuation lines: each must not cost a stack
 /// frame, so the parse completes on a thread whose stack is far smaller than
-/// one frame per fold would need.
+/// one frame per fold would need. The header-line limit, which refuses such a
+/// block at once by default, is lifted to reach the unfolding.
 #[test]
 fn twenty_thousand_folds_parse_on_a_small_stack() {
     let mut value = String::from("x");
@@ -60,10 +61,12 @@ fn twenty_thousand_folds_parse_on_a_small_stack() {
         value.push_str("\r\n ");
     }
     let raw = invite_with_subject(&value);
+    let limits = SipParserLimits { max_header_lines: usize::MAX, ..SipParserLimits::default() };
+    assert!(CustomParser::new().parse(&raw).is_err(), "refused at the line limit by default");
     let parsed = std::thread::Builder::new()
         .stack_size(128 * 1024)
         .spawn(move || {
-            let msg = CustomParser::new().parse(&raw).expect("parse");
+            let msg = CustomParser::with_limits(limits).parse(&raw).expect("parse");
             subject(&msg).iter().map(|v| v.to_string()).collect::<Vec<_>>()
         })
         .expect("spawn")

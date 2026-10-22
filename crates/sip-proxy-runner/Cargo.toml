@@ -30,10 +30,6 @@ jemalloc-stats = { path = "../jemalloc-stats" }
 # /debug/flamegraph pprof route — one module shared with the b2bua worker.
 probe-http = { path = "../probe-http" }
 sip-net = { path = "../sip-net" }
-# The parser the receive-path hook parses each datagram with; the intake shed
-# classifies the parsed message (`sip_txn::class_of`). No SIP reading lives
-# in this crate.
-sip-message = { path = "../sip-message" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
 # Cluster membership: the shared topology crate with the kube EndpointSlice

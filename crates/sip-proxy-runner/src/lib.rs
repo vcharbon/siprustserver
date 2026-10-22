@@ -24,7 +24,6 @@ pub mod binds;
 pub mod config;
 pub mod discovery;
 pub mod health_sampler;
-pub mod intake_shed;
 pub mod metrics_body;
 pub mod readiness;
 pub mod runtime;
