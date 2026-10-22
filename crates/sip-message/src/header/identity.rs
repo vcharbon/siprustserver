@@ -32,8 +32,12 @@ fn lws_fields<'a, const N: usize>(
     }
 }
 
-/// `1*DIGIT`, at most [`SEQUENCE_MAX`].
+/// `1*DIGIT`, at most [`SEQUENCE_MAX`]: every byte an ASCII digit, nothing
+/// trimmed.
 fn sequence_number(field: &str, what: &str) -> Result<u32, SipParseError> {
+    if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(SipParseError::new(format!("{what} is not 1*DIGIT: {field:?}")));
+    }
     let n = parse_u32(field, what)?;
     if n > SEQUENCE_MAX {
         return Err(SipParseError::new(format!("{what} is not below 2^31: {field:?}")));
@@ -281,6 +285,8 @@ mod tests {
             "776656 1 \"INVITE\"",
             "776656+1 1 INVITE",
             "776656 2147483648 INVITE",
+            "776656\u{a0} 1 INVITE",
+            "776656 1\x0b INVITE",
         ] {
             assert!(rack(refused).is_err(), "{refused:?} is no RAck");
         }
@@ -299,6 +305,9 @@ mod tests {
             "1INVITE",
             "2147483648 INVITE",
             "-1 INVITE",
+            "1\x0b INVITE",
+            "1\x0c INVITE",
+            "1\u{a0} INVITE",
         ] {
             assert!(cseq(refused).is_err(), "{refused:?} is no CSeq");
         }

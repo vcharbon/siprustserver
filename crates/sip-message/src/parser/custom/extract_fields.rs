@@ -200,10 +200,16 @@ pub(super) fn extract_identity(
 
     let cseq_val =
         idx.cseq.first.ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
-    let cseq_parsed = parse_cseq(cseq_val);
-    if wire {
-        header::CSeq::parse(cseq_val)?;
-    }
+    let cseq = if wire {
+        header::CSeq::parse(cseq_val)?
+    } else {
+        // The lenient read saturates a sequence number past `u32`.
+        let lenient = parse_cseq(cseq_val);
+        header::CSeq::new(
+            u32::try_from(lenient.seq).unwrap_or(u32::MAX),
+            Method::from_wire(&lenient.method),
+        )
+    };
 
     // Via — at least one required; both comma-list and repeated-line encodings
     // fold into one ordered list. Each segment stays a span of its header
@@ -282,12 +288,7 @@ pub(super) fn extract_identity(
         from: header::From::new(from),
         to: header::To::new(to),
         call_id: header::CallId::new(call_id),
-        // The lenient read saturates a sequence number past `u32`; the wire
-        // read refused it above.
-        cseq: header::CSeq::new(
-            u32::try_from(cseq_parsed.seq).unwrap_or(u32::MAX),
-            Method::from_wire(&cseq_parsed.method),
-        ),
+        cseq,
         via: NonEmpty::from_parts(top, hops.collect()),
     })
 }

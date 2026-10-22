@@ -45,7 +45,8 @@ pub(super) fn is_call_id(value: &str) -> bool {
 }
 
 /// Count the `;tag=` header parameters: those outside quoted-strings and
-/// outside `<...>`, where a `tag` is a URI parameter (RFC 3261 permits one).
+/// outside a closed `<...>`, where a `tag` is a URI parameter (RFC 3261
+/// permits one).
 pub(super) fn count_tag_params(value: &str) -> usize {
     let s = value.as_bytes();
     let at = |k: usize| s.get(k).copied();
@@ -55,6 +56,7 @@ pub(super) fn count_tag_params(value: &str) -> usize {
         }
         k
     };
+    let last_close = s.iter().rposition(|&b| b == b'>');
     let mut count = 0usize;
     let mut in_quote = false;
     let mut in_angle = false;
@@ -78,7 +80,8 @@ pub(super) fn count_tag_params(value: &str) -> usize {
         }
         if c == b'"' || c == b'<' {
             in_quote = c == b'"';
-            in_angle = c == b'<';
+            // An unclosed `<` encloses nothing: the rest is still counted.
+            in_angle = c == b'<' && last_close.is_some_and(|close| close > i);
             i += 1;
             continue;
         }
@@ -96,4 +99,16 @@ pub(super) fn count_tag_params(value: &str) -> usize {
         i += 1;
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_tag_params;
+
+    #[test]
+    fn only_header_tags_outside_a_closed_angle_count() {
+        assert_eq!(count_tag_params("<sip:a@h;tag=1>;tag=2"), 1);
+        assert_eq!(count_tag_params("\"x;tag=0\" <sip:a@h;tag=1>;tag=2;tag=3"), 2);
+        assert_eq!(count_tag_params("<sip:a@h;tag=1;tag=2"), 2, "an unclosed `<` hides nothing");
+    }
 }

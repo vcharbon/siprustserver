@@ -224,6 +224,7 @@ fn rack_missing_method_or_non_numeric_is_err() {
 fn rack_without_lws_or_with_a_non_token_method_is_err() {
     assert!(build("PRACK", PRACK_BASE, "RAck: 776656 1INVITE\r\n").optional().rack.is_err());
     assert!(build("PRACK", PRACK_BASE, "RAck: 776656 1 INVITE/extra\r\n").optional().rack.is_err());
+    assert!(build("PRACK", PRACK_BASE, "RAck: 776656\u{a0} 1 INVITE\r\n").optional().rack.is_err());
 }
 
 // --- Refer-To (RFC 3515 + RFC 3891) ---
