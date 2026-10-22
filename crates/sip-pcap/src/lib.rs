@@ -32,6 +32,7 @@ pub mod emit;
 pub mod enrich;
 pub mod flow;
 mod frame;
+pub mod header_errors;
 mod msgfacts;
 mod pcapng;
 pub mod pcapout;

@@ -226,8 +226,8 @@ struct Args {
     #[arg(long)]
     out: Option<PathBuf>,
 
-    /// Also write every SIP-looking datagram the parser rejected (the
-    /// `parse-failed` count), exactly as captured, to this classic pcap.
+    /// Also write every datagram ingest set aside (`parse-failed`, and a copy
+    /// of each `header-failed` one), exactly as captured, to this classic pcap.
     #[arg(long = "parse-failed-pcap")]
     parse_failed_pcap: Option<PathBuf>,
 
@@ -445,8 +445,7 @@ fn main() {
     let sut = sut_of(&args, &flows);
 
     if let Some(path) = &args.parse_failed_pcap {
-        let failed = flows.stats.parse_failed_at.iter().map(|&i| &datagrams[i]);
-        if let Err(e) = sip_pcap::pcapout::datagrams_to_pcap(failed)
+        if let Err(e) = sip_pcap::pcapout::set_aside_to_pcap(&flows.stats, &datagrams)
             .and_then(|bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))
         {
             eprintln!("cannot write the rejected datagrams to {}: {e}", path.display());
@@ -466,11 +465,12 @@ fn main() {
         .collect();
 
     eprintln!(
-        "# files={} {stats}\n# sip-messages={} capture-dups={} parse-failed={} non-sip={} legs={} call-groups={} matched={}",
+        "# files={} {stats}\n# sip-messages={} capture-dups={} parse-failed={} header-failed={} non-sip={} legs={} call-groups={} matched={}",
         files.len(),
         flows.stats.sip_messages,
         flows.stats.capture_dups,
         flows.stats.parse_failed,
+        flows.stats.header_failed,
         flows.stats.non_sip,
         flows.legs.len(),
         flows.groups.len(),

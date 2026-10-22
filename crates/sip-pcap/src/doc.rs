@@ -66,6 +66,14 @@ pub struct FlowStatsJson {
     pub sip_messages: u64,
     pub capture_dups: u64,
     pub parse_failed: u64,
+    /// Ingested messages carrying a non-fatal header reading that failed
+    /// (`sip_pcap::header_errors`), set aside beside the `parse_failed` ones.
+    /// Absent when none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub header_failed: u64,
+    /// Each failed reading of those messages. Absent when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_failures: Vec<HeaderFailureJson>,
     pub non_sip: u64,
     /// Every stretch of every probe rebased onto another probe's clock before
     /// the dedup (a zero stretch included: the clock back inside the window
@@ -73,6 +81,21 @@ pub struct FlowStatsJson {
     /// no probe moved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aligned_probes: Vec<AlignedProbeJson>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// One failed non-fatal header reading of an ingested message
+/// ([`crate::flow::HeaderFailure`]): the message is `msg` of the leg whose
+/// Call-ID is `call_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HeaderFailureJson {
+    pub call_id: String,
+    pub msg: usize,
+    pub header: String,
+    pub reason: String,
 }
 
 /// One stretch of one probe's clock put on another's

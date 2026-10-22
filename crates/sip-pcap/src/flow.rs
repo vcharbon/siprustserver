@@ -41,8 +41,11 @@ use sip_message::header::{HeaderName, Params, Uri};
 use sip_message::parser::SipParser;
 use sip_message::{CustomParser, Method, SipMessage};
 
-use crate::align::{align_probes, rides_no_timer, ProbeOffset};
+use crate::align::{align_probes, rides_no_timer};
 use crate::Datagram;
+
+mod stats;
+pub use stats::{FlowStats, HeaderFailure};
 
 /// Leg index into [`Flows::legs`].
 pub type LegId = usize;
@@ -334,29 +337,6 @@ pub struct CallGroup {
     pub evidence: Vec<MatchEvidence>,
 }
 
-/// Ingest counters (SIP filter, capture dedup, parse). Decode-level counters
-/// live in [`crate::DecodeStats`].
-#[derive(Debug, Default, Clone)]
-pub struct FlowStats {
-    /// Messages ingested into the model.
-    pub sip_messages: u64,
-    /// Identical (src, dst, payload) datagrams within the capture-dup window —
-    /// `-i any` seeing one packet on veth AND bridge, or two probes of one
-    /// wire once aligned — not a retransmission.
-    pub capture_dups: u64,
-    /// SIP-looking datagrams the parser rejected.
-    pub parse_failed: u64,
-    /// The index in the input slice of each datagram counted in
-    /// `parse_failed`, in capture-time order.
-    pub parse_failed_at: Vec<usize>,
-    /// Datagrams that did not look like SIP (RTP/STUN/DNS on captured ports).
-    pub non_sip: u64,
-    /// Every stretch of every probe rebased onto another probe's clock before
-    /// the dedup ([`crate::align`]), a zero stretch included, with the copies
-    /// now counted in `capture_dups`.
-    pub aligned_probes: Vec<ProbeOffset>,
-}
-
 /// The full flow model of a capture.
 #[derive(Debug)]
 pub struct Flows {
@@ -425,6 +405,7 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
             });
             legs.len() - 1
         });
+        stats.note_header_failures(i, &msg, &legs[idx].call_id, legs[idx].msgs.len());
         ingest(&mut legs[idx], ts[i], d.src, d.dst, msg, d.probe, &cfg.strategies);
     }
 

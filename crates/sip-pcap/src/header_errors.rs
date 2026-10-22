@@ -1,20 +1,21 @@
 //! The non-fatal header readings of an accepted message that came back as an
 //! error: the optional structured headers the parser stores as `Err`, and the
-//! route sets read on access.
+//! route sets read on access. Ingest counts and copies the messages carrying
+//! one beside the ones the parser refuses; `sipflow --reparse` reports each.
 
 use sip_message::header::HeaderName;
 use sip_message::{SipMessage, SipParseError};
 
 /// One header of an accepted message whose reading failed: its name, the
 /// reason, and its values as written.
-pub(crate) struct HeaderError {
+pub struct HeaderError {
     pub name: HeaderName,
     pub reason: String,
     pub values: Vec<String>,
 }
 
 /// Every failed non-fatal reading of `msg`, in a fixed header order.
-pub(crate) fn of(msg: &SipMessage) -> Vec<HeaderError> {
+pub fn of(msg: &SipMessage) -> Vec<HeaderError> {
     let o = msg.optional();
     let routes = match msg {
         SipMessage::Request(r) => (r.route_set().err(), r.record_route_set().err()),

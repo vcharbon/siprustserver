@@ -9,11 +9,9 @@ use std::sync::Mutex;
 use sip_message::parser::SipParser;
 use sip_message::CustomParser;
 use sip_pcap::doc::{FlowsDoc, Summary};
+use sip_pcap::header_errors;
 
 use crate::walk::{capture_of, expand_flows_documents};
-
-#[path = "header_errors.rs"]
-mod header_errors;
 
 /// Re-parse every message under `inputs` and print one JSON line per message
 /// the parser refuses (its document, capture, position, start-line facts,
