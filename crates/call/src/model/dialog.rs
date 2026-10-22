@@ -237,6 +237,12 @@ pub struct Dialog {
     /// `our_tag`, so she holds the early dialog it names (§12.1.1): a
     /// caller-facing dialog only, set once and kept.
     pub shown: bool,
+    /// On a caller-facing dialog, the media leg whose early media it shows:
+    /// that dialog is the media leg's session alone, so no callee is shown
+    /// under it (RFC 3264 §8). A fact about what the caller sees, not a relay
+    /// route: requests on the dialog go where [`Self::fronts`] sends them.
+    #[serde(default)]
+    pub shows_media: Option<String>,
     /// Pending transparently-relayed inbound requests awaiting response here.
     pub inbound_pending_requests: Vec<PendingRequest>,
     /// Via branch of the first ACK for this dialog's 2xx (§13.2.2.4 re-ACK).
@@ -316,6 +322,7 @@ impl Dialog {
             route_set: Vec::new(),
             fronts: Vec::new(),
             shown: false,
+            shows_media: None,
             inbound_pending_requests: Vec::new(),
             ack_branch: None,
             pending_invite_txn: None,

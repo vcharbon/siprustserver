@@ -67,6 +67,7 @@ fn adopt_dialog(leg: &mut Leg, caller: bool, id: &DialogId) {
         || leg.dialogs.iter().any(|d| d.sdp_session.as_ref().is_some_and(|s| s.has_restated));
     if let Some(mut own) = early_dialog_mut(leg, caller, id).and_then(|d| d.sdp_session.take()) {
         own.exchanges_opened = leg.sdp_session.exchanges_opened;
+        own.absorbed_origin = leg.sdp_session.absorbed_origin.take();
         leg.sdp_session = own;
     }
     leg.sdp_session.has_restated |= restated;
@@ -77,12 +78,22 @@ fn adopt_dialog(leg: &mut Leg, caller: bool, id: &DialogId) {
 /// one up. `None` where the stack stated none there, or the version has no
 /// next one.
 pub fn next_origin_in_dialog(leg: &Leg, remote_tag: &str) -> Option<String> {
-    let early = (leg.state() != LegState::Confirmed)
-        .then(|| call::helpers::callee_dialog(leg, remote_tag))
-        .flatten()
-        .and_then(|d| d.sdp_session.as_ref());
-    let stated = early.unwrap_or(&leg.sdp_session).sent_origin.as_deref()?;
-    let line = origin_of(stated)?.next_version_line()?;
+    match call::helpers::callee_dialog(leg, remote_tag) {
+        Some(dialog) => next_origin_on(leg, dialog),
+        None => next_version(&leg.sdp_session),
+    }
+}
+
+/// [`next_origin_in_dialog`] for `dialog`, the dialog of `leg` a message
+/// names, on either side of the call: its own state while `leg` is
+/// unconfirmed and it carries one, the leg's otherwise.
+pub fn next_origin_on(leg: &Leg, dialog: &Dialog) -> Option<String> {
+    let early = (leg.state() != LegState::Confirmed).then_some(dialog.sdp_session.as_ref());
+    next_version(early.flatten().unwrap_or(&leg.sdp_session))
+}
+
+fn next_version(state: &LegSdpSession) -> Option<String> {
+    let line = origin_of(state.sent_origin.as_deref()?)?.next_version_line()?;
     Some(line.strip_prefix("o=")?.to_string())
 }
 

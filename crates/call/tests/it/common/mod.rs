@@ -143,9 +143,8 @@ pub fn representative_call() -> Call {
         sdp_session: LegSdpSession {
             sent_origin: Some("bob 202 3 IN IP4 203.0.113.42".into()),
             sent_media: vec!["audio 20000 RTP/AVP 8".into(), "video 0 RTP/AVP 96".into()],
-            sent_description: Some(
-                "v=0\ns=-\nm=audio 20000 RTP/AVP 8\nm=video 0 RTP/AVP 96".into(),
-            ),
+            sent_digest: Some(0x5eed_d16e_5700_0001),
+            absorbed_origin: Some("bob 202 2 IN IP4 203.0.113.42".into()),
             sent_slots: vec![Some(0), None],
             sent_slots_author: Some("b-3".into()),
             restated_from: Some("1 carol 303 1 IN IP4 192.0.2.3".into()),
@@ -505,7 +504,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
             proptest::option::of(arb_owed_answer()),
             proptest::option::of(arb_own_notify()),
         ),
-        any::<bool>(),
+        (any::<bool>(), proptest::option::of(arb_tag())),
     );
     (sip, ext)
         .prop_map(
@@ -522,7 +521,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                     emitted_ack,
                     awaited_ack_cseq,
                     (sdp_session, owed_answer, own_notify),
-                    shown,
+                    (shown, shows_media),
                 ),
             )| Dialog {
                 our_tag,
@@ -534,6 +533,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                 route_set,
                 fronts,
                 shown,
+                shows_media,
                 inbound_pending_requests,
                 ack_branch,
                 pending_invite_txn,

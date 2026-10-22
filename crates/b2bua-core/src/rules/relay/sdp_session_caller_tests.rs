@@ -81,34 +81,30 @@ fn another_authors_opening_description_continues_the_early_dialogs_session() {
     assert_eq!(o_line(&second), "o=mrf 1 2 IN IP4 192.0.2.4");
 }
 
+/// The stack answers `offer` from `b-1`'s peer itself (a glare 491): its
+/// version reaches no other leg.
+fn refused_from_b1(c: &mut Call, offer: &str) {
+    super::super::note_absorbed_offer(c, "b-1", offer.as_bytes());
+}
+
 /// What the caller receives continues what she last received, whatever
-/// versions the author spent on offers the stack absorbed: the author's same
-/// description again after a skipped version leaves at the version she holds,
-/// a changed one at the next.
+/// versions the author spent on offers the stack refused: the author's same
+/// description again past a refused offer leaves at the version she holds, a
+/// changed one at the next.
 #[test]
 fn a_version_the_caller_never_received_is_not_skipped_over() {
-    let mut c = early_caller();
     let ringing = sdp("bob 1 1 IN IP4 192.0.2.2", 20000);
-    to_caller(&mut c, "x", Author::Leg("b-1"), Carried::Opening, &ringing);
-    let same = to_caller(
-        &mut c,
-        "x",
-        Author::Leg("b-1"),
-        Carried::Opening,
-        &sdp("bob 1 3 IN IP4 192.0.2.2", 20000),
-    );
-    assert_eq!(same, ringing, "the same description, at the version she holds");
-
-    let mut c = early_caller();
-    to_caller(&mut c, "x", Author::Leg("b-1"), Carried::Opening, &ringing);
-    let changed = to_caller(
-        &mut c,
-        "x",
-        Author::Leg("b-1"),
-        Carried::Opening,
-        &sdp("bob 1 3 IN IP4 192.0.2.2", 20002),
-    );
-    assert_eq!(o_line(&changed), "o=bob 1 2 IN IP4 192.0.2.2");
+    let refused = sdp("bob 1 2 IN IP4 192.0.2.2", 20004);
+    for (port, expected) in
+        [(20000, "o=bob 1 1 IN IP4 192.0.2.2"), (20002, "o=bob 1 2 IN IP4 192.0.2.2")]
+    {
+        let mut c = early_caller();
+        to_caller(&mut c, "x", Author::Leg("b-1"), Carried::Opening, &ringing);
+        refused_from_b1(&mut c, &refused);
+        let after = sdp("bob 1 3 IN IP4 192.0.2.2", port);
+        let out = to_caller(&mut c, "x", Author::Leg("b-1"), Carried::Opening, &after);
+        assert_eq!(o_line(&out), expected, "port {port}");
+    }
 }
 
 /// The same on a confirmed dialog: the author's re-offer the stack refused
@@ -117,6 +113,22 @@ fn a_version_the_caller_never_received_is_not_skipped_over() {
 #[test]
 fn a_skipped_version_on_a_confirmed_dialog_is_restated_above_the_held_one() {
     let mut c = call();
+    let opening = sdp("bob 1 1 IN IP4 192.0.2.2", 20000);
+    send(&mut c, "a", Author::Leg("b-1"), Carried::Opening, &opening);
+    let held = sdp("bob 1 2 IN IP4 192.0.2.2", 20002);
+    assert_eq!(send(&mut c, "a", Author::Leg("b-1"), Carried::InDialog, &held), held);
+    refused_from_b1(&mut c, &sdp("bob 1 3 IN IP4 192.0.2.2", 20006));
+    let after = sdp("bob 1 4 IN IP4 192.0.2.2", 20004);
+    let out = send(&mut c, "a", Author::Leg("b-1"), Carried::InDialog, &after);
+    assert_eq!(o_line(&out), "o=bob 1 3 IN IP4 192.0.2.2");
+}
+
+/// A version the author skipped on its own account — no offer of its was
+/// answered here — is the author's: its description leaves byte for byte, and
+/// the leg records no restatement.
+#[test]
+fn an_authors_own_skip_leaves_as_written() {
+    let mut c = call();
     send(
         &mut c,
         "a",
@@ -124,14 +136,7 @@ fn a_skipped_version_on_a_confirmed_dialog_is_restated_above_the_held_one() {
         Carried::Opening,
         &sdp("bob 1 1 IN IP4 192.0.2.2", 20000),
     );
-    let held = sdp("bob 1 2 IN IP4 192.0.2.2", 20002);
-    assert_eq!(send(&mut c, "a", Author::Leg("b-1"), Carried::InDialog, &held), held);
-    let after_refused = send(
-        &mut c,
-        "a",
-        Author::Leg("b-1"),
-        Carried::InDialog,
-        &sdp("bob 1 4 IN IP4 192.0.2.2", 20004),
-    );
-    assert_eq!(o_line(&after_refused), "o=bob 1 3 IN IP4 192.0.2.2");
+    let skipped = sdp("bob 1 4 IN IP4 192.0.2.2", 20004);
+    assert_eq!(send(&mut c, "a", Author::Leg("b-1"), Carried::InDialog, &skipped), skipped);
+    assert!(!c.a_leg.sdp_session.restated && !c.a_leg.sdp_session.has_restated);
 }

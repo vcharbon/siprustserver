@@ -72,12 +72,7 @@ impl ActionExecutor<'_> {
                 })
                 .flatten();
             let content_type = content_type.and_then(relay::media_type);
-            // The dialog the request rides: its To-tag is ours, its From-tag
-            // the peer's.
-            let dialog = req.from().tag().map(|peer_tag| call::DialogId {
-                our_tag: req.to().tag().unwrap_or_default().to_string(),
-                peer_tag: peer_tag.to_string(),
-            });
+            let dialog = relay::received_on(req);
             let body = relay::continue_on_leg(
                 call,
                 ctx.source_leg_id,
@@ -88,6 +83,7 @@ impl ActionExecutor<'_> {
                 content_type.as_ref(),
                 self.config.sdp_form.as_ref(),
             );
+            relay::note_answered_here(call, ctx.source_leg_id, req);
             // A 2xx or 1xx to a target refresh or a subscription-creating
             // request names this face as the dialog's remote target
             // (`response_states_own_contact`); anything else states none. The

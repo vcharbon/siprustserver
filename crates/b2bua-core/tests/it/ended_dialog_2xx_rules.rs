@@ -200,3 +200,85 @@ fn the_rejecting_answer_continues_the_session_the_stack_stated() {
     assert!(answer.contains("\r\no=- 708 709 IN IP4 10.10.0.9\r\n"), "{answer}");
     assert!(answer.contains("m=audio 0 "), "{answer}");
 }
+
+/// The caller's `status` final to the re-INVITE of CSeq `cseq` this stack sent
+/// on her dialog, carrying `sdp`.
+fn from_alice(status: u16, cseq: u32, sdp: &str) -> CallEvent {
+    let raw = format!(
+        "SIP/2.0 {status} OK\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bKa{cseq}\r\n\
+From: <sip:bob@host>;tag=b2bua-a\r\n\
+To: <sip:alice@host>;tag=atag\r\n\
+Call-ID: c1@alice\r\n\
+CSeq: {cseq} INVITE\r\n\
+Contact: <sip:alice@127.0.0.1:5060>\r\n\
+Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{sdp}",
+        sdp.len()
+    );
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
+        panic!("a response")
+    };
+    CallEvent::Sip {
+        message: Box::new(SipMessage::Response(resp)),
+        src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: true,
+    }
+}
+
+/// The same on the caller's leg: the stack's offerless re-INVITE toward her
+/// crosses her BYE, and the offer her 2xx makes is answered in the session
+/// the stack stated on her dialog, never one minted for the ACK.
+#[test]
+fn on_the_callers_leg_the_rejecting_answer_continues_the_stacks_session() {
+    let reinvited = executed(
+        &bridged(),
+        &[RuleAction::SendReinvite { leg_id: "a".into(), body: None, add_headers: vec![] }],
+    );
+    let mut call = reinvited.call;
+    let cseq = call.a_leg.dialogs.confirmed().expect("her dialog").our_cseq;
+    call.a_leg.sdp_session.sent_origin = Some("bob 2 2 IN IP4 10.0.0.2".into());
+    call.a_leg.sdp_session.sent_media = vec!["audio 4000 RTP/AVP 0".into()];
+    call::testkit::stage_leg(&mut call.a_leg, call::LegState::Terminated);
+    let config = B2buaConfig::default();
+    let event = from_alice(
+        200,
+        u32::try_from(cseq).unwrap(),
+        OFFER.replace("bob 2 2", "alice 9 9").as_str(),
+    );
+    let resolved = call::helpers::Resolved {
+        dialog: Some(call::DialogId { our_tag: "b2bua-a".into(), peer_tag: "atag".into() }),
+        relay: None,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &config,
+        discharged: None,
+        resolved: &resolved,
+    };
+    let rules = b2bua_core::rules::default_rules();
+    let rule = b2bua_core::rules::pick_ranked(&rules, &call, &ctx).into_iter().next();
+    assert_eq!(rule.map(|r| r.id), Some("ack-2xx-on-ended-dialog"));
+    let actions = (rule.expect("the rule").handle)(&ctx).map(|r| r.actions).unwrap_or_default();
+    let mut ids = TurnScope::of(TurnIds::fixed(3));
+    let result = ActionExecutor { config: &config, turn: &mut ids, now_ms: 0 }
+        .execute(&actions, &call, &ctx);
+    let ack = requests_to(&result, "a");
+    assert!(ack.iter().any(|(m, _)| m == "ACK"), "{ack:?}");
+    let body: Vec<String> = result
+        .effects
+        .outbound
+        .iter()
+        .filter_map(|e| match &e.body {
+            OutboundBody::Request(r) if r.method().as_str() == "ACK" => {
+                Some(String::from_utf8_lossy(r.body()).to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(body[0].contains("\r\no=bob 2 3 IN IP4 10.0.0.2\r\n"), "{body:?}");
+}

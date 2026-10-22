@@ -24,10 +24,12 @@
 //! author, or under another sess-id, is restated as that session's next
 //! version (one early dialog, one session).
 //!
-//! What a peer receives continues what it last received: the author's own
-//! next description that skips a version the peer never received (an offer
-//! the stack refused or absorbed) is restated — a repeat of what the peer
-//! holds at that version, a change at the next.
+//! What a peer receives continues what it last received: where the stack
+//! answered an offer of the author itself — refused it or answered it locally
+//! ([`note_absorbed_offer`]) — the author's own next description, stating a
+//! version past that offer's, is restated — a repeat of what the peer holds at
+//! that version, a change at the next. A version the author skipped on its own
+//! account leaves as written: the skip is the author's.
 //!
 //! Inside an early dialog, a description of the stack's own that already
 //! states the next version of the session the dialog carries (an answer it
@@ -205,6 +207,12 @@ fn continue_session(
         _ => None,
     };
     let sdp = reordered.as_deref().unwrap_or(sdp);
+    let absorbed = match author {
+        Author::Leg(from) => {
+            leg_ref(call, from).and_then(|l| l.sdp_session.absorbed_origin.clone())
+        }
+        Author::Stack => None,
+    };
     let Some(leg) = leg_mut(call, leg_id) else {
         return body;
     };
@@ -218,7 +226,7 @@ fn continue_session(
         && matches!(leg.state(), LegState::Trying | LegState::Early)
         && stated(leg).is_some_and(|s| states_next_version(sdp, &s.origin));
     let own = continues_itself(&leg.sdp_session, author, &session_id);
-    let skips = own && skips_a_version(&leg.sdp_session, sdp);
+    let skips = own && skips_absorbed(&leg.sdp_session, sdp, absorbed.as_deref());
     let in_session = match carried {
         Carried::Opening => leg.sdp_session.sent_origin.is_some(),
         _ if carried.in_dialog() => match leg.state() {
@@ -284,7 +292,7 @@ fn continue_session(
     if let Some(now) = StatedSession::of(&out) {
         state.sent_origin = Some(now.origin);
         state.sent_media = now.media;
-        state.sent_description = parse_origin(&out).map(|o| o.body_excluding_origin);
+        state.sent_digest = parse_origin(&out).map(|o| digest(&o.body_excluding_origin));
     }
     let out = match reformed.then(|| canonical_form(&out)).flatten() {
         Some(canonical) => Cow::Owned(canonical),
@@ -377,33 +385,63 @@ fn continues_itself(state: &LegSdpSession, author: Author<'_>, session_id: &str)
 }
 
 /// Whether `sdp`, its author's own continuation of the session `state`
-/// carries, states a version above the one after the version the peer holds:
-/// a version the author spent where the peer never received it (an offer
-/// this stack refused or absorbed). What the peer receives continues what it
-/// last received (RFC 3264 §8), so such a description is restated.
-fn skips_a_version(state: &LegSdpSession, sdp: &[u8]) -> bool {
-    let (Some(now), Some(held)) =
-        (parse_origin(sdp), state.sent_origin.as_deref().and_then(origin_of))
-    else {
+/// carries, states a version past `absorbed` — the `o=` value of the
+/// author's last offer the stack answered itself — where that offer's version
+/// lies above the one the peer holds: the peer never received it, so what it
+/// receives is restated to continue what it holds (RFC 3264 §8).
+fn skips_absorbed(state: &LegSdpSession, sdp: &[u8], absorbed: Option<&str>) -> bool {
+    let (Some(now), Some(held), Some(absorbed)) = (
+        parse_origin(sdp),
+        state.sent_origin.as_deref().and_then(origin_of),
+        absorbed.and_then(origin_of),
+    ) else {
         return false;
     };
     now.identifies_same_session(&held)
-        && held.session_version.checked_add(1).is_some_and(|next| now.session_version > next)
+        && absorbed.identifies_same_session(&held)
+        && held.session_version < absorbed.session_version
+        && absorbed.session_version < now.session_version
 }
 
 /// Whether `sdp` describes, apart from its `o=` line, what the peer last
 /// received under `state`: a repeat, kept at the version the peer holds.
 fn repeats_what_was_held(state: &LegSdpSession, sdp: &[u8]) -> bool {
-    let now = parse_origin(sdp).map(|o| o.body_excluding_origin);
-    now.is_some() && now == state.sent_description
+    let now = parse_origin(sdp).map(|o| digest(&o.body_excluding_origin));
+    now.is_some() && now == state.sent_digest
+}
+
+/// The 64-bit FNV-1a digest of `text`: stable across processes and builds,
+/// so a replicated call compares alike on every node.
+fn digest(text: &str) -> u64 {
+    text.bytes()
+        .fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+}
+
+/// Record that the stack answers `req`, received from `leg_id`'s peer,
+/// itself: an offer it carries in an INVITE or UPDATE reaches no other leg
+/// ([`note_absorbed_offer`]).
+pub fn note_answered_here(call: &mut Call, leg_id: &str, req: &SipRequest) {
+    if let Some(offer) =
+        req.sdp().filter(|_| matches!(req.method(), Method::Invite | Method::Update))
+    {
+        note_absorbed_offer(call, leg_id, offer);
+    }
+}
+
+/// Record that the stack answered `offer`, received from `leg_id`'s peer,
+/// itself — refused it or answered it locally — so no other leg received its
+/// version ([`call::LegSdpSession::absorbed_origin`]).
+pub fn note_absorbed_offer(call: &mut Call, leg_id: &str, offer: &[u8]) {
+    if let (Some(origin), Some(leg)) = (parse_origin(offer), leg_mut(call, leg_id)) {
+        leg.sdp_session.absorbed_origin = Some(origin.value().to_string());
+    }
 }
 
 /// `sdp`, written by the peer of `from` and going to `to`, in the stream order
 /// of `to`'s description the stack last restated toward `from`, or `None`
 /// where that description was not `to`'s (or not restated at all).
 fn in_restated_author_order(call: &Call, from: &str, to: &str, sdp: &[u8]) -> Option<Vec<u8>> {
-    let state =
-        &std::iter::once(&call.a_leg).chain(&call.b_legs).find(|l| l.leg_id == from)?.sdp_session;
+    let state = &leg_ref(call, from)?.sdp_session;
     (state.sent_slots_author.as_deref() == Some(to) && !state.sent_slots.is_empty())
         .then(|| in_author_order(sdp, &state.sent_slots))
         .flatten()
@@ -444,6 +482,10 @@ fn has_restated(call: &Call) -> bool {
         leg.sdp_session.has_restated
             || leg.dialogs.iter().any(|d| d.sdp_session.as_ref().is_some_and(|s| s.has_restated))
     })
+}
+
+fn leg_ref<'a>(call: &'a Call, leg_id: &str) -> Option<&'a Leg> {
+    std::iter::once(&call.a_leg).chain(&call.b_legs).find(|l| l.leg_id == leg_id)
 }
 
 pub(super) fn leg_mut<'a>(call: &'a mut Call, leg_id: &str) -> Option<&'a mut Leg> {

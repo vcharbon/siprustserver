@@ -11,7 +11,7 @@ ext .rs
 # No generated or fixture .rs file is tracked; one would go here as
 # `exclude <path glob>`.
 
-crates/b2bua-core/src/rules/actions/respond.rs 625
+crates/b2bua-core/src/rules/actions/respond.rs 621
 crates/b2bua-core/src/rules/defaults/core_rules.rs 1643
 crates/b2bua-core/src/rules/relay_first_18x.rs 526
 crates/b2bua-core/src/rules/relay/originate_tests.rs 849

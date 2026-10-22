@@ -66,8 +66,11 @@ pub(crate) use unbuilt::unbuilt;
 // One session per dialog, whoever authored the description (RFC 3264 §8).
 pub use sdp_dialogs::{
     adopt_answered_caller_dialog, adopt_confirmed_dialog, in_dialog_session, next_origin_in_dialog,
+    next_origin_on,
 };
-pub use sdp_session::{continue_on_leg, note_request, opened, Author, Carried};
+pub use sdp_session::{
+    continue_on_leg, note_absorbed_offer, note_answered_here, note_request, opened, Author, Carried,
+};
 
 // Wire routing for what those emit.
 pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
@@ -83,7 +86,7 @@ pub use provisional_withhold::withhold_from_relayed_provisional;
 // Reading text back into typed values (decision fields, dialog state, bodies).
 pub use address::{redirect_contact, UnreadableAddress};
 pub use body::{carries_sdp, describe_body, media_type, mints_offer, sdp};
-pub use dialog::{target_dest, to_gen_dialog, uas_addresses, wire_cseq};
+pub use dialog::{received_on, target_dest, to_gen_dialog, uas_addresses, wire_cseq};
 
 // The relayed-failure-headers Call.ext slot.
 pub use failure_ext::{

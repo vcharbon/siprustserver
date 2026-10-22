@@ -24,6 +24,15 @@ pub fn to_gen_dialog(leg: &Leg, d: &Dialog) -> generators::StackDialog {
     }
 }
 
+/// The dialog a received request rides: its To-tag is ours, its From-tag
+/// the peer's (RFC 3261 §12). `None` for a request with no From tag.
+pub fn received_on(req: &SipRequest) -> Option<call::DialogId> {
+    Some(call::DialogId {
+        our_tag: req.to().tag().unwrap_or_default().to_string(),
+        peer_tag: req.from().tag()?.to_string(),
+    })
+}
+
 /// A dialog sequence number `call` keeps as an `i64`, as a CSeq header
 /// carries it (RFC 3261 §8.1.1.5 keeps a CSeq below 2³¹, which a `u32`
 /// holds): a negative number reads as `0`, one past `u32::MAX` as `u32::MAX`.

@@ -135,7 +135,7 @@ impl ActionExecutor<'_> {
         // A media leg's early media holds the primary as its own dialog: the
         // callee's dialog is another session, under another tag (RFC 3264 §8).
         let primary_shows_media =
-            caller_dialog(call, &primary).is_some_and(|d| fronts_media(call, d));
+            caller_dialog(call, &primary).is_some_and(|d| d.shows_media.is_some());
         let a_face = if already_published || primary_shows_media {
             self.turn.ids.new_tag()
         } else {
@@ -181,52 +181,36 @@ impl ActionExecutor<'_> {
             call.a_leg.own_tag = Some(t.to_string());
         }
         if let Some(media) = media {
-            self.front_media(call, t, media);
+            show_media(call, t, media);
         }
         t.to_string()
     }
 
     /// The caller-facing tag the early media of the media leg `media_leg` is
-    /// shown under when the service states none: the dialog already fronting
-    /// that leg; else the a-leg's own dialog where the caller was shown
-    /// nothing under it and it fronts no callee, so a non-2xx final still
-    /// answers under a tag she holds (RFC 3261 §17.2.1); else an early dialog
-    /// of its own beside the tags she holds. Either way that dialog fronts
-    /// the media leg alone: a callee's provisionals and its 2xx go out under
+    /// shown under when the service states none: the dialog already showing
+    /// it; else the a-leg's own dialog where the caller was shown nothing
+    /// under it and it fronts no callee, so a non-2xx final still answers
+    /// under a tag she holds (RFC 3261 §17.2.1); else an early dialog of its
+    /// own beside the tags she holds. Either way that dialog shows the media
+    /// leg alone ([`Dialog::shows_media`]): a callee's provisionals and its 2xx go out under
     /// another tag ([`Self::a_face_tag`]), and the 2xx ends the media leg's
     /// early dialog (RFC 3261 §12.1.2, RFC 3264 §8).
     pub(super) fn media_face_tag(&mut self, call: &mut Call, media_leg: &str) -> String {
-        let fronted = call
+        let showing = call
             .a_leg
             .dialogs
             .iter()
-            .find(|d| d.is_live() && d.fronts.iter().any(|f| f.leg_id == media_leg));
-        if let Some(d) = fronted {
+            .find(|d| d.is_live() && d.shows_media.as_deref() == Some(media_leg));
+        if let Some(d) = showing {
             return d.our_tag.clone();
         }
         let primary = self.ensure_a_dialog(call);
-        let free = caller_dialog(call, &primary).is_some_and(|d| !d.shown && d.fronts.is_empty());
+        let free = caller_dialog(call, &primary)
+            .is_some_and(|d| !d.shown && d.fronts.is_empty() && d.shows_media.is_none());
         let tag = if free { primary } else { self.turn.ids.new_tag() };
         open_early_a_dialog(call, &tag);
-        self.front_media(call, &tag, media_leg);
+        show_media(call, &tag, media_leg);
         tag
-    }
-
-    /// Record that the caller-facing dialog `tag` shows the early media of
-    /// the media leg `media_leg`: it fronts that leg's dialog, so no callee
-    /// is shown under it ([`Self::a_face_tag`]). Nothing for a leg that is
-    /// not a media leg or holds no dialog.
-    pub(super) fn front_media(&mut self, call: &mut Call, tag: &str, media_leg: &str) {
-        let media_tag = call
-            .b_legs
-            .iter()
-            .find(|l| l.leg_id == media_leg)
-            .filter(|l| call::helpers::leg_kind(l) == call::LegKind::Media)
-            .and_then(|l| l.dialogs.carrying().or_else(|| l.dialogs.iter().next()))
-            .map(|d| d.peer_tag.clone());
-        if let Some(peer_tag) = media_tag {
-            self.map_a_face(call, tag, media_leg, &peer_tag);
-        }
     }
 
     /// Ensure the a-leg has a dialog of its own with a stable B2BUA-minted tag
@@ -331,14 +315,18 @@ impl ActionExecutor<'_> {
     }
 }
 
-/// Whether the caller-facing dialog `d` fronts a media leg's dialog.
-fn fronts_media(call: &Call, d: &Dialog) -> bool {
-    d.fronts.iter().any(|f| {
-        call.b_legs
-            .iter()
-            .find(|l| l.leg_id == f.leg_id)
-            .is_some_and(|l| call::helpers::leg_kind(l) == call::LegKind::Media)
-    })
+/// Record that the caller-facing dialog `tag` shows the early media of the
+/// media leg `media_leg` ([`Dialog::shows_media`]), so no callee is shown
+/// under it ([`ActionExecutor::a_face_tag`]). Nothing for a leg that is not a
+/// media leg. Request routing on the dialog is untouched.
+fn show_media(call: &mut Call, tag: &str, media_leg: &str) {
+    let media = call
+        .b_legs
+        .iter()
+        .any(|l| l.leg_id == media_leg && call::helpers::leg_kind(l) == call::LegKind::Media);
+    if let Some(d) = caller_dialog_mut(call, tag).filter(|_| media) {
+        d.shows_media = Some(media_leg.to_string());
+    }
 }
 
 /// The a-leg's own dialog ([`call::Leg::own_tag`]), to update.

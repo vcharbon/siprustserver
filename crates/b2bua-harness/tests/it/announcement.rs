@@ -139,6 +139,60 @@ async fn announcement_happy_path() {
     let _ = h.finish().await;
 }
 
+/// A request the caller sends on the media server's early dialog once that
+/// leg has ended goes where it went before that dialog had a tag of its own:
+/// to the call's adopted leg, the destination ringing in its own early dialog
+/// (RFC 3261 §12.1.2). Showing the early media there routes nothing.
+#[tokio::test]
+async fn a_caller_request_on_the_media_early_dialog_reaches_the_destination() {
+    let h = Harness::with_transit_delay("announcement-early-dialog-request", 1);
+    let alice = h.agent("alice", "127.0.0.1:5903").await;
+    let mrf = h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
+    let dest = h.agent("dest", &format!("127.0.0.1:{DEST_PORT}")).await;
+    let b2bua = B2buaSut::builder(announcement_decision())
+        .services(vec![announcement::service()])
+        .start(&h, "b2bua", "127.0.0.1:5923")
+        .await;
+
+    let mut call = alice.invite(&dest).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut mrf_uas = mrf.receive("INVITE").await;
+    mrf_uas.respond(200, "OK").with_sdp(MRF_SDP).await;
+    mrf.receive("ACK").await;
+    let mut mrf_dialog = mrf_uas.dialog();
+    let pem = call.expect(183).await;
+    let early_media = pem.to().tag().expect("the 183 names an early dialog").to_string();
+    mrf.receive("INFO").await.respond(200, "OK").await;
+    let done_body = String::from_utf8(announcement::mscml::build_response(200)).unwrap();
+    let mut done = mrf_dialog
+        .send_request(InDialogMethod::Info)
+        .with_header("Content-Type", "application/mediaservercontrol+xml")
+        .with_sdp(&done_body)
+        .send()
+        .await;
+    done.expect(200).await;
+    mrf.receive("BYE").await.respond(200, "OK").await;
+    let mut dest_uas = dest.receive("INVITE").await;
+    dest_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    // The caller's INFO on the media server's early dialog: the media leg is
+    // gone, the destination takes it.
+    let mut info = call.send_request(InDialogMethod::Info).with_to_tag(&early_media).send().await;
+    dest.receive("INFO").await.respond(200, "OK").await;
+    info.expect(200).await;
+
+    dest_uas.respond(200, "OK").with_sdp(DEST_SDP).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    dest.receive("ACK").await;
+    let mut bye = alice_dialog.bye().await;
+    dest.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
 // ── Failure path: the MRF rejects the media leg → the call terminates cleanly.
 #[tokio::test]
 async fn announcement_mrf_rejects() {

@@ -56,12 +56,10 @@ fn ack_2xx(ctx: &RuleContext) -> Option<RuleHandleResult> {
     };
     // The answer continues the session this stack stated on the dialog (RFC
     // 3264 §8).
-    let origin = ctx
-        .call
-        .b_legs()
-        .iter()
+    let origin = std::iter::once(ctx.call.a_leg())
+        .chain(ctx.call.b_legs())
         .find(|l| l.leg_id == ctx.source_leg_id)
-        .and_then(|l| relay::next_origin_in_dialog(l, &dialog.peer_tag));
+        .and_then(|l| relay::next_origin_on(l, dialog));
     let answer = (!relay::acked_invite_carries_offer(dialog))
         .then(|| resp.sdp())
         .flatten()

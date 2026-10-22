@@ -46,10 +46,8 @@ impl ActionExecutor<'_> {
                 now_ms: self.now_ms,
             };
             // In the session this stack stated on the dialog (§8).
-            let origin = call::helpers::find_leg(call, leg_id).and_then(|leg| {
-                let tag = leg.dialogs.established()?.peer_tag.clone();
-                relay::next_origin_in_dialog(leg, &tag)
-            });
+            let origin = call::helpers::find_leg(call, leg_id)
+                .and_then(|leg| relay::next_origin_on(leg, leg.dialogs.established()?));
             let answer = resp
                 .sdp()
                 .and_then(|offer| sip_message::sdp_answer::reject_offer(offer, &options))
