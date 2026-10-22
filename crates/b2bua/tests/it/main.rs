@@ -5,6 +5,7 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=b2bua) & binary(it)' <module>::`.
 
+mod brake_parse_once;
 mod ingress_brake;
 mod materialised_admit_numbers;
 mod reaper_ledger;
