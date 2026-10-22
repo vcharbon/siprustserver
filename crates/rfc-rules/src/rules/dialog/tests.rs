@@ -621,14 +621,6 @@ fn a_strict_dialog_request_sent_to_its_first_route_is_charged_once() {
     assert_eq!(hits(&MidDialogRoute, &msgs).len(), 1, "the header is charged once");
 }
 
-/// An unconfirmed dialog may still be going through a configured outbound
-/// proxy (§8.1.2): no occasion before the peer has a tag.
-#[test]
-fn an_unconfirmed_dialog_opens_no_occasion() {
-    let msgs = [invite(1_000, "z9hG4bK-i", "")];
-    assert!(eval(&MidDialogWireDestination, &msgs).is_empty());
-}
-
 // ── RecordRoutePlacement (RFC 3261 §12.1.1 / §12.2.2) ───────────────────
 
 /// Record-Route on the dialog-CREATING response is where it belongs.
@@ -1157,3 +1149,4 @@ fn a_retransmitted_bye_is_one_occasion() {
 }
 
 mod bye_after_final;
+mod wire_destination;

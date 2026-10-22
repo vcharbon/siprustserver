@@ -11,7 +11,7 @@ use sip_message::header::{
     network_host, Geolocation, GeolocationError, HeaderValue, ParamValue, RouteEntry, Uri, Via,
 };
 use sip_message::remote_target::rewrite_hostport;
-use sip_message::{CustomParser, SipMessage, SipParser, SipStr};
+use sip_message::{CustomParser, SipMessage, SipParser, SipParserLimits, SipStr};
 
 /// Text that RFC 3261's `hexseq` admits and no RFC 4291 address is.
 const NOT_ADDRESSES: [&str; 2] = ["1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7:8::"];
@@ -146,6 +146,34 @@ fn a_received_is_stamped_on_an_address_difference_only() {
     assert_eq!(moved.received(), Some("2001:db8::2"));
     let named = via("host.example.com").stamped_from("192.0.2.7", 5060);
     assert_eq!(named.received(), Some("192.0.2.7"));
+    let mapped = via("192.0.2.1:5060").stamped_from("::ffff:192.0.2.1", 5060);
+    assert_eq!(mapped.received(), None, "an IPv4-mapped source is the IPv4 address");
+}
+
+/// A message read leniently (`wire_grammar = false`) never fails on its
+/// sent-by: one the reader refuses is held whole, with no port, and renders
+/// back as written.
+#[test]
+fn a_lenient_reading_holds_a_refused_sent_by_whole() {
+    let lenient = CustomParser::with_limits(SipParserLimits {
+        wire_grammar: false,
+        ..SipParserLimits::default()
+    });
+    for sent_by in [
+        "[2001:db8::00001]",
+        "[1:2:3:4:5:6:7::8]",
+        "192.0.2.1:",
+        "[2001:db8::1]x",
+        "192.0.2.1:5060abc",
+    ] {
+        let via = format!("SIP/2.0/UDP {sent_by};branch=z9hG4bK-hg1");
+        let raw = invite("sip:bob@example.com", &via, "");
+        let msg = lenient.parse(raw.as_bytes()).unwrap_or_else(|e| panic!("{via}: {}", e.reason));
+        let top = msg.via().first();
+        assert_eq!((top.host(), top.port()), (sent_by, None), "{via}");
+        assert_eq!(top.to_wire(), via);
+        assert!(with_via(&via).is_err(), "the wire refuses {via}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +201,18 @@ fn a_uri_of_another_scheme_is_opaque() {
     }
     assert_ne!(uri("urn:service:sos"), uri("urn:service:police"));
     assert!(uri("urn:service:s\u{f6}s").is_err(), "a URI byte outside the URI character set");
+}
+
+/// RFC 3261 §25.1 `opaque-part = uric-no-slash *uric` and RFC 3966
+/// `telephone-subscriber` are never empty.
+#[test]
+fn an_empty_scheme_specific_part_is_no_uri() {
+    for empty in ["urn:", "cid:", "tel:", "tel:;phone-context=example.com"] {
+        assert!(uri(empty).is_err(), "{empty:?} accepted");
+    }
+    let contact =
+        invite("sip:bob@example.com", VIA, "").replace("<sip:alice@192.0.2.1:5060>", "<urn:>");
+    assert!(parse(&contact).is_err(), "Contact <urn:> accepted");
 }
 
 #[test]

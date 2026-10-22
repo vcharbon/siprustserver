@@ -12,7 +12,7 @@ mod uri_facts;
 mod via_hops;
 mod via_stamp;
 use std::borrow::Cow;
-pub use uri_facts::UriFacts;
+pub use uri_facts::{request_uri_target, UriFacts};
 pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
 pub use via_stamp::relay_stamp_spans;
 

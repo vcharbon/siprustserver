@@ -67,7 +67,7 @@ by construction. Every other reader of a URI goes through it.
   names no user, host, port, parameter or header; a route-family entry of one
   names no hop and is refused. Both are held to every byte of the URI character
   set (`reserved / unreserved / "%"` and the IPv6 brackets), plus a raw `#` in
-  a `tel` number.
+  a `tel` number, and neither the number nor the opaque part is empty.
 - A Request-URI also carries no escaped headers (§19.1.1 Table 1), and a
   recorded route is held to the same rule.
 
@@ -123,7 +123,7 @@ parser validates" is the Date: a malformed Date never refuses the message
 the stack or read by a test harness. From, To and Contact keep their scanned
 parts there, and a URI the reader refuses is held opaque instead of refusing
 the message; a Via sent-by the reader refuses is held whole as the host, with
-no port. The Request-URI is read in every mode: a URI that does not read
+no port, and renders as written. The Request-URI is read in every mode: a URI that does not read
 is no request's target, whoever built the request.
 
 ## Considered and rejected

@@ -121,7 +121,7 @@ const EXPECTED: &[Expected] = &[
     rvoip("param-gaps/viaEmptyBranch", OnlyCustomRefuses, "RFC 3261 §25.1 via-branch")
         .values(0x57f029553723be25),
     rvoip("param-gaps/viaPortTrailingGarbage", OnlyCustomRefuses, "RFC 3261 §25.1 sent-by")
-        .values(0xc978a1042444b2bc),
+        .values(0xe7f8970a3c605f11),
     rvoip("rfc4475-invalid/angleBracketRequestUri", OnlyCustomRefuses, "RFC 4475 §3.1.2.7")
         .values(0x377fef051d494302),
     rvoip("rfc4475-invalid/escapedHeadersInUri", OnlyCustomRefuses, "RFC 3261 §19.1.1 Table 1")

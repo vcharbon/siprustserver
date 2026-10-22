@@ -184,11 +184,12 @@ impl Via {
     /// host, the sender asked for `rport` (even when they are equal), or the
     /// hop already carries a `received`, which is the sender's own writing and
     /// is never kept; `rport` is the source port when the sender asked for it.
-    /// Two IP literals differ as addresses, anything else as text.
+    /// Two IP literals differ as addresses, an IPv4-mapped IPv6 address being
+    /// its IPv4 address; anything else as text.
     pub fn stamped_from(mut self, source_host: &str, source_port: u16) -> Self {
         let rport_asked = matches!(self.rport(), Some(Rport::Requested));
         let same_host = match (ip_host(self.host()), ip_host(source_host)) {
-            (Some(sent_by), Some(source)) => sent_by == source,
+            (Some(sent_by), Some(source)) => sent_by.to_canonical() == source.to_canonical(),
             _ => self.host() == source_host,
         };
         if rport_asked || self.received().is_some() || !same_host {

@@ -123,7 +123,7 @@ fn read_sip(value: &SipStr, scheme: SipStr, i: usize, role: UriRole) -> Result<U
     Ok(UriParts { scheme, user, authority, params, headers, opaque: None })
 }
 
-/// `userinfo =( user / telephone-subscriber ) [ ":" password ] "@"`, the `@`
+/// `userinfo = ( user / telephone-subscriber ) [ ":" password ] "@"`, the `@`
 /// excluded. A telephone-subscriber's characters are all user characters.
 fn userinfo_refusal(userinfo: &str) -> Option<String> {
     let (user, password) = match userinfo.split_once(':') {
@@ -327,7 +327,8 @@ fn is_ipv6_address(text: &str) -> bool {
 
 /// A `tel` URI (RFC 3966), read structurally: every byte of the URI character
 /// set or a raw `#` (`local-number-digits`), the number up to the first `;`
-/// or `?` as the host, then `;`-parameters and `?`-pairs.
+/// or `?` as the host, then `;`-parameters and `?`-pairs. The number is not
+/// empty (`telephone-subscriber`).
 fn read_tel(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipParseError> {
     let bytes = value.as_bytes();
     let text = value.as_str();
@@ -336,6 +337,9 @@ fn read_tel(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipPar
         return Err(fail(value, &r));
     }
     let number_end = scan_until(bytes, i, b";?");
+    if number_end <= i {
+        return Err(fail(value, "empty tel number"));
+    }
     let authority = HostPort::new(sub(value, i, number_end), None);
     let (params, after_params) = parse_semicolon_params(value, number_end, &URI_PARAMS);
     let mut headers = Vec::new();
@@ -351,10 +355,14 @@ fn read_tel(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipPar
 }
 
 /// A URI of a scheme this stack does not take apart (`urn`, `http`, `cid` …):
-/// every byte of the URI character set, the scheme-specific part kept whole.
-/// It names no user, host, port, parameter or escaped header.
+/// every byte of the URI character set, the scheme-specific part kept whole
+/// and not empty (RFC 3261 §25.1 `opaque-part = uric-no-slash *uric`, or a
+/// `hier-part`). It names no user, host, port, parameter or escaped header.
 fn read_opaque(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipParseError> {
     let len = value.as_str().len();
+    if i >= len {
+        return Err(fail(value, "empty scheme-specific part"));
+    }
     if let Some(r) = run_refusal(clamped(value.as_str(), i, len), is_uri_char, false) {
         return Err(fail(value, &r));
     }

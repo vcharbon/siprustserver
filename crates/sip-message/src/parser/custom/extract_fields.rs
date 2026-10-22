@@ -13,7 +13,6 @@ use super::contact_entries::{
 };
 use super::dialog_ids::{count_tag_params, is_call_id, read_address, tag_refusal};
 use super::header_index::HeaderIndex;
-use super::port_garbage::has_via_port_trailing_garbage;
 use super::request_uri::read_request_uri;
 use super::routes::route_refusal;
 use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
@@ -218,13 +217,8 @@ pub(super) fn extract_identity(
         return Err(SipParseError::new("Missing mandatory Via header"));
     }
     let via_segments = || idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()));
-    for segment in via_segments() {
-        if has_via_port_trailing_garbage(segment) {
-            return Err(SipParseError::new(format!(
-                "Trailing non-digit after Via port: \"{segment}\""
-            )));
-        }
-        if wire {
+    if wire {
+        for segment in via_segments() {
             if let Some(reason) = check_sent_protocol(segment) {
                 return Err(SipParseError::new(format!("{reason}: \"{segment}\"")));
             }
@@ -239,11 +233,11 @@ pub(super) fn extract_identity(
         // A lenient reading holds a sent-by the reader refuses whole, as it
         // holds a URI it refuses opaque.
         let (host, port) = match &v.sent_by {
-            Ok(read) => read.clone(),
+            Ok((host, port)) => (Some(host.clone()), *port),
             Err(reason) if wire => {
                 return Err(SipParseError::new(format!("Strict Via sent-by: {reason}: \"{raw}\"")));
             }
-            Err(_) => (v.sent_by_text.clone(), None),
+            Err(_) => (None, None),
         };
         if let Some(p) = port.filter(|&p| top_via::port_out_of_range(p, top)) {
             return Err(SipParseError::new(format!("Via port out of range: {p}")));
@@ -269,13 +263,11 @@ pub(super) fn extract_identity(
             .map(u16::try_from)
             .transpose()
             .map_err(|_| SipParseError::new(format!("Via port out of range: {port:?}")))?;
-        vias.push(header::Via::from_parts(
-            v.protocol,
-            v.version,
-            v.transport,
-            HostPort::new(host, port),
-            v.params,
-        ));
+        let sent_by = match host {
+            Some(host) => HostPort::new(host, port),
+            None => HostPort::whole(v.sent_by_text),
+        };
+        vias.push(header::Via::from_parts(v.protocol, v.version, v.transport, sent_by, v.params));
     }
 
     let mut hops = vias.into_iter();

@@ -277,7 +277,7 @@ impl Obligation for MidDialogWireDestination {
             let strict = req.dialog.route_set.first().filter(|r| !r.loose).cloned();
             let target = match strict.or_else(|| routes.into_iter().next()) {
                 Some(first) => Some((first, true)),
-                None => sniff::request_uri_facts(head).map(|u| (u, false)),
+                None => sniff::request_uri_target(head).map(|u| (u, false)),
             };
             let Some((target, from_route)) = target else {
                 out.push(finding(Decision::Undecidable("no readable target at this vantage")));

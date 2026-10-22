@@ -1,8 +1,8 @@
-//! The Via sent-by port check reads the sent-by alone (RFC 3261 §20.42:
+//! The Via sent-by reader reads the sent-by alone (RFC 3261 §20.42:
 //! `sent-by = host [COLON port]`, `host` an IPv6 reference in brackets): a
 //! group of an IPv6 address is never taken for a port, in the sent-by or in
-//! a `received`/`maddr` parameter, while a port followed by letters is still
-//! refused.
+//! a `received`/`maddr` parameter, while a port followed by letters is
+//! refused on the wire.
 
 use sip_message::{CustomParser, SipMessage, SipParser};
 
@@ -37,6 +37,6 @@ fn a_port_followed_by_letters_is_still_refused() {
         "SIP / 2.0 / UDP host.example.com:5060abc;branch=z9hG4bK1",
     ] {
         let err = request(via).expect_err(via);
-        assert!(err.reason.contains("Trailing non-digit after Via port"), "{}", err.reason);
+        assert!(err.reason.contains("Strict Via sent-by: non-digit in port"), "{}", err.reason);
     }
 }

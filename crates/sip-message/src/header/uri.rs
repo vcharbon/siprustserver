@@ -29,11 +29,13 @@ pub enum UriRole {
 }
 
 /// A host with an optional explicit port. An IPv6 literal is held WITHOUT its
-/// brackets; [`render`](Self::render) puts them back.
+/// brackets; [`render`](Self::render) puts them back. A value held
+/// [`whole`](Self::whole) renders as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostPort {
     host: SipStr,
     port: Option<u16>,
+    whole: bool,
 }
 
 impl HostPort {
@@ -41,7 +43,13 @@ impl HostPort {
     pub const DEFAULT_PORT: u16 = 5060;
 
     pub fn new(host: impl Into<SipStr>, port: Option<u16>) -> Self {
-        Self { host: host.into(), port }
+        Self { host: host.into(), port, whole: false }
+    }
+
+    /// Text no host reader accepts, held whole as the host, with no port: it
+    /// renders as written, never bracketed.
+    pub fn whole(text: impl Into<SipStr>) -> Self {
+        Self { host: text.into(), port: None, whole: true }
     }
 
     pub fn host(&self) -> &str {
@@ -69,7 +77,7 @@ impl HostPort {
     }
 
     pub fn render(&self, out: &mut Wire) {
-        let ipv6 = self.host.contains(':');
+        let ipv6 = !self.whole && self.host.contains(':');
         if ipv6 {
             out.byte(b'[');
         }
@@ -159,7 +167,7 @@ impl Uri {
         Self {
             scheme: SipStr::EMPTY,
             user: None,
-            authority: HostPort::new(text.clone(), None),
+            authority: HostPort::whole(text.clone()),
             params: Params::new(),
             headers: Vec::new(),
             opaque_part: None,
@@ -169,7 +177,8 @@ impl Uri {
 
     /// Whether this value could not be read as a URI and is kept whole — the
     /// state [`opaque`](Self::opaque) puts it in. A router must not resolve one:
-    /// its host and port mean nothing.
+    /// its host and port mean nothing. A URI read under a scheme that names no
+    /// host is another state: see [`opaque_part`](Self::opaque_part).
     pub fn is_opaque(&self) -> bool {
         self.scheme.is_empty()
     }
@@ -205,7 +214,8 @@ impl Uri {
 
     /// The scheme-specific part of a URI whose scheme is neither sip, sips nor
     /// tel, kept whole; `None` for those three, whose parts the other
-    /// accessors read.
+    /// accessors read. Such a URI names no host, so a router that resolves a
+    /// URI checks this beside [`is_opaque`](Self::is_opaque).
     pub fn opaque_part(&self) -> Option<&str> {
         self.opaque_part.as_ref().map(SipStr::as_str)
     }
