@@ -9,6 +9,7 @@ use std::fmt::Debug;
 
 use super::echo;
 use sip_message::generators::cancel::generate_cancel;
+use sip_message::generators::generate_invalid_request;
 use sip_message::generators::response::{generate_response, retag_response, GenerateResponseOpts};
 use sip_message::generators::spec::InviteClientTransactionHandle;
 use sip_message::header::{self, HeaderName, HeaderValue, MediaType, Uri};
@@ -90,6 +91,9 @@ pub fn message(raw: &[u8], d: &mut Digest) {
     for (name, parser) in parsers() {
         let parsed = parser.parse(raw);
         d.note(name, &parsed.as_ref().map(|_| ()));
+        if let Err(error) = &parsed {
+            invalid_request(error, d);
+        }
         if name == "default" {
             d.note("shared", &parser.parse_shared(Bytes::copy_from_slice(raw)));
             d.note("header-fields", &parser.parse_header_fields(raw));
@@ -99,6 +103,13 @@ pub fn message(raw: &[u8], d: &mut Digest) {
             parsed_message(&msg, name == "default", d);
         }
     }
+}
+
+/// The 400 answering a refused request, built from its partial.
+fn invalid_request(error: &sip_message::SipParseError, d: &mut Digest) {
+    let Some(partial) = error.partial() else { return };
+    let built = generate_invalid_request(partial, &error.reason, "192.0.2.1:5060", "t400");
+    d.note("invalid-request", &built.map(|r| r.image().to_vec()));
 }
 
 /// What a parsed message answers; `strict` where the wire grammar read it.

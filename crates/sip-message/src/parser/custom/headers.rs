@@ -55,10 +55,33 @@ fn extract_strict_numeric_prefix(value: &str, rule: &NumericHeaderRule) -> Optio
 }
 
 pub struct ParsedHeaders {
+    /// The lines that passed, in wire order.
     pub headers: Vec<SipHeader>,
     /// The declared `Content-Length`; `None` when the block states none, which
     /// the transport framing then resolves (RFC 3261 §18.3).
     pub content_length: Option<u64>,
+    /// The first line that broke the grammar or a gate; the split read past it.
+    pub refusal: Option<SipParseError>,
+    /// Whether a refused line named Via, From, To, Call-ID or CSeq: a field a
+    /// response echoes is then missing from `headers`.
+    pub echoed_line_refused: bool,
+}
+
+/// Whether `name` is one of the fields a response echoes (RFC 3261 §8.2.6.2).
+fn is_echoed(name: &HeaderName) -> bool {
+    matches!(
+        name,
+        HeaderName::Via | HeaderName::From | HeaderName::To | HeaderName::CallId | HeaderName::CSeq
+    )
+}
+
+/// How one header line ended.
+enum Line {
+    /// It passed, and is in the list.
+    Kept,
+    /// It broke the grammar or a gate; the scanner is past it. `name` is the
+    /// header it named, when its name read.
+    Refused { error: SipParseError, name: Option<HeaderName> },
 }
 
 /// Scan the ordered **as-wire** header names from a raw datagram — RFC 3261
@@ -103,17 +126,24 @@ pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<Strin
 /// Parse all headers from the current position until the blank line, which is
 /// consumed. `text` is the message image the scanner walks; every name/value
 /// comes back as a span of it, so a header costs no allocation.
+///
+/// A line that breaks the grammar or a gate is left out and the split reads
+/// on, the first such line kept as the refusal. A line past the length limit
+/// stops the split: the `Err` is that first refused line, else the limit.
 pub fn parse_headers(
     s: &mut Scanner,
     text: &SharedText,
     lines: usize,
     limits: &SipParserLimits,
 ) -> Result<ParsedHeaders, SipParseError> {
-    let image = text.as_str();
-    // Size the list up front from the block's line count — growing it from
-    // empty cost one reallocation per doubling, several per message.
-    let mut headers: Vec<SipHeader> = Vec::with_capacity(lines);
-    let mut content_length: Option<u64> = None;
+    let mut parsed = ParsedHeaders {
+        // Size the list up front from the block's line count — growing it from
+        // empty cost one reallocation per doubling, several per message.
+        headers: Vec::with_capacity(lines),
+        content_length: None,
+        refusal: None,
+        echoed_line_refused: false,
+    };
 
     loop {
         if s.at_end_of_headers() {
@@ -123,84 +153,134 @@ pub fn parse_headers(
         if s.at_end() {
             break;
         }
-
-        let raw_name = read_header_name(s)?;
-        if raw_name.is_empty() {
-            return Err(SipParseError::new(format!("Empty header name at position {}", s.pos())));
-        }
-        let name_bytes = image.as_bytes().get(raw_name.clone());
-        if limits.wire_grammar && !name_bytes.is_some_and(|n| n.iter().all(|&b| is_token_char(b))) {
-            return Err(SipParseError::new(format!(
-                "Header name is not a token at position {}",
-                raw_name.start
-            )));
-        }
-
-        s.expect(COLON)?;
-        s.skip_lws();
-
-        let value = s.read_header_value()?;
-        let name = expand_compact_form(text, raw_name);
-        let trimmed_value = match value {
-            HeaderValue::Span(range) => {
-                let t = trim_span(image, range.clone()).ok_or_else(|| {
-                    SipParseError::new(format!("header value {range:?} outside the image"))
-                })?;
-                text.span(t.start, t.len())
+        match parse_line(s, text, limits, &mut parsed) {
+            Ok(Line::Kept) => {}
+            Ok(Line::Refused { error, name }) => {
+                parsed.echoed_line_refused |= name.as_ref().is_some_and(is_echoed);
+                parsed.refusal.get_or_insert(error);
             }
-            HeaderValue::Unfolded(v) => SipStr::owned(v.trim()),
-        };
-
-        // Bound per-header memory: name + ": " + value, post-unfold/trim.
-        let header_len = name.len() + 2 + trimmed_value.len();
-        if header_len > limits.max_header_length {
-            return Err(SipParseError::new(format!(
-                "Header \"{name}\" length {header_len} exceeds limit {}",
-                limits.max_header_length
-            )));
+            Err(limit) => return Err(parsed.refusal.unwrap_or(limit)),
         }
-
-        // Header identity is resolved once, here, from bytes the scanner has
-        // just walked; every gate below dispatches on it instead of re-probing
-        // the name against a candidate list.
-        if let Some(known) = HeaderName::known(&name) {
-            // Registry-driven paranoid digit-only pass.
-            if let Some(rule) = numeric_header_rule(&known) {
-                match extract_strict_numeric_prefix(&trimmed_value, &rule) {
-                    Some(parsed) => {
-                        if known == HeaderName::ContentLength {
-                            content_length = Some(parsed);
-                        }
-                    }
-                    None => {
-                        return Err(SipParseError::new(format!(
-                            "Invalid {name} numeric value: \"{trimmed_value}\""
-                        )));
-                    }
-                }
-            }
-
-            // Reject unterminated quoted-strings on quoted-string-bearing headers
-            // (CVE-2023-27599).
-            if is_quoted_string_header(&known) && has_unbalanced_quotes(&trimmed_value) {
-                return Err(SipParseError::new(format!(
-                    "Unterminated quoted-string in {name} header"
-                )));
-            }
-
-            // Digest credentials must be comma-separated name=value pairs
-            // (CVE-2023-28098).
-            if is_authorization_header(&known) && !is_valid_digest_credentials(&trimmed_value) {
-                return Err(SipParseError::new(format!(
-                    "Malformed Digest credentials in {name} header"
-                )));
-            }
-        }
-
-        headers.push(SipHeader { name, value: trimmed_value });
     }
 
-    Ok(ParsedHeaders { headers, content_length })
+    Ok(parsed)
+}
+
+/// The rest of a refused line consumed, folds included, so the split resumes
+/// at the next line.
+fn refused(
+    s: &mut Scanner,
+    error: SipParseError,
+    name: Option<HeaderName>,
+) -> Result<Line, SipParseError> {
+    s.read_header_value()?;
+    Ok(Line::Refused { error, name })
+}
+
+/// Parse the header line at the scanner, pushing it to `parsed` when it
+/// passes. `Err` is a limit, which stops the split.
+fn parse_line(
+    s: &mut Scanner,
+    text: &SharedText,
+    limits: &SipParserLimits,
+    parsed: &mut ParsedHeaders,
+) -> Result<Line, SipParseError> {
+    let image = text.as_str();
+    let raw_name = match read_header_name(s) {
+        Ok(raw_name) => raw_name,
+        Err(error) => return refused(s, error, None),
+    };
+    if raw_name.is_empty() {
+        let error = SipParseError::new(format!("Empty header name at position {}", s.pos()));
+        return refused(s, error, None);
+    }
+    let name_bytes = image.as_bytes().get(raw_name.clone());
+    if limits.wire_grammar && !name_bytes.is_some_and(|n| n.iter().all(|&b| is_token_char(b))) {
+        let error = SipParseError::new(format!(
+            "Header name is not a token at position {}",
+            raw_name.start
+        ));
+        return refused(s, error, None);
+    }
+
+    let name = expand_compact_form(text, raw_name);
+    // Header identity is resolved once, here, from bytes the scanner has just
+    // walked; every gate below dispatches on it instead of re-probing the name
+    // against a candidate list.
+    let known = HeaderName::known(&name);
+    if let Err(error) = s.expect(COLON) {
+        return refused(s, error, known);
+    }
+    s.skip_lws();
+
+    let value = s.read_header_value()?;
+    let trimmed_value = match value {
+        HeaderValue::Span(range) => {
+            let t = trim_span(image, range.clone()).ok_or_else(|| {
+                SipParseError::new(format!("header value {range:?} outside the image"))
+            })?;
+            text.span(t.start, t.len())
+        }
+        HeaderValue::Unfolded(v) => SipStr::owned(v.trim()),
+    };
+
+    // Bound per-header memory: name + ": " + value, post-unfold/trim.
+    let header_len = name.len() + 2 + trimmed_value.len();
+    if header_len > limits.max_header_length {
+        return Err(SipParseError::new(format!(
+            "Header \"{name}\" length {header_len} exceeds limit {}",
+            limits.max_header_length
+        )));
+    }
+
+    if let Some(known) = known {
+        if let Some(error) = gate_refusal(&known, &name, &trimmed_value, &mut parsed.content_length)
+        {
+            return Ok(Line::Refused { error, name: Some(known) });
+        }
+    }
+
+    parsed.headers.push(SipHeader { name, value: trimmed_value });
+    Ok(Line::Kept)
+}
+
+/// The gate beyond the grammar (ADR-0001) the value of the known header
+/// `known` breaks, if any. A numeric value that passes and names the
+/// Content-Length is stored in `content_length`.
+fn gate_refusal(
+    known: &HeaderName,
+    name: &SipStr,
+    value: &SipStr,
+    content_length: &mut Option<u64>,
+) -> Option<SipParseError> {
+    // Registry-driven paranoid digit-only pass.
+    if let Some(rule) = numeric_header_rule(known) {
+        match extract_strict_numeric_prefix(value, &rule) {
+            Some(parsed) => {
+                if *known == HeaderName::ContentLength {
+                    *content_length = Some(parsed);
+                }
+            }
+            None => {
+                return Some(SipParseError::new(format!(
+                    "Invalid {name} numeric value: \"{value}\""
+                )));
+            }
+        }
+    }
+
+    // Reject unterminated quoted-strings on quoted-string-bearing headers
+    // (CVE-2023-27599).
+    if is_quoted_string_header(known) && has_unbalanced_quotes(value) {
+        return Some(SipParseError::new(format!("Unterminated quoted-string in {name} header")));
+    }
+
+    // Digest credentials must be comma-separated name=value pairs
+    // (CVE-2023-28098).
+    if is_authorization_header(known) && !is_valid_digest_credentials(value) {
+        return Some(SipParseError::new(format!("Malformed Digest credentials in {name} header")));
+    }
+    None
 }
 
 /// Headers whose RFC 3261 grammar can carry a quoted-string.

@@ -128,8 +128,9 @@ is no request's target, whoever built the request.
 
 ## Consequences
 
-- A message the grammar refuses is dropped where it was read before; the
-  refusal is the packet's alone (ADR-0051).
+- A message the grammar refuses is refused where it was read before; the
+  refusal is the packet's alone (ADR-0051), a request answered 400 when it can
+  be (ADR-0054).
 - Capture ingest (`sipflow`) sets aside the messages it refuses and copies the
   accepted ones whose non-fatal header reading failed beside them, counting
   each (`parse_failed`, `header_failed`), so a stricter grammar's cost on a

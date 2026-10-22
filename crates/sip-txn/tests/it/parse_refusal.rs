@@ -138,13 +138,14 @@ async fn a_request_with_a_malformed_from_is_dropped_unanswered() {
     stack.inject(&malformed_invite("z9hG4bK-bad-from", "<sip:caller@10.0.0.1>junk;tag=c")).await;
     elapse_ms(2 * TRANSIT + 1).await;
     assert!(drain_raw(&stack).is_empty(), "no From to echo: no answer");
+    assert!(stack.drain_events().is_empty());
     assert_eq!(stack.txn.metrics().parse_errors(), 1);
     assert_eq!(stack.txn.metrics().parse_refusals_answered(), 0);
 }
 
 #[tokio::test(start_paused = true)]
 async fn past_the_burst_a_refusal_is_dropped_and_counted() {
-    let mut stack = stack().await;
+    let stack = stack().await;
     let burst = usize::try_from(PARSE_REFUSAL_BURST).unwrap();
     for i in 0..=burst {
         stack.inject(&malformed_invite(&format!("z9hG4bK-flood-{i}"), FROM)).await;

@@ -1,6 +1,6 @@
 //! The owner's inbound packet dispatch: a datagram is parsed, a parser panic
-//! contained to it ([`crate::parse_guard`]), and the message handed to the
-//! server or the client side.
+//! contained to it ([`crate::parse_guard`]), a refused one answered or dropped
+//! (`parse_refusal`), and the message handed to the server or the client side.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -23,10 +23,8 @@ impl Owner {
         let raw = bytes::Bytes::from(packet.raw);
         let parsed = match parse_datagram(raw, |raw| self.parser.parse_shared(raw)) {
             Ok(Ok(m)) => m,
-            Ok(Err(_)) => {
-                // Parse error: the datagram is dropped. Count it so a
-                // malformed-traffic flood / parser regression is visible.
-                self.metrics.parse_errors.fetch_add(1, Relaxed);
+            Ok(Err(error)) => {
+                self.refuse_unparsed(endpoint, &error, src).await;
                 return;
             }
             Err(ParserPanicked) => {

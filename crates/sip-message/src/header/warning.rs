@@ -7,9 +7,24 @@
 pub const WARN_TEXT_MAX: usize = 200;
 
 /// One warning-value: `code SP agent SP warn-text`, the warn-text being
-/// `text` as a quoted-string.
+/// `text` as a quoted-string of printable ASCII: `"` and `\` escaped as
+/// quoted-pairs, every other byte outside SP..`~` written `%XX`, and the
+/// escaped text cut at [`WARN_TEXT_MAX`] bytes between two escapes.
 pub fn warning_value(code: u16, agent: &str, text: &str) -> String {
-    format!("{code} {agent} \"{text}\"")
+    let mut warn_text = String::with_capacity(text.len().min(WARN_TEXT_MAX));
+    for byte in text.bytes() {
+        let escaped = match byte {
+            b'"' => String::from("\\\""),
+            b'\\' => String::from("\\\\"),
+            b' '..=b'~' => char::from(byte).to_string(),
+            _ => format!("%{byte:02X}"),
+        };
+        if warn_text.len().saturating_add(escaped.len()) > WARN_TEXT_MAX {
+            break;
+        }
+        warn_text.push_str(&escaped);
+    }
+    format!("{code} {agent} \"{warn_text}\"")
 }
 
 /// The warn-agent of every warning-value of a `Warning` header line, in order.

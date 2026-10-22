@@ -15,6 +15,7 @@
 
 mod admission;
 mod classify;
+mod parse_refusal;
 mod record_route;
 mod reply;
 mod route;

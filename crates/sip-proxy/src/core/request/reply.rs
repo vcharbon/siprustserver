@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::header::HeaderValue;
+use sip_message::header::{HeaderValue, Via};
 use sip_message::types::SipHeader;
 use sip_message::{Method, SipRequest, SipResponse};
 
@@ -17,7 +17,17 @@ use crate::strategy::SelectError;
 use crate::trace::emit;
 
 use super::super::ProxyCore;
-use super::{top_via_branch, RouteOutcome};
+use super::RouteOutcome;
+
+/// The fields of a request the proxy answers itself that its own final's
+/// bookkeeping reads: a parsed request's, or a refused one's partial's.
+pub(super) struct Answered<'a> {
+    pub method: &'a Method,
+    pub top_via: &'a Via,
+    pub call_id: &'a str,
+    pub from_tag: Option<&'a str>,
+    pub cseq: u32,
+}
 
 /// A typed value on the response generator's extra-header seam, which still
 /// takes wire lines.
@@ -122,6 +132,24 @@ impl ProxyCore {
 
     /// Send `resp`, the proxy's own final to `req`, to the source.
     async fn send_own_final(&self, req: &SipRequest, src: SocketAddr, resp: &SipResponse) {
+        let answered = Answered {
+            method: req.method(),
+            top_via: req.top_via(),
+            call_id: req.call_id().as_str(),
+            from_tag: req.from().tag(),
+            cseq: req.cseq().seq(),
+        };
+        self.send_own_final_to(answered, src, resp).await;
+    }
+
+    /// Send `resp`, the proxy's own final to the request `answered` names,
+    /// to the source.
+    pub(super) async fn send_own_final_to(
+        &self,
+        answered: Answered<'_>,
+        src: SocketAddr,
+        resp: &SipResponse,
+    ) {
         // A recipe freezes into its own image, and that image IS the wire form.
         self.reply_to_source(resp.image(), src).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
@@ -129,7 +157,7 @@ impl ProxyCore {
         // place a traced call's own 503 / 483 / 420 / 400 becomes a `sip.out`.
         // A shed call never reaches a downstream hop, so without this its span
         // would show the INVITE arriving and nothing leaving.
-        emit::responded(&self.traces, req.call_id().as_str(), self.trace_ms(), src, resp.image());
+        emit::responded(&self.traces, answered.call_id, self.trace_ms(), src, resp.image());
 
         // ── §16.7 / §17.1.1.3: absorb the ACK to our OWN non-2xx INVITE final ─
         // Generating a final response makes this proxy the UAS of that INVITE
@@ -140,16 +168,15 @@ impl ProxyCore {
         // self-generated reject; relaying would run the strategy and hand a
         // worker a stray ACK matching no transaction it ever created).
         if (300..700).contains(&resp.status())
-            && req.method() == Method::Invite
-            && top_via_branch(req).is_some()
+            && answered.method == Method::Invite
+            && answered.top_via.branch().is_some_and(|b| !b.is_empty())
         {
-            let from = req.from();
             self.cancel_lru.remember(
                 &crate::cancel_lru::ack_hop_key(
-                    req.top_via(),
-                    req.call_id().as_str(),
-                    from.tag(),
-                    req.cseq().seq(),
+                    answered.top_via,
+                    answered.call_id,
+                    answered.from_tag,
+                    answered.cseq,
                 ),
                 crate::cancel_lru::CancelEntry {
                     target: self.advertised.clone(),

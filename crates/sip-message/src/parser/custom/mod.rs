@@ -89,7 +89,11 @@ impl CustomParser {
         let text = decode_image(head(raw, block.end)?);
         let mut s = Scanner::new(text.as_str().as_bytes());
         parse_start_line(&mut s, text.as_str(), &self.limits)?;
-        Ok(headers::parse_headers(&mut s, &text, block.lines, &self.limits)?.headers)
+        let parsed = headers::parse_headers(&mut s, &text, block.lines, &self.limits)?;
+        match parsed.refusal {
+            Some(refusal) => Err(refusal),
+            None => Ok(parsed.headers),
+        }
     }
 
     pub fn with_limits(limits: SipParserLimits) -> Self {
@@ -124,14 +128,40 @@ impl SipParser for CustomParser {
         let image = text.as_str();
 
         let mut s = Scanner::new(image.as_bytes());
+        // A refused start line or a limit is never answered: no partial.
         let start = parse_start_line(&mut s, image, limits)?;
-        let parsed = headers::parse_headers(&mut s, &text, block.lines, limits)?;
-        let headers_vec = parsed.headers;
+        let headers::ParsedHeaders {
+            headers: headers_vec,
+            content_length,
+            refusal,
+            echoed_line_refused,
+        } = headers::parse_headers(&mut s, &text, block.lines, limits)?;
+
+        let mode = if limits.wire_grammar { ExtractMode::Wire } else { ExtractMode::Hydrate };
+
+        // One dispatch pass over the header list feeds both the mandatory field
+        // extraction and the optional-header parse.
+        let idx = HeaderIndex::build(&headers_vec);
+
+        // Every refusal from here on carries the partial a 400 answers it
+        // with, when the request has one.
+        let refuse = |error: SipParseError| match &start {
+            StartLine::Request(rl) if !echoed_line_refused => SipParseError {
+                partial: scanner::span_text(image, &rl.method)
+                    .ok()
+                    .and_then(|method| partial::request_partial(method, &idx, limits, mode)),
+                ..error
+            },
+            _ => error,
+        };
+        if let Some(refusal) = refusal {
+            return Err(refuse(refusal));
+        }
 
         // The body bound is the declared Content-Length; a datagram that
         // declares none ends with its bytes (RFC 3261 §18.3), a stream that
         // declares none is undelimited and refused (§20.14).
-        let body: Bytes = match parsed.content_length {
+        let body: Bytes = match content_length {
             Some(0) => Bytes::new(),
             Some(declared) => {
                 let available = raw.len().saturating_sub(body_at);
@@ -140,35 +170,30 @@ impl SipParser for CustomParser {
                     .and_then(|len| body_at.checked_add(len))
                     .filter(|&end| end <= raw.len());
                 let Some(end) = bounded else {
-                    return Err(SipParseError::new(format!(
+                    return Err(refuse(SipParseError::new(format!(
                         "Content-Length {declared} exceeds remaining bytes {available}"
-                    )));
+                    ))));
                 };
-                body_of(&raw, body_at..end)?
+                body_of(&raw, body_at..end).map_err(refuse)?
             }
             None => match limits.framing {
-                Framing::Datagram => body_of(&raw, body_at..raw.len())?,
+                Framing::Datagram => body_of(&raw, body_at..raw.len()).map_err(refuse)?,
                 Framing::Stream => {
-                    return Err(SipParseError::new(
+                    return Err(refuse(SipParseError::new(
                         "Content-Length is mandatory over a stream transport (RFC 3261 §20.14)",
-                    ))
+                    )))
                 }
             },
         };
 
-        let mode = if limits.wire_grammar { ExtractMode::Wire } else { ExtractMode::Hydrate };
-
-        // One dispatch pass over the header list feeds both the mandatory field
-        // extraction and the optional-header parse.
-        let idx = HeaderIndex::build(&headers_vec);
-
         match start {
-            StartLine::Request(rl) => {
+            StartLine::Request(ref rl) => {
                 // A method is case-sensitive (RFC 3261 §7.1): the token as written.
                 let method = scanner::span_text(image, &rl.method)?;
                 let uri = text.span(rl.uri.start, rl.uri.len());
                 let eager: RequestEager =
-                    extract_request_fields(&idx, &uri, limits, Some(method), mode)?;
+                    extract_request_fields(&idx, &uri, limits, Some(method), mode)
+                        .map_err(refuse)?;
                 let optional = optional_headers::extract_optional_indexed(&idx);
                 Ok(SipMessage::Request(SipRequest::new(
                     RequestLine {

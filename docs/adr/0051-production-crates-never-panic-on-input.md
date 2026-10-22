@@ -111,8 +111,9 @@ with a failure code.
 
 ### 6. Errors replacing panics
 
-A function that can fail on input returns an error; a signature that was infallible changes
-and its callers follow. A rewrite never introduces a default that changes a result
+Any input yields a recoverable error; only the packet is refused, and a refused request is
+answered with 400 when its parse error carries a partial (ADR-0054). A function that can fail
+on input returns an error; a signature that was infallible changes and its callers follow. A rewrite never introduces a default that changes a result
 (`unwrap_or_default`, `unwrap_or(0)`). In the B2BUA, an unreadable SDP offer is refused as an
 unacceptable offer (488); an unreadable answer fails the negotiation like an answer with no
 common format.
@@ -145,5 +146,6 @@ in its own workspace as discovery only; each crash becomes a committed regressio
 - Test-support code compiled into production crates moves into crates of its own, or behind
   a `testkit` feature of its crate when that crate's own unit tests use it; the closure check
   refuses the feature in every production binary.
-- Rare failure outcomes change where a panic becomes an error: a parse failure drops one
-  packet, a call whose handler failed is torn down on the wire.
+- Rare failure outcomes change where a panic becomes an error: a parse failure refuses one
+  packet (a refused request with a partial is answered 400, ADR-0054), a call whose handler
+  failed is torn down on the wire.

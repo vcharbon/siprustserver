@@ -18,9 +18,10 @@ pub(crate) const RESOLVER_CACHE: &str = "resolver_cache";
 pub(crate) const TRACE_REGISTRY: &str = "trace_registry";
 pub(crate) const UDP_SHARD_STATS: &str = "udp_shard_stats";
 pub(crate) const SIMULATED_REGISTRY: &str = "simulated_registry";
+pub(crate) const PARSE_REFUSAL_CAP: &str = "parse_refusal_cap";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 11] = [
+pub const LOCKS: [&str; 12] = [
     INVITE_BRANCH_LRU,
     REFUSALS_MEMO,
     LOAD_OBSERVER,
@@ -32,6 +33,7 @@ pub const LOCKS: [&str; 11] = [
     TRACE_REGISTRY,
     UDP_SHARD_STATS,
     SIMULATED_REGISTRY,
+    PARSE_REFUSAL_CAP,
 ];
 
 /// The recoveries of the proxy's locks in this process.

@@ -37,6 +37,9 @@ compatibility rules admit, on purpose:
 - **Numeric headers.** A header of the numeric registry carries a decimal value
   within its range, digits only.
 
+A gate refuses like any other rule: a refused request whose echoed fields read
+is answered 400 (ADR-0054).
+
 ## Considered and rejected
 
 - **Adopt rvoip-sip-core as the production parser + re-derive the gates.**

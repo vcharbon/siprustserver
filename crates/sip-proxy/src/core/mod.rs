@@ -436,8 +436,8 @@ impl ProxyCore {
             let raw = bytes::Bytes::from(pkt.raw);
             let msg = match parse_datagram(raw, |raw| self.parser.parse_shared(raw)) {
                 Ok(Ok(msg)) => msg,
-                // Malformed datagram — drop silently.
-                Ok(Err(_)) => {
+                Ok(Err(error)) => {
+                    self.refuse_unparsed(&error, src).await;
                     self.pulse.waiting(self.shard);
                     continue;
                 }

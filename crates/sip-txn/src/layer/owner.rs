@@ -22,6 +22,7 @@ use super::backlog::DeferredBound;
 use super::call_txns::CallTxns;
 use super::handle::{Command, TransactionConfig};
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
+use super::parse_refusal::ParseRefusals;
 use super::refusals::InviteRefusals;
 use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
 use super::txn::{CancelWire, Timer, Transaction, TxnId, TxnRef, TxnRole};
@@ -100,6 +101,8 @@ pub(super) struct Owner {
     pub(super) strict_to_tag: bool,
     /// [`TransactionConfig::stateless_options`](crate::TransactionConfig).
     pub(super) stateless_options: bool,
+    /// The cap and the To-tags of the 400s answering refused requests.
+    pub(super) parse_refusals: ParseRefusals,
 }
 
 impl Owner {
@@ -123,6 +126,7 @@ impl Owner {
             parser,
             events_tx,
             metrics,
+            parse_refusals: ParseRefusals::new(&config.id_gen),
             id_gen: config.id_gen,
             self_release_watch: HashSet::new(),
             txn_index: HashMap::new(),

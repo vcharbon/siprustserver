@@ -5,7 +5,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 
-use sip_message::SipRequest;
+use sip_message::header::{CSeq, CallId, From, Via};
+use sip_message::{RequestPartial, SipRequest};
 
 use crate::rng::IdGen;
 
@@ -33,13 +34,23 @@ impl StatelessTagger {
     /// `Retry-After` jittered by the roll are equally stable across copies of
     /// the request and equally spread across distinct requests.
     pub fn for_request(&self, req: &SipRequest) -> (String, u64) {
+        self.derive(req.call_id(), req.from(), req.via().first(), req.cseq())
+    }
+
+    /// The `(To-tag, roll)` for the refused request `partial` holds, derived
+    /// as [`for_request`](Self::for_request) derives it.
+    pub fn for_partial(&self, partial: &RequestPartial) -> (String, u64) {
+        self.derive(partial.call_id(), partial.from(), partial.via().first(), partial.cseq())
+    }
+
+    fn derive(&self, call_id: &CallId, from: &From, top_via: &Via, cseq: &CSeq) -> (String, u64) {
         let mut h = DefaultHasher::new();
         h.write_u64(self.secret);
-        h.write(req.call_id().as_str().as_bytes());
-        h.write(req.from().tag().unwrap_or("").as_bytes());
-        h.write(req.via().first().branch().unwrap_or("").as_bytes());
-        h.write_u32(req.cseq().seq());
-        h.write(req.cseq().method().as_str().as_bytes());
+        h.write(call_id.as_str().as_bytes());
+        h.write(from.tag().unwrap_or("").as_bytes());
+        h.write(top_via.branch().unwrap_or("").as_bytes());
+        h.write_u32(cseq.seq());
+        h.write(cseq.method().as_str().as_bytes());
         let key = h.finish();
         (format!("{key:016x}"), key)
     }
