@@ -16,18 +16,15 @@ use super::header_index::HeaderIndex;
 use super::port_garbage::has_via_port_trailing_garbage;
 use super::request_uri::read_request_uri;
 use super::routes::route_refusal;
-use super::scanner::strict_non_negative_decimal;
 use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
 use super::top_via;
 use crate::char_class::is_token_char;
 use crate::error::SipParseError;
-use crate::header::{self, host_refusal, HostPort, Uri, UriRole};
+use crate::header::{self, host_refusal, HeaderValue, HostPort, Uri, UriRole};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
 use crate::types::{ContactSet, CoreHeaders, NonEmpty};
-
-const INT_32_MAX: u64 = (1u64 << 31) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractMode {
@@ -205,31 +202,7 @@ pub(super) fn extract_identity(
         idx.cseq.first.ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
     let cseq_parsed = parse_cseq(cseq_val);
     if wire {
-        let cseq_raw = cseq_val.trim();
-        match cseq_raw.split_once([' ', '\t']) {
-            None => {
-                return Err(SipParseError::new(format!(
-                    "CSeq missing method token: \"{cseq_val}\""
-                )));
-            }
-            Some((cseq_digits, cseq_method)) => {
-                if strict_non_negative_decimal(cseq_digits, INT_32_MAX).is_none() {
-                    return Err(SipParseError::new(format!(
-                        "CSeq seq malformed (paranoid digit check): \"{cseq_digits}\""
-                    )));
-                }
-                if cseq_method.trim().is_empty() {
-                    return Err(SipParseError::new(format!(
-                        "CSeq missing method token: \"{cseq_val}\""
-                    )));
-                }
-                if !cseq_method.trim().bytes().all(is_token_char) {
-                    return Err(SipParseError::new(format!(
-                        "CSeq method is not a token: \"{cseq_val}\""
-                    )));
-                }
-            }
-        }
+        header::CSeq::parse(cseq_val)?;
     }
 
     // Via — at least one required; both comma-list and repeated-line encodings

@@ -217,6 +217,20 @@ Content-Length: 0\r\n\r\n";
     assert_eq!(out[1].name, "v", "v1: both rows collapse to the compact form");
 }
 
+/// The captured Contact keeps its display name as written; the host:port moved
+/// onto the bound socket is the one of the URI the name-addr grammar reads,
+/// never a URI quoted inside the display name.
+#[test]
+fn remote_target_emit_rewrites_the_address_not_the_quoted_display_name() {
+    let headers = vec![SipHeader::new("Contact", "<sip:uac@192.0.2.10:5070>")];
+    let emits = vec![(
+        "contact".to_string(),
+        "\"Alice <sip:evil@example.com>\" <sip:real@example.com>".to_string(),
+    )];
+    let out = apply_remote_target_emits(&headers, &emits);
+    assert_eq!(out[0].value, "\"Alice <sip:evil@example.com>\" <sip:real@192.0.2.10:5070>");
+}
+
 #[test]
 fn response_template_carries_status_and_reason() {
     let tmpl = MessageTemplate::response(

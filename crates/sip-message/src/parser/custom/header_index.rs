@@ -46,9 +46,6 @@ pub struct HeaderIndex<'a> {
     pub diversion: Vec<&'a SipStr>,
     pub history_info: Vec<&'a SipStr>,
     pub remote_party_id: Vec<&'a SipStr>,
-    pub geolocation: Vec<&'a SipStr>,
-    pub geolocation_error: Vec<&'a SipStr>,
-    pub geolocation_routing: Slot<'a>,
     pub rack: Slot<'a>,
     pub refer_to: Slot<'a>,
 }
@@ -76,9 +73,6 @@ impl<'a> HeaderIndex<'a> {
                 HeaderName::Diversion => idx.diversion.push(value),
                 HeaderName::HistoryInfo => idx.history_info.push(value),
                 HeaderName::RemotePartyId => idx.remote_party_id.push(value),
-                HeaderName::Geolocation => idx.geolocation.push(value),
-                HeaderName::GeolocationError => idx.geolocation_error.push(value),
-                HeaderName::GeolocationRouting => idx.geolocation_routing.record(value),
                 HeaderName::RAck => idx.rack.record(value),
                 HeaderName::ReferTo => idx.refer_to.record(value),
                 _ => {}

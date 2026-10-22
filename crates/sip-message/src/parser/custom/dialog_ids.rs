@@ -44,7 +44,8 @@ pub(super) fn is_call_id(value: &str) -> bool {
     }
 }
 
-/// Count `;tag=` occurrences outside quoted-strings (RFC 3261 permits one).
+/// Count the `;tag=` header parameters: those outside quoted-strings and
+/// outside `<...>`, where a `tag` is a URI parameter (RFC 3261 permits one).
 pub(super) fn count_tag_params(value: &str) -> usize {
     let s = value.as_bytes();
     let at = |k: usize| s.get(k).copied();
@@ -56,6 +57,7 @@ pub(super) fn count_tag_params(value: &str) -> usize {
     };
     let mut count = 0usize;
     let mut in_quote = false;
+    let mut in_angle = false;
     let mut i = 0usize;
     while let Some(c) = at(i) {
         if in_quote {
@@ -69,8 +71,14 @@ pub(super) fn count_tag_params(value: &str) -> usize {
             i += 1;
             continue;
         }
-        if c == b'"' {
-            in_quote = true;
+        if in_angle {
+            in_angle = c != b'>';
+            i += 1;
+            continue;
+        }
+        if c == b'"' || c == b'<' {
+            in_quote = c == b'"';
+            in_angle = c == b'<';
             i += 1;
             continue;
         }

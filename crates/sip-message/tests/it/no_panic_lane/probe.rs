@@ -246,6 +246,9 @@ fn typed_reads(msg: &SipMessage, d: &mut Digest) {
         header::CallId,
         header::CSeq,
         header::RAck,
+        header::Geolocation,
+        header::GeolocationError,
+        header::GeolocationRouting,
         header::Via,
         header::ChargingVector,
     );

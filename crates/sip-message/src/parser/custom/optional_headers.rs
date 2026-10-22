@@ -38,26 +38,13 @@ fn parse_name_addr_list(
     Ok(out)
 }
 
-/// `Geolocation-Routing` (RFC 6442 §4.2): token "yes"/"no". Absent → `Ok(None)`.
-fn parse_geolocation_routing(value: Option<&SipStr>) -> Result<Option<bool>, SipParseError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let v = value.trim().to_lowercase();
-    match v.as_str() {
-        "yes" => Ok(Some(true)),
-        "no" => Ok(Some(false)),
-        _ => Err(SipParseError::new(format!("Invalid Geolocation-Routing value: \"{v}\""))),
-    }
-}
-
 fn parse_rack_header(value: Option<&SipStr>) -> Result<Option<RAck>, SipParseError> {
     let Some(value) = value else {
         return Ok(None);
     };
     RAck::parse(value)
         .map(Some)
-        .map_err(|_| SipParseError::new(format!("Malformed RAck: \"{value}\"")))
+        .map_err(|e| SipParseError::new(format!("Malformed RAck: {}", e.reason)))
 }
 
 fn parse_refer_to_header(value: Option<&SipStr>) -> Result<Option<ReferTo>, SipParseError> {
@@ -84,12 +71,6 @@ pub fn extract_optional_indexed(idx: &HeaderIndex) -> OptionalHeaders {
         diversion: parse_name_addr_list(&idx.diversion, HeaderName::Diversion),
         history_info: parse_name_addr_list(&idx.history_info, HeaderName::HistoryInfo),
         remote_party_id: parse_name_addr_list(&idx.remote_party_id, HeaderName::RemotePartyId),
-        geolocation: parse_name_addr_list(&idx.geolocation, HeaderName::Geolocation),
-        geolocation_error: parse_name_addr_list(
-            &idx.geolocation_error,
-            HeaderName::GeolocationError,
-        ),
-        geolocation_routing: parse_geolocation_routing(idx.geolocation_routing.first),
         rack: parse_rack_header(idx.rack.first),
         refer_to: parse_refer_to_header(idx.refer_to.first),
     }

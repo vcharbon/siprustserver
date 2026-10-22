@@ -382,6 +382,12 @@ impl Uri {
         self.normalized()
     }
 
+    /// This URI at another host and port, every other part kept.
+    pub fn with_authority(mut self, authority: HostPort) -> Self {
+        self.authority = authority;
+        self.normalized()
+    }
+
     pub fn with_param(mut self, name: impl Into<SipStr>, value: ParamValue) -> Self {
         self.params.set(name, value);
         self.normalized()

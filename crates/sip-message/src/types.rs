@@ -100,7 +100,9 @@ impl ContactSet {
 
 /// Optional structured headers, parsed **eagerly + non-fatally** (ADR-0003):
 /// each is a `Result` so a malformed optional header does NOT reject the
-/// message, but the error is captured and surfaced on access.
+/// message, but the error is captured and surfaced on access. A header no
+/// element acts on, such as the RFC 6442 location family, is no field here: a
+/// reader asks for it through the typed read surface (`msg.header::<H>()`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalHeaders {
     pub p_asserted_identity: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
@@ -108,9 +110,6 @@ pub struct OptionalHeaders {
     pub diversion: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
     pub history_info: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
     pub remote_party_id: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
-    pub geolocation: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
-    pub geolocation_error: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
-    pub geolocation_routing: Result<Option<bool>, crate::error::SipParseError>,
     pub rack: Result<Option<header::RAck>, crate::error::SipParseError>,
     pub refer_to: Result<Option<header::ReferTo>, crate::error::SipParseError>,
 }

@@ -86,6 +86,10 @@ the **non-fatal** axis, not the **lazy** axis, and is satisfied by storing a
   applied to the invalid/canonical corpora, not the full valid torture set.
 - Extension headers stay on-demand via `TypedHeader` (the core can't eagerly
   parse types it doesn't know); non-fatal by returning `Result`.
+- A built-in header no element acts on is no `OptionalHeaders` field either:
+  the RFC 6442 location headers (Geolocation, Geolocation-Error,
+  Geolocation-Routing) are read on access, `msg.header::<H>()` /
+  `msg.list::<H>()`.
 
 Net: immutable, `Send + Sync` messages; no `OnceCell`; same tolerance; the
 strict surface the tests need. If profiling later shows a *specific* present-

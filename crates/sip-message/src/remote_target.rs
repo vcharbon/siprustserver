@@ -5,13 +5,14 @@
 //! and the two parameter sets (URI vs header) separately, host:port ignored.
 //!
 //! Structured parsing goes through the parser's name-addr scan and the one URI
-//! reader ([`Uri::parse`]); only the host:port *rewrite* is targeted string
-//! surgery, because reconstructing from the sorted parsed param maps would lose
-//! the captured parameter order/placement the model must preserve.
+//! reader ([`Uri::parse`]). The host:port *rewrite* reads each element with the
+//! strict name-addr reader and splices the re-rendered URI into the element,
+//! so the display name and header parameters keep their captured spelling and
+//! placement.
 
 use std::collections::BTreeMap;
 
-use crate::header::Uri;
+use crate::header::{AddrForm, HostPort, NameAddr, Uri, UriRole};
 use crate::parser::custom::compact_forms::expanded_name;
 use crate::parser::custom::structured_headers::{parse_name_addr, split_top_level_commas};
 use crate::sip_str::SipStr;
@@ -71,32 +72,25 @@ pub fn first_hostport(value: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
-/// Replace the host:port span of a single SIP-URI string, preserving scheme,
-/// userinfo, and all URI parameters verbatim; a value with no scheme comes
-/// back as it is.
-fn replace_uri_hostport(uri: &str, host: &str, port: u16) -> String {
-    hostport_replaced(uri, host, port).unwrap_or_else(|| uri.to_string())
-}
-
-fn hostport_replaced(uri: &str, host: &str, port: u16) -> Option<String> {
-    let (head, rest) = uri.split_at_checked(uri.find(':')? + 1)?;
-    let params_at = rest.find([';', '?']).unwrap_or(rest.len());
-    // Userinfo (before '@', before any parameter).
-    let user_len = rest.get(..params_at)?.find('@').map_or(0, |at| at + 1);
-    let (user, after_user) = rest.split_at_checked(user_len)?;
-    let tail = after_user.get(after_user.find([';', '?']).unwrap_or(after_user.len())..)?;
-    Some(format!("{head}{user}{host}:{port}{tail}"))
-}
-
-/// Rewrite the host:port of every element in `value` to `(host, port)`,
-/// preserving display name, user, URI/header params, and their placement.
+/// Rewrite the host:port of one element to `(host, port)`. The element is read
+/// by the strict name-addr reader, so the URI rewritten is the one its grammar
+/// names, never a `<` inside a quoted display name; the URI is re-rendered
+/// from its parts and spliced back, every byte around it kept as written. An
+/// element the reader refuses, or whose URI is not `sip` / `sips`, comes back
+/// as it is.
 fn rewrite_element_hostport(elem: &str, host: &str, port: u16) -> String {
-    if let Some((before, inner)) = elem.split_once('<') {
-        if let Some((uri, after)) = inner.split_once('>') {
-            return format!("{before}<{}>{after}", replace_uri_hostport(uri, host, port));
-        }
+    rewritten_element(elem, host, port).unwrap_or_else(|| elem.to_string())
+}
+
+fn rewritten_element(elem: &str, host: &str, port: u16) -> Option<String> {
+    let value = SipStr::owned(elem);
+    let (addr, span) =
+        NameAddr::parse_spanned(&value, AddrForm::NameAddrOrSpec, UriRole::Target).ok()?;
+    if !matches!(addr.uri().scheme(), "sip" | "sips") {
+        return None;
     }
-    replace_uri_hostport(elem, host, port)
+    let uri = addr.uri().clone().with_authority(HostPort::new(host, Some(port)));
+    Some(format!("{}{uri}{}", elem.get(..span.start)?, elem.get(span.end..)?))
 }
 
 /// Rewrite host:port across every comma-separated element of a remote-target
@@ -138,6 +132,29 @@ mod tests {
             "<sip:10.0.0.1:5060;lr>"
         );
         assert_eq!(rewrite_hostport("sip:a@h:5060", "1.2.3.4", 9), "sip:a@1.2.3.4:9");
+    }
+
+    /// A `<` inside a quoted display name opens no URI: the address the
+    /// name-addr grammar reads is the one rewritten.
+    #[test]
+    fn a_uri_quoted_in_the_display_name_is_left_as_written() {
+        assert_eq!(
+            rewrite_hostport(
+                "\"Alice <sip:evil@example.com>\" <sip:real@example.com>;expires=60",
+                "192.0.2.1",
+                5070
+            ),
+            "\"Alice <sip:evil@example.com>\" <sip:real@192.0.2.1:5070>;expires=60"
+        );
+    }
+
+    /// The userinfo ends at the `@`, even where it carries a `;`.
+    #[test]
+    fn a_semicolon_in_the_user_stays_in_the_user() {
+        assert_eq!(
+            rewrite_hostport("<sip:+331;npdi@example.com:5060;user=phone>", "192.0.2.1", 5070),
+            "<sip:+331;npdi@192.0.2.1:5070;user=phone>"
+        );
     }
 
     #[test]

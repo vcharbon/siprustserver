@@ -1,13 +1,53 @@
 //! The scalar identity headers: [`CallId`], [`CSeq`] and [`RAck`].
 
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::method::Method;
 use crate::sip_str::SipStr;
 
 use super::name::HeaderName;
-use super::scan::{clamped, digits_end, parse_u32, skip_ws, sub, sub_trimmed};
+use super::scan::parse_u32;
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
+
+/// The largest sequence number: a CSeq-num is below 2^31 (RFC 3261 §8.1.1.5),
+/// and so is the RSeq a RAck's response-num echoes (RFC 3262 §7.1).
+const SEQUENCE_MAX: u32 = i32::MAX as u32;
+
+/// The `N` LWS-separated fields of `value`, exactly `N` of them.
+fn lws_fields<'a, const N: usize>(
+    value: &'a str,
+    header: &str,
+) -> Result<[&'a str; N], SipParseError> {
+    let refused =
+        || SipParseError::new(format!("{header} is not {N} LWS-separated fields: {value:?}"));
+    let mut fields = value.split([' ', '\t']).filter(|f| !f.is_empty());
+    let mut out = [""; N];
+    for slot in &mut out {
+        *slot = fields.next().ok_or_else(refused)?;
+    }
+    match fields.next() {
+        Some(_) => Err(refused()),
+        None => Ok(out),
+    }
+}
+
+/// `1*DIGIT`, at most [`SEQUENCE_MAX`].
+fn sequence_number(field: &str, what: &str) -> Result<u32, SipParseError> {
+    let n = parse_u32(field, what)?;
+    if n > SEQUENCE_MAX {
+        return Err(SipParseError::new(format!("{what} is not below 2^31: {field:?}")));
+    }
+    Ok(n)
+}
+
+/// `Method = token`.
+fn method_token(field: &str, header: &str) -> Result<Method, SipParseError> {
+    if !field.bytes().all(is_token_char) {
+        return Err(SipParseError::new(format!("{header} method is not a token: {field:?}")));
+    }
+    Ok(Method::from_wire(field))
+}
 
 /// The dialog's Call-ID — an opaque token compared byte-exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -127,17 +167,14 @@ impl HeaderValue for CSeq {
         Folding::Single
     }
 
+    /// `CSeq = 1*DIGIT LWS Method` (RFC 3261 §25.1), the number below 2^31 —
+    /// the grammar the parser's wire gate holds a CSeq to.
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let value = raw.trimmed();
-        let bytes = value.as_bytes();
-        let start = skip_ws(bytes, 0);
-        let end = digits_end(bytes, start);
-        let seq = parse_u32(clamped(value.as_str(), start, end), "CSeq sequence")?;
-        let method = sub_trimmed(&value, end, bytes.len());
-        if method.is_empty() {
-            return Err(SipParseError::new(format!("CSeq has no method: {:?}", value.as_str())));
-        }
-        Ok(Self { seq, method: Method::from_wire(method.as_str()) })
+        let [seq, method] = lws_fields(raw.as_str(), "CSeq")?;
+        Ok(Self {
+            seq: sequence_number(seq, "CSeq sequence")?,
+            method: method_token(method, "CSeq")?,
+        })
     }
 
     fn render(&self, out: &mut Wire) {
@@ -182,22 +219,15 @@ impl HeaderValue for RAck {
         Folding::Single
     }
 
+    /// `RAck = response-num LWS CSeq-num LWS Method` (RFC 3262 §7.2), both
+    /// numbers below 2^31.
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let value = raw.trimmed();
-        let bytes = value.as_bytes();
-        let mut i = skip_ws(bytes, 0);
-        let rseq_end = digits_end(bytes, i);
-        let rseq = parse_u32(clamped(value.as_str(), i, rseq_end), "RAck response-num")?;
-
-        i = skip_ws(bytes, rseq_end);
-        let seq_end = digits_end(bytes, i);
-        let seq = parse_u32(clamped(value.as_str(), i, seq_end), "RAck CSeq-num")?;
-
-        let method = sub(&value, skip_ws(bytes, seq_end), bytes.len());
-        if method.is_empty() || method.bytes().any(|b| b == b' ' || b == b'\t') {
-            return Err(SipParseError::new(format!("RAck has no method: {:?}", value.as_str())));
-        }
-        Ok(Self { rseq, seq, method: Method::from_wire(method.as_str()) })
+        let [rseq, seq, method] = lws_fields(raw.as_str(), "RAck")?;
+        Ok(Self {
+            rseq: sequence_number(rseq, "RAck response-num")?,
+            seq: sequence_number(seq, "RAck CSeq-num")?,
+            method: method_token(method, "RAck")?,
+        })
     }
 
     fn render(&self, out: &mut Wire) {
@@ -235,6 +265,43 @@ mod tests {
         assert_eq!((r.rseq(), r.seq()), (776656, 1));
         assert_eq!(r.to_wire(), "776656 1 INVITE");
         assert!(RAck::parse(&SipStr::owned("776656 1")).is_err());
+    }
+
+    /// RFC 3262 §7.2: `response-num LWS CSeq-num LWS Method`, the method a
+    /// token and nothing after it.
+    #[test]
+    fn a_rack_is_three_lws_separated_fields() {
+        let rack = |s: &str| RAck::parse(&SipStr::owned(s));
+        let r = rack("  42 \t 7  INVITE ").expect("LWS runs separate the fields");
+        assert_eq!((r.rseq(), r.seq(), r.method()), (42, 7, &Method::Invite));
+        for refused in [
+            "776656 1INVITE",
+            "776656 1 INVITE/extra",
+            "776656 1 INVITE trailing",
+            "776656 1 \"INVITE\"",
+            "776656+1 1 INVITE",
+            "776656 2147483648 INVITE",
+        ] {
+            assert!(rack(refused).is_err(), "{refused:?} is no RAck");
+        }
+    }
+
+    /// The typed CSeq reads by the grammar the parser's wire gate holds:
+    /// `1*DIGIT LWS Method`, the number below 2^31, the method a token.
+    #[test]
+    fn a_cseq_is_a_number_and_a_method_token_only() {
+        let cseq = |s: &str| CSeq::parse(&SipStr::owned(s));
+        assert_eq!(cseq("2147483647\tBYE").expect("the largest").seq(), 2147483647);
+        for refused in [
+            "1 OPTIONS trailing",
+            "1 INVITE/extra",
+            "1 \"INVITE\"",
+            "1INVITE",
+            "2147483648 INVITE",
+            "-1 INVITE",
+        ] {
+            assert!(cseq(refused).is_err(), "{refused:?} is no CSeq");
+        }
     }
 
     #[test]

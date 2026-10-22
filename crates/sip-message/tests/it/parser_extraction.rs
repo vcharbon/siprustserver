@@ -262,6 +262,34 @@ Content-Length: 0\r\n\r\n"
     }
 }
 
+/// A `tag` URI parameter inside `<...>` is the URI's, not a second dialog tag
+/// (RFC 3261 §19.1.1, §20.20): only the header parameters after `>` count.
+#[test]
+fn a_tag_inside_the_uri_is_not_a_duplicate_tag() {
+    let request = |from: &str, to: &str| {
+        format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-uritag\r\n\
+From: {from}\r\n\
+To: {to}\r\n\
+Call-ID: uri-tag@example.com\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+        )
+    };
+    let r = req(&request(
+        "<sip:a@example.com;tag=URI>;tag=REAL",
+        "<sip:b@example.com;tag=URI>;tag=PEER",
+    ));
+    assert_eq!(r.from().tag(), Some("REAL"));
+    assert_eq!(r.from().uri().params().value("tag"), Some("URI"));
+    assert_eq!(r.to().tag(), Some("PEER"));
+
+    let twice = request("<sip:a@example.com;tag=URI>;tag=A;tag=B", "<sip:b@example.com>");
+    let refused = CustomParser::new().parse(twice.as_bytes()).expect_err("two header tags");
+    assert!(refused.reason.contains("Duplicate From tag"), "{}", refused.reason);
+}
+
 // --- eager parsed fields ---
 
 #[test]
