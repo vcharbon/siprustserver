@@ -1,4 +1,5 @@
 use super::*;
+use sip_message::SipParser;
 use sip_txn::IdGen;
 
 /// Every refusal the brake answered: first refusals and copies.
@@ -82,11 +83,18 @@ Content-Length: 0\r\n\r\n"
     .into_bytes()
 }
 
+/// A brake hook judging a datagram's bytes as they arrive.
+type OnBytes = Box<dyn Fn(&[u8], std::net::SocketAddr, usize) -> PreIngressAction>;
+
 /// Brake hook under test: threshold 2, refusing with `refusals`.
-fn brake_over(refusals: Refusals) -> (PreIngressHook, IngressBrakeCounters) {
+fn brake_over(refusals: Refusals) -> (OnBytes, IngressBrakeCounters) {
     let counters = IngressBrakeCounters::new();
     let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40 };
-    (build_ingress_brake_hook(cfg, counters.clone(), refusals), counters)
+    let hook = build_ingress_brake_hook(cfg, counters.clone(), refusals);
+    let on_bytes: OnBytes = Box::new(move |raw, src, depth| {
+        hook(&mut Arrival::new(sip_message::Bytes::copy_from_slice(raw)), src, depth)
+    });
+    (on_bytes, counters)
 }
 
 /// The worker's refusals: `Retry-After` base 5, jitter `jitter_sec`.
@@ -95,13 +103,13 @@ fn refusals_with_jitter(jitter_sec: u32) -> Refusals {
 }
 
 /// Brake hook under test: threshold 2, jitter `jitter_sec`.
-fn brake_with_jitter(jitter_sec: u32) -> (PreIngressHook, IngressBrakeCounters) {
+fn brake_with_jitter(jitter_sec: u32) -> (OnBytes, IngressBrakeCounters) {
     brake_over(refusals_with_jitter(jitter_sec))
 }
 
 /// Brake hook under test: threshold 2, jitter 0 (so `Retry-After` is
 /// exactly the base).
-fn brake() -> (PreIngressHook, IngressBrakeCounters) {
+fn brake() -> (OnBytes, IngressBrakeCounters) {
     brake_with_jitter(0)
 }
 

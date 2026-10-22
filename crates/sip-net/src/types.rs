@@ -4,7 +4,7 @@
 //! Reshaping notes (the "closer to Rust methods" adaptation):
 //!   - `RemoteInfo { address, port }` → [`std::net::SocketAddr`] everywhere.
 //!   - `bindUdp` ip/port pair → a single `addr: SocketAddr` on [`BindUdpOpts`].
-//!   - `Buffer` → `Vec<u8>` (owned) / `&[u8]` (borrowed on `send`).
+//!   - `Buffer` → `Bytes` (received) / `&[u8]` (borrowed on `send`).
 //!   - `PreIngressHook` is an `Arc<dyn Fn ...>` so it is cheap to clone into
 //!     the simulated fabric's routing table and into recorded summaries.
 
@@ -13,17 +13,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sip_clock::Clock;
+use sip_message::Bytes;
+
+use crate::arrival::Arrival;
+use crate::parse_guard::ParseOutcome;
 
 /// Theoretical max single-UDP-datagram payload (65535 − 20 IP − 8 UDP). The
 /// paranoid decorator rejects sends above this; SIP fragments far below it.
 pub const MAX_UDP_PAYLOAD: usize = 65507;
 
-/// One received datagram handed up from an endpoint's inbound queue. The TS
-/// `UdpPacket` carried an optional pre-parsed `SipMessage`; here parsing is
-/// the consumer's job (and the recording projector's), so the packet is raw.
+/// One received datagram handed up from an endpoint's inbound queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpPacket {
-    pub raw: Vec<u8>,
+    pub raw: Bytes,
     pub src: SocketAddr,
     /// Arrival timestamp (ms) on the binding endpoint's [`BindUdpOpts::clock`]
     /// timeline. Behavioural input — the proxy ages dequeued packets off it to
@@ -31,6 +33,17 @@ pub struct UdpPacket {
     /// same monotonic-anchored `Clock`: differencing it against a raw
     /// `SystemTime` reading folds unbounded wall-vs-monotonic drift into it.
     pub arrival_ms: u64,
+    /// The parse of `raw` a pre-ingress hook made on the receive path
+    /// ([`Arrival::parse`]). The consumer takes it and parses `raw` itself
+    /// only when it is `None`, so a datagram is parsed once.
+    pub parsed: Option<Box<ParseOutcome>>,
+}
+
+impl UdpPacket {
+    /// The datagram `raw` from `src` stamped `arrival_ms`, with no parse.
+    pub fn unparsed(raw: impl Into<Bytes>, src: SocketAddr, arrival_ms: u64) -> Self {
+        Self { raw: raw.into(), src, arrival_ms, parsed: None }
+    }
 }
 
 /// How an inbound datagram fared at the receiving endpoint's inbox, recorded on
@@ -179,10 +192,13 @@ pub enum PreIngressAction {
     Reply(Vec<u8>),
 }
 
-/// Arrival-time filter installed at `bind_udp`. Receives the raw bytes, the
-/// source address, and the current queue depth. `Arc<dyn Fn>` so it clones
-/// into the simulated routing table and recorded summaries.
-pub type PreIngressHook = Arc<dyn Fn(&[u8], SocketAddr, usize) -> PreIngressAction + Send + Sync>;
+/// Arrival-time filter installed at `bind_udp`. Receives the datagram (its
+/// bytes, and the parse it makes through [`Arrival::parse`], which the queued
+/// packet carries on), the source address, and the current queue depth.
+/// `Arc<dyn Fn>` so it clones into the simulated routing table and recorded
+/// summaries.
+pub type PreIngressHook =
+    Arc<dyn Fn(&mut Arrival, SocketAddr, usize) -> PreIngressAction + Send + Sync>;
 
 /// Options for `bind_udp` (port of `BindUdpOpts`).
 #[derive(Clone)]

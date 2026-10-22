@@ -1,7 +1,9 @@
-//! Pins [`intake_shed_hook`]: the hook is pure over `(raw, depth)`
+//! Pins [`intake_shed_hook`]: the hook is pure over `(arrival, depth)`
 //! — no socket needed — so each case invokes it directly.
 
 use super::*;
+use sip_message::Bytes;
+use sip_net::Arrival;
 use std::net::SocketAddr;
 
 const WATERMARK: usize = 8;
@@ -12,7 +14,7 @@ fn src() -> SocketAddr {
 
 /// The hook's verdict on `raw` arriving at queue depth `depth`.
 fn judge(hook: &PreIngressHook, raw: &[u8], depth: usize) -> PreIngressAction {
-    hook(raw, src(), depth)
+    hook(&mut Arrival::new(Bytes::copy_from_slice(raw)), src(), depth)
 }
 
 /// A new INVITE whose To header line is `to`.
@@ -64,6 +66,24 @@ fn below_the_watermark_everything_is_admitted() {
     let hook = intake_shed_hook(WATERMARK);
     for raw in [NEW_INVITE, IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
         assert_eq!(judge(&hook, raw, WATERMARK - 1), PreIngressAction::Accept);
+    }
+}
+
+/// The hook parses every datagram it is given, below the watermark too, and
+/// leaves the parse on the arrival for the core; a datagram the parser
+/// refuses is queued with its refusal, which the core answers or drops.
+#[test]
+fn every_datagram_is_parsed_on_the_receive_path() {
+    let hook = intake_shed_hook(WATERMARK);
+    for depth in [0, WATERMARK] {
+        for raw in [IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
+            let mut arrival = Arrival::new(Bytes::from_static(raw));
+            assert_eq!(hook(&mut arrival, src(), depth), PreIngressAction::Accept);
+            assert!(matches!(arrival.parsed(), Some(Ok(Ok(_)))), "{depth}: {:?}", arrival.parsed());
+        }
+        let mut garbage = Arrival::new(Bytes::from_static(b"\x00 not SIP"));
+        assert_eq!(hook(&mut garbage, src(), depth), PreIngressAction::Accept);
+        assert!(matches!(garbage.parsed(), Some(Ok(Err(_)))), "{depth}: {:?}", garbage.parsed());
     }
 }
 

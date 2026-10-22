@@ -12,6 +12,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use sip_message::SipRequest;
 use sip_net::UdpEndpoint;
 
+use crate::invite_class::InviteClass;
+
 use super::owner::Owner;
 use super::refusals::Admission;
 
@@ -46,36 +48,6 @@ impl DeferredBound {
     /// Whether an INVITE of `class` is refused while `deferred` events wait.
     pub fn refuses(&self, class: InviteClass, deferred: usize) -> bool {
         deferred >= self.ceiling(class)
-    }
-}
-
-/// The class an INVITE is judged in: the `class` of the refusal counter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InviteClass {
-    /// A new initial INVITE.
-    Normal,
-    /// A new initial INVITE carrying an emergency priority (RFC 4412).
-    Emergency,
-    /// An INVITE carrying a To-tag.
-    InDialog,
-}
-
-impl InviteClass {
-    /// Every class, in exposition order.
-    pub const ALL: [InviteClass; 3] = [Self::Normal, Self::Emergency, Self::InDialog];
-
-    /// Stable metric label (`class="..."`).
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Emergency => "emergency",
-            Self::InDialog => "in_dialog",
-        }
-    }
-
-    /// The class's position in [`ALL`](Self::ALL).
-    pub const fn index(self) -> usize {
-        self as usize
     }
 }
 

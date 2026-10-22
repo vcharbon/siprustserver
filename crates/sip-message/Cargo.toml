@@ -18,6 +18,11 @@ default = []
 # differential tests. No workspace build turns it on and production closures
 # refuse it (`purity.toml`); `just parity-oracle` builds and runs it.
 rvoip-oracle = ["dep:rvoip-sip-core"]
+# `sniff`, `preparse` and `payload`: the line-based raw readers and the
+# document form built on them, for tooling and tests. Production reads a
+# datagram only through the parser; production closures refuse this feature
+# (`purity.toml`).
+sniff = []
 
 [dependencies]
 rvoip-sip-core = { version = "0.4", optional = true }
@@ -38,6 +43,8 @@ schemars.workspace = true
 lookup-map = { path = "../lookup-map" }
 
 [dev-dependencies]
+# The tests read the `sniff` modules too.
+sip-message = { path = ".", features = ["sniff"] }
 bytes.workspace = true
 proptest.workspace = true
 # The no-panic lane's mutations and runner, shared with the other lanes.

@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use alloc_counter::{measure, CountingAlloc};
 use observe::{activation_bucket, CallIdentity, RateDraw, SampleAdmission};
-use sip_message::sniff;
 use sip_proxy::observability::metrics::{Face, RoutingDecisionKind};
 use sip_proxy::trace::emit::{self, RouteFacts};
 use sip_proxy::trace::Activation;
@@ -135,13 +134,6 @@ fn nothing_sampled() {
     let allocs = cost_of(|| assert!(!std::hint::black_box(traces.as_ref()).any_sampled()));
     assert_eq!(allocs, 0, "the flag read must not allocate; it allocated {allocs}");
     assert_every_site_is_free(&traces, "nothing sampled");
-
-    // The raw INVITE scan the sampling decision runs on a lab-gated process is
-    // on the same path, and reads the datagram in place.
-    let allocs = cost_of(|| {
-        std::hint::black_box(sniff::trace_sample_rate(std::hint::black_box(INVITE)));
-    });
-    assert_eq!(allocs, 0, "the raw X-Trace-Sample scan must not allocate; it allocated {allocs}");
 }
 
 // The production steady state: a traced call holds its slot for its whole life,

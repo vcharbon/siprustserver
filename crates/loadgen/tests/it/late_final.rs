@@ -73,7 +73,8 @@ async fn released_call(core: &Arc<MuxCore>, sut: &dyn UdpEndpoint, call_id: &str
 }
 
 async fn recv(sut: &dyn UdpEndpoint) -> Option<Vec<u8>> {
-    tokio::time::timeout(Duration::from_secs(2), sut.recv()).await.ok().flatten().map(|p| p.raw)
+    let packet = tokio::time::timeout(Duration::from_secs(2), sut.recv()).await.ok().flatten();
+    packet.map(|p| p.raw.to_vec())
 }
 
 #[tokio::test(start_paused = true)]

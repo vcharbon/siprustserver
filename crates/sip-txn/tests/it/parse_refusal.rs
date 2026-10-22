@@ -52,7 +52,7 @@ fn ack_to_400(branch: &str, to_tag: &str) -> Vec<u8> {
 
 /// Every datagram the peer received, as wire bytes.
 fn drain_raw(stack: &Stack) -> Vec<Vec<u8>> {
-    std::iter::from_fn(|| stack.peer.try_recv()).map(|p| p.raw).collect()
+    std::iter::from_fn(|| stack.peer.try_recv()).map(|p| p.raw.to_vec()).collect()
 }
 
 fn response(raw: &[u8]) -> SipResponse {

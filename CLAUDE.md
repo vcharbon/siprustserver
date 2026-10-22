@@ -201,7 +201,8 @@ a child span with its request/response. **Every emission site sits behind
 allocates nothing; subscriber-side filtering is never the mechanism. Tracing is
 inert unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set; `X-Trace-Sample` is honored
 only under `SIP_TRACE_HEADER=1` (lab/endurance) and, like every SIP header, is
-extracted ONLY in `sip-message` / `sip_message::sniff`.
+extracted ONLY in `sip-message`, from the parsed message (`sip_message::sniff`
+is tooling, behind its feature).
 
 ## Initial-INVITE final-response guarantee — summary ([ADR-0022](docs/adr/0022-initial-invite-final-response-guarantee.md))
 

@@ -149,7 +149,8 @@ async fn drive(seed: &Seed, datagram: &[u8]) -> Outcome {
         None
     };
     tu.abort();
-    let received: Vec<Vec<u8>> = std::iter::from_fn(|| peer.try_recv()).map(|p| p.raw).collect();
+    let received: Vec<Vec<u8>> =
+        std::iter::from_fn(|| peer.try_recv()).map(|p| p.raw.to_vec()).collect();
     let invite_copies = received
         .iter()
         .filter(|raw| raw.starts_with(b"INVITE ") && contains(raw, b"z9hG4bK-lane-inv"))

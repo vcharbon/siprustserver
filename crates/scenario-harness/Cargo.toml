@@ -21,7 +21,7 @@ futures = "0.3"
 # same JSON instead of hand-formatting it.
 serde = { workspace = true }
 serde_json = { workspace = true }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 sip-template = { path = "../sip-template" }
 # The §13.2.2.4 early-dialog window the dialog table shares with the audit.
 rfc-rules = { path = "../rfc-rules" }

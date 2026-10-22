@@ -4599,6 +4599,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sip-message",
  "smallvec",
  "thiserror 2.0.21",
  "wire-mutations",

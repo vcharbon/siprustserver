@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 b2bua = { path = "../b2bua", features = ["testkit"] }
 call = { path = "../call" }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 sip-net = { path = "../sip-net" }
 sip-net-testkit = { path = "../sip-net-testkit" }
 sip-txn = { path = "../sip-txn" }

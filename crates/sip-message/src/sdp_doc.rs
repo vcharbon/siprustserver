@@ -1,7 +1,7 @@
 //! The SDP session description read as a DOCUMENT: the line walk, the
 //! session/media split, and the field extractions a consumer keys on.
 //!
-//! This is the only home for SDP document grammar, the way [`crate::sniff`] is
+//! This is the only home for SDP document grammar, the way `crate::sniff` is
 //! the only home for raw SIP header extraction — a rule or an audit reads facts
 //! off an [`SdpDoc`] and never walks `v=` / `o=` / `m=` / `a=` lines itself.
 //! Its sibling [`crate::sdp`] BUILDS descriptions for the B2BUA's transfer and

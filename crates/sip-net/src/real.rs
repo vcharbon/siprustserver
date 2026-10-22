@@ -18,9 +18,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sip_clock::Clock;
+use sip_message::Bytes;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
+use crate::arrival::Arrival;
 use crate::fragmentation::pin_fragmentation;
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
 use crate::pre_ingress;
@@ -172,7 +174,8 @@ fn recv_pause(error: &std::io::Error) -> Option<Duration> {
 }
 
 /// The receive pump. Mirrors the source's `socket.on("message", ...)` handler:
-/// depth-aware pre-ingress dispatch, tail-drop on a full queue. A receive
+/// depth-aware pre-ingress dispatch, tail-drop on a full queue. An accepted
+/// datagram is queued with the parse its hook made, if any. A receive
 /// error never ends it: each is counted ([`UdpEndpointCounters::recv_errors`])
 /// and the pump reads on, after [`recv_pause`].
 async fn recv_loop(
@@ -202,9 +205,9 @@ async fn recv_loop(
             }
         };
         // `recv_from` reports at most the buffer's length.
-        let raw = buf.get(..n).unwrap_or(&buf).to_vec();
+        let mut arrival = Arrival::new(Bytes::copy_from_slice(buf.get(..n).unwrap_or(&buf)));
         let depth = queue.depth();
-        match pre_ingress::judge(pre_ingress.as_ref(), &raw, src, depth, &counters) {
+        match pre_ingress::judge(pre_ingress.as_ref(), &mut arrival, src, depth, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -220,8 +223,7 @@ async fn recv_loop(
             }
             PreIngressAction::Accept => {
                 let arrival_ms = u64::try_from(clock.now_ms()).unwrap_or(0);
-                let pkt = UdpPacket { raw, src, arrival_ms };
-                if queue.offer(pkt) {
+                if queue.offer(arrival.into_packet(src, arrival_ms)) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {
                     counters.tail_dropped.fetch_add(1, Ordering::Relaxed);

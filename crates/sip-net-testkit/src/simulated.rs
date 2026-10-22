@@ -23,6 +23,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use layer_harness::time::now_ms;
 use sip_clock::Clock;
+use sip_message::Bytes;
+use sip_net::Arrival;
 
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
 use crate::queue::PacketQueue;
@@ -190,7 +192,8 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
         };
 
         let depth = queue.depth();
-        match crate::pre_ingress::judge(pre.as_ref(), &raw, src, depth, &counters) {
+        let mut arrival = Arrival::new(Bytes::from(raw));
+        match crate::pre_ingress::judge(pre.as_ref(), &mut arrival, src, depth, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -206,7 +209,7 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
                 });
             }
             PreIngressAction::Accept => {
-                let pkt = UdpPacket { raw, src, arrival_ms: clock.now_ms().max(0) as u64 };
+                let pkt = arrival.into_packet(src, clock.now_ms().max(0) as u64);
                 if queue.offer(pkt) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {

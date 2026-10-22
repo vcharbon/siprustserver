@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sip_net::types::PreIngressAction;
-use sip_net::{BindErrorReason, BindUdpOpts, PreIngressHook, SignalingNetwork};
+use sip_net::{Arrival, BindErrorReason, BindUdpOpts, PreIngressHook, SignalingNetwork};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use tokio::time::timeout;
 
@@ -26,7 +26,7 @@ async fn routes_packet_to_bound_endpoint() {
         .await
         .expect("recv timed out")
         .expect("queue closed");
-    assert_eq!(pkt.raw, b"INVITE sip:bob");
+    assert_eq!(pkt.raw, &b"INVITE sip:bob"[..]);
     assert_eq!(pkt.src, a.local_addr());
     assert_eq!(b.counters().enqueued, 1);
 }
@@ -94,11 +94,12 @@ async fn pre_ingress_drop_and_reply() {
 
     // b drops anything that starts with 'D', replies "PONG" to anything that
     // starts with 'P', accepts the rest.
-    let hook: PreIngressHook = Arc::new(|raw: &[u8], _src, _depth| match raw.first() {
-        Some(b'D') => PreIngressAction::Drop,
-        Some(b'P') => PreIngressAction::Reply(b"PONG".to_vec()),
-        _ => PreIngressAction::Accept,
-    });
+    let hook: PreIngressHook =
+        Arc::new(|arrival: &mut Arrival, _src, _depth| match arrival.raw().first() {
+            Some(b'D') => PreIngressAction::Drop,
+            Some(b'P') => PreIngressAction::Reply(b"PONG".to_vec()),
+            _ => PreIngressAction::Accept,
+        });
     let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
     let b = net.bind_udp(opts("10.0.0.2:5060", 64).with_pre_ingress(hook)).await.unwrap();
     let dst = b.local_addr();
@@ -110,7 +111,7 @@ async fn pre_ingress_drop_and_reply() {
 
     // a should have received the PONG reply.
     let reply = timeout(Duration::from_secs(1), a.recv()).await.expect("reply timed out").unwrap();
-    assert_eq!(reply.raw, b"PONG");
+    assert_eq!(reply.raw, &b"PONG"[..]);
 
     // b enqueued only ACCEPT; dropped DROP_ME; replied to PING.
     let c = b.counters();
@@ -118,7 +119,7 @@ async fn pre_ingress_drop_and_reply() {
     assert_eq!(c.pre_ingress_replies, 1);
     assert_eq!(c.enqueued, 1);
     let accepted = b.try_recv().unwrap();
-    assert_eq!(accepted.raw, b"ACCEPT");
+    assert_eq!(accepted.raw, &b"ACCEPT"[..]);
 }
 
 #[tokio::test]

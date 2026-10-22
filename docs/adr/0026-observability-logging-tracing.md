@@ -135,8 +135,8 @@ per-request authorization check: a serving edge simply cannot be steered into
 tracing by a caller. A malformed value is ignored in favour of the configured
 rate and counted (`trace_header_malformed_total`).
 
-Header extraction lives ONLY in `sip-message` (full-parse path) and
-`sip_message::sniff` (the proxy's raw INVITE path), per the repo-wide rule that
+Header extraction lives ONLY in `sip-message`, on the parsed INVITE (the proxy
+reads it off the message its receive path parsed), per the repo-wide rule that
 no other crate extracts SIP headers. The reader keeps "absent" and "present but
 unreadable" apart (`TraceSample::{Absent, Malformed, Rate}`) so a rig that
 mistyped its rate does not look like a call that asked for nothing.

@@ -330,11 +330,8 @@ async fn overflow_arrival_is_recorded_with_its_disposition() {
 #[test]
 fn audit_view_hides_consumption_markers_and_modeled_loss() {
     use sip_net::{RecvDisposition, UdpPacket};
-    let pkt = UdpPacket {
-        raw: b"BYE sip:x SIP/2.0\r\n".to_vec(),
-        src: "10.0.0.1:5060".parse().unwrap(),
-        arrival_ms: 7,
-    };
+    let pkt =
+        UdpPacket::unparsed(&b"BYE sip:x SIP/2.0\r\n"[..], "10.0.0.1:5060".parse().unwrap(), 7);
     let item = |disposition| SignalingNetworkEvent::RecvItem {
         bind_key: "10.0.0.2:5060".to_string(),
         packet: pkt.clone(),

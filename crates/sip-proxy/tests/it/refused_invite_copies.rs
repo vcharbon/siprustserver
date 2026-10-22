@@ -18,7 +18,7 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::HeaderName;
 use sip_message::{SipMessage, SipParser, SipResponse};
-use sip_net::{PreIngressAction, PreIngressHook, UdpEndpoint};
+use sip_net::{Arrival, PreIngressAction, PreIngressHook, UdpEndpoint};
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::WorkerRegistry;
 use sip_proxy::self_gate::{EluCpsGate, ProxySelfGate, ProxySelfGateConfig};
@@ -90,10 +90,10 @@ Content-Length: 0\r\n\r\n",
 async fn lossy_caller(h: &Harness, lose: u32) -> (Box<dyn UdpEndpoint>, Arc<Mutex<Vec<Vec<u8>>>>) {
     let lost = Arc::new(Mutex::new(Vec::new()));
     let kept = lost.clone();
-    let hook: PreIngressHook = Arc::new(move |bytes: &[u8], _src, _depth| {
+    let hook: PreIngressHook = Arc::new(move |arrival: &mut Arrival, _src, _depth| {
         let mut kept = kept.lock().unwrap();
         if (kept.len() as u32) < lose {
-            kept.push(bytes.to_vec());
+            kept.push(arrival.raw().to_vec());
             PreIngressAction::Drop
         } else {
             PreIngressAction::Accept

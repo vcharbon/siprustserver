@@ -96,7 +96,8 @@ set explicitly. A `Drop` body never panics: a panic during unwinding aborts.
 `panic = "unwind"`. Two backstops, sound because neither holds partial state:
 
 - an explicit `catch_unwind` around the datagram parse in each shared loop (owned bytes, pure
-  parser): a panic drops the datagram and is counted;
+  parser): a panic drops the datagram and is counted. A datagram is parsed once, by the parser
+  only: a receive-path hook's parse travels with the queued packet and the loop takes it;
 - the per-call handler task: a panic is a `JoinError`; on an active call the reaper's first
   strike tears the call down on the wire through the existing teardown (BYE to confirmed legs,
   CANCEL to early legs, the final owed to the caller), the second strike discharges silently.

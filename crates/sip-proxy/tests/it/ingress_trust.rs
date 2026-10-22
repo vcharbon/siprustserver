@@ -196,7 +196,7 @@ struct Seen {
 fn drain(ep: &dyn UdpEndpoint) -> Vec<(SocketAddr, Vec<u8>)> {
     let mut out = Vec::new();
     while let Some(p) = ep.try_recv() {
-        out.push((p.src, p.raw));
+        out.push((p.src, p.raw.to_vec()));
     }
     out
 }

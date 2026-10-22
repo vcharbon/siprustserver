@@ -6,16 +6,15 @@
 //! saturated**, before the datagram is queued and before any transaction or
 //! call state exists. Below the threshold, and while the worker remembers no
 //! refused INVITE, it is an integer compare and an atomic load, and the packet
-//! is accepted untouched.
+//! is accepted unparsed (the transaction layer parses it).
 //!
 //! At or above `floor(queue_max * threshold_pct / 100)` the datagram is
-//! classified:
+//! parsed, and the parse is queued with it: the transaction layer takes it
+//! and does not parse the datagram again ([`sip_net::Arrival`]). Then:
 //!
-//!   - anything whose first bytes are not an `INVITE ` request line — a
-//!     response, any other method, garbage — → accept unparsed (the normal
-//!     pipeline owns it). The hook runs inline on the socket's drain loop, so
-//!     the classes the brake always admits must never cost a parse;
-//!   - an `INVITE ` the pipeline's own parser cannot read → accept;
+//!   - a datagram the parser refuses → accept (the transaction layer answers
+//!     or drops it);
+//!   - a response, any request but an INVITE → accept;
 //!   - a copy of an initial INVITE the worker refused in the last 64·T1 — at
 //!     this brake or at the transaction layer's deferred backlog, whatever
 //!     its class → that refusal again, counted as a copy;
@@ -27,10 +26,12 @@
 //!     transaction holds a copy of it (that transaction answers it), its
 //!     first refusal counted as a new call refused in its class.
 //!
-//! Below the threshold, an initial INVITE the worker refused in the last
-//! 64·T1 — at this brake or at the transaction layer's deferred backlog —
-//! draws that refusal again, so a refused call is never admitted behind its
-//! caller's back. Every other datagram below the threshold is accepted.
+//! Below the threshold, while the worker remembers a refused INVITE, the
+//! datagram is parsed the same way, and an initial INVITE the worker refused
+//! in the last 64·T1 — at this brake or at the transaction layer's deferred
+//! backlog — draws that refusal again, so a refused call is never admitted
+//! behind its caller's back. Every other datagram below the threshold is
+//! accepted.
 //!
 //! The brake shares the worker's one refusal memo and answer with the
 //! transaction layer: every copy of one INVITE draws the same bytes, the
@@ -44,9 +45,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use sip_message::preparse::is_invite_request_buffer;
-use sip_message::{serialize, CustomParser, SipMessage, SipParser};
+use sip_message::{serialize, CustomParser, Method, SipMessage};
 use sip_net::types::{PreIngressAction, PreIngressHook};
+use sip_net::Arrival;
 use sip_txn::{InviteRefusals, Verdict as Memo};
 
 use crate::admission::{class_of, judge, Class, Refusals, Rung, Verdict};
@@ -161,28 +162,26 @@ pub fn build_ingress_brake_hook(
     let threshold = config.threshold();
     let parser = CustomParser::new();
     let memo = refusals.memo().clone();
-    Arc::new(move |raw: &[u8], _src, depth: usize| {
+    Arc::new(move |arrival: &mut Arrival, _src, depth: usize| {
         let above = depth >= threshold;
         if !above && !memo.remembers() {
             return PreIngressAction::Accept;
         }
-        // Seven bytes decide every class the brake always admits — responses,
-        // other methods, garbage — before any parse touches the drain loop.
-        if !is_invite_request_buffer(raw) {
-            return PreIngressAction::Accept;
-        }
-        // Anything the pipeline itself could not read is the pipeline's problem,
-        // not the brake's: accept and let the normal path answer it.
-        let Ok(SipMessage::Request(req)) = parser.parse(raw) else {
+        // What the parser refuses is the pipeline's to answer, and responses
+        // and other methods are always admitted: each is queued with its parse.
+        let Ok(Ok(SipMessage::Request(req))) = arrival.parse(&parser) else {
             return PreIngressAction::Accept;
         };
-        let class = class_of(&req);
+        if *req.method() != Method::Invite {
+            return PreIngressAction::Accept;
+        }
+        let class = class_of(req);
         // A copy of an INVITE the worker refused draws that refusal again, on
         // either side of the threshold and whatever its class. A held identity
         // is never refused (see `InviteRefusals`), so a live call is spared.
-        if class != Class::InDialog && memo.remembers() && memo.refused(&req) {
+        if class != Class::InDialog && memo.remembers() && memo.refused(req) {
             counters.record_copy();
-            return reply(&memo, &req);
+            return reply(&memo, req);
         }
         match judge(Rung::Brake { depth, threshold }, class) {
             Verdict::Admit => {
@@ -195,8 +194,8 @@ pub fn build_ingress_brake_hook(
             // that cannot be built leaves no memo entry the transaction
             // layer would rebuild that same answer from.
             Verdict::Refuse(_) => {
-                let reply = reply(&memo, &req);
-                match memo.refuse(&req) {
+                let reply = reply(&memo, req);
+                match memo.refuse(req) {
                     Memo::Held => PreIngressAction::Accept,
                     Memo::Refused { first } => {
                         if first {

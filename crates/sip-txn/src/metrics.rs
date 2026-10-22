@@ -10,7 +10,7 @@ use sip_retransmit::Class;
 use tokio::sync::mpsc;
 
 use crate::event::{EventQueueClass, TransactionEvent};
-use crate::layer::InviteClass;
+use crate::invite_class::InviteClass;
 
 mod by_class;
 mod retransmits;

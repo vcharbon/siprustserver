@@ -17,6 +17,6 @@ thiserror = { workspace = true }
 # The recording decorators record onto the harness's typed `Recorder`.
 layer-harness = { path = "../layer-harness" }
 sip-clock = { path = "../sip-clock" }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 # The RFC rule bodies the audit runs over the recording.
 rfc-rules = { path = "../rfc-rules" }

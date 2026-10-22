@@ -19,7 +19,7 @@ scenario-harness = { path = "../scenario-harness" }
 # `EndpointConfig` (`--endpoint-config`), whose optional `egress` field carries
 # the run's egress policy (the environment axis).
 e2e-model = { path = "../e2e-model" }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 tokio = { workspace = true }
 # catch_unwind over a scenario future → a panic becomes a counted failure, never
 # aborts the worker.

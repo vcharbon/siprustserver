@@ -216,7 +216,7 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
         }
     }
     let arrival_ms = mux.clock.now_ms().max(0) as u64;
-    deliver(&mux.stats, &d.queue, UdpPacket { raw: raw.to_vec(), src, arrival_ms });
+    deliver(&mux.stats, &d.queue, UdpPacket::unparsed(raw.to_vec(), src, arrival_ms));
 }
 
 /// Report a demuxed-but-discarded datagram to a recorded inbox's delivery tap
@@ -230,7 +230,7 @@ fn tap_discard(
 ) {
     if let Some(tap) = d.queue.recv_tap() {
         let arrival_ms = mux.clock.now_ms().max(0) as u64;
-        tap(&UdpPacket { raw: raw.to_vec(), src, arrival_ms }, disp);
+        tap(&UdpPacket::unparsed(raw.to_vec(), src, arrival_ms), disp);
     }
 }
 
@@ -245,7 +245,8 @@ fn tap_unrouted(mux: &MuxSocket, slot: &CallSlot, raw: &[u8], src: SocketAddr) {
         return;
     };
     let arrival_ms = mux.clock.now_ms().max(0) as u64;
-    tap(&UdpPacket { raw: raw.to_vec(), src, arrival_ms }, sip_net::RecvDisposition::Unrouted);
+    let packet = UdpPacket::unparsed(raw.to_vec(), src, arrival_ms);
+    tap(&packet, sip_net::RecvDisposition::Unrouted);
 }
 
 fn deliver(stats: &MuxStats, q: &PacketQueue, pkt: UdpPacket) {

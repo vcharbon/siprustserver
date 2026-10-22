@@ -4,7 +4,7 @@
 //! sentinels, no post-processing; Call-ID, branch, tag, local address and
 //! CSeq are arguments, never side effects. Reading *existing* messages does
 //! NOT live here — that is the typed read surface on the message itself;
-//! lenient raw scanning is [`crate::sniff`].
+//! lenient raw scanning is `crate::sniff`.
 //!
 //! Each generator is a recipe over a [`Draft`](crate::draft::Draft): it knows
 //! the dialog rules — CSeq stepping, route-set application, tag placement — and

@@ -16,7 +16,7 @@ load-shed = { path = "../load-shed" }
 # Shared b2bua/proxy spawn primitives live in b2bua-harness; failover-harness reuses them.
 b2bua-harness = { path = "../b2bua-harness" }
 call = { path = "../call" }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 sip-net = { path = "../sip-net" }
 sip-net-testkit = { path = "../sip-net-testkit" }
 sip-txn = { path = "../sip-txn" }

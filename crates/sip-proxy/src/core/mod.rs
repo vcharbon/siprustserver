@@ -31,8 +31,7 @@ use std::time::Duration;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-use sip_net::UdpEndpoint;
-use sip_txn::parse_guard::{parse_datagram, ParserPanicked};
+use sip_net::{parse_datagram, ParserPanicked, UdpEndpoint, UdpPacket};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
@@ -368,9 +367,10 @@ impl ProxyCore {
     }
 
     /// The recv loop. Runs until the endpoint's queue is closed (the endpoint
-    /// is dropped). Parse failures are dropped silently (RFC 3261 §16.3); a
-    /// datagram the parser panics on is dropped and counted, and the loop
-    /// goes on.
+    /// is dropped). A datagram is parsed once: the loop takes the parse its
+    /// receive path made and parses only a datagram that came without one. A
+    /// refused one is answered or dropped (ADR-0054); one the parser panics
+    /// on is dropped and counted, and the loop goes on.
     pub async fn run(self) {
         // The shared `(Call-ID|CSeq#)` LRU sweeper — spawned exactly once per
         // LRU however many recv-shard cores share it (see
@@ -435,11 +435,14 @@ impl ProxyCore {
             // on one timeline and carries no wall-vs-monotonic drift.
             self.intake_age.record(now_ms.saturating_sub(pkt.arrival_ms));
             self.metrics.record_face_ingress(face);
-            let src = pkt.src;
-            // Hand the receive buffer to the parser instead of lending it: the
-            // message's `raw`/`body` then share it and no packet byte is copied.
-            let raw = bytes::Bytes::from(pkt.raw);
-            let msg = match parse_datagram(raw, |raw| self.parser.parse_shared(raw)) {
+            let UdpPacket { raw, src, parsed, .. } = pkt;
+            // The receive path's parse, else one made here; either way the
+            // message's `raw`/`body` share the receive buffer.
+            let parsed = match parsed {
+                Some(parsed) => *parsed,
+                None => parse_datagram(raw, |b| self.parser.parse_shared(b)),
+            };
+            let msg = match parsed {
                 Ok(Ok(msg)) => msg,
                 Ok(Err(error)) => {
                     self.refuse_unparsed(&error, src).await;

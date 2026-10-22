@@ -148,7 +148,7 @@ async fn settle(net: &SimulatedSignalingNetwork) {
 fn drain(ep: &dyn UdpEndpoint) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     while let Some(pkt) = ep.try_recv() {
-        out.push(pkt.raw);
+        out.push(pkt.raw.to_vec());
     }
     out
 }

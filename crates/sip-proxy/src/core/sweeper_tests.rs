@@ -142,16 +142,8 @@ async fn run_records_packet_age_at_dequeue() {
     // Two packets queued in the past: ages at dequeue 500 ms and 200 ms.
     // Raw bytes are deliberately unparseable — no SIP flow is involved.
     let ep = DrainOnceEndpoint(Mutex::new(vec![
-        UdpPacket {
-            raw: b"not-sip".to_vec(),
-            src: "127.0.0.1:9999".parse().unwrap(),
-            arrival_ms: 200,
-        },
-        UdpPacket {
-            raw: b"not-sip".to_vec(),
-            src: "127.0.0.1:9999".parse().unwrap(),
-            arrival_ms: 500,
-        },
+        UdpPacket::unparsed(&b"not-sip"[..], "127.0.0.1:9999".parse().unwrap(), 200),
+        UdpPacket::unparsed(&b"not-sip"[..], "127.0.0.1:9999".parse().unwrap(), 500),
     ]));
     let recorder = IntakeAgeRecorder::default();
 

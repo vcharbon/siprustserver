@@ -122,7 +122,7 @@ impl Rig {
 
     /// Every datagram `peer` has received, in order.
     pub fn drain(&self, peer: Peer) -> Vec<Vec<u8>> {
-        std::iter::from_fn(|| self.peer(peer).try_recv()).map(|p| p.raw).collect()
+        std::iter::from_fn(|| self.peer(peer).try_recv()).map(|p| p.raw.to_vec()).collect()
     }
 
     /// The failure the case ended in, if any.

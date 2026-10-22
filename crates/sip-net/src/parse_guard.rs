@@ -5,20 +5,23 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use bytes::Bytes;
-use sip_message::{SipMessage, SipParseError};
+use sip_message::{Bytes, SipMessage, SipParseError};
 
 /// The parser panicked on a datagram: a parser defect. The caller drops the
 /// datagram and counts it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParserPanicked;
 
+/// What the parse of one datagram gave: the message, the parser's refusal,
+/// or [`ParserPanicked`].
+pub type ParseOutcome = Result<Result<SipMessage, SipParseError>, ParserPanicked>;
+
 /// Parse the datagram `raw` with `parse`: the parse's own result, or
 /// [`ParserPanicked`] when `parse` panics.
 pub fn parse_datagram(
     raw: Bytes,
     parse: impl FnOnce(Bytes) -> Result<SipMessage, SipParseError>,
-) -> Result<Result<SipMessage, SipParseError>, ParserPanicked> {
+) -> ParseOutcome {
     catch_unwind(AssertUnwindSafe(|| parse(raw))).map_err(|_payload| ParserPanicked)
 }
 

@@ -27,7 +27,7 @@
 //! departure sweep runs, so the message each cell is about takes the call over.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering, Ordering::SeqCst};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ use sip_message::generators::InDialogMethod;
 use sip_message::header::{RAck, RSeq};
 use sip_message::types::SipResponse;
 use sip_message::Method;
-use sip_net::PreIngressAction;
+use sip_net::{Arrival, PreIngressAction};
 
 /// Bob's offer, carried on the reliable 183 (delayed-offer INVITE).
 const OFFER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -554,9 +554,8 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
         .agent_with_pre_ingress(
             "alice",
             ALICE,
-            Arc::new(move |bytes: &[u8], _src, _depth| {
-                if bytes.starts_with(b"SIP/2.0 486") && counter.fetch_add(1, Ordering::SeqCst) == 0
-                {
+            Arc::new(move |a: &mut Arrival, _src, _depth| {
+                if a.raw().starts_with(b"SIP/2.0 486") && counter.fetch_add(1, SeqCst) == 0 {
                     return PreIngressAction::Drop;
                 }
                 PreIngressAction::Accept
@@ -746,8 +745,8 @@ async fn a_lost_takeover_ack_is_resent_when_the_callee_retransmits_its_final() {
         .agent_with_pre_ingress(
             "bob",
             BOB,
-            Arc::new(move |bytes: &[u8], _src, _depth| {
-                if bytes.starts_with(b"ACK ") && counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Arc::new(move |a: &mut Arrival, _src, _depth| {
+                if a.raw().starts_with(b"ACK ") && counter.fetch_add(1, SeqCst) == 0 {
                     return PreIngressAction::Drop;
                 }
                 PreIngressAction::Accept

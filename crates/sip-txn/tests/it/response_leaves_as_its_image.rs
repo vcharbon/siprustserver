@@ -14,7 +14,7 @@ const TRANSIT_MS: u64 = 5;
 fn raw_from_b2bua(stack: &Stack) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     while let Some(p) = stack.peer.try_recv() {
-        out.push(p.raw);
+        out.push(p.raw.to_vec());
     }
     out
 }

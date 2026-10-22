@@ -32,7 +32,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
 use failover_harness::FailoverHarness;
-use sip_net::PreIngressAction;
+use sip_net::{Arrival, PreIngressAction};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
@@ -63,8 +63,9 @@ async fn lost_relayed_603_recovers_via_worker_timer_g_and_relayed_ack() {
         .agent_with_pre_ingress(
             "alice",
             ALICE,
-            Arc::new(move |bytes: &[u8], _src, _depth| {
-                if bytes.starts_with(b"SIP/2.0 603") && counter.fetch_add(1, Ordering::SeqCst) == 0
+            Arc::new(move |arrival: &mut Arrival, _src, _depth| {
+                if arrival.raw().starts_with(b"SIP/2.0 603")
+                    && counter.fetch_add(1, Ordering::SeqCst) == 0
                 {
                     return PreIngressAction::Drop;
                 }

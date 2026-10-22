@@ -70,11 +70,11 @@ impl Rig {
     }
 
     fn to_caller(&self) -> Vec<Vec<u8>> {
-        std::iter::from_fn(|| self.caller.try_recv()).map(|p| p.raw).collect()
+        std::iter::from_fn(|| self.caller.try_recv()).map(|p| p.raw.to_vec()).collect()
     }
 
     fn to_worker(&self) -> Vec<Vec<u8>> {
-        std::iter::from_fn(|| self.worker.try_recv()).map(|p| p.raw).collect()
+        std::iter::from_fn(|| self.worker.try_recv()).map(|p| p.raw.to_vec()).collect()
     }
 
     fn counters(&self) -> (u64, u64, u64) {

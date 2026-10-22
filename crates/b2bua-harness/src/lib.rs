@@ -527,10 +527,10 @@ impl B2buaSutBuilder {
             let slot: Arc<OnceLock<sip_net::PreIngressHook>> = Arc::new(OnceLock::new());
             let forced = Arc::new(AtomicUsize::new(NO_FORCED_DEPTH));
             let (depth, installed) = (forced.clone(), slot.clone());
-            let hook: sip_net::PreIngressHook = Arc::new(move |raw, src, live| {
+            let hook: sip_net::PreIngressHook = Arc::new(move |arrival, src, live| {
                 let Some(brake) = installed.get() else { return sip_net::PreIngressAction::Accept };
                 let forced = depth.load(Ordering::Relaxed);
-                brake(raw, src, if forced == NO_FORCED_DEPTH { live } else { forced })
+                brake(arrival, src, if forced == NO_FORCED_DEPTH { live } else { forced })
             });
             ((config, counters, forced, slot), hook)
         });

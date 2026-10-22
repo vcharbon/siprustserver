@@ -62,7 +62,7 @@ mod txn;
 mod unanswered;
 mod via_marks;
 
-pub use backlog::{DeferredBound, InviteClass};
+pub use backlog::DeferredBound;
 pub use handle::{TransactionConfig, TransactionLayer, TransactionLayerClosed};
 pub use key::ServerTxnKey;
 pub use refusals::{InviteRefusals, NewCallRefusal, Verdict, REFUSED_MEMO_MAX};

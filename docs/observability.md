@@ -102,6 +102,6 @@ request and response as events. Every emission site sits behind
 `if call.sampled { … }` — an unsampled call must evaluate no format argument and
 allocate nothing; subscriber-side filtering is never the mechanism.
 
-**Headers.** `X-Trace-Sample` is read in `sip-message` (full parse) and
-`sip_message::sniff` (proxy raw path) and nowhere else — the repo-wide rule that
-no other crate extracts SIP headers has no exception here.
+**Headers.** `X-Trace-Sample` is read in `sip-message`, off the parsed INVITE,
+and nowhere else — the repo-wide rule that no other crate extracts SIP headers
+has no exception here.

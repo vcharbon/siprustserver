@@ -2,11 +2,12 @@
 //! strict-validate plus read/rewrite helpers. No async, no I/O, no clock —
 //! a pure leaf crate.
 //!
-//! This is the ONLY crate that extracts SIP headers/messages. Lenient
-//! raw-datagram scanning: [`sniff`]; strict pre-parse classifiers:
-//! [`preparse`]; parsed-header access: the typed read surface on
-//! [`SipRequest`] / [`SipResponse`] ([`header`] values, [`HeaderName`]);
-//! construction: [`draft`] and [`generators`].
+//! This is the ONLY crate that extracts SIP headers/messages. Parsed-header
+//! access: the typed read surface on [`SipRequest`] / [`SipResponse`]
+//! ([`header`] values, [`HeaderName`]); construction: [`draft`] and
+//! [`generators`]. Tooling only, behind the `sniff` feature: lenient
+//! raw-datagram scanning (`sniff`), pre-parse classifiers (`preparse`) and
+//! the document form of a datagram (`payload`).
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -48,7 +49,9 @@ pub mod ip_literal;
 pub mod mscml;
 pub mod multipart;
 pub mod param_codec;
+#[cfg(feature = "sniff")]
 pub mod payload;
+#[cfg(feature = "sniff")]
 pub mod preparse;
 pub mod projection;
 pub mod remote_target;
@@ -62,6 +65,7 @@ pub mod sdp_text;
 pub mod serializer;
 pub mod sipfrag;
 pub mod site;
+#[cfg(feature = "sniff")]
 pub mod sniff;
 pub mod trace_sample;
 pub mod worker_report;

@@ -230,7 +230,7 @@ fn paired_sip_entries(
                 && r.bind_key == bind_key
                 && r.src == packet.src
                 && r.arrival_ms == packet.arrival_ms
-                && r.raw == packet.raw.as_slice()
+                && *r.raw == packet.raw[..]
         }) {
             r.read = true;
         }
@@ -399,11 +399,7 @@ mod tests {
             event: SignalingNetworkEvent::RecvItem {
                 bind_key: at.to_string(),
                 disposition: RecvDisposition::Delivered,
-                packet: UdpPacket {
-                    raw: raw.as_bytes().to_vec(),
-                    src: from.parse().unwrap(),
-                    arrival_ms: seq,
-                },
+                packet: UdpPacket::unparsed(raw.as_bytes().to_vec(), from.parse().unwrap(), seq),
                 wire: crate::contracts::WireStamp::of_bytes(raw.as_bytes()),
             },
             seq,

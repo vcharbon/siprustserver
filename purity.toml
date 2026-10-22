@@ -11,9 +11,17 @@ binaries = ["sip-proxy-runner", "call-limiter-runner"]
 # build -p <binary>` of its own, the resolution the closure check holds.
 dockerfiles = ["deploy/docker/Dockerfile"]
 
-# Features no production binary may reach: test support, and the schedules
-# no RFC prescribes (ADR-0032 X1). A bare name is that feature of any crate.
-test-features = ["testkit", "test-util", "sip-retransmit/authored", "sip-message/rvoip-oracle"]
+# Features no production binary may reach: test support, the schedules no
+# RFC prescribes (ADR-0032 X1), and the line-based raw readers beside the
+# parser (`sip-message/sniff`, tooling only). A bare name is that feature of
+# any crate.
+test-features = [
+  "testkit",
+  "test-util",
+  "sip-retransmit/authored",
+  "sip-message/rvoip-oracle",
+  "sip-message/sniff",
+]
 
 # Third-party crates a pure crate may reach through its normal dependencies
 # (proc-macro crates aside): no clock, randomness, filesystem, network,

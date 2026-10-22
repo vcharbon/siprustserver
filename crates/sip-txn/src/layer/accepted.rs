@@ -10,8 +10,7 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use sip_message::header::RSeq;
 use sip_message::{SipMessage, SipRequest, SipResponse};
-
-use crate::parse_guard::parse_datagram;
+use sip_net::parse_datagram;
 
 use super::lifetime::Hold;
 use super::owner::Owner;

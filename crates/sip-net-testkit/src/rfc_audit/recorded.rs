@@ -44,7 +44,7 @@ impl Recorded {
         let mut addrs: HashSet<SocketAddr> = keys.iter().filter_map(|k| lane_addr(k)).collect();
         for s in events {
             if let SignalingNetworkEvent::RecvItem { bind_key, packet, .. } = &s.event {
-                if sends.get(packet.raw.as_slice()).is_some_and(|from| *from != bind_key) {
+                if sends.get(&packet.raw[..]).is_some_and(|from| *from != bind_key) {
                     addrs.insert(packet.src);
                 }
             }

@@ -98,7 +98,7 @@ fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindView> {
                     !held_chains.insert(chain),
                     packet.src.to_string(),
                     bind_key.clone(),
-                    packet.raw.clone(),
+                    packet.raw.to_vec(),
                 )
             }
             SignalingNetworkEvent::SendCalled { bind_key, to, msg } => {

@@ -42,7 +42,7 @@ pub fn relay_lanes(events: &[Stamped<SignalingNetworkEvent>]) -> HashSet<LaneKey
                 (bind_key, msg.as_slice(), true)
             }
             SignalingNetworkEvent::RecvItem { bind_key, packet, .. } => {
-                (bind_key, packet.raw.as_slice(), false)
+                (bind_key, &packet.raw[..], false)
             }
             _ => continue,
         };
@@ -118,7 +118,7 @@ mod tests {
                 bind_key: bind.to_string(),
                 disposition: crate::types::RecvDisposition::Delivered,
                 wire: crate::contracts::WireStamp::of_bytes(&raw),
-                packet: UdpPacket { raw, src: "127.0.0.1:5070".parse().unwrap(), arrival_ms: seq },
+                packet: UdpPacket::unparsed(raw, "127.0.0.1:5070".parse().unwrap(), seq),
             },
             seq,
             at_ms: seq,

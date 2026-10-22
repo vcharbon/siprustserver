@@ -3,9 +3,6 @@
 //! for one [`Class`]. The router judges its rungs in that order
 //! ([`first_refusal`]).
 
-use sip_message::emergency::is_emergency_request;
-use sip_message::SipRequest;
-
 use crate::capacity::CapacityReading;
 use crate::new_calls::Refusal;
 
@@ -14,16 +11,9 @@ use crate::new_calls::Refusal;
 /// alone).
 pub use sip_txn::InviteClass as Class;
 
-/// The class of `req`: the one classification every rung reads.
-pub fn class_of(req: &SipRequest) -> Class {
-    if req.to().tag().is_some() {
-        Class::InDialog
-    } else if is_emergency_request(req) {
-        Class::Emergency
-    } else {
-        Class::Normal
-    }
-}
+/// The class of a request: the one classification every rung reads, and the
+/// one a front proxy's intake shed reads.
+pub use sip_txn::class_of;
 
 /// One rung of the ladder, without its input. The brake is judged on
 /// arrival, before the datagram is queued; the backlog in the transaction
