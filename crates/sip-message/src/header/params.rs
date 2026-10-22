@@ -279,7 +279,9 @@ pub(crate) fn read_generic_params(base: &SipStr, mut i: usize) -> Result<Params,
                 })?;
                 let end = close + 1;
                 let inner = clamped(text, value_at + 1, close);
-                if !inner.contains(':') || super::uri::host_refusal(inner).is_some() {
+                if !inner.contains(':')
+                    || super::uri::host_refusal(inner, super::uri::UriRole::Target).is_some()
+                {
                     return Err(SipParseError::new(format!(
                         "parameter {name}: invalid IPv6 reference [{inner}]"
                     )));

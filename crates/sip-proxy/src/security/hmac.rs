@@ -15,6 +15,7 @@
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use sip_message::char_class::{is_paramchar, is_run_of};
 use subtle::ConstantTimeEq;
 
 /// RFC 2104 §3: keys shorter than the hash output should be avoided.
@@ -86,6 +87,14 @@ fn validate_key(key: &HmacKey, label: &str) -> Result<(), HmacKeyProviderConfigE
     if key.id.is_empty() {
         return Err(HmacKeyProviderConfigError(format!("{label} key id must be non-empty")));
     }
+    // The key id rides the Record-Route cookie as a URI parameter value
+    // (`pvalue = 1*paramchar`, RFC 3261 §25.1), written unescaped.
+    if !is_run_of(&key.id, is_paramchar, false) {
+        return Err(HmacKeyProviderConfigError(format!(
+            "{label} key id {:?} must be URI-parameter characters (RFC 3261 §25.1 paramchar)",
+            key.id
+        )));
+    }
     if key.bytes.len() < MIN_KEY_BYTES {
         return Err(HmacKeyProviderConfigError(format!(
             "{label} key must be at least {MIN_KEY_BYTES} bytes (got {})",
@@ -155,6 +164,21 @@ mod tests {
 
     fn provider() -> StaticHmacKeyProvider {
         StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap()
+    }
+
+    /// A key id the Record-Route cookie could not carry as a URI parameter
+    /// value is refused at load, the previous key's too.
+    #[test]
+    fn rejects_a_key_id_no_uri_parameter_carries() {
+        for kid in ["k@1", "k 1", "k\"1", "k%1", "k;1", "k=1", "k?1", "kë"] {
+            let key = HmacKey::new(kid, vec![0u8; 32]);
+            assert!(StaticHmacKeyProvider::new(key.clone(), None).is_err(), "{kid:?}");
+            let current = HmacKey::new("k1", vec![0u8; 32]);
+            assert!(StaticHmacKeyProvider::new(current, Some(key)).is_err(), "previous {kid:?}");
+        }
+        assert!(
+            StaticHmacKeyProvider::new(HmacKey::new("k-1_2.v[3]:$", vec![0u8; 32]), None).is_ok()
+        );
     }
 
     #[test]

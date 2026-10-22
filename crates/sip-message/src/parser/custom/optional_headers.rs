@@ -7,7 +7,7 @@
 use super::header_index::HeaderIndex;
 use super::structured_headers::top_level_comma_entries;
 use crate::error::SipParseError;
-use crate::header::{HeaderName, HeaderValue, NameAddr, RAck, ReferTo};
+use crate::header::{AddrForm, HeaderName, HeaderValue, NameAddr, RAck, ReferTo, UriRole};
 use crate::sip_str::SipStr;
 use crate::types::{OptionalHeaders, SipHeader};
 
@@ -16,8 +16,9 @@ use crate::types::{OptionalHeaders, SipHeader};
 // ---------------------------------------------------------------------------
 
 /// Parse a multi-value name-addr header (flattened across instances and
-/// comma-separated entries), each entry by the strict name-addr reader. Any
-/// malformed entry → `Err`.
+/// comma-separated entries), each entry by the strict name-addr reader, its
+/// URI a [`UriRole::Identity`]. Any malformed entry → `Err`, and the header's
+/// entries are not used (ADR-0053).
 fn parse_name_addr_list(
     values: &[&SipStr],
     header_name: HeaderName,
@@ -28,7 +29,8 @@ fn parse_name_addr_list(
             if entry.is_empty() {
                 continue;
             }
-            let addr = NameAddr::parse(&v.reslice(entry))
+            let entry = v.reslice(entry);
+            let addr = NameAddr::parse_as(&entry, AddrForm::NameAddrOrSpec, UriRole::Identity)
                 .map_err(|e| SipParseError::new(format!("Strict {header_name}: {}", e.reason)))?;
             out.push(addr);
         }

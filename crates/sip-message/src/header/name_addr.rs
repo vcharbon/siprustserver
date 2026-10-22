@@ -7,7 +7,7 @@ use crate::sip_str::SipStr;
 
 use super::params::{read_generic_params, ParamValue, Params};
 use super::scan::{byte_at, index_of, quoted_close, read_quoted, skip_ws, sub, sub_trimmed};
-use super::uri::Uri;
+use super::uri::{Uri, UriRole};
 use super::wire::Wire;
 
 /// An address with an optional display name and header parameters. The URI is
@@ -75,19 +75,20 @@ impl NameAddr {
     }
 
     /// Read `( name-addr / addr-spec ) *( SEMI generic-param )` — the
-    /// [`AddrForm::NameAddrOrSpec`] reading of [`parse_as`](Self::parse_as).
+    /// [`AddrForm::NameAddrOrSpec`], [`UriRole::Target`] reading of
+    /// [`parse_as`](Self::parse_as).
     pub fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        Self::parse_as(raw, AddrForm::NameAddrOrSpec)
+        Self::parse_as(raw, AddrForm::NameAddrOrSpec, UriRole::Target)
     }
 
     /// Read one address value whole by the RFC 3261 §25.1 grammar:
     /// `name-addr = [ display-name ] LAQUOT addr-spec RAQUOT`, a display name
     /// being a quoted-string or tokens separated by LWS, the addr-spec read by
-    /// the one URI reader with no whitespace inside the brackets, then the
-    /// header parameters and nothing else. A bare addr-spec ends at the first
-    /// `;`, every parameter after it is the header's, and it carries no `,` or
-    /// `?` (§20); [`AddrForm::NameAddrOnly`] refuses it.
-    pub fn parse_as(raw: &SipStr, form: AddrForm) -> Result<Self, SipParseError> {
+    /// the one URI reader in `role` with no whitespace inside the brackets,
+    /// then the header parameters and nothing else. A bare addr-spec ends at
+    /// the first `;`, every parameter after it is the header's, and it carries
+    /// no `,` or `?` (§20); [`AddrForm::NameAddrOnly`] refuses it.
+    pub fn parse_as(raw: &SipStr, form: AddrForm, role: UriRole) -> Result<Self, SipParseError> {
         let value = raw.trimmed();
         let bytes = value.as_bytes();
         let (display, open) = match byte_at(bytes, 0) {
@@ -135,21 +136,22 @@ impl NameAddr {
                 (spec, semi)
             }
         };
-        let uri = Uri::read_exact(&uri_text)?;
+        let uri = Uri::read_exact(&uri_text, role)?;
         let params = read_generic_params(&value, params_at)?;
         Ok(Self { display, uri, params })
     }
 
-    /// Read an identity a caller states as text: bracketed, the name-addr [`parse`]
-    /// reads; bare, an addr-spec whose every `;`-parameter is a URI parameter, the
-    /// way a Request-URI reads. The two readings differ only on a bare value's tail.
+    /// Read an identity a caller states as text, its URI a [`UriRole::Identity`]:
+    /// bracketed, the name-addr [`parse_as`] reads; bare, an addr-spec whose
+    /// every `;`-parameter is a URI parameter, the way a Request-URI reads. The
+    /// two readings differ only on a bare value's tail.
     ///
-    /// [`parse`]: Self::parse
+    /// [`parse_as`]: Self::parse_as
     pub fn parse_identity(raw: &SipStr) -> Result<Self, SipParseError> {
         if raw.as_str().contains('<') {
-            Self::parse(raw)
+            Self::parse_as(raw, AddrForm::NameAddrOrSpec, UriRole::Identity)
         } else {
-            Uri::parse(&raw.trimmed()).map(Self::new)
+            Uri::parse_as(raw, UriRole::Identity).map(Self::new)
         }
     }
 

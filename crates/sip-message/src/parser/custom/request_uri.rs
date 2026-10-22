@@ -5,12 +5,12 @@
 //! recorded it as a route (RFC 3261 §12.2.1.1, §16.12).
 
 use crate::error::SipParseError;
-use crate::header::Uri;
+use crate::header::{Uri, UriRole};
 use crate::sip_str::SipStr;
 
 /// The Request-URI `text` names, or why it names none.
 pub(crate) fn read_request_uri(text: &SipStr) -> Result<Uri, SipParseError> {
-    let uri = Uri::read_exact(text)
+    let uri = Uri::read_exact(text, UriRole::Target)
         .map_err(|e| SipParseError::new(format!("Malformed Request-URI: {}", e.reason)))?;
     request_uri_refusal(&uri)?;
     Ok(uri)

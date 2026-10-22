@@ -6,7 +6,8 @@
 //! after the scheme lands in the userinfo, host, port, a parameter or an
 //! escaped header, each held to its character class, or the URI is refused.
 //! Another scheme (`tel`, `urn`, …) keeps a generic structural reading and is
-//! held only to the URI character set ([`is_uri_char`]).
+//! held only to the URI character set ([`is_uri_char`], and a `tel` number's
+//! `#`). The URI's [`UriRole`] moves one rule: a digit-led top label.
 
 use std::net::Ipv6Addr;
 
@@ -19,7 +20,7 @@ use crate::sip_str::SipStr;
 
 use super::super::params::{parse_semicolon_params, ParamValue, Params, URI_PARAMS};
 use super::super::scan::{byte_at, clamped, index_of, scan_until, sub, sub_lower};
-use super::HostPort;
+use super::{HostPort, UriRole};
 
 /// The parts of one URI, cut from the text it was read from.
 pub(super) struct UriParts {
@@ -31,7 +32,7 @@ pub(super) struct UriParts {
 }
 
 /// Read all of `value` as one URI.
-pub(super) fn read(value: &SipStr) -> Result<UriParts, SipParseError> {
+pub(super) fn read(value: &SipStr, role: UriRole) -> Result<UriParts, SipParseError> {
     let bytes = value.as_bytes();
     let colon = index_of(bytes, b':', 0)
         .ok_or_else(|| SipParseError::new(format!("URI has no scheme: {:?}", value.as_str())))?;
@@ -39,7 +40,7 @@ pub(super) fn read(value: &SipStr) -> Result<UriParts, SipParseError> {
     let scheme = sub_lower(value, 0, colon);
     let after = colon + 1;
     if scheme.eq_ignore_ascii_case("sip") || scheme.eq_ignore_ascii_case("sips") {
-        read_sip(value, scheme, after).map_err(|reason| fail(value, &reason))
+        read_sip(value, scheme, after, role).map_err(|reason| fail(value, &reason))
     } else {
         read_other(value, scheme, after)
     }
@@ -63,7 +64,7 @@ fn scheme_refusal(scheme: &str) -> Option<String> {
 
 /// `SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]`, read
 /// from byte `i` to the end of `value`.
-fn read_sip(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, String> {
+fn read_sip(value: &SipStr, scheme: SipStr, i: usize, role: UriRole) -> Result<UriParts, String> {
     let bytes = value.as_bytes();
     let text = value.as_str();
     // No byte after the userinfo may be an `@` (none of the classes of host,
@@ -75,7 +76,7 @@ fn read_sip(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, String
         }
         None => (None, i),
     };
-    let (authority, mut j) = read_hostport(value, host_at)?;
+    let (authority, mut j) = read_hostport(value, host_at, role)?;
 
     let mut params = Params::new();
     while byte_at(bytes, j) == Some(b';') {
@@ -141,7 +142,7 @@ fn paramchar_refusal(what: &str, run: &str) -> Result<(), String> {
 
 /// `hostport = host [ ":" port ]` from byte `i`; yields the value and the
 /// position after it, which is a `;`, a `?` or the end.
-fn read_hostport(value: &SipStr, i: usize) -> Result<(HostPort, usize), String> {
+fn read_hostport(value: &SipStr, i: usize, role: UriRole) -> Result<(HostPort, usize), String> {
     let bytes = value.as_bytes();
     let text = value.as_str();
     let (host, j) = if byte_at(bytes, i) == Some(b'[') {
@@ -162,7 +163,7 @@ fn read_hostport(value: &SipStr, i: usize) -> Result<(HostPort, usize), String> 
             return Err("unbracketed IPv6 host (RFC 3261 §19.1.1 requires [])".to_string());
         }
         let host = clamped(text, i, end);
-        host_refusal(host).map_or(Ok(()), Err)?;
+        host_refusal(host, role).map_or(Ok(()), Err)?;
         (sub(value, i, end), end)
     };
     match byte_at(bytes, j) {
@@ -190,8 +191,8 @@ fn port_value(port: &str) -> Result<u16, String> {
 }
 
 /// Why `host` (an IPv6 reference without its brackets) is no
-/// `host = hostname / IPv4address / IPv6reference`, if it is not.
-pub(crate) fn host_refusal(host: &str) -> Option<String> {
+/// `host = hostname / IPv4address / IPv6reference` in `role`, if it is not.
+pub(crate) fn host_refusal(host: &str, role: UriRole) -> Option<String> {
     if host.is_empty() {
         return Some("empty host".to_string());
     }
@@ -201,7 +202,7 @@ pub(crate) fn host_refusal(host: &str) -> Option<String> {
     if is_dotted_digits(host.strip_suffix('.').unwrap_or(host)) {
         return ipv4_refusal(host);
     }
-    hostname_refusal(host)
+    hostname_refusal(host, role)
 }
 
 /// Two or more non-empty runs of digits joined by dots: an `IPv4address`,
@@ -212,10 +213,12 @@ fn is_dotted_digits(host: &str) -> bool {
 }
 
 /// `hostname = *( domainlabel "." ) toplabel [ "." ]`, where a label is
-/// alphanumerics and inner hyphens. The top label may start with a digit
+/// alphanumerics and inner hyphens and a [`UriRole::Target`]'s top label
+/// starts with a letter. An [`UriRole::Identity`]'s may start with a digit
 /// (RFC 1123 §2.1), the one leniency of the host grammar (ADR-0053).
-fn hostname_refusal(host: &str) -> Option<String> {
+fn hostname_refusal(host: &str, role: UriRole) -> Option<String> {
     let named = host.strip_suffix('.').filter(|h| !h.is_empty()).unwrap_or(host);
+    let mut top = None;
     for label in named.split('.') {
         let bytes = label.as_bytes();
         let ends_ok = bytes.first().is_some_and(|&b| is_alphanum(b))
@@ -223,8 +226,11 @@ fn hostname_refusal(host: &str) -> Option<String> {
         if !ends_ok || !bytes.iter().all(|&b| is_alphanum(b) || b == b'-') {
             return Some(format!("invalid host label {label:?}"));
         }
+        top = bytes.first().copied();
     }
-    None
+    let letter_led = top.is_some_and(|b| b.is_ascii_alphabetic());
+    (role == UriRole::Target && !letter_led)
+        .then(|| format!("top label of {host:?} must start with ALPHA"))
 }
 
 /// A dotted run of digits as an `IPv4address`: four octets of at most three
@@ -283,7 +289,13 @@ fn is_rfc3261_ipv6(text: &str) -> bool {
 fn read_other(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipParseError> {
     let bytes = value.as_bytes();
     let text = value.as_str();
-    if let Some(r) = run_refusal(clamped(text, i, bytes.len()), is_uri_char, false) {
+    // A tel number's `#` (RFC 3966 `local-number-digits`) rides raw too.
+    let class: fn(u8) -> bool = if scheme.eq_ignore_ascii_case("tel") {
+        |b| is_uri_char(b) || b == b'#'
+    } else {
+        is_uri_char
+    };
+    if let Some(r) = run_refusal(clamped(text, i, bytes.len()), class, false) {
         return Err(fail(value, &r));
     }
     let mut i = i;

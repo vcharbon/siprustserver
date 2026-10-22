@@ -5,7 +5,7 @@
 //! the parser reads keep their character classes. Each refusal sits beside a
 //! well-formed counterpart that must keep parsing.
 
-use sip_message::header::{NameAddr, Uri};
+use sip_message::header::{NameAddr, Uri, UriRole};
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest, SipStr};
 
 /// An INVITE with one line replaced by `line` (matched on its header name, or the
@@ -168,16 +168,37 @@ fn host_labels_follow_the_hostname_and_ipv4_grammar() {
     }
 }
 
-/// The one leniency of the host grammar: a top label need not start with a
-/// letter (RFC 1123 §2.1), so a host of alphanumeric labels that is no dotted
-/// run of digits is a hostname. A dotted run of digits is an IPv4 address or
-/// nothing.
+/// The one leniency of the host grammar, where a host names a party and is
+/// never resolved (From, To, the identity headers): a top label need not start
+/// with a letter (RFC 1123 §2.1). A dotted run of digits is still an IPv4
+/// address or nothing.
 #[test]
-fn a_digits_only_top_label_is_a_hostname() {
+fn a_digit_led_top_label_names_a_party() {
     let r = request(&invite("From", "From: <sip:+33612345678@27:5790;user=phone>;tag=a1", ""));
     assert_eq!(r.from().uri().host_port(), ("27", 5790));
+    let r = request(&invite("To", "To: <sip:bob@2130706433>", ""));
+    assert_eq!(r.to().uri().host(), "2130706433");
+    let r = request(&invite("", "", "P-Asserted-Identity: <sip:+33612345678@27>\r\n"));
+    assert!(r.optional().p_asserted_identity.is_ok(), "{:?}", r.optional().p_asserted_identity);
     for good in ["sip:a@example.123", "sip:a@1x.27", "sip:a@27", "sip:a@9-9.27."] {
-        assert!(uri(good).is_ok(), "host {good:?} refused: {:?}", uri(good));
+        let identity = Uri::parse_as(&SipStr::owned(good), UriRole::Identity);
+        assert!(identity.is_ok(), "host {good:?} refused: {identity:?}");
+    }
+}
+
+/// A host a request is sent to or routed on keeps the RFC 3261 top label: a
+/// resolver reads `2130706433`, `0x7f.0.0.1` or `0177` as an IPv4 literal.
+#[test]
+fn a_resolved_host_keeps_the_rfc_3261_top_label() {
+    for host in ["2130706433", "0x7f.0.0.1", "0177", "1x.27"] {
+        let target = format!("sip:bob@{host}");
+        assert!(uri(&target).is_err(), "Request-URI host {host:?} accepted");
+        refused("Request-URI", &invite("INVITE", &format!("INVITE {target} SIP/2.0"), ""));
+        refused("Route", &invite("", "", &format!("Route: <sip:{host};lr>\r\n")));
+        refused("Record-Route", &invite("", "", &format!("Record-Route: <sip:{host};lr>\r\n")));
+        refused("Contact", &invite("Contact", &format!("Contact: <{target}>"), ""));
+        let via = format!("Via: SIP/2.0/UDP {host}:5060;branch=z9hG4bK-uri1");
+        refused("Via", &invite("Via", &via, ""));
     }
 }
 
@@ -191,6 +212,59 @@ fn an_extension_method_keeps_its_case() {
     let r = request(&raw);
     assert_eq!(r.method().as_str(), "Foo-Bar");
     assert_eq!(r.cseq().method().as_str(), "Foo-Bar");
+}
+
+/// The CSeq names the request's own method (§8.1.1.5): an extension method
+/// matches only in its own case; a known one as it always did.
+#[test]
+fn an_extension_method_matches_its_cseq_in_case() {
+    let raw = invite("INVITE", "Foo-Bar sip:bob@example.com SIP/2.0", "")
+        .replace("CSeq: 1 INVITE", "CSeq: 1 FOO-BAR");
+    refused("CSeq method case", &raw);
+    let raw = invite("INVITE", "invite sip:bob@example.com SIP/2.0", "");
+    assert_eq!(request(&raw).method().as_str(), "INVITE");
+}
+
+/// The request-line method is a token of its own (§25.1 `Method`), whatever
+/// its CSeq says.
+#[test]
+fn a_request_line_method_is_a_token() {
+    let raw = invite("INVITE", "FO<O sip:bob@example.com SIP/2.0", "")
+        .replace("CSeq: 1 INVITE", "CSeq: 1 FO<O");
+    let err = parse(&raw).expect_err("refused");
+    assert!(err.contains("Method"), "refused by the request line: {err}");
+}
+
+/// An identity header the grammar refuses is a non-fatal `Err`: the message
+/// parses, and the entry is not used.
+#[test]
+fn an_identity_header_the_grammar_refuses_is_stored_as_an_error() {
+    let raw = invite(
+        "",
+        "",
+        "Refer-To: sip:carol@192.0.2.9:5060?User-to-User=0430%3Bencoding%3Dhex\r\n\
+         History-Info: <sip:bob@example.com?Reason=SIP;cause=302>;index=1.1\r\n\
+         Diversion: <sip: +33612345678@example.com>;reason=unconditional\r\n",
+    );
+    let r = request(&raw);
+    assert!(r.optional().refer_to.is_err(), "bare addr-spec with ?headers");
+    assert!(r.optional().history_info.is_err(), "raw `;` in an escaped header");
+    assert!(r.optional().diversion.is_err(), "a space inside <...>");
+}
+
+/// A final of 300 or more establishes no dialog (§12.1.1): a Record-Route on
+/// it is not read, like its Contact, and the response is delivered.
+#[test]
+fn a_record_route_on_a_failure_final_does_not_refuse_it() {
+    let raw = "SIP/2.0 486 Busy Here\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-uri1\r\n\
+               From: <sip:alice@example.com>;tag=a1\r\nTo: <sip:bob@example.com>;tag=b1\r\n\
+               Call-ID: c1\r\nCSeq: 1 INVITE\r\nRecord-Route: sip:p.example.com;lr\r\n\
+               Content-Length: 0\r\n\r\n";
+    match parse(raw) {
+        Ok(SipMessage::Response(r)) => assert_eq!(r.status(), 486),
+        other => panic!("the 486 is delivered: {other:?}"),
+    }
+    refused("a 200 is held to it", &raw.replace("486 Busy Here", "200 OK"));
 }
 
 #[test]
@@ -262,14 +336,21 @@ fn a_scheme_is_alpha_then_scheme_characters() {
 
 #[test]
 fn tel_and_other_schemes_stay_lenient_but_ascii() {
-    for good in
-        ["tel:+1-555-0100;phone-context=example.com", "tel:(555)0100", "urn:service:sos", "im:a@b"]
-    {
+    for good in [
+        "tel:+1-555-0100;phone-context=example.com",
+        "tel:(555)0100",
+        "tel:*31#;phone-context=+33",
+        "urn:service:sos",
+        "im:a@b",
+    ] {
         assert!(uri(good).is_ok(), "{good:?} refused: {:?}", uri(good));
     }
-    for bad in ["tel:+1555\u{eb}", "urn:service:s\u{f6}s", "tel:+1 555", "tel:+1555>x"] {
+    for bad in
+        ["tel:+1555\u{eb}", "urn:service:s\u{f6}s", "tel:+1 555", "tel:+1555>x", "sip:*31#@h"]
+    {
         assert!(uri(bad).is_err(), "{bad:?} accepted");
     }
+    request(&invite("INVITE", "INVITE tel:*31#;phone-context=+33 SIP/2.0", ""));
 }
 
 // ---------------------------------------------------------------------------

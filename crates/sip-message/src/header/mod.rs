@@ -71,7 +71,7 @@ pub use sent_by::{SentBy, SentByRef};
 pub use token_list::TokenListHeader;
 pub use token_params::{parse_token_params, TokenParamsHeader};
 pub(crate) use uri::host_refusal;
-pub use uri::{HostPort, Uri};
+pub use uri::{HostPort, Uri, UriRole};
 pub use value::{Folding, HeaderValue};
 pub use via::{Rport, Via, BRANCH_MAGIC_COOKIE};
 pub use warning::warn_agents;

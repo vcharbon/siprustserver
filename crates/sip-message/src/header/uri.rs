@@ -17,6 +17,18 @@ use super::wire::Wire;
 mod read;
 pub(crate) use read::host_refusal;
 
+/// What a URI's host is for, the one axis on which its grammar varies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UriRole {
+    /// A host a request is sent to or routed on (Request-URI, Contact, Route,
+    /// Record-Route, Via, Refer-To): RFC 3261's `hostname`, its top label
+    /// starting with a letter, so no resolver reads it as an IPv4 literal.
+    Target,
+    /// A host that names a party and is never resolved (From, To, the identity
+    /// headers): the top label may also start with a digit (RFC 1123 §2.1).
+    Identity,
+}
+
 /// A host with an optional explicit port. An IPv6 literal is held WITHOUT its
 /// brackets; [`render`](Self::render) puts them back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,19 +405,25 @@ impl Uri {
         self.normalized()
     }
 
-    /// Read a whole URI, surrounding whitespace aside. The value must carry a
-    /// scheme colon; anything looser is [`opaque`](Self::opaque) territory,
-    /// not a URI. A `sip` / `sips` URI is held to the RFC 3261 §25.1 grammar
-    /// byte for byte; another scheme to the URI character set (ADR-0053).
+    /// Read a whole URI, surrounding whitespace aside, as a [`UriRole::Target`].
+    /// The value must carry a scheme colon; anything looser is
+    /// [`opaque`](Self::opaque) territory, not a URI. A `sip` / `sips` URI is
+    /// held to the RFC 3261 §25.1 grammar byte for byte; another scheme to the
+    /// URI character set (ADR-0053).
     pub fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        Self::read_exact(&raw.trimmed())
+        Self::parse_as(raw, UriRole::Target)
+    }
+
+    /// [`parse`](Self::parse) in the given role.
+    pub fn parse_as(raw: &SipStr, role: UriRole) -> Result<Self, SipParseError> {
+        Self::read_exact(&raw.trimmed(), role)
     }
 
     /// Read all of `value` as one URI, whitespace included: the reading of a
     /// URI whose surroundings already delimit it (a Request-URI, the inside of
     /// `<...>`), where a space is a byte of the URI and refuses it.
-    pub(crate) fn read_exact(value: &SipStr) -> Result<Self, SipParseError> {
-        let read::UriParts { scheme, user, authority, params, headers } = read::read(value)?;
+    pub(crate) fn read_exact(value: &SipStr, role: UriRole) -> Result<Self, SipParseError> {
+        let read::UriParts { scheme, user, authority, params, headers } = read::read(value, role)?;
         Ok(Self { scheme, user, authority, params, headers, source: Some(value.clone()) })
     }
 

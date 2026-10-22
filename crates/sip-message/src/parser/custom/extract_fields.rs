@@ -21,7 +21,7 @@ use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
 use super::top_via;
 use crate::char_class::is_token_char;
 use crate::error::SipParseError;
-use crate::header::{self, host_refusal, HostPort, Uri};
+use crate::header::{self, host_refusal, HostPort, Uri, UriRole};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
@@ -35,15 +35,17 @@ pub enum ExtractMode {
     Hydrate,
 }
 
-/// How a message's Contact set is read.
+/// How a message's Contact set and route sets are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContactReading {
     /// The Contact names a dialog target or a binding (a request, a 1xx / 2xx):
-    /// a misplaced wildcard or an unreadable entry refuses the message.
+    /// a misplaced wildcard or an unreadable entry refuses the message, and so
+    /// does a Route or Record-Route that does not read.
     Strict,
-    /// The Contact names no dialog target (a final of 300 or more): a misplaced
-    /// wildcard or an unreadable entry is dropped and the message kept, so the
-    /// transaction it ends still completes.
+    /// The Contact names no dialog target (a final of 300 or more, §12.1.1): a
+    /// misplaced wildcard or an unreadable entry is dropped and the message
+    /// kept, so the transaction it ends still completes. Its route sets are
+    /// not read at parse.
     Lenient,
 }
 
@@ -238,7 +240,7 @@ pub fn extract_common_fields(
             if let Some(refusal) = top.then(|| top_via::cookie_refusal(&v)).flatten() {
                 return Err(refusal);
             }
-            if let Some(reason) = host_refusal(&v.host) {
+            if let Some(reason) = host_refusal(&v.host, UriRole::Target) {
                 return Err(SipParseError::new(format!(
                     "Strict Via sent-by host: {reason} (\"{}\")",
                     v.host
@@ -274,7 +276,7 @@ pub fn extract_common_fields(
     }
 
     let contacts = read_contacts(idx, wire, contact_reading)?;
-    if wire {
+    if wire && contact_reading == ContactReading::Strict {
         route_refusal(idx)?;
     }
 
@@ -402,7 +404,8 @@ pub fn extract_request_fields(
         }
     }
 
-    // CSeq method must match the request method.
+    // CSeq method must match the request method: a known method in any case,
+    // an extension method in its own (RFC 3261 §7.1).
     if let Some(method) = method {
         if let Some(cseq_val) = idx.cseq.first {
             let trimmed = cseq_val.trim();
@@ -410,7 +413,9 @@ pub fn extract_request_fields(
                 Some((_, method)) => method.trim(),
                 None => "",
             };
-            if !cseq_method.is_empty() && !cseq_method.eq_ignore_ascii_case(method) {
+            if !cseq_method.is_empty()
+                && Method::from_wire(cseq_method) != Method::from_wire(method)
+            {
                 return Err(SipParseError::new(format!(
                     "CSeq method \"{cseq_method}\" does not match request method \"{method}\""
                 )));

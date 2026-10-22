@@ -4,23 +4,25 @@
 use super::structured_headers::parse_name_addr;
 use crate::char_class::{is_token_char, is_word_char};
 use crate::error::SipParseError;
-use crate::header::{NameAddr, ParamValue, Uri};
+use crate::header::{AddrForm, NameAddr, ParamValue, Uri, UriRole};
 use crate::sip_str::SipStr;
 
-/// One From / To value: on wire bytes the strict name-addr reading, refused
-/// whole on any grammar error; in `Hydrate` mode the lenient scan, its URI
-/// held [`Uri::opaque`] when the URI reader refuses it.
+/// One From / To value, its URI read as a [`UriRole::Identity`]: on wire bytes
+/// the strict name-addr reading, refused whole on any grammar error; in
+/// `Hydrate` mode the lenient scan, its URI held [`Uri::opaque`] when the URI
+/// reader refuses it.
 pub(super) fn read_address(
     value: &SipStr,
     header: &str,
     wire: bool,
 ) -> Result<NameAddr, SipParseError> {
     if wire {
-        return NameAddr::parse(value)
+        return NameAddr::parse_as(value, AddrForm::NameAddrOrSpec, UriRole::Identity)
             .map_err(|e| SipParseError::new(format!("Strict {header}: {}", e.reason)));
     }
     let p = parse_name_addr(value);
-    Ok(NameAddr::from_parts(p.display_name, Uri::parse_or_verbatim(&p.uri), p.params))
+    let uri = Uri::parse_as(&p.uri, UriRole::Identity).unwrap_or_else(|_| Uri::opaque(p.uri));
+    Ok(NameAddr::from_parts(p.display_name, uri, p.params))
 }
 
 /// The dialog tag of a From / To read off the wire: `tag-param = "tag" EQUAL

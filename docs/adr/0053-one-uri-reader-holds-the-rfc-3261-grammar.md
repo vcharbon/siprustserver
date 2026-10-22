@@ -45,10 +45,16 @@ by construction. Every other reader of a URI goes through it.
   scheme lands in the userinfo, the host, the port, a URI parameter or an
   escaped header, each held to its class; anything left over refuses the URI.
   The first `@` ends the userinfo, since no later part admits one. Hosts are
-  `hostname` (labels of alphanumerics and inner hyphens) or `IPv4address`; a
-  dotted run of digits is an `IPv4address` or no host. The one leniency: a top
-  label may start with a digit (RFC 1123 §2.1 relaxed the same rule for host
-  names), so `27` and `1x.27` are hostnames. An IPv6 reference holds an
+  `hostname` (labels of alphanumerics and inner hyphens, the top label
+  starting with a letter) or `IPv4address`; a dotted run of digits is an
+  `IPv4address` or no host. The reader takes the URI's role
+  (`UriRole`) as a parameter, and the role moves one rule only: a host that
+  names a party and is never resolved (From, To, the identity headers) may
+  have a digit-led top label (RFC 1123 §2.1), so `27` and `1x.27` are
+  hostnames there. A host a request is sent to or routed on (Request-URI,
+  Contact, Route, Record-Route, Via, Refer-To) keeps the RFC 3261 top label,
+  so no resolver reads `2130706433`, `0x7f.0.0.1` or `0177` as an IPv4
+  literal. An IPv6 reference holds an
   `IPv6address` as §25.1 writes it or in the RFC 4291 text form (RFC 5954, and
   RFC 5118 §4.10 asks for both), with no zone ID. A port is 1 to 65535.
   Parameter values are not checked against their parameter: `ttl=256` and
@@ -56,7 +62,7 @@ by construction. Every other reader of a URI goes through it.
 - **Every other scheme** (`tel`, `urn`, `im` …): a structural
   `user@host:port;params?headers` reading, no RFC 3966 grammar, and every byte
   of the URI character set (`reserved / unreserved / "%"` and the IPv6
-  brackets).
+  brackets), plus a raw `#` in a `tel` number.
 - A Request-URI also carries no escaped headers (§19.1.1 Table 1), and a
   recorded route is held to the same rule.
 
@@ -68,9 +74,10 @@ TEXT-UTF8, so raw UTF-8 refuses a URI in any position and of any scheme. There
 is no percent-encoding on egress: what arrives escaped stays escaped, what
 arrives raw is refused. On wire bytes the classes also hold the Call-ID
 (`word [ "@" word ]`), the From and To tags and the Via branch (`token`), the
-CSeq method (`token`) and every header name (`token`). Headers the parser does
-not read are not newly checked. A method keeps the case it was written in
-(§7.1): an extension method is never uppercased.
+request-line and CSeq methods (`token`) and every header name (`token`).
+Headers the parser does not read are not newly checked. A method keeps the case
+it was written in (§7.1): an extension method is never uppercased, and its CSeq
+names it in the same case; a known method matches in any case.
 
 ### 4. The name-addr
 
@@ -90,10 +97,12 @@ whole:
 
 On wire bytes, a URI or name-addr that does not read refuses the message for
 the Request-URI, From, To, Contact, Route and Record-Route. Route and
-Record-Route are read at parse time. The identity headers (P-Asserted-Identity,
-P-Preferred-Identity, Diversion, History-Info, Remote-Party-ID, Refer-To) stay
-non-fatal: the error is their stored value. A header read on access uses the
-same reader and returns the error.
+Record-Route are read at parse time, except on a final of 300 or more, which
+establishes no dialog (§12.1.1): there, like its Contact, they are not read.
+Identity headers that fail the grammar (P-Asserted-Identity,
+P-Preferred-Identity, Diversion, History-Info, Remote-Party-ID, Refer-To …)
+are a non-fatal `Err`, and the entry is not used. A header read on access uses
+the same reader and returns the error.
 
 The opt-in strict pass is gone. The one exception to "strict wherever the
 parser validates" is the Date: a malformed Date never refuses the message
@@ -121,6 +130,10 @@ is no request's target, whoever built the request.
 
 - A message the grammar refuses is dropped where it was read before; the
   refusal is the packet's alone (ADR-0051).
+- Capture ingest (`sipflow`) sets aside the messages it refuses and copies the
+  accepted ones whose non-fatal header reading failed beside them, counting
+  each (`parse_failed`, `header_failed`), so a stricter grammar's cost on a
+  capture is seen, not silent.
 - A test or fixture that relied on a URI the grammar refuses carries a
   compliant one; a test whose subject is that input asserts the refusal.
 - The vendored ABNF grammars of the fuzz corpus draw a header parameter's name

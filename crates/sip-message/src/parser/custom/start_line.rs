@@ -5,6 +5,7 @@
 //!   Status-Line:   SIP-Version SP Status-Code SP Reason-Phrase CRLF
 
 use super::scanner::{span_text, Scanner, Span, CR, LF, SP};
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::parser::SipParserLimits;
 
@@ -66,6 +67,12 @@ fn parse_request_line(
     method: Span,
     limits: &SipParserLimits,
 ) -> Result<RequestLine, SipParseError> {
+    // `Method = INVITEm / … / extension-method`, a token (§25.1).
+    let method_text = span_text(image, &method)?;
+    if limits.wire_grammar && !method_text.bytes().all(is_token_char) {
+        return Err(SipParseError::new(format!("Method is not a token: {method_text:?}")));
+    }
+
     // Request-URI must not be enclosed in angle brackets (3.1.2.7).
     if s.peek() == Some(0x3c) {
         return Err(SipParseError::new("Request-URI must not be enclosed in angle brackets"));

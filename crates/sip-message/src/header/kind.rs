@@ -11,6 +11,7 @@
 
 use super::name::HeaderName;
 use super::name_addr::AddrForm;
+use super::uri::UriRole;
 use super::value::Folding;
 
 /// `2^31 - 1` — the ceiling RFC 3261 puts on the 32-bit signed counters.
@@ -27,6 +28,8 @@ pub trait HeaderKind: std::fmt::Debug + Clone + Copy + Send + Sync + 'static {
 pub trait NameAddrKind: HeaderKind {
     /// Where this header's grammar lets its address stand.
     const FORM: AddrForm = AddrForm::NameAddrOrSpec;
+    /// What the address's host is for.
+    const ROLE: UriRole = UriRole::Target;
 }
 
 /// A name-addr header whose grammar admits header parameters. Absent on
@@ -147,10 +150,27 @@ kinds! {
     ProxyAuthenticate => ProxyAuthenticate, Opaque;
 }
 
-capability! { NameAddrKind:
-    From, To, Contact, ReferTo, ReferredBy, ReplyTo, Diversion, HistoryInfo, RemotePartyId,
-    PAssertedIdentity, PPreferredIdentity,
+capability! { NameAddrKind: Contact, ReferTo, ReplyTo }
+
+/// The headers whose address names a party and is never resolved.
+macro_rules! identity_kinds {
+    ($($marker:ident),+) => {
+        $(impl NameAddrKind for $marker {
+            const ROLE: UriRole = UriRole::Identity;
+        })+
+    };
 }
+
+identity_kinds!(
+    From,
+    To,
+    ReferredBy,
+    Diversion,
+    HistoryInfo,
+    RemotePartyId,
+    PAssertedIdentity,
+    PPreferredIdentity
+);
 
 /// The route family: `route-param = name-addr *( SEMI rr-param )` (RFC 3261
 /// §20.30, §20.34; RFC 3327 §4; RFC 3608 §5).
