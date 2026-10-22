@@ -132,7 +132,15 @@ impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        NameAddr::parse_as(raw, K::FORM, K::ROLE).map(Self::new)
+        let addr = NameAddr::parse_as(raw, K::FORM, K::ROLE)?;
+        if K::NAMES_HOP && addr.uri().opaque_part().is_some() {
+            return Err(SipParseError::new(format!(
+                "a {} URI names no hop: {:?}",
+                addr.uri().scheme(),
+                raw.as_str()
+            )));
+        }
+        Ok(Self::new(addr))
     }
 
     fn render(&self, out: &mut Wire) {

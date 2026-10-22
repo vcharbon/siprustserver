@@ -67,6 +67,17 @@ impl ProxyCore {
         self.reply_reject(req, src, 400, "Bad Request", &[], "malformed_request_uri").await
     }
 
+    /// A Request-URI whose scheme names no host this hop can forward to: 416,
+    /// counted `unsupported_uri_scheme`.
+    pub(super) async fn reply_unsupported_scheme(
+        &self,
+        req: &SipRequest,
+        src: SocketAddr,
+    ) -> RouteOutcome {
+        self.reply_reject(req, src, 416, "Unsupported URI Scheme", &[], "unsupported_uri_scheme")
+            .await
+    }
+
     /// Refuse the new request `req` with a 503, `retry_after_sec` being the
     /// refusing stage's hint, counted once under `metric`: every later copy
     /// draws the same bytes from [`repeat_refusal`](Self::repeat_refusal).

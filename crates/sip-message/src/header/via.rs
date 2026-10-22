@@ -9,9 +9,10 @@ use crate::sip_str::SipStr;
 use super::name::HeaderName;
 use super::params::{parse_semicolon_params, ParamValue, Params, HEADER_PARAMS};
 use super::scan::{scan_until, skip_ws, sub, sub_trimmed};
-use super::uri::HostPort;
+use super::uri::{read_sent_by, HostPort};
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
+use crate::ip_literal::ip_host;
 
 /// The RFC 3261 §8.1.1.7 magic cookie every branch this stack emits starts
 /// with.
@@ -183,9 +184,14 @@ impl Via {
     /// host, the sender asked for `rport` (even when they are equal), or the
     /// hop already carries a `received`, which is the sender's own writing and
     /// is never kept; `rport` is the source port when the sender asked for it.
+    /// Two IP literals differ as addresses, anything else as text.
     pub fn stamped_from(mut self, source_host: &str, source_port: u16) -> Self {
         let rport_asked = matches!(self.rport(), Some(Rport::Requested));
-        if rport_asked || self.received().is_some() || self.host() != source_host {
+        let same_host = match (ip_host(self.host()), ip_host(source_host)) {
+            (Some(sent_by), Some(source)) => sent_by == source,
+            _ => self.host() == source_host,
+        };
+        if rport_asked || self.received().is_some() || !same_host {
             self = self.with_received(SipStr::owned(source_host));
         }
         if rport_asked {
@@ -236,16 +242,17 @@ impl HeaderValue for Via {
         }
 
         let host_at = skip_ws(bytes, trans_end);
-        let (sent_by, after_host) = HostPort::parse_at(&value, host_at)?;
-        if sent_by.host().is_empty() {
-            return Err(SipParseError::new(format!(
-                "Via has an empty sent-by: {:?}",
-                value.as_str()
-            )));
-        }
+        let refused = |reason: String| {
+            SipParseError::new(format!("Via sent-by: {reason}: {:?}", value.as_str()))
+        };
+        let (host, port, after_host) = read_sent_by(&value, host_at).map_err(refused)?;
+        let port = port
+            .map(u16::try_from)
+            .transpose()
+            .map_err(|_| refused(format!("port out of range: {port:?}")))?;
         let (params, _) = parse_semicolon_params(&value, after_host, &HEADER_PARAMS);
 
-        Ok(Self { protocol, version, transport, sent_by, params })
+        Ok(Self { protocol, version, transport, sent_by: HostPort::new(host, port), params })
     }
 
     fn render(&self, out: &mut Wire) {

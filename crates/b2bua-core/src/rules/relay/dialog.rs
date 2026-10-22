@@ -50,10 +50,17 @@ pub fn uas_addresses(invite: &SipRequest) -> (String, String) {
 /// The transport destination the address `target` names. The `call` crate keeps
 /// dialog targets and route sets as text (it has no sip-message dependency by
 /// design, ADR-0008), so reading one back is a parse; an address no reader
-/// accepts falls back to its own text on the default port, and says so — the
-/// fallback resolves a host nothing routes to, so it must not pass unnamed.
+/// accepts, or whose scheme names no host, falls back to its own text on the
+/// default port, and says so — the fallback resolves a host nothing routes
+/// to, so it must not pass unnamed.
 pub fn target_dest(target: &str) -> (String, u16) {
-    match NameAddr::parse(&SipStr::owned(target)) {
+    let read = NameAddr::parse(&SipStr::owned(target)).map_err(|e| e.reason).and_then(|addr| {
+        match addr.uri().opaque_part() {
+            None => Ok(addr),
+            Some(_) => Err(format!("a {} URI names no host", addr.uri().scheme())),
+        }
+    });
+    match read {
         Ok(addr) => {
             let (host, port) = addr.uri().host_port();
             (host.to_string(), port)
@@ -63,6 +70,24 @@ pub fn target_dest(target: &str) -> (String, u16) {
                 tracing::warn!(%target, error = %err, "dialog target does not read; resolving it as a host name");
             }
             (target.trim().to_string(), HostPort::DEFAULT_PORT)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_dest;
+
+    #[test]
+    fn a_target_names_its_host_and_port() {
+        assert_eq!(target_dest("<sip:bob@192.0.2.4:5070>"), ("192.0.2.4".to_string(), 5070));
+    }
+
+    /// A target whose scheme names no host resolves to no part of its text.
+    #[test]
+    fn a_target_of_an_opaque_scheme_names_no_host() {
+        for target in ["<urn:service:sos>", "<http://example.com/a:b>"] {
+            assert_eq!(target_dest(target), (target.to_string(), 5060));
         }
     }
 }

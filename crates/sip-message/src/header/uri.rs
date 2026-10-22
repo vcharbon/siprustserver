@@ -11,11 +11,10 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::params::{ParamValue, Params};
-use super::scan::{byte_at, clamped, digits_end, index_of, parse_port, scan_until, sub};
 use super::wire::Wire;
 
 mod read;
-pub(crate) use read::host_refusal;
+pub(crate) use read::{host_refusal, read_sent_by};
 
 /// What a URI's host is for, the one axis on which its grammar varies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,45 +82,6 @@ impl HostPort {
             out.num(port as u64);
         }
     }
-
-    /// Read `host[:port]` from byte `i`; yields the value and the position
-    /// after it. An IPv6 host must come bracketed (RFC 3261 §19.1.1): an
-    /// unbracketed one is refused, never read as the text before its first
-    /// colon.
-    pub(crate) fn parse_at(base: &SipStr, i: usize) -> Result<(Self, usize), SipParseError> {
-        let bytes = base.as_bytes();
-        let (host, mut j) = if byte_at(bytes, i) == Some(b'[') {
-            match index_of(bytes, b']', i + 1) {
-                Some(close) => (sub(base, i + 1, close), close + 1),
-                None => return Err(SipParseError::new("unclosed IPv6 reference")),
-            }
-        } else {
-            // A second colon inside the authority is an IPv6 literal written
-            // without its brackets. Keeping the text before the first colon
-            // would name a host the peer never wrote — and a router that
-            // resolves it is worse than one that refuses the URI.
-            let authority = scan_until(bytes, i, b";,> \t?");
-            let head = bytes.get(..authority).unwrap_or(bytes);
-            let colon = index_of(head, b':', i);
-            if colon.is_some_and(|c| index_of(head, b':', c + 1).is_some()) {
-                return Err(SipParseError::new(format!(
-                    "unbracketed IPv6 host (RFC 3261 §19.1.1 requires []): {:?}",
-                    clamped(base.as_str(), i, authority)
-                )));
-            }
-            let end = colon.unwrap_or(authority);
-            (sub(base, i, end), end)
-        };
-        let mut port = None;
-        if byte_at(bytes, j) == Some(b':') {
-            let digits = digits_end(bytes, j + 1);
-            if digits > j + 1 {
-                port = Some(parse_port(clamped(base.as_str(), j + 1, digits))?);
-            }
-            j = digits;
-        }
-        Ok((Self { host, port }, j))
-    }
 }
 
 /// A SIP/SIPS/tel/any-scheme URI.
@@ -131,6 +91,10 @@ impl HostPort {
 /// retargeting, and §9.1 / §17.1.1.3 require the CANCEL and the non-2xx ACK to
 /// carry the INVITE's Request-URI unchanged. Identity is the parsed parts, so
 /// two URIs spelled differently but meaning the same thing compare equal.
+///
+/// A URI of a scheme other than sip, sips or tel is opaque: it keeps its
+/// scheme-specific part whole and names no user, host, port, parameter or
+/// escaped header.
 #[derive(Debug, Clone, Eq)]
 pub struct Uri {
     scheme: SipStr,
@@ -138,9 +102,11 @@ pub struct Uri {
     authority: HostPort,
     params: Params,
     /// The `?a=b&c=d` escaped-header list (RFC 3261 §19.1.1), verbatim. A
-    /// sip/sips pair always carries a value; a pair of another scheme written
-    /// without its `=` carries none and renders back without one.
+    /// sip/sips pair always carries a value; a tel pair written without its
+    /// `=` carries none and renders back without one.
     headers: Vec<(SipStr, Option<SipStr>)>,
+    /// The scheme-specific part of a URI of an opaque scheme.
+    opaque_part: Option<SipStr>,
     /// The text this URI was read from, dropped by the first update.
     source: Option<SipStr>,
 }
@@ -152,6 +118,7 @@ impl PartialEq for Uri {
             && self.authority == other.authority
             && self.params == other.params
             && self.headers == other.headers
+            && self.opaque_part == other.opaque_part
     }
 }
 
@@ -180,6 +147,7 @@ impl Uri {
             authority,
             params: Params::new(),
             headers: Vec::new(),
+            opaque_part: None,
             source: None,
         }
     }
@@ -194,6 +162,7 @@ impl Uri {
             authority: HostPort::new(text.clone(), None),
             params: Params::new(),
             headers: Vec::new(),
+            opaque_part: None,
             source: Some(text),
         }
     }
@@ -232,6 +201,13 @@ impl Uri {
 
     pub fn is_secure(&self) -> bool {
         self.scheme.eq_ignore_ascii_case("sips")
+    }
+
+    /// The scheme-specific part of a URI whose scheme is neither sip, sips nor
+    /// tel, kept whole; `None` for those three, whose parts the other
+    /// accessors read.
+    pub fn opaque_part(&self) -> Option<&str> {
+        self.opaque_part.as_ref().map(SipStr::as_str)
     }
 
     pub fn user(&self) -> Option<&str> {
@@ -415,7 +391,7 @@ impl Uri {
     /// The value must carry a scheme colon; anything looser is
     /// [`opaque`](Self::opaque) territory, not a URI. A `sip` / `sips` URI is
     /// held to the RFC 3261 §25.1 grammar byte for byte; another scheme to the
-    /// URI character set (ADR-0053).
+    /// URI character set, and read opaque unless it is tel (ADR-0053).
     pub fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         Self::parse_as(raw, UriRole::Target)
     }
@@ -429,8 +405,17 @@ impl Uri {
     /// URI whose surroundings already delimit it (a Request-URI, the inside of
     /// `<...>`), where a space is a byte of the URI and refuses it.
     pub(crate) fn read_exact(value: &SipStr, role: UriRole) -> Result<Self, SipParseError> {
-        let read::UriParts { scheme, user, authority, params, headers } = read::read(value, role)?;
-        Ok(Self { scheme, user, authority, params, headers, source: Some(value.clone()) })
+        let read::UriParts { scheme, user, authority, params, headers, opaque } =
+            read::read(value, role)?;
+        Ok(Self {
+            scheme,
+            user,
+            authority,
+            params,
+            headers,
+            opaque_part: opaque,
+            source: Some(value.clone()),
+        })
     }
 
     /// [`parse`](Self::parse), falling back to [`opaque`](Self::opaque): text no
@@ -463,11 +448,15 @@ impl Uri {
         }
         out.str(self.scheme.as_str());
         out.byte(b':');
-        if let Some(user) = &self.user {
-            out.str(user.as_str());
-            out.byte(b'@');
+        if let Some(part) = &self.opaque_part {
+            out.str(part.as_str());
+        } else {
+            if let Some(user) = &self.user {
+                out.str(user.as_str());
+                out.byte(b'@');
+            }
+            self.authority.render(out);
         }
-        self.authority.render(out);
         self.params.render(out);
         for (i, (name, value)) in self.headers.iter().enumerate() {
             out.byte(if i == 0 { b'?' } else { b'&' });

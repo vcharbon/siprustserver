@@ -15,10 +15,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use sip_message::header::{Contact, HeaderValue, NameAddr, RAck, ReferTo, Uri};
-use sip_message::parser::custom::structured_headers::{
-    parse_cseq, parse_via, split_top_level_commas,
-};
+use sip_message::header::{Contact, HeaderValue, NameAddr, RAck, ReferTo, Uri, Via};
+use sip_message::parser::custom::structured_headers::{parse_cseq, split_top_level_commas};
 use sip_message::{CustomParser, SipMessage, SipParser, SipStr};
 
 /// Rejection reasons reflecting documented semantic constraints (RFC limits
@@ -128,22 +126,13 @@ fn fuzz_via(line: &str, s: &mut Stat) {
         if entry.is_empty() {
             continue;
         }
-        let parsed = parse_via(&SipStr::owned(entry));
-        if parsed.transport.is_empty() || parsed.host.is_empty() {
-            s.reject(
-                entry,
-                format!(
-                    "empty transport/host (transport=\"{}\" host=\"{}\")",
-                    parsed.transport, parsed.host
-                ),
-            );
+        let parsed = match Via::parse(&SipStr::owned(entry)) {
+            Ok(parsed) => parsed,
+            Err(e) => return s.reject(entry, e.reason),
+        };
+        if parsed.port() == Some(0) {
+            s.reject(entry, "port out of range (0)".to_string());
             return;
-        }
-        if let Some(port) = parsed.port {
-            if port == 0 || port > 65535 {
-                s.reject(entry, format!("port out of range ({port})"));
-                return;
-            }
         }
     }
     s.accepted += 1;

@@ -5,9 +5,12 @@
 //! A `sip` / `sips` URI is read by the RFC 3261 §25.1 grammar whole: every byte
 //! after the scheme lands in the userinfo, host, port, a parameter or an
 //! escaped header, each held to its character class, or the URI is refused.
-//! Another scheme (`tel`, `urn`, …) keeps a generic structural reading and is
-//! held only to the URI character set ([`is_uri_char`], and a `tel` number's
-//! `#`). The URI's [`UriRole`] moves one rule: a digit-led top label.
+//! A `tel` URI keeps a structural reading, its number as the host. Any other
+//! scheme is opaque: its scheme-specific part is kept whole and names no host.
+//! Both are held only to the URI character set ([`is_uri_char`], and a `tel`
+//! number's `#`). The URI's [`UriRole`] moves one rule: a digit-led top label.
+//!
+//! The same host reader reads a Via sent-by ([`read_sent_by`]).
 
 use std::net::Ipv6Addr;
 
@@ -19,7 +22,7 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::super::params::{parse_semicolon_params, ParamValue, Params, URI_PARAMS};
-use super::super::scan::{byte_at, clamped, index_of, scan_until, sub, sub_lower};
+use super::super::scan::{byte_at, clamped, index_of, scan_until, skip_ws, sub, sub_lower};
 use super::{HostPort, UriRole};
 
 /// The parts of one URI, cut from the text it was read from.
@@ -29,6 +32,8 @@ pub(super) struct UriParts {
     pub(super) authority: HostPort,
     pub(super) params: Params,
     pub(super) headers: Vec<(SipStr, Option<SipStr>)>,
+    /// The scheme-specific part of a URI of an opaque scheme, whole.
+    pub(super) opaque: Option<SipStr>,
 }
 
 /// Read all of `value` as one URI.
@@ -41,8 +46,10 @@ pub(super) fn read(value: &SipStr, role: UriRole) -> Result<UriParts, SipParseEr
     let after = colon + 1;
     if scheme.eq_ignore_ascii_case("sip") || scheme.eq_ignore_ascii_case("sips") {
         read_sip(value, scheme, after, role).map_err(|reason| fail(value, &reason))
+    } else if scheme.eq_ignore_ascii_case("tel") {
+        read_tel(value, scheme, after)
     } else {
-        read_other(value, scheme, after)
+        read_opaque(value, scheme, after)
     }
 }
 
@@ -113,10 +120,10 @@ fn read_sip(value: &SipStr, scheme: SipStr, i: usize, role: UriRole) -> Result<U
             headers.push((value.reslice(name), Some(value.reslice(hvalue))));
         }
     }
-    Ok(UriParts { scheme, user, authority, params, headers })
+    Ok(UriParts { scheme, user, authority, params, headers, opaque: None })
 }
 
-/// `userinfo = ( user / telephone-subscriber ) [ ":" password ] "@"`, the `@`
+/// `userinfo =( user / telephone-subscriber ) [ ":" password ] "@"`, the `@`
 /// excluded. A telephone-subscriber's characters are all user characters.
 fn userinfo_refusal(userinfo: &str) -> Option<String> {
     let (user, password) = match userinfo.split_once(':') {
@@ -140,12 +147,18 @@ fn paramchar_refusal(what: &str, run: &str) -> Result<(), String> {
     run_refusal(run, is_paramchar, true).map_or(Ok(()), |r| Err(format!("{what}: {r}")))
 }
 
-/// `hostport = host [ ":" port ]` from byte `i`; yields the value and the
-/// position after it, which is a `;`, a `?` or the end.
-fn read_hostport(value: &SipStr, i: usize, role: UriRole) -> Result<(HostPort, usize), String> {
+/// `host` from byte `i`, where a byte of `ends` or a `:` ends a host that is
+/// no IPv6 reference; yields the host, an IPv6 address without its brackets,
+/// and the position after it.
+fn read_host(
+    value: &SipStr,
+    i: usize,
+    role: UriRole,
+    ends: &[u8],
+) -> Result<(SipStr, usize), String> {
     let bytes = value.as_bytes();
     let text = value.as_str();
-    let (host, j) = if byte_at(bytes, i) == Some(b'[') {
+    if byte_at(bytes, i) == Some(b'[') {
         let close =
             index_of(bytes, b']', i + 1).ok_or_else(|| "unclosed IPv6 reference".to_string())?;
         let inner = clamped(text, i + 1, close);
@@ -155,17 +168,31 @@ fn read_hostport(value: &SipStr, i: usize, role: UriRole) -> Result<(HostPort, u
         if !is_ipv6_address(inner) {
             return Err(format!("invalid IPv6 reference [{inner}]"));
         }
-        (sub(value, i + 1, close), close + 1)
-    } else {
-        let end = scan_until(bytes, i, b":;?");
-        let hostport_end = scan_until(bytes, end, b";?");
-        if index_of(bytes, b':', end + 1).is_some_and(|c| c < hostport_end) {
-            return Err("unbracketed IPv6 host (RFC 3261 §19.1.1 requires [])".to_string());
-        }
-        let host = clamped(text, i, end);
-        host_refusal(host, role).map_or(Ok(()), Err)?;
-        (sub(value, i, end), end)
-    };
+        return Ok((sub(value, i + 1, close), close + 1));
+    }
+    let end = scan_until_host_end(bytes, i, ends);
+    let hostport_end = scan_until(bytes, end, ends);
+    if index_of(bytes, b':', end + 1).is_some_and(|c| c < hostport_end) {
+        return Err("unbracketed IPv6 host (RFC 3261 §19.1.1 requires [])".to_string());
+    }
+    host_refusal(clamped(text, i, end), role).map_or(Ok(()), Err)?;
+    Ok((sub(value, i, end), end))
+}
+
+/// The first byte at or after `i` that is a `:` or one of `ends`, or the end.
+fn scan_until_host_end(bytes: &[u8], i: usize, ends: &[u8]) -> usize {
+    bytes
+        .get(i..)
+        .and_then(|rest| rest.iter().position(|b| *b == b':' || ends.contains(b)))
+        .map_or(bytes.len().max(i), |p| i + p)
+}
+
+/// `hostport = host [ ":" port ]` from byte `i`; yields the value and the
+/// position after it, which is a `;`, a `?` or the end.
+fn read_hostport(value: &SipStr, i: usize, role: UriRole) -> Result<(HostPort, usize), String> {
+    let bytes = value.as_bytes();
+    let text = value.as_str();
+    let (host, j) = read_host(value, i, role, b";?")?;
     match byte_at(bytes, j) {
         None | Some(b';' | b'?') => Ok((HostPort::new(host, None), j)),
         Some(b':') => {
@@ -173,6 +200,42 @@ fn read_hostport(value: &SipStr, i: usize, role: UriRole) -> Result<(HostPort, u
             Ok((HostPort::new(host, Some(port_value(clamped(text, j + 1, end))?)), end))
         }
         Some(b) => Err(format!("byte 0x{b:02x} after the host")),
+    }
+}
+
+/// `sent-by = host [ COLON port ]` (RFC 3261 §20.42, `COLON = SWS ":" SWS`)
+/// from byte `i` of one Via value, the host read as a [`UriRole::Target`]
+/// URI host. Yields the host, the port's digits as a number (its range is the
+/// Via's to judge) and the position after the sent-by, where only LWS, a `;`
+/// or a `,` may follow.
+pub(crate) fn read_sent_by(
+    value: &SipStr,
+    i: usize,
+) -> Result<(SipStr, Option<u64>, usize), String> {
+    const ENDS: &[u8] = b";, \t";
+    let bytes = value.as_bytes();
+    let (host, mut j) = read_host(value, i, UriRole::Target, ENDS)?;
+    let mut port = None;
+    let colon = skip_ws(bytes, j);
+    if byte_at(bytes, colon) == Some(b':') {
+        let at = skip_ws(bytes, colon + 1);
+        let end = scan_until(bytes, at, ENDS);
+        let digits = clamped(value.as_str(), at, end);
+        if digits.is_empty() {
+            return Err("empty port".to_string());
+        }
+        if !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("non-digit in port {digits:?}"));
+        }
+        let number = digits.bytes().fold(0u64, |n, d| {
+            n.saturating_mul(10).saturating_add(u64::from(d.saturating_sub(b'0')))
+        });
+        port = Some(number);
+        j = end;
+    }
+    match byte_at(bytes, skip_ws(bytes, j)) {
+        None | Some(b';' | b',') => Ok((host, port, j)),
+        Some(b) => Err(format!("byte 0x{b:02x} after the sent-by")),
     }
 }
 
@@ -256,59 +319,25 @@ fn ipv4_refusal(host: &str) -> Option<String> {
     None
 }
 
-/// `IPv6address` as RFC 3261 §25.1 writes it, or in the RFC 4291 text form
-/// RFC 5954 replaces it with (RFC 5118 §4.10 asks for both). No zone ID.
+/// `IPv6address` in the RFC 4291 §2.2 text form, the one RFC 5954 §4.1 puts
+/// in place of the RFC 3261 §25.1 rule. No zone ID.
 fn is_ipv6_address(text: &str) -> bool {
-    is_rfc3261_ipv6(text) || text.parse::<Ipv6Addr>().is_ok()
+    text.parse::<Ipv6Addr>().is_ok()
 }
 
-/// `IPv6address = hexpart [ ":" IPv4address ]`, `hexpart = hexseq / hexseq
-/// "::" [ hexseq ] / "::" [ hexseq ]`, `hexseq = hex4 *( ":" hex4 )`.
-fn is_rfc3261_ipv6(text: &str) -> bool {
-    let hexpart = if text.contains('.') {
-        let Some((hex, v4)) = text.rsplit_once(':') else { return false };
-        if !is_dotted_digits(v4) || ipv4_refusal(v4).is_some() {
-            return false;
-        }
-        hex
-    } else {
-        text
-    };
-    let hexseq = |s: &str| {
-        s.split(':').all(|h| (1..=4).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_hexdigit()))
-    };
-    match hexpart.split_once("::") {
-        Some((a, b)) => (a.is_empty() || hexseq(a)) && (b.is_empty() || hexseq(b)),
-        None => hexseq(hexpart),
-    }
-}
-
-/// A URI of a scheme this stack does not read by its own grammar: every byte
-/// of the URI character set, then a structural `user@host:port;params?headers`
-/// reading that leaves what it does not recognise in the source text.
-fn read_other(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipParseError> {
+/// A `tel` URI (RFC 3966), read structurally: every byte of the URI character
+/// set or a raw `#` (`local-number-digits`), the number up to the first `;`
+/// or `?` as the host, then `;`-parameters and `?`-pairs.
+fn read_tel(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipParseError> {
     let bytes = value.as_bytes();
     let text = value.as_str();
-    // A tel number's `#` (RFC 3966 `local-number-digits`) rides raw too.
-    let class: fn(u8) -> bool = if scheme.eq_ignore_ascii_case("tel") {
-        |b| is_uri_char(b) || b == b'#'
-    } else {
-        is_uri_char
-    };
+    let class: fn(u8) -> bool = |b| is_uri_char(b) || b == b'#';
     if let Some(r) = run_refusal(clamped(text, i, bytes.len()), class, false) {
         return Err(fail(value, &r));
     }
-    let mut i = i;
-    let at = scan_until(bytes, i, b"@");
-    let user = if byte_at(bytes, at) == Some(b'@') {
-        let u = sub(value, i, at);
-        i = at + 1;
-        Some(u)
-    } else {
-        None
-    };
-    let (authority, after_host) = HostPort::parse_at(value, i)?;
-    let (params, after_params) = parse_semicolon_params(value, after_host, &URI_PARAMS);
+    let number_end = scan_until(bytes, i, b";?");
+    let authority = HostPort::new(sub(value, i, number_end), None);
+    let (params, after_params) = parse_semicolon_params(value, number_end, &URI_PARAMS);
     let mut headers = Vec::new();
     if byte_at(bytes, after_params) == Some(b'?') {
         for pair in clamped(text, after_params + 1, bytes.len()).split('&') {
@@ -318,5 +347,23 @@ fn read_other(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipP
             }
         }
     }
-    Ok(UriParts { scheme, user, authority, params, headers })
+    Ok(UriParts { scheme, user: None, authority, params, headers, opaque: None })
+}
+
+/// A URI of a scheme this stack does not take apart (`urn`, `http`, `cid` …):
+/// every byte of the URI character set, the scheme-specific part kept whole.
+/// It names no user, host, port, parameter or escaped header.
+fn read_opaque(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipParseError> {
+    let len = value.as_str().len();
+    if let Some(r) = run_refusal(clamped(value.as_str(), i, len), is_uri_char, false) {
+        return Err(fail(value, &r));
+    }
+    Ok(UriParts {
+        scheme,
+        user: None,
+        authority: HostPort::new(SipStr::EMPTY, None),
+        params: Params::new(),
+        headers: Vec::new(),
+        opaque: Some(sub(value, i, len)),
+    })
 }

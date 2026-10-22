@@ -106,6 +106,8 @@ const EXPECTED: &[Expected] = &[
         .values(0x5375cbaccf51bcc2),
     rvoip("ipv6/v42_ipv6NoBrackets", OnlyCustomRefuses, "RFC 3261 §25.1; RFC 5118 §4.2")
         .values(0xb6843c68f7c98e91),
+    rvoip("ipv6/v410a_extraColon", OnlyCustomRefuses, "RFC 5954 §4.1; RFC 5118 §4.10")
+        .values(0xef06ab923137562a),
     rvoip("param-gaps/fromEmptyTag", OnlyCustomRefuses, "RFC 3261 §25.1 tag-param")
         .values(0xf08f087dcdf891df),
     rvoip("param-gaps/requestUriCtlInParamName", OnlyCustomRefuses, "RFC 3261 §25.1")
@@ -156,7 +158,6 @@ const EXPECTED: &[Expected] = &[
     rvoip("rfc4475-valid/multipartMime", OnlyRvoipRefuses, "RFC 4475 §3.1.1.11")
         .values(0x768d41a8cf8b34aa),
     // The tag of an unbracketed From/To URI.
-    rvoip("ipv6/v410a_extraColon", FromTag, ADDR_SPEC_PARAMS).values(0xa0f4a29e4b2e58f8),
     rvoip("ipv6/v410b_correctIpv4InIpv6", FromTag, ADDR_SPEC_PARAMS).values(0xa0f4a29e4b2e58f8),
     rvoip("ipv6/v41_basicIpv6", FromTag, ADDR_SPEC_PARAMS).values(0xec9681ef8a5b85d8),
     rvoip("ipv6/v43_portAmbiguousInBrackets", FromTag, ADDR_SPEC_PARAMS).values(0xec9681ef8a5b85d8),

@@ -4,6 +4,7 @@
 //! `Err` there only.
 
 use crate::error::SipParseError;
+use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 
 use super::name::HeaderName;
@@ -56,6 +57,15 @@ impl HeaderValue for Geolocation {
         Ok(Self { uri: addr.uri().clone(), params: addr.params().clone() })
     }
 
+    /// Every location of one line; an empty entry between commas, or after
+    /// the last one, names none and is skipped.
+    fn parse_line(raw: &SipStr) -> Result<Vec<Self>, SipParseError> {
+        top_level_comma_entries(raw.as_str())
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| Self::parse(&raw.reslice(entry)))
+            .collect()
+    }
+
     fn render(&self, out: &mut Wire) {
         out.byte(b'<');
         self.uri.render(out);
@@ -66,10 +76,12 @@ impl HeaderValue for Geolocation {
 
 /// Why a location could not be used (RFC 6442 §4.3): `locationErrorValue =
 /// location-error-code *(SEMI location-error-params)`, the code `1*3DIGIT`,
-/// its text the `code` parameter.
+/// its text the `code` parameter. The code renders with the digits it was
+/// written with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeolocationError {
     code: u16,
+    digits: SipStr,
     params: Params,
 }
 
@@ -113,11 +125,11 @@ impl HeaderValue for GeolocationError {
         })?;
         let params = read_generic_params(&value, end)
             .map_err(|e| SipParseError::new(format!("Geolocation-Error: {}", e.reason)))?;
-        Ok(Self { code, params })
+        Ok(Self { code, digits: value.reslice(digits), params })
     }
 
     fn render(&self, out: &mut Wire) {
-        out.num(u64::from(self.code));
+        out.str(self.digits.as_str());
         self.params.render(out);
     }
 }

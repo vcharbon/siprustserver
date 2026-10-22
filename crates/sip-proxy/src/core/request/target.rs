@@ -21,7 +21,9 @@ pub(super) type Chosen = (ProxyAddr, RoutingDecisionKind, Option<&'static str>);
 
 impl ProxyCore {
     /// The Request-URI as the target. An out-of-range port is malformed (400),
-    /// not truncated: `sip:host:70596` must not be forwarded to port 5060.
+    /// not truncated: `sip:host:70596` must not be forwarded to port 5060. A
+    /// URI of a scheme that names no host (`urn:`, `http:` …) is no target
+    /// this hop resolves (416, RFC 3261 §16.3).
     pub(super) async fn request_uri_target(
         &self,
         req: &SipRequest,
@@ -30,6 +32,9 @@ impl ProxyCore {
         let uri = req.request_uri();
         if uri.is_opaque() {
             return Err(self.reply_malformed_uri(req, src).await);
+        }
+        if uri.opaque_part().is_some() {
+            return Err(self.reply_unsupported_scheme(req, src).await);
         }
         let (host, port) = uri.host_port();
         Ok(ProxyAddr::new(host, port))

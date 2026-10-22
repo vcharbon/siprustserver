@@ -75,9 +75,9 @@ pub fn first_hostport(value: &str) -> Option<(String, u16)> {
 /// Rewrite the host:port of one element to `(host, port)`. The element is read
 /// by the strict name-addr reader, so the URI rewritten is the one its grammar
 /// names, never a `<` inside a quoted display name; the URI is re-rendered
-/// from its parts and spliced back, every byte around it kept as written. An
-/// element the reader refuses, or whose URI is not `sip` / `sips`, comes back
-/// as it is.
+/// from its parts and spliced back, its scheme and every byte around it kept
+/// as written. An element the reader refuses, or whose URI is not `sip` /
+/// `sips`, comes back as it is.
 fn rewrite_element_hostport(elem: &str, host: &str, port: u16) -> String {
     rewritten_element(elem, host, port).unwrap_or_else(|| elem.to_string())
 }
@@ -86,11 +86,18 @@ fn rewritten_element(elem: &str, host: &str, port: u16) -> Option<String> {
     let value = SipStr::owned(elem);
     let (addr, span) =
         NameAddr::parse_spanned(&value, AddrForm::NameAddrOrSpec, UriRole::Target).ok()?;
-    if !matches!(addr.uri().scheme(), "sip" | "sips") {
+    let scheme = addr.uri().scheme();
+    if !matches!(scheme, "sip" | "sips") {
         return None;
     }
-    let uri = addr.uri().clone().with_authority(HostPort::new(host, Some(port)));
-    Some(format!("{}{uri}{}", elem.get(..span.start)?, elem.get(span.end..)?))
+    let uri = addr.uri().clone().with_authority(HostPort::new(host, Some(port))).to_string();
+    Some(format!(
+        "{}{}{}{}",
+        elem.get(..span.start)?,
+        elem.get(span.start..span.start + scheme.len())?,
+        uri.get(scheme.len()..)?,
+        elem.get(span.end..)?
+    ))
 }
 
 /// Rewrite host:port across every comma-separated element of a remote-target

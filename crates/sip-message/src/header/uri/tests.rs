@@ -95,16 +95,16 @@ fn an_unedited_uri_renders_the_bytes_it_was_read_from() {
 }
 
 /// `header = hname "=" hvalue` (RFC 3261 §25.1): a sip pair without its `=`
-/// refuses the URI; another scheme keeps the pair valueless and renders it
-/// back without one.
+/// refuses the URI; a tel URI keeps the pair valueless and renders it back
+/// without one.
 #[test]
-fn an_escaped_header_with_no_value_is_sip_malformed_and_kept_elsewhere() {
+fn an_escaped_header_with_no_value_is_sip_malformed_and_kept_in_tel() {
     assert!(Uri::parse(&SipStr::owned("sip:a@h?X-Trace")).is_err());
     assert!(Uri::parse(&SipStr::owned("sip:a@h?a=b&X-Trace&c=d")).is_err());
     assert_eq!(uri("sip:a@h?X-Trace=").normalized().to_string(), "sip:a@h?X-Trace=");
 
-    let mixed = uri("im:a@h?a=b&X-Trace&c=d").normalized();
-    assert_eq!(mixed.to_string(), "im:a@h?a=b&X-Trace&c=d");
+    let mixed = uri("tel:+15550100?a=b&X-Trace&c=d").normalized();
+    assert_eq!(mixed.to_string(), "tel:+15550100?a=b&X-Trace&c=d");
     assert_eq!(
         mixed.escaped_headers().collect::<Vec<_>>(),
         vec![("a", Some("b")), ("X-Trace", None), ("c", Some("d"))],

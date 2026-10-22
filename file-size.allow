@@ -102,7 +102,7 @@ crates/scenario-harness/src/agent/ua.rs 804
 crates/scenario-harness/tests/it/template_emission.rs 1016
 crates/seq-report/src/html.rs 1005
 crates/sip-message/src/generators/relay.rs 504
-crates/sip-message/src/parser/custom/structured_headers.rs 543
+crates/sip-message/src/parser/custom/structured_headers.rs 504
 crates/sip-message/src/sdp_answer.rs 534
 crates/sip-message/src/sniff.rs 608
 crates/sip-message/tests/it/generators.rs 1401

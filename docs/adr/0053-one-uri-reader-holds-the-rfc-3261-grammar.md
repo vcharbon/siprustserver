@@ -55,14 +55,19 @@ by construction. Every other reader of a URI goes through it.
   Contact, Route, Record-Route, Via, Refer-To) keeps the RFC 3261 top label,
   so no resolver reads `2130706433`, `0x7f.0.0.1` or `0177` as an IPv4
   literal. An IPv6 reference holds an
-  `IPv6address` as §25.1 writes it or in the RFC 4291 text form (RFC 5954, and
-  RFC 5118 §4.10 asks for both), with no zone ID. A port is 1 to 65535.
+  `IPv6address` in the RFC 4291 text form only (RFC 5954 §4.1 replaces the
+  §25.1 rule), with no zone ID. A port is 1 to 65535. The same host reader
+  reads a Via sent-by, whose host or `]` is followed only by a port, LWS, `;`
+  or `,`.
   Parameter values are not checked against their parameter: `ttl=256` and
   `transport=x` are `other-param`s by the grammar.
-- **Every other scheme** (`tel`, `urn`, `im` …): a structural
-  `user@host:port;params?headers` reading, no RFC 3966 grammar, and every byte
-  of the URI character set (`reserved / unreserved / "%"` and the IPv6
-  brackets), plus a raw `#` in a `tel` number.
+- **`tel`**: the number up to the first `;` or `?` as the host, then
+  `;params?headers`, no RFC 3966 grammar. **Every other scheme** (`urn`,
+  `http`, `cid` …) is opaque: its scheme-specific part is kept whole, and it
+  names no user, host, port, parameter or header; a route-family entry of one
+  names no hop and is refused. Both are held to every byte of the URI character
+  set (`reserved / unreserved / "%"` and the IPv6 brackets), plus a raw `#` in
+  a `tel` number.
 - A Request-URI also carries no escaped headers (§19.1.1 Table 1), and a
   recorded route is held to the same rule.
 
@@ -117,7 +122,8 @@ parser validates" is the Date: a malformed Date never refuses the message
 `SipParserLimits::wire_grammar = false` is the reading of a message built by
 the stack or read by a test harness. From, To and Contact keep their scanned
 parts there, and a URI the reader refuses is held opaque instead of refusing
-the message. The Request-URI is read in every mode: a URI that does not read
+the message; a Via sent-by the reader refuses is held whole as the host, with
+no port. The Request-URI is read in every mode: a URI that does not read
 is no request's target, whoever built the request.
 
 ## Considered and rejected

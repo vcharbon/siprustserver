@@ -12,7 +12,7 @@
 //! and every index we slice at lands on a char boundary. No function collects a
 //! `Vec<char>` (4x the bytes plus an allocation per call).
 
-use crate::header::{ItemSeparator, ParamValue, Params};
+use crate::header::{read_sent_by, ItemSeparator, ParamValue, Params};
 use crate::sip_str::SipStr;
 
 // ---------------------------------------------------------------------------
@@ -35,8 +35,12 @@ pub struct ParsedVia {
     pub protocol: SipStr,
     pub version: SipStr,
     pub transport: SipStr,
-    pub host: SipStr,
-    pub port: Option<u64>,
+    /// The sent-by host and port digits as the URI host reader reads them,
+    /// or why it does not read.
+    pub sent_by: Result<(SipStr, Option<u64>), String>,
+    /// The sent-by as written, up to the first `;`: what a lenient reading
+    /// holds whole when the reader refuses it.
+    pub sent_by_text: SipStr,
     pub branch: Option<SipStr>,
     pub params: Params,
 }
@@ -240,13 +244,17 @@ pub fn parse_via(value: &SipStr) -> ParsedVia {
     i = trans_end;
 
     i = skip_ws(s, i);
-    let (host, port, host_end) = parse_host_port(value, i);
-    i = host_end;
+    let text_end = scan_until_one_of(s, i, b";");
+    let sent_by_text = slice_trimmed(value, i, text_end);
+    let (sent_by, params_at) = match read_sent_by(value, i) {
+        Ok((host, port, end)) => (Ok((host, port)), end),
+        Err(reason) => (Err(reason), text_end),
+    };
 
-    let params = parse_header_params(value, i);
+    let params = parse_header_params(value, params_at);
     let branch = param_text(&params, "branch");
 
-    ParsedVia { protocol, version, transport, host, port, branch, params }
+    ParsedVia { protocol, version, transport, sent_by, sent_by_text, branch, params }
 }
 
 // ---------------------------------------------------------------------------
@@ -414,53 +422,6 @@ fn fold_digits(s: &[u8], from: usize, to: usize) -> u64 {
         .skip(from)
         .filter_map(|&c| char::from(c).to_digit(10))
         .fold(0u64, |n, d| n.saturating_mul(10).saturating_add(u64::from(d)))
-}
-
-/// Parse host[:port] from byte `i`. Host can be IPv4, bracketed IPv6, or
-/// hostname.
-fn parse_host_port(base: &SipStr, i: usize) -> (SipStr, Option<u64>, usize) {
-    let s = base.as_str();
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-
-    // IPv6: [address]
-    if byte_at(bytes, i) == Some(b'[') {
-        match index_of(bytes, b']', i + 1) {
-            None => return (slice(base, i + 1, len), None, len),
-            Some(close) => {
-                let host = slice(base, i + 1, close);
-                let mut j = close + 1;
-                let mut port: Option<u64> = None;
-                if byte_at(bytes, j) == Some(b':') {
-                    j += 1;
-                    let port_start = j;
-                    j = skip_digits(bytes, j);
-                    // TS does not guard the IPv6 branch — empty digits yield NaN
-                    // (an invalid port). We mirror with fold_digits → 0, which
-                    // `is_valid_port` likewise rejects.
-                    port = Some(fold_digits(bytes, port_start, j));
-                }
-                return (host, port, j);
-            }
-        }
-    }
-
-    // IPv4 or hostname: scan until : ; , > SP HTAB ?
-    let host_end = scan_until_one_of(bytes, i, b":;,> \t?");
-    let host = slice(base, i, host_end);
-
-    let mut j = host_end;
-    let mut port: Option<u64> = None;
-    if byte_at(bytes, j) == Some(b':') {
-        j += 1;
-        let port_start = j;
-        j = skip_digits(bytes, j);
-        if j > port_start {
-            port = Some(fold_digits(bytes, port_start, j));
-        }
-    }
-
-    (host, port, j)
 }
 
 /// Parse header-level parameters (after `>` or after addr-spec). This is where

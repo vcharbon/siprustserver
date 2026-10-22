@@ -30,6 +30,9 @@ pub trait NameAddrKind: HeaderKind {
     const FORM: AddrForm = AddrForm::NameAddrOrSpec;
     /// What the address's host is for.
     const ROLE: UriRole = UriRole::Target;
+    /// The address names a hop a request is sent to, so its URI must name a
+    /// host: one of an opaque scheme is refused.
+    const NAMES_HOP: bool = false;
 }
 
 /// A name-addr header whose grammar admits header parameters. Absent on
@@ -178,6 +181,7 @@ macro_rules! route_kinds {
     ($($marker:ident),+) => {
         $(impl NameAddrKind for $marker {
             const FORM: AddrForm = AddrForm::NameAddrOnly;
+            const NAMES_HOP: bool = true;
         })+
     };
 }

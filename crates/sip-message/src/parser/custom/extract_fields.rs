@@ -20,7 +20,7 @@ use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
 use super::top_via;
 use crate::char_class::is_token_char;
 use crate::error::SipParseError;
-use crate::header::{self, host_refusal, HeaderValue, HostPort, Uri, UriRole};
+use crate::header::{self, HeaderValue, HostPort, Uri};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
@@ -236,7 +236,16 @@ pub(super) fn extract_identity(
     {
         let v = parse_via(&value.reslice(raw));
         let top = vias.is_empty();
-        if let Some(p) = v.port.filter(|&p| top_via::port_out_of_range(p, top)) {
+        // A lenient reading holds a sent-by the reader refuses whole, as it
+        // holds a URI it refuses opaque.
+        let (host, port) = match &v.sent_by {
+            Ok(read) => read.clone(),
+            Err(reason) if wire => {
+                return Err(SipParseError::new(format!("Strict Via sent-by: {reason}: \"{raw}\"")));
+            }
+            Err(_) => (v.sent_by_text.clone(), None),
+        };
+        if let Some(p) = port.filter(|&p| top_via::port_out_of_range(p, top)) {
             return Err(SipParseError::new(format!("Via port out of range: {p}")));
         }
         if v.branch.as_deref() == Some("") {
@@ -246,37 +255,25 @@ pub(super) fn extract_identity(
             if let Some(refusal) = top.then(|| top_via::cookie_refusal(&v)).flatten() {
                 return Err(refusal);
             }
-            if let Some(reason) = host_refusal(&v.host, UriRole::Target) {
-                return Err(SipParseError::new(format!(
-                    "Strict Via sent-by host: {reason} (\"{}\")",
-                    v.host
-                )));
-            }
             if v.branch.as_ref().is_some_and(|b| !b.bytes().all(is_token_char)) {
                 return Err(SipParseError::new(format!(
                     "Via branch is not a token: \"{}\"",
                     v.branch.as_deref().unwrap_or_default()
                 )));
             }
-            if let Some(colon_count) = sent_by_extra_colons(raw) {
-                return Err(SipParseError::new(format!(
-                    "Via sent-by has {colon_count} colons (must be ≤ 1): \"{raw}\""
-                )));
-            }
             if let Some(refusal) = top.then(|| top_via::transport_refusal(&v, limits)).flatten() {
                 return Err(refusal);
             }
         }
-        let port = v
-            .port
+        let port = port
             .map(u16::try_from)
             .transpose()
-            .map_err(|_| SipParseError::new(format!("Via port out of range: {:?}", v.port)))?;
+            .map_err(|_| SipParseError::new(format!("Via port out of range: {port:?}")))?;
         vias.push(header::Via::from_parts(
             v.protocol,
             v.version,
             v.transport,
-            HostPort::new(v.host, port),
+            HostPort::new(host, port),
             v.params,
         ));
     }
@@ -291,31 +288,6 @@ pub(super) fn extract_identity(
         cseq,
         via: NonEmpty::from_parts(top, hops.collect()),
     })
-}
-
-/// The sent-by colon count when a Via segment carries more than one colon
-/// outside `[...]` and before the first `;` — IPv6 without brackets, or a
-/// second port. `None` when the segment is well-formed.
-fn sent_by_extra_colons(raw: &str) -> Option<i32> {
-    let mut in_bracket = false;
-    let mut colon_count = 0i32;
-    for c in raw.bytes() {
-        if c == b'[' {
-            in_bracket = true;
-            continue;
-        }
-        if c == b']' {
-            in_bracket = false;
-            continue;
-        }
-        if c == b';' && !in_bracket {
-            break;
-        }
-        if !in_bracket && c == b':' {
-            colon_count += 1;
-        }
-    }
-    (colon_count > 1).then_some(colon_count)
 }
 
 /// The message's Contact set, folded over comma-lists and repeated lines.

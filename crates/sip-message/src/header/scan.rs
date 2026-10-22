@@ -144,15 +144,6 @@ pub(crate) fn parse_u32(text: &str, field: &str) -> Result<u32, SipParseError> {
     t.parse::<u32>().map_err(|_| SipParseError::new(format!("{field} out of range: {t:?}")))
 }
 
-/// A port: `1*DIGIT` within the 16-bit range. `None` when the field is absent.
-pub(crate) fn parse_port(text: &str) -> Result<u16, SipParseError> {
-    let t = text.trim();
-    if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(SipParseError::new(format!("non-digit in port: {t:?}")));
-    }
-    t.parse::<u16>().map_err(|_| SipParseError::new(format!("port out of range: {t:?}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,7 +175,5 @@ mod tests {
     #[test]
     fn out_of_range_numbers_are_errors_not_saturations() {
         assert!(parse_u32("4294967296", "CSeq").is_err());
-        assert!(parse_port("88161").is_err());
-        assert_eq!(parse_port("5060").unwrap(), 5060);
     }
 }
