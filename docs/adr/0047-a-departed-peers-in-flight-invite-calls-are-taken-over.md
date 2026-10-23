@@ -2,7 +2,8 @@
 
 **Status:** accepted (2026-10-12)
 Amended (2026-10-23): D5 and its residuals, the lost round becomes the evidence rule of
-any method (ADR-0055 §3, §4).
+any method (ADR-0055 §3, §4); a removed process superseded by its replacement authors
+nothing (ADR-0055 §6).
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -271,17 +272,12 @@ the call has one CDR.
   only on the dead node (§17.1.3); the BYE ends its dialog instead
   (`reinvite_round_not_yet_replicated.rs`). Answering it would need the 100 held on
   a synchronous replication, which ADR-0014 rejects.
-- **A caller answered twice.** When a removed node refuses a call its backup's sweep
-  answered too, the caller hears a second 503 on the branch its transaction completed
-  on, and does not ACK it (`undecided_call_settled_on_departure.rs`, the
-  replacement-decision cell). A CANCEL during the decision round trip draws the same:
-  the backup holds the call as born and refuses it 503 after the caller's 487 (the
-  CANCEL-during-decision cell).
-- **An abrupt removal writes two CDRs.** In ADR-0031 case 2 the removed process and
-  the backup that ended the call of its departed primary each discharge it — the dual-owner
-  window of ADR-0031 D3 (`undecided_call_settled_on_departure.rs`, the
-  replacement-decision cell). A decision slower than the process's grace leaves one
-  final, one CDR, one consult (the replacement cell).
+- **A caller answered twice.** A CANCEL during the decision round trip: the backup
+  holds the call as born and refuses it 503 after the caller's 487, on the branch the
+  caller's transaction completed on (`undecided_call_settled_on_departure.rs`, the
+  CANCEL-during-decision cell). A removed node whose ordinal is bound to its
+  replacement is superseded and answers nothing, nor writes a CDR (ADR-0055 §6, the
+  replacement-decision cell).
 - **A returning node's answer inside the replication lag of the deadline.** The
   copy's ring deadline fires before the returned node's reclaim and answer reach the
   backup: the copy CANCELs the callee after its answer and refuses the caller 480
