@@ -206,6 +206,11 @@ impl ActionExecutor<'_> {
                 self.config,
                 relay::CallMarks::of(call),
                 target_leg,
+                Some(relay::RequestFacts {
+                    method: req.method().as_str(),
+                    uri: &gen_dialog.remote_target,
+                    offer: *req.method() == Method::Invite && relay::carries_sdp(req),
+                }),
                 branch.clone(),
             )),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg)),

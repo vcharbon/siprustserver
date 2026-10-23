@@ -75,6 +75,12 @@ worker:
   # internal VIP (B2BUA_OUTBOUND_PROXY, ADR-0048) and the worker refuses to
   # boot without it (B2BUA_REQUIRE_OUTBOUND_PROXY).
   outboundProxy: true
+  # The Secret holding the key the workers share to sign the via-extension
+  # on their own requests (ADR-0055 §12), key `key` (16 to 64 bytes).
+  # Required with `replication.enabled`: the chart never draws it, so every
+  # render (helm template, GitOps) yields the same pods on the same key.
+  clusterKey:
+    existingSecret: ""
   # HA call replication (ADR-0011): the changelog on `port`, peers from the
   # EndpointSlices of the headless b2bua-worker Service.
   replication:

@@ -1,6 +1,7 @@
 //! The departure sweep over a wired core: of a departed peer's backup
 //! partition it takes over exactly the calls with an INVITE transaction to
-//! serve and discharges the ended ones, and an
+//! serve, and the ending ones with any transaction to serve, and discharges
+//! the ended ones and the ending ones with nothing left to serve; an
 //! undecided one among them is answered 503 through the caller's INVITE
 //! transaction, or settled with nothing on the wire when that transaction's
 //! branch is already another call's here.
@@ -103,6 +104,32 @@ async fn a_departed_peers_in_flight_calls_are_taken_over_and_its_ended_calls_dis
     );
     let held = n.store.get_call(BAK, "w0", &ended.call_ref).await.unwrap();
     assert!(held.is_none(), "the discharged call is deleted");
+    assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
+}
+
+/// A call whose ending the departed peer finished with its last write lost:
+/// `Terminating`, nothing left to serve. No node is left to end it: the sweep
+/// discharges it — one CDR, the call deleted — with nothing on the wire.
+#[tokio::test(start_paused = true)]
+async fn an_ending_call_with_nothing_left_to_serve_is_discharged() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let mut ending = quiet("ending");
+    ending.a_leg.own_tag = Some("staged".into());
+    ending.state = CallModelState::Terminating;
+    put(&n.store, &ending).await;
+
+    take_over_departed(ctx, "w0");
+
+    let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
+    assert!(lines.is_empty(), "nothing on the wire: {lines:?}");
+    let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|r| r.call_ref).collect();
+    assert_eq!(cdrs, [ending.call_ref.clone()], "the ending call's one CDR");
+    let held = n.store.get_call(BAK, "w0", &ending.call_ref).await.unwrap();
+    assert!(held.is_none(), "the discharged call is deleted");
+    assert!(ctx.state.peek(&ending.call_ref).is_none(), "no live copy is left");
     assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
 }
 

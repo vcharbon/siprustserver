@@ -125,9 +125,15 @@ fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Optio
         let request = rebuild_a_leg_invite(&call.a_leg_invite).ok()?;
         return Some(TxnSeed::ServerInvite {
             request,
-            // The tag the a-leg's own responses carry (`ensure_a_dialog`);
-            // none while nothing above a 100 went out.
-            to_tag: leg.own_tag.clone().filter(|t| !t.is_empty()),
+            // The tag the a-leg's own responses carry (`ensure_a_dialog`),
+            // else the one the call derives for it: what a provisional an
+            // earlier owner showed carried (ADR-0055 §4).
+            to_tag: Some(
+                leg.own_tag
+                    .clone()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| b2bua_core::caller_tags::own(call)),
+            ),
             leg_id: Some(leg.leg_id.clone()),
         });
     };

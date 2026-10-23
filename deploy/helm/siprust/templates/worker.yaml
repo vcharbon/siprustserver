@@ -38,6 +38,10 @@ B2BUA_LOOP_STALL_MS.
 {{- $_ := set $env "B2BUA_CDR_RABBITMQ_MAX_LEN" (toString (int .Values.cdr.maxLength)) }}
 {{- end }}
 {{- include "siprust.overlayEnv" (dict "into" $env "from" $w.env) }}
+{{- $clusterKeySecret := "" }}
+{{- if $w.replication.enabled }}
+{{- $clusterKeySecret = required "worker.clusterKey.existingSecret: replication needs the Secret of the workers' shared key (ADR-0055 §12)" $w.clusterKey.existingSecret }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -86,6 +90,11 @@ spec:
             # 0.0.0.0 is not routable.
             - name: POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            {{- with $clusterKeySecret }}
+            # The key the workers share to sign the via-extension (ADR-0055 §12).
+            - name: B2BUA_CLUSTER_KEY
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: key } }
+            {{- end }}
             {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with $w.extraEnv }}
             {{- toYaml . | nindent 12 }}

@@ -139,13 +139,8 @@ pub async fn run_cell(
         .flat_map(|n| n.cdr_records())
         .filter(|r| r.call_ref == call_ref)
         .collect();
-    // A split call's two copies may each write its CDR, or neither: no CDR
-    // is deduplicated, and its loss in a split is accepted.
-    let split = cut.is_some_and(|c| matches!(c.incident, Incident::Split | Incident::SplitHealed));
-    let lost = cut.is_some_and(|c| c.incident.loses_the_call());
-    match (cdrs.len(), split, lost) {
-        (1, _, _) | (0..=2, true, _) | (0, _, true) => {}
-        (n, _, _) => panic!("[{name}] the call left {n} CDRs"),
+    if !cdr_count_accepted(cut.map(|c| c.incident), cdrs.len()) {
+        panic!("[{name}] the call left {} CDRs", cdrs.len());
     }
     if let Some(cdr) = cdrs.first() {
         if let Err(why) = shape.check_cdr(cdr) {
@@ -153,6 +148,19 @@ pub async fn run_cell(
         }
     }
     turn_points.turns(&call_ref)
+}
+
+/// Whether `n` CDRs of the call are what `incident` may leave (ADR-0055 §5):
+/// one, or for a split call's two copies each one or neither (no CDR is
+/// deduplicated, its loss in a split is accepted), for a stalled primary its
+/// own and the departure sweep's, and for an unbacked kill one or none.
+fn cdr_count_accepted(incident: Option<Incident>, n: usize) -> bool {
+    match incident {
+        Some(Incident::Split | Incident::SplitHealed) => n <= 2,
+        Some(Incident::StalledKilled) => (1..=2).contains(&n),
+        Some(Incident::UnbackedKilled) => n <= 1,
+        _ => n == 1,
+    }
 }
 
 /// The call the cell placed: the first that took a turn.
@@ -187,14 +195,17 @@ fn strike(
             Some(placement.primary.as_str())
         }
         Incident::PrimaryKilled => {
+            accept_clean_end_into_ended_dialogs(cluster, names);
             kill_inside_the_window(cluster, placement);
             Some(placement.primary.as_str())
         }
         Incident::UnbackedKilled => {
+            accept_clean_end_into_ended_dialogs(cluster, names);
             cluster.kill(&placement.primary, &placement.backup);
             Some(placement.primary.as_str())
         }
         Incident::StalledKilled => {
+            accept_clean_end_into_ended_dialogs(cluster, names);
             cluster.fh.stall(&placement.primary, &placement.backup);
             None
         }
@@ -213,6 +224,8 @@ fn strike(
             None
         }
         Incident::SplitHealed => {
+            accept_clean_end_into_ended_dialogs(cluster, names);
+            accept_unseen_rseq(cluster);
             cluster.split(placement);
             None
         }
@@ -230,13 +243,39 @@ fn wrote_past(cluster: &Cluster, held: &HeldTurn, cut: Cut) -> bool {
 
 /// Kill the primary of `placement` inside the replication window: a copy may
 /// re-use, once per dialog, an in-dialog CSeq the dead primary sent before its
-/// backup applied the write, the request drawing its peer's reject (ADR-0055
-/// §11).
+/// backup applied the write, the request drawing its peer's reject, and may
+/// send a reliable provisional whose RSeq does not continue the dead
+/// primary's (ADR-0055 §11).
 fn kill_inside_the_window(cluster: &mut Cluster, placement: &Placement) {
     cluster.fh.accept_rfc_deviations_once_per_dialog(
         crate::RULE_CSEQ_IN_DIALOG_ORDER,
         "ADR-0055 §11: a copy re-uses once per dialog a CSeq the dead primary sent \
          inside the replication window",
     );
+    accept_unseen_rseq(cluster);
     cluster.kill(&placement.primary, &placement.backup);
+}
+
+/// The §4 clean end BYEs every dialog the record or the evidence names; one
+/// the other owner already ended draws its 481 at the party (ADR-0055 §11).
+fn accept_clean_end_into_ended_dialogs(cluster: &Cluster, names: &[String]) {
+    cluster.fh.accept_dialog_verdicts(
+        scenario_harness::dialogs::DIALOG_ENDED,
+        names,
+        "ADR-0055 §11: the §4 clean end's BYE into a dialog the other owner ended, \
+         closed by the 481 it draws",
+    );
+}
+
+/// A copy's reliable provisional, under the dialog's derived tag, whose RSeq
+/// cannot continue the sequence the dead primary sent (RFC 3262 §4); the
+/// call still ends cleanly (ADR-0055 §11).
+fn accept_unseen_rseq(cluster: &mut Cluster) {
+    for rule in ["non-contiguous-rseq", "no-prack-of-out-of-order-rseq"] {
+        cluster.fh.accept_rfc_deviations_from_now(
+            rule,
+            "ADR-0055 §11: a copy's reliable provisional cannot continue the RSeq the \
+             dead primary sent",
+        );
+    }
 }

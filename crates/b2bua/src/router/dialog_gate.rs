@@ -25,9 +25,17 @@
 //! draws 500 (§12.2.2); one the gate passes or answers sets that last CSeq
 //! ([`note_in_order`]). An ACK passes on a dialog
 //! a 2xx established, ended by a BYE since or not (RFC 5407 §2); it is never
-//! answered (§17.1.1.3), so one the gate refuses is dropped. A CANCEL is matched by
+//! answered (§17.1.1.3), so one the gate refuses is dropped. An ACK on the
+//! a-leg naming the caller's INVITE while the record holds no final sent for
+//! it reaches the rules only on a takeover copy, as evidence of an answer the
+//! record lacks whatever tag it names (ADR-0055 §4), with no dialog resolved
+//! when none names it; on the call's own node, whose record a copy that
+//! answered may still be folding into, it acknowledges nothing and is dropped
+//! (the answer's ladder draws the ACK again, RFC 3261 §13.2.2.4). A CANCEL is matched by
 //! transaction (§9.1) and passes unread. A response whose From-tag is no tag
-//! this stack put on the leg answers nothing of this stack's and is dropped.
+//! this stack put on the leg answers nothing of this stack's and is dropped,
+//! save a 2xx to an INVITE whose verified via-extension names a leg the record
+//! lacks (ADR-0055 §4, §12).
 
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
 use call::{Call, Dialog, DialogEnd, DialogState};
@@ -40,6 +48,7 @@ use super::responses::{
     build_200, build_200_advertising, build_481, build_487, build_out_of_order_500,
 };
 use super::RouterCtx;
+use crate::rules::actions::possibly_confirmed;
 use b2bua_sdk::event::CallEvent;
 
 /// What the gate made of an event.
@@ -64,9 +73,12 @@ pub(super) async fn admit(
     let CallEvent::Sip { message, src, .. } = event else { return Gate::Pass(Resolved::default()) };
     let leg_id = res.source_leg_id.as_str();
     let req = match message.as_ref() {
-        SipMessage::Response(resp) => return admit_response(call, leg_id, resp),
+        SipMessage::Response(resp) => return admit_response(ctx, call, leg_id, resp),
         SipMessage::Request(req) => req,
     };
+    if acks_unanswered_caller(call, leg_id, req) && !copy_served(ctx, call) {
+        return Gate::Answered { answer: None, in_order: None };
+    }
     let (answer, in_order) = match request_verdict(call, leg_id, req) {
         Verdict::Pass(resolved) => return Gate::Pass(resolved),
         Verdict::Drop => return Gate::Answered { answer: None, in_order: None },
@@ -114,8 +126,9 @@ pub(super) fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Ve
     let (Some(to), false) = (req.to().tag(), *method == Method::Cancel) else {
         return Verdict::Pass(Resolved::default());
     };
+    // A leg the record lacks (another owner dialled it) holds no dialog here.
     let Some(leg) = call::helpers::find_leg(call, leg_id) else {
-        return Verdict::Pass(Resolved::default());
+        return if *method == Method::Ack { Verdict::Drop } else { Verdict::NoDialog };
     };
     // A caller-facing dialog names nothing until the caller was shown its tag:
     // in a provisional, or in the 2xx that established it.
@@ -128,6 +141,12 @@ pub(super) fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Ve
         Admission::Pass => Verdict::Pass,
         Admission::Absorb => Verdict::Absorbed,
         Admission::Terminate => Verdict::Terminated,
+        Admission::Refuse
+            if *method == Method::Ack
+                && (acks_unanswered_caller(call, leg_id, req) || acks_held(call, leg_id, req)) =>
+        {
+            return Verdict::Pass(Resolved::default())
+        }
         Admission::Refuse if *method == Method::Ack => return Verdict::Drop,
         Admission::Refuse => return Verdict::NoDialog,
     };
@@ -202,8 +221,37 @@ pub(super) fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
     }
 }
 
+/// Whether a takeover copy served `call`: this node is that copy, or its
+/// record holds a copy's write it folded (a backup counter above zero). Only
+/// then is an ACK of the caller's unanswered INVITE evidence (ADR-0055 §4);
+/// otherwise the copy that answered it is live and its write is on its way.
+fn copy_served(ctx: &RouterCtx, call: &Call) -> bool {
+    ctx.state.is_takeover(&call.call_ref) || call.topology.as_ref().is_some_and(|t| t.bak_gen > 0)
+}
+
+/// Whether `ack`, an ACK on `leg_id` naming a dialog by its To-tag, names
+/// the caller's INVITE while the record holds no final sent for it.
+fn acks_unanswered_caller(call: &Call, leg_id: &str, ack: &SipRequest) -> bool {
+    *ack.method() == Method::Ack
+        && ack.to().tag().is_some()
+        && leg_id == call.a_leg.leg_id
+        && ack.cseq().seq() == call.a_leg_invite.cseq
+        && call.a_leg.invite_final_sent().is_none()
+}
+
+/// Whether `ack`, an ACK of the caller's INVITE, names a caller dialog held
+/// possibly confirmed (ADR-0055 §4): her ACK ends its hold.
+fn acks_held(call: &Call, leg_id: &str, ack: &SipRequest) -> bool {
+    leg_id == call.a_leg.leg_id
+        && ack.cseq().seq() == call.a_leg_invite.cseq
+        && ack.to().tag().is_some_and(|tag| possibly_confirmed::holds(call, tag))
+}
+
 /// Resolve the response `resp` arriving on `leg_id`.
-fn admit_response(call: &Call, leg_id: &str, resp: &SipResponse) -> Gate {
+fn admit_response(ctx: &RouterCtx, call: &Call, leg_id: &str, resp: &SipResponse) -> Gate {
+    if call::helpers::find_leg(call, leg_id).is_none() && names_unknown_leg(ctx, resp) {
+        return Gate::Pass(Resolved::default());
+    }
     let cseq = resp.cseq();
     let facts = ResponseFacts {
         to: resp.to().tag(),
@@ -218,4 +266,17 @@ fn admit_response(call: &Call, leg_id: &str, resp: &SipResponse) -> Gate {
         ResponseOrigin::Creates | ResponseOrigin::Request => Gate::Pass(Resolved::default()),
         ResponseOrigin::Stray => Gate::Dropped,
     }
+}
+
+/// Whether `resp` is a 2xx to an INVITE whose verified via-extension names
+/// the leg it arrived on.
+fn names_unknown_leg(ctx: &RouterCtx, resp: &SipResponse) -> bool {
+    resp.cseq().method() == Method::Invite
+        && (200..300).contains(&resp.status())
+        && crate::stack_identity::read_via_extension(
+            resp.top_via(),
+            "INVITE",
+            ctx.config.cluster_key.as_ref(),
+        )
+        .is_some()
 }

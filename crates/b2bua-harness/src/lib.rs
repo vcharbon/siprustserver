@@ -18,9 +18,8 @@ use b2bua::{B2buaCore, B2buaDeps};
 use scenario_harness::{Harness, RunReport};
 
 // The canonical INVITE/180/200/ACK choreography lives in
-// `scenario_harness::callflow`, one implementation shared by the single-SUT
-// b2bua tests and the HA failover tests; the names the b2bua tests use are
-// re-exported here.
+// `scenario_harness::callflow`, shared by the single-SUT b2bua tests and the
+// HA failover tests; the names the b2bua tests use are re-exported here.
 pub use scenario_harness::callflow::{self, establish, hangup, ANSWER_SDP, OFFER_SDP};
 use sip_clock::Clock;
 use sip_net::UdpEndpoint;
@@ -100,9 +99,10 @@ pub fn spawn_b2bua_core(
         sip_local_ip: sip_addr.ip().to_string(),
         sip_local_port: sip_addr.port(),
         b2b_outbound_proxy: outbound_proxy,
-        // Every harness B2BUA checks the model invariants after each turn,
-        // release builds included.
+        // Every harness B2BUA checks the model invariants after each turn, and
+        // shares one cluster key with every other (ADR-0055 §12).
         model_invariants: true,
+        cluster_key: sip_ids::SigningKey::new(b"harness-cluster-key-000000000000"),
         ..Default::default()
     };
     tune(&mut config);

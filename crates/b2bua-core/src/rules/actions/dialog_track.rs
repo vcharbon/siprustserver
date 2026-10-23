@@ -97,7 +97,7 @@ impl ActionExecutor<'_> {
         if b_tag.is_empty() || fronting_dialog(call, b_leg_id, b_tag).is_some() {
             return;
         }
-        let a_tag = self.turn.ids.new_tag();
+        let a_tag = crate::caller_tags::fronting(call, b_leg_id, b_tag);
         self.map_a_face(call, &a_tag, b_leg_id, b_tag);
     }
 
@@ -139,7 +139,7 @@ impl ActionExecutor<'_> {
         let primary_shows_media =
             caller_dialog(call, &primary).is_some_and(|d| d.shows_media.is_some());
         let a_face = if already_published || primary_shows_media {
-            self.turn.ids.new_tag()
+            crate::caller_tags::fronting(call, b_leg_id, b_tag)
         } else {
             primary
         };
@@ -209,7 +209,7 @@ impl ActionExecutor<'_> {
         let primary = self.ensure_a_dialog(call);
         let free = caller_dialog(call, &primary)
             .is_some_and(|d| !d.shown && d.fronts.is_empty() && d.shows_media.is_none());
-        let tag = if free { primary } else { self.turn.ids.new_tag() };
+        let tag = if free { primary } else { crate::caller_tags::of_leg(call, media_leg) };
         open_early_a_dialog(call, &tag);
         show_media(call, &tag, media_leg);
         tag
@@ -240,7 +240,7 @@ impl ActionExecutor<'_> {
         if call.a_leg.invite_final_sent().is_some_and(|status| !(200..300).contains(&status)) {
             return call.a_leg.own_tag.clone().or(preferred).unwrap_or_default();
         }
-        let tag = preferred.unwrap_or_else(|| self.turn.ids.new_tag());
+        let tag = preferred.unwrap_or_else(|| crate::caller_tags::own(call));
         let Some(a_invite) = self.caller_invite(call) else { return tag };
         let from = a_invite.from();
         let a_leg_id = call.a_leg.leg_id.clone();

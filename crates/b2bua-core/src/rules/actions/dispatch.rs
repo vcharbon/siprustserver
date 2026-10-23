@@ -100,7 +100,7 @@ impl ActionExecutor<'_> {
                 self.refuse_glare(call, fx, ctx, *refusal);
             }
             RuleAction::AckLeg { leg_id, body } => self.ack_authored(call, fx, leg_id, body),
-            RuleAction::AckLostRound { leg_id } => self.ack_lost_round(call, fx, ctx, leg_id),
+            RuleAction::EndOnEvidence { leg_id } => self.end_on_evidence(call, fx, ctx, leg_id),
             RuleAction::ReleaseStraggler2xx { leg_id } => {
                 self.release_straggler(call, fx, ctx, leg_id);
             }

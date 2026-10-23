@@ -446,10 +446,10 @@ impl ActionExecutor<'_> {
         if !(200..300).contains(&status) {
             return;
         }
-        // A2: the caller-supplied tag verbatim, else a freshly minted one.
-        // Minting via the IdGen guarantees A2 ≠ A1 (distinct from the pinned
-        // early-media tag), the RFC 3264 §5.1 requirement.
-        let a2 = to_tag.map(str::to_string).unwrap_or_else(|| self.turn.ids.new_tag());
+        // A2: the caller-supplied tag verbatim, else the one the call derives
+        // for the answering dialog, distinct from every early-media tag (RFC
+        // 3264 §5.1).
+        let a2 = to_tag.map(str::to_string).unwrap_or_else(|| crate::caller_tags::answering(call));
         // SDP answer defaults to application/sdp (mirrors the provisional path).
         let content_type = content_type
             .and_then(relay::media_type)

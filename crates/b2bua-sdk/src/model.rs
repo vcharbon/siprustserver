@@ -488,12 +488,11 @@ pub enum RuleAction {
         leg_id: String,
         body: Option<Body>,
     },
-    /// ACK the INVITE final the current response carries on `leg_id`'s
-    /// confirmed dialog for a round the record does not hold (ADR-0047): the
-    /// dialog's sequence is raised to the response's first (RFC 3261
-    /// §12.2.1.1); a 2xx is ACKed end to end and its ACK retained for a repeat
-    /// (§13.2.2.4), a non-2xx hop by hop on the response's own branch (§17.1.1.3).
-    AckLostRound {
+    /// Owe the current message on `leg_id`, evidence the record cannot
+    /// explain (ADR-0055 §4), what RFC 3261 requires of it, and take into the
+    /// record the dialog state it proves, so the teardown that follows ends
+    /// every dialog the record or the evidence names.
+    EndOnEvidence {
         leg_id: String,
     },
     /// Release the fork straggler whose 2xx the current event carries on a

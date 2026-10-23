@@ -4,9 +4,14 @@
 //! Every cell must end with an RFC-clean, fully terminated call, one CDR and
 //! nothing left on any node or in the limiter; an incident that loses the
 //! call states what the parties are left with instead
-//! ([`Incident::loses_the_call`]). A kill inside the replication window
-//! declares one window: a copy may re-use, once per dialog, an in-dialog CSeq
-//! the dead primary sent before its backup applied the write (ADR-0055 §11).
+//! ([`Incident::loses_the_call`]), a split's copies and a stalled primary
+//! with the departure sweep may each write a CDR (ADR-0055 §5). A kill inside
+//! the replication window declares its windows: a copy may re-use, once per
+//! dialog, an in-dialog CSeq the dead primary sent before its backup applied
+//! the write, and may send a reliable provisional whose RSeq cannot continue
+//! the dead primary's. Every kill of the primary and a healed split accept the
+//! §4 clean end's BYE into a dialog the other owner ended, closed by its 481
+//! (ADR-0055 §11).
 //!
 //! A cell is named `<shape>/<incident>/t<k>-<point>`. The cells that fail
 //! before their correction lands are listed in a [`Ratchet`] with the decision
@@ -120,7 +125,8 @@ impl Incident {
     /// Whether the incident may lose the call as a non-HA B2BUA loses it
     /// (ADR-0055 §11): a caller whose INVITE drew nothing from a copy is
     /// answered by its own Timer B, a callee whose dialog no copy holds keeps
-    /// it until its own timers end it, and the call leaves at most one CDR.
+    /// it until its own timers end it. An unbacked call leaves at most one
+    /// CDR; a stalled one its primary's, the departure sweep's, or both.
     /// Nothing is left on any node or in the limiter either way.
     pub fn loses_the_call(self) -> bool {
         matches!(self, Incident::StalledKilled | Incident::UnbackedKilled)

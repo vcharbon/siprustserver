@@ -1,12 +1,13 @@
 //! The B2BUA's own per-leg identity (Via + Contact) on outbound messages,
 //! binding [`B2buaConfig`]'s addresses to [`crate::stack_identity`]'s wire
 //! shapes (call-ref/leg/incarnation markers, `;em=1`/`;emerg=1` emergency
-//! stamps, the call's other owner on the Via).
+//! stamps, the call's other owner and the signed via-extension on the Via).
 
 use call::Call;
 use sip_message::header::{self, Via};
 
 use crate::config::B2buaConfig;
+pub use crate::stack_identity::RequestFacts;
 use crate::stack_identity::{build_call_contact, build_call_via, StackIdentityOpts};
 
 /// What of a call the stack stamps on every Via and Contact it emits for it:
@@ -43,7 +44,12 @@ impl<'a> CallMarks<'a> {
         (!other.is_empty() && other != sender).then_some(other)
     }
 
-    fn opts<'b>(&self, config: &'b B2buaConfig, leg_id: &'b str) -> StackIdentityOpts<'b>
+    fn opts<'b>(
+        &self,
+        config: &'b B2buaConfig,
+        leg_id: &'b str,
+        request: Option<RequestFacts<'b>>,
+    ) -> StackIdentityOpts<'b>
     where
         'a: 'b,
     {
@@ -55,16 +61,24 @@ impl<'a> CallMarks<'a> {
             incarnation_mark: self.incarnation_mark,
             is_emergency: self.is_emergency,
             other_owner: self.other_owner(&config.self_ordinal),
+            request: request.zip(config.cluster_key.as_ref()),
         }
     }
 }
 
-/// The B2BUA's Via for a leg's outbound message.
-pub fn leg_via(config: &B2buaConfig, marks: CallMarks, leg_id: &str, branch: String) -> Via {
-    build_call_via(&marks.opts(config, leg_id), branch)
+/// The B2BUA's Via for a leg's outbound message; a request that states its
+/// facts carries them, signed, in the via-extension (ADR-0055 §12).
+pub fn leg_via(
+    config: &B2buaConfig,
+    marks: CallMarks,
+    leg_id: &str,
+    request: Option<RequestFacts>,
+    branch: String,
+) -> Via {
+    build_call_via(&marks.opts(config, leg_id, request), branch)
 }
 
 /// The B2BUA's Contact for a leg's outbound message.
 pub fn leg_contact(config: &B2buaConfig, marks: CallMarks, leg_id: &str) -> header::Contact {
-    build_call_contact(&marks.opts(config, leg_id))
+    build_call_contact(&marks.opts(config, leg_id, None))
 }

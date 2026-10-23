@@ -13,7 +13,7 @@ fn stated(owners: Option<(&str, &str)>, sender: &str) -> Option<String> {
     let config = B2buaConfig { self_ordinal: sender.into(), ..B2buaConfig::default() };
     let marks =
         CallMarks { call_ref: "w0|c|t", incarnation_mark: "k", is_emergency: false, owners };
-    let via = leg_via(&config, marks, "b-1", "z9hG4bKowner".to_string());
+    let via = leg_via(&config, marks, "b-1", None, "z9hG4bKowner".to_string());
     via.param("bak").and_then(ParamValue::as_str).map(str::to_string)
 }
 

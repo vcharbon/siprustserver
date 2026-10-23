@@ -568,6 +568,7 @@ dependencies = [
  "scenario-harness",
  "serde_json",
  "sip-clock",
+ "sip-ids",
  "sip-message",
  "sip-net",
  "sip-net-testkit",
@@ -638,6 +639,7 @@ dependencies = [
  "call",
  "serde",
  "serde_json",
+ "sip-ids",
  "sip-message",
 ]
 

@@ -43,6 +43,9 @@
 //!                   empty = kernel rmem_default; clamped at rmem_max)
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
 //!   POD_UID         worker identity, the pod UID (downward API); unset: a per-boot token
+//!   B2BUA_CLUSTER_KEY the key the cluster's workers share to sign the via-extension
+//!                   (16..64 bytes; required with B2BUA_REPL on; unset: none
+//!                   stated, none trusted) — ADR-0055 §12
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024; 0 = unbuffered, refused beside a RabbitMQ URL)
 //!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN / _WINDOW / _*_TIMEOUT_MS / _BACKOFF*_MS
 //!                   the RabbitMQ CDR sink (see `b2bua_runner_kit::RabbitMqCdrSettings`)

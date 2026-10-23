@@ -12,7 +12,10 @@
 //! legs. The caller's pending re-INVITE cannot get a final: its transaction
 //! existed only on the dead node (§17.1.3); the BYE ends its dialog. Every
 //! retransmission of the callee's 2xx (§13.3.1.4) finds the call ended and
-//! takes nothing over again: one takeover per lost round.
+//! takes nothing over again: one takeover per lost round. Each draws an ACK
+//! and a BYE, as a 2xx no node holds does (ADR-0055 §4), numbered from the 2xx
+//! alone; the callee answers the BYE into its ended dialog with a 481
+//! (ADR-0055 §11).
 
 use std::time::Duration;
 
@@ -155,6 +158,17 @@ async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_
     lost.ended_on_both_legs().await;
 
     // The callee's §13.3.1.4 ladder, as if the ACK were lost: the call is ended.
+    lost.fh.accept_dialog_verdicts(
+        scenario_harness::dialogs::DIALOG_ENDED,
+        &["bob".to_string()],
+        "ADR-0055 §11: a 2xx repeat no node holds draws a BYE into the dialog the copy \
+         ended, closed by its 481",
+    );
+    lost.fh.accept_rfc_deviations_once_per_dialog(
+        failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
+        "ADR-0055 §11: the BYE of a 2xx no node holds is numbered from the 2xx, \
+         re-using the copy's BYE number on the dialog it ended",
+    );
     let mut gap = T1;
     let mut elapsed = Duration::ZERO;
     while elapsed + gap < 64 * T1 {

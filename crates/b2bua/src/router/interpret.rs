@@ -175,6 +175,15 @@ pub(super) async fn process_result(
                 ctx.timers.cancel_all(call_ref.to_string()).await
             }
             CriticalStateEffect::RemoveCall => remove_call = true,
+            CriticalStateEffect::RelinquishAnsweredInvite { via } => {
+                if let Some(branch) = via.branch() {
+                    let key = sip_txn::ServerTxnKey::invite(
+                        branch.to_string(),
+                        sip_message::header::SentBy::of(via),
+                    );
+                    let _ = ctx.txn.relinquish_server(key).await;
+                }
+            }
         }
     }
 

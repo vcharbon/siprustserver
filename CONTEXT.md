@@ -516,21 +516,41 @@ The copy serves the dialog and owns the runtime timers; the Element is just byte
 _Avoid_: using "Element"/"replica" for the live copy, or "takeover copy" for the
 stored body; "eager takeover" (removed: it took over every call, quiet ones too).
 
-**Departure sweep** (ADR-0047, `router::departure`): what a backup does when a
-peer leaves the membership set while its flows run — it takes over every call of
-the peer's backup partition that names an INVITE transaction in flight, and
-discharges every ended one (ADR-0047 D8); every other call is left. _Avoid_:
-"eager takeover" for it.
+**Departure sweep** (ADR-0047, ADR-0055 §5, `router::departure`): what a backup
+does when a peer leaves the membership set while its flows run — it takes over
+every call of the peer's backup partition that names an INVITE transaction in
+flight, and every `Terminating` one with any request record open; it discharges
+every ended one (ADR-0047 D8) and every `Terminating` one with nothing left to
+serve; every other call is left to the reactive path by user ruling, a silent
+one ending at the endpoints' timers or the replica's TTL. _Avoid_: "eager
+takeover" for it.
 
 **Undecided call** (ADR-0047, `router::undecided`): a live call still waiting on
 its first routing decision — caller unanswered, no decision applied, nothing
 dialled. Materialised with no message (the departure sweep, a reclaim), it is
 refused 503 without Retry-After, the decision never asked again.
 
-**Lost round** (ADR-0047, `rules::lost_round`): an INVITE transaction a node sent
-on a confirmed dialog that no record holds — the node died before the round
-replicated. Its final is told by a CSeq above the dialog's recorded sequence with
-no relay pending; it is ACKed and the call ended.
+**Evidence** (ADR-0055 §4, `rules::evidence`): a message proving the call took a
+step its record never saw — a final above its dialog's sequence or at a number
+this side re-used, an ACK of an INVITE the record holds unanswered, a callee's
+BYE on an early dialog, a 2xx naming a leg the record lacks. It is owed what RFC
+3261 requires and the call is ended over every dialog the record or the evidence
+names. _Avoid_: "lost round" (its INVITE-only predecessor).
+
+**Possibly confirmed** (ADR-0055 §4, `rules::actions::possibly_confirmed`): a
+caller dialog held after evidence proves a callee answered while the record
+holds the caller unanswered: she is sent her non-2xx under the tag a relayed
+2xx carried, and the dialog is BYEd on her ACK naming it or at 64·T1.
+
+**Via-extension** (ADR-0055 §12, `stack_identity`): the `vx` parameter on the
+worker's own Via — the leg, the Request-URI and the offer flag of the request,
+signed with the cluster key over them and the Via's own call, leg, incarnation,
+branch and method — read back off a response by a node that holds no record of
+the request.
+
+**Unheld response** (ADR-0055 §4, `unheld_response`): a response to a request of
+ours for a call this node holds neither live nor as a replica it may serve:
+answered as an unknown dialog would be.
 
 **Reclaim** (active) — the sole quiescent-recovery path (ADR-0014):
 A returning primary *re-serving* its calls — materialising each back into the live

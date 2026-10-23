@@ -231,6 +231,12 @@ pub struct Call {
     /// `SetState` action is its sole writer; the rule engine reads it to gate
     /// machine-bound rules.
     pub sm_cursors: BTreeMap<MachineId, StateLabel>,
+    /// The seed every tag this stack mints toward the caller is derived from,
+    /// drawn once at the call's birth from the keyed identifier stream and
+    /// replicated with the body: any owner of the call derives the tags its
+    /// first owner showed the caller (RFC 3261 §19.3, ADR-0055 §4).
+    #[serde(default)]
+    pub tag_seed: u64,
 }
 
 impl Call {

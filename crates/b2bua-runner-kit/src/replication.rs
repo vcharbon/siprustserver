@@ -91,10 +91,17 @@ pub struct ReplicationSettings {
 
 impl ReplicationSettings {
     /// Reads the grammar through `get`. `Ok(None)` when replication is off;
-    /// `Err` naming the variable when one is malformed.
+    /// `Err` naming the variable when one is malformed, or when replication is
+    /// on with no `B2BUA_CLUSTER_KEY`: the owners of a call trust what each
+    /// states on its requests only under that key (ADR-0055 §12).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         if !get("B2BUA_REPL").is_some_and(|v| is_truthy(&v)) {
             return Ok(None);
+        }
+        if get("B2BUA_CLUSTER_KEY").is_none_or(|k| k.trim().is_empty()) {
+            return Err("B2BUA_REPL is on but B2BUA_CLUSTER_KEY is unset: the owners of a call \
+                 sign and verify the via-extension with it (ADR-0055 §12)"
+                .to_string());
         }
         let raw_listen = get("B2BUA_REPL_LISTEN").unwrap_or_else(|| "0.0.0.0:9092".to_string());
         let listen =

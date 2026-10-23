@@ -30,7 +30,10 @@ loadgen stream may instead run as a pod (`placement: pod` in its profile).
 Both are configured entirely by env vars (see the module docs at the top of each
 `main.rs`). HA call replication is opt-in via `B2BUA_REPL=1`: real TCP repl
 transport + `K8sMembership` EndpointSlice discovery + SIGTERM drain + `/ready`
-probe (ADR-0011). The proxy refuses a boot it cannot honour (ADR-0046): it needs
+probe (ADR-0011); a worker with it on refuses to boot without `B2BUA_CLUSTER_KEY`
+(ADR-0055 §12), which the chart reads from the Secret
+`worker.clusterKey.existingSecret` names (the kind lab creates one). The proxy
+refuses a boot it cannot honour (ADR-0046): it needs
 `PROXY_HMAC_KEY`, and an advertise address when it listens on an unspecified one.
 
 ### Image

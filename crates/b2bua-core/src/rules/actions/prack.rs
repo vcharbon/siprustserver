@@ -151,7 +151,17 @@ impl ActionExecutor<'_> {
         let branch = self.turn.ids.new_branch();
         let marks = relay::CallMarks::of(call);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, marks, &id.leg, branch.clone())),
+            via: Some(relay::leg_via(
+                self.config,
+                marks,
+                &id.leg,
+                Some(relay::RequestFacts {
+                    method: "PRACK",
+                    uri: &gen_dialog.remote_target,
+                    offer: false,
+                }),
+                branch.clone(),
+            )),
             contact: Some(relay::leg_contact(self.config, marks, &id.leg)),
             rack: Some(RAck::new(id.rseq.0, id.invite_cseq.0, Method::Invite)),
             cseq: Some(relay::wire_cseq(outbound_cseq)),

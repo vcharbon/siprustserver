@@ -81,6 +81,13 @@ pub enum CriticalStateEffect {
     CancelAllTimers,
     /// Remove the call from memory + store, cancel its txns, poison its queue.
     RemoveCall,
+    /// The INVITE server transaction a request with this top Via opened was
+    /// answered 2xx by another node (ADR-0055 §4): it is relinquished here,
+    /// nothing sent and nothing owed, so no final follows the 2xx (RFC 3261
+    /// §13.3.1.4).
+    RelinquishAnsweredInvite {
+        via: sip_message::header::Via,
+    },
 }
 
 /// Soft-bounded effects — limiter work handed off the call's turn (never

@@ -3,7 +3,8 @@
 **Status:** accepted (2026-10-12)
 Amended (2026-10-23): D5 and its residuals, the lost round becomes the evidence rule of
 any method (ADR-0055 §3, §4); a removed process superseded by its replacement authors
-nothing (ADR-0055 §6).
+nothing (ADR-0055 §6); D2's sweep also serves a departed primary's `Terminating` calls
+and discharges those with nothing left to serve (ADR-0055 §5).
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -13,8 +14,8 @@ ADR-0020 X3 (a copy whose primary departed discharges the call, D8).
 `repl/self_endpoint.rs` (leaving the slice), `router/departure.rs` (the sweep),
 `router/quiesced.rs` (the self-release turn), `router/undecided.rs` (the undecided
 call), `router/initial_turn.rs` (the creation write, the decision a node that left
-the slice does not apply), `rules/lost_round.rs` and
-`rules/actions/lost_round.rs` (the lost round), `sip-message`'s
+the slice does not apply), `rules/evidence.rs` and
+`rules/actions/evidence.rs` (the lost round, now ADR-0055 §4's evidence rule), `sip-message`'s
 `generate_ack_for_non_2xx_in_dialog`, `router/reclaim/bulk.rs` (the reclaim write),
 `repl/puller/apply.rs` and `repl/router_sink.rs` (an applied primary write handed up),
 `router/stand_down.rs` (the stand-down), `store/takeover.rs` (the takeover marks),
@@ -109,16 +110,16 @@ answer that other call; when the transaction layer cannot be asked, nothing is s
 **D5 — A final for a round the record lost is acknowledged and ends the call.** An
 INVITE final on a confirmed dialog whose CSeq is above the last the record sent on that
 dialog, with no relay pending for it, answers a round the record lost
-(`ack-lost-round`). The dialog's sequence is raised to the round's first, so no later
+(`evidence-final`, ADR-0055 §4). The dialog's sequence is raised to the round's first, so no later
 request reuses a number the peer saw (§12.2.1.1), and the round becomes the dialog's
 INVITE transaction. A 2xx is ACKed end to end, an offer it makes answered with every
 stream rejected (RFC 3264 §6), the ACK retained so a repeat is re-ACKed (§13.2.2.4); a
 non-2xx is ACKed hop by hop on the response's own branch, built from the dialog's
 remote target and route set where the INVITE went (§17.1.1.3), the ACK retained too so
-a repeat is re-ACKed (`re-ack-lost-round`, §17.1.1.2). Then the call ends with a BYE on
+a repeat is re-ACKed (`re-ack-evidence`, §17.1.1.2). Then the call ends with a BYE on
 every leg. Once the call is ended, a later copy of the final finds a terminal record
 and takes nothing over: one takeover per lost round
-(`reinvite_round_not_yet_replicated.rs`, `b2bua/tests/it/lost_round_rules.rs`). The
+(`reinvite_round_not_yet_replicated.rs`, `b2bua-core/tests/it/evidence_rules.rs`). The
 failure rule for a dialled leg matches only a leg still dialling: a non-2xx on a
 confirmed leg is never read as the leg failing.
 

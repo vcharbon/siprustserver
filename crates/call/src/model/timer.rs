@@ -76,6 +76,14 @@ pub enum TimerType {
     /// The bound on an established call's reroute: the replacement leg's dial,
     /// the realign and the old leg's release.
     RerouteGuard,
+    /// The end of the hold of the caller dialog `tag` names, which may be
+    /// confirmed by a 2xx another owner sent (ADR-0055 §4): 64·T1 after this
+    /// stack sent the caller's INVITE its non-2xx, the dialog is BYEd unless
+    /// her ACK named it first. Call-scoped; it outlives the start of the
+    /// termination, which waits for it.
+    PossiblyConfirmed {
+        tag: String,
+    },
     /// The deadline of the answer to the adaptation HTTP request a service
     /// sent off the call's turn, named by its `correlation_id`: the request's
     /// budget plus a margin. In the ledger while the answer is awaited; its
@@ -159,6 +167,7 @@ impl PartialEq for TimerType {
             NotifyAnswerCap => matches!(other, NotifyAnswerCap),
             HeldAnswer => matches!(other, HeldAnswer),
             RerouteGuard => matches!(other, RerouteGuard),
+            PossiblyConfirmed { tag: a } => matches!(other, PossiblyConfirmed { tag: b } if a == b),
             ServiceHttpAnswer { correlation_id: a } => {
                 matches!(other, ServiceHttpAnswer { correlation_id: b } if a == b)
             }
@@ -183,6 +192,7 @@ impl Hash for TimerType {
         std::mem::discriminant(self).hash(state);
         match self {
             TimerType::ServiceHttpAnswer { correlation_id } => correlation_id.hash(state),
+            TimerType::PossiblyConfirmed { tag } => tag.hash(state),
             TimerType::ServiceAdmitAnswer { correlation_id, change } => {
                 correlation_id.hash(state);
                 change.hash(state);
@@ -217,6 +227,7 @@ impl std::fmt::Debug for TimerType {
             TimerType::NotifyAnswerCap => f.write_str("NotifyAnswerCap"),
             TimerType::HeldAnswer => f.write_str("HeldAnswer"),
             TimerType::RerouteGuard => f.write_str("RerouteGuard"),
+            TimerType::PossiblyConfirmed { tag } => write!(f, "PossiblyConfirmed:{tag}"),
             TimerType::ServiceHttpAnswer { correlation_id } => {
                 write!(f, "ServiceHttpAnswer:{correlation_id}")
             }

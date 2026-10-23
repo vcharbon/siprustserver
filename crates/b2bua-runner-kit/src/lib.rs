@@ -318,9 +318,8 @@ impl RunnerEnv {
         );
 
         match &self.outbound_proxy {
-            // Every b-leg request goes to the front proxy with a preloaded plain
-            // `;lr` Route; its internal face classifies it worker-outbound
-            // (ADR-0048) and it record-routes itself into the b-leg.
+            // Every b-leg request goes to the front proxy with a preloaded plain `;lr`
+            // Route; it classifies it worker-outbound (ADR-0048) and record-routes.
             Some((h, p)) => tracing::info!(
                 service = name,
                 proxy_host = %h,
@@ -336,6 +335,7 @@ impl RunnerEnv {
         let config = B2buaConfig {
             self_ordinal: self.ordinal.clone(),
             self_identity: entropy::worker_identity(name, self.identity.clone(), &id_gen),
+            cluster_key: self.cluster_key.clone(),
             sip_local_ip: advertise_ip,
             sip_local_port: advertise_port,
             b2b_outbound_proxy: self.outbound_proxy.clone(),

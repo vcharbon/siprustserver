@@ -62,6 +62,10 @@ pub struct RunnerEnv {
     /// downward API (ADR-0055 §6). Unset (a static pool): a per-boot token
     /// drawn from the OS RNG.
     pub identity: Option<String>,
+    /// `B2BUA_CLUSTER_KEY` — the secret every worker of the cluster shares to
+    /// sign the via-extension on its own requests (ADR-0055 §12), 16 to 64
+    /// bytes. Unset: the worker states none and trusts none.
+    pub cluster_key: Option<sip_ids::SigningKey>,
     /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
     /// back-pressure SAFETY limit, not a rate governor).
     pub concurrency: usize,
@@ -232,6 +236,20 @@ pub(crate) fn switch(key: &str, value: Option<String>, default: bool) -> Result<
     }
 }
 
+/// `B2BUA_CLUSTER_KEY` as the key it holds: unset is none, a value out of
+/// the key's bounds refuses the boot.
+fn cluster_key(value: Option<String>) -> Result<Option<sip_ids::SigningKey>, String> {
+    let Some(value) = value else { return Ok(None) };
+    sip_ids::SigningKey::new(value.as_bytes()).map(Some).ok_or_else(|| {
+        format!(
+            "B2BUA_CLUSTER_KEY must hold {} to {} bytes, got {}",
+            sip_ids::MIN_KEY_BYTES,
+            sip_ids::MAX_KEY_BYTES,
+            value.len()
+        )
+    })
+}
+
 impl RunnerEnv {
     /// Parse the full generic env grammar. `Err` is the boot refusal of the
     /// first value the worker cannot honour, naming its variable.
@@ -259,6 +277,7 @@ impl RunnerEnv {
             cdr_queue: knob("B2BUA_CDR_QUEUE", "1024")?,
             ordinal: env_or("B2BUA_ORDINAL", "w0"),
             identity: stated(env::var("POD_UID").ok()),
+            cluster_key: cluster_key(stated(env::var("B2BUA_CLUSTER_KEY").ok()))?,
             // Dispatch throttle ceilings — deliberately high so they never cap
             // throughput below the offered rate; `cap_drops`/`saturation`
             // metrics flag if either is actually hit.

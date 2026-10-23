@@ -149,11 +149,19 @@ fn caller_request(method: Method, cseq: u32) -> SipRequest {
         .expect("an in-dialog request of the same dialog is complete")
 }
 
+/// A caller dialog never shown names nothing; an ACK naming the caller's
+/// INVITE, which the record holds unanswered, is evidence of an answer the
+/// record lacks (ADR-0055 §4) and passes with no dialog resolved, while one
+/// naming another INVITE is dropped.
 #[test]
 fn a_caller_facing_dialog_the_caller_was_never_shown_names_nothing() {
     let unshown = call_with_caller_dialog(false);
     assert_eq!(request_verdict(&unshown, "a", &caller_request(Method::Info, 2)), Verdict::NoDialog);
-    assert_eq!(request_verdict(&unshown, "a", &caller_request(Method::Ack, 1)), Verdict::Drop);
+    assert_eq!(
+        request_verdict(&unshown, "a", &caller_request(Method::Ack, 1)),
+        Verdict::Pass(call::helpers::Resolved::default())
+    );
+    assert_eq!(request_verdict(&unshown, "a", &caller_request(Method::Ack, 2)), Verdict::Drop);
 
     let shown = call_with_caller_dialog(true);
     let Verdict::Pass(resolved) = request_verdict(&shown, "a", &caller_request(Method::Info, 2))
@@ -222,4 +230,13 @@ fn an_ending_dialog_answers_in_its_own_dialog_and_judges_the_order_first() {
     assert!(matches!(update, Verdict::Terminated(_)), "{update:?}");
     assert_eq!(named(update), Some("ours".to_string()));
     assert_eq!(request_verdict(&call, "a", &caller_request(Method::Info, 4)), Verdict::OutOfOrder);
+}
+
+/// A leg the record lacks — another owner dialled it — holds no dialog here:
+/// its BYE draws a 481 and its ACK is dropped (RFC 3261 §12.2.2).
+#[test]
+fn a_request_on_a_leg_the_record_lacks_names_no_dialog() {
+    let call = call_with_caller_dialog(true);
+    assert_eq!(request_verdict(&call, "b-9", &caller_request(Method::Bye, 2)), Verdict::NoDialog);
+    assert_eq!(request_verdict(&call, "b-9", &caller_request(Method::Ack, 1)), Verdict::Drop);
 }

@@ -87,8 +87,9 @@ def secret_key_bytes(secret: Doc) -> bytes:
 def canonical(docs: list[Doc]) -> str:
     """A render as sorted, key-sorted YAML, the random cookie key masked."""
     out: list[Doc] = []
+    drawn = ("sip-front-proxy-hmac",)
     for d in sorted(docs, key=lambda d: (d["kind"], d["metadata"]["name"])):
-        if d["kind"] == "Secret" and d["metadata"]["name"] == "sip-front-proxy-hmac":
+        if d["kind"] == "Secret" and d["metadata"]["name"] in drawn:
             d = dict(d, data=dict(d["data"], key="<random>"))
         out.append(d)
     return yaml.safe_dump_all(out, sort_keys=True)

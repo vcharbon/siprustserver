@@ -158,6 +158,7 @@ impl ActionExecutor<'_> {
                 self.now_ms,
                 &self.config.minted_final_advertisement,
                 &mut self.turn.notes,
+                None,
             );
         }
         // Nothing awaits an answer, no service makes progress and nothing is
@@ -168,11 +169,14 @@ impl ActionExecutor<'_> {
         self.retire(call, fx, Scope::Call);
         deactivate_service_machines(call);
         call.state = call::CallModelState::Terminating;
+        // A caller dialog held possibly confirmed is BYEd when its hold ends,
+        // the backstop running again from that BYE.
+        let held = super::possibly_confirmed::held_for(call, self.now_ms).map_or(0, |h| h + 1);
         self.schedule(
             call,
             fx,
             TimerKey::call(TimerType::TerminatingTimeout),
-            TERMINATING_TIMEOUT_MS,
+            TERMINATING_TIMEOUT_MS.max(held),
         );
     }
 

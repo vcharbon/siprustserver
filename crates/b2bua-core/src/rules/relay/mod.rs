@@ -104,4 +104,4 @@ pub use failure_ext::{
 };
 
 // The B2BUA's own per-leg identity.
-pub use identity::{leg_contact, leg_via, CallMarks};
+pub use identity::{leg_contact, leg_via, CallMarks, RequestFacts};

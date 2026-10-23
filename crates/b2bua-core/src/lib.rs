@@ -14,6 +14,7 @@
 //! - [`initial_invite`], [`decision`] — the initial INVITE's folds and the
 //!   decision DTOs;
 //! - [`effects`] — the effect vocabulary a turn returns;
+//! - [`unheld_response`] — the answer to a response for a call no node holds;
 //! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`] — a turn's inputs and
 //!   what it reports.
 #![cfg_attr(
@@ -36,6 +37,7 @@
 
 pub mod answer_deadline;
 pub mod attempts;
+pub mod caller_tags;
 pub mod config;
 pub mod decision;
 pub mod decision_log;
@@ -58,4 +60,5 @@ pub mod test_call;
 pub mod timer_arm;
 pub mod turn_notes;
 pub mod turn_scope;
+pub mod unheld_response;
 pub mod wire_fault_set;

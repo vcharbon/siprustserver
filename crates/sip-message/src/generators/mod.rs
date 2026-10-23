@@ -26,6 +26,8 @@
 //!   - [`ack`] — ACK for 2xx (§13.2.2.4) and for non-2xx finals (§17.1.1.3)
 //!   - [`bye`] — BYE of a dialog a 2xx created that nothing above holds (§15.1.1)
 //!   - [`cancel`] — CANCEL of an outstanding INVITE (§9.1)
+//!   - [`unheld`] — what a UAC owes a final to an INVITE it holds no record
+//!     of: the ACK and BYE of a 2xx, the ACK of a non-2xx (§13.2.2.4, §17.1.1.3)
 //!   - [`response`] — UAS responses echoing the request (§8.2.6.2)
 //!   - [`invalid_request`] — the stateless 400 to a request the parser refused
 //!   - [`relay`] — B2BUA relay transparency + rebuilt responses (§16.6)
@@ -47,6 +49,7 @@ pub mod relay_policy;
 pub mod response;
 pub mod session_timer;
 pub mod spec;
+pub mod unheld;
 
 pub use ack::{
     generate_ack_for_2xx, generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx,
@@ -78,3 +81,6 @@ pub use relay_policy::{
 pub use response::{delayed_trying_timestamp, generate_response, GenerateResponseOpts};
 pub use session_timer::{offers_session_timer, withdraw_session_timer};
 pub use spec::{InviteClientTransactionHandle, StackDialog};
+pub use unheld::{
+    generate_ack_for_unheld_2xx, generate_ack_for_unheld_non_2xx, generate_bye_for_unheld_2xx,
+};

@@ -378,7 +378,17 @@ pub fn build_b_leg(
         from: Some(header::From::new(from_addr.clone()).with_tag(SipStr::owned(&from_tag))),
         to: Some(header::To::new(to_addr.clone())),
         cseq: 1,
-        via: Some(leg_via(config, marks, leg_id, branch.clone())),
+        via: Some(leg_via(
+            config,
+            marks,
+            leg_id,
+            Some(super::RequestFacts {
+                method: "INVITE",
+                uri: &request_uri.text(),
+                offer: !body.is_empty(),
+            }),
+            branch.clone(),
+        )),
         contact: Some(leg_contact(config, marks, leg_id)),
         // §16.6 step 3: the originated leg continues the budget of the INVITE
         // that caused it rather than refilling — a B2BUA that restated 70 would

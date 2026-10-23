@@ -84,6 +84,12 @@ impl<'a> RuleCall<'a> {
     pub fn caller_answered(&self) -> bool {
         call::helpers::caller_answered(self.0)
     }
+    /// Whether another owner of the call may have sent what its record
+    /// lacks: the node `ordinal` serves it as its backup's copy, or holds a
+    /// write a copy made (ADR-0055 §4).
+    pub fn copy_served(&self, ordinal: &str) -> bool {
+        self.0.topology.as_ref().is_some_and(|t| t.bak == ordinal || t.bak_gen > 0)
+    }
     /// The id the next leg this stack dials takes — the one a `CreateLeg`
     /// ([`crate::model::RuleAction::CreateLeg`]) emitted now mints.
     pub fn next_b_leg_id(&self) -> String {

@@ -4094,6 +4094,7 @@ fn call_with_retained_answered_2xx() -> call::Call {
     call::helpers::hold_answered_2xx(&mut answered, 1, retained_2xx("btag", 1, 5060));
     call.a_leg.dialogs.insert(answered);
     call.a_leg.own_tag = Some("btag".into());
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     let obligation = answered_obligation();
     for (key, fire_at) in [
         (TimerKey::obligation(TimerType::Rung, obligation.clone()), 500),
@@ -4175,8 +4176,7 @@ fn callee_side_ack_leaves_the_retained_answered_2xx() {
     assert!(fx.critical.is_empty(), "nothing is cancelled, got {:?}", fx.critical);
 }
 
-/// `relay-ack` owns none of the ladder plumbing any more: an a-leg ACK
-/// produces the relay alone.
+/// `relay-ack` owns none of the ladder plumbing: an a-leg ACK relays alone.
 #[test]
 fn relay_ack_pushes_no_ladder_plumbing() {
     let call = call_with_retained_answered_2xx();

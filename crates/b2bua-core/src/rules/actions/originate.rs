@@ -44,7 +44,17 @@ impl ActionExecutor<'_> {
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let branch = self.turn.ids.new_branch();
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
+            via: Some(relay::leg_via(
+                self.config,
+                relay::CallMarks::of(call),
+                leg_id,
+                Some(relay::RequestFacts {
+                    method: "NOTIFY",
+                    uri: &gen_dialog.remote_target,
+                    offer: false,
+                }),
+                branch,
+            )),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
             body: body.to_vec(),
             content_type: content_type.and_then(relay::media_type),
@@ -161,6 +171,11 @@ impl ActionExecutor<'_> {
                 self.config,
                 relay::CallMarks::of(call),
                 leg_id,
+                Some(relay::RequestFacts {
+                    method: "INVITE",
+                    uri: &gen_dialog.remote_target,
+                    offer: !body.is_empty(),
+                }),
                 branch.clone(),
             )),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
@@ -319,7 +334,17 @@ impl ActionExecutor<'_> {
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
+            via: Some(relay::leg_via(
+                self.config,
+                relay::CallMarks::of(call),
+                leg_id,
+                Some(relay::RequestFacts {
+                    method,
+                    uri: &gen_dialog.remote_target,
+                    offer: m == InDialogMethod::Invite && !body.is_empty(),
+                }),
+                branch,
+            )),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
             body: relay::continue_on_leg(

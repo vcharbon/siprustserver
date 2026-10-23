@@ -74,8 +74,7 @@ fn dialog(
     d
 }
 
-/// What a fixture emission on the ladder `class` paces is a copy of: an
-/// INVITE's 200 on the §13.3.1.4 ladder, a 183 to an INVITE on RFC 3262 §3's.
+/// What a fixture emission on the ladder `class` paces is a copy of.
 pub fn repeated_on(class: Class) -> Repeated {
     match class {
         Class::ReliableProvisional => Repeated::response("INVITE", 183),
@@ -344,6 +343,7 @@ pub fn representative_call() -> Call {
         termination: None,
         message_turn: 1,
         sm_cursors: BTreeMap::new(),
+        tag_seed: 0,
     }
 }
 
@@ -387,8 +387,7 @@ fn arb_ext() -> impl Strategy<Value = Option<ExtMap>> {
     proptest::option::of(proptest::collection::btree_map("[a-z]{1,8}", arb_json(), 0..3))
 }
 
-/// Varied `sm_cursors` maps (ADR-0016): empty through a few
-/// `MachineId → StateLabel` entries, exercising the round-trip.
+/// Varied `sm_cursors` maps (ADR-0016), empty through a few entries.
 fn arb_sm_cursors() -> impl Strategy<Value = BTreeMap<MachineId, StateLabel>> {
     proptest::collection::btree_map(
         "[a-z-]{1,12}".prop_map(|s| MachineId(s.into())),
@@ -803,6 +802,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             termination,
             message_turn,
             sm_cursors,
+            tag_seed: 7,
         },
     )
 }

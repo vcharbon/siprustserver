@@ -19,7 +19,7 @@ and its envelope, materialise, reclaim, departure, stand-down), `crates/repl-net
 (send on write, explicit replica refusal), `crates/sip-txn` (seeds for every
 method, the first provisional handed to the turn engine), `crates/sip-proxy` (the
 routing rule, the Via cookie on every method), `crates/b2bua-sdk` (the seam),
-`crates/cdr-consumer-runner` (dedupe), `crates/failover-harness` (placement,
+`crates/failover-harness` (placement,
 steering, turn points, the sweep), `scripts/purity.py` (the blind/aware
 boundary).
 
@@ -89,10 +89,9 @@ What a service may rely on, and all it must know:
   ledger);
 - an off-turn request is delivered at least once: the backend may receive it
   more than once, and its answer may come back as "no answer" at the deadline
-  though the backend acted (ADR-0039). The platform puts a stable key on every
-  attempt (the `call_ref`, the call incarnation, a per-call request sequence
-  reserved by the sending turn); only the first answer the call awaits reaches
-  the service;
+  though the backend acted (ADR-0039); only the first answer the call awaits
+  reaches the service. No idempotency key rides the request while no backend
+  reads one;
 - a call may end cleanly at any instant (§4);
 - it keeps durations or timers in its own state, never absolute times (§9
   re-anchors the platform's instants only).
@@ -149,8 +148,8 @@ record's image under its branch (§17.1.2.2).
   before any effect of the turn leaves the node. The order lives in the turn
   engine alone.
 - **One entry per call, never dropped.** The change log holds one entry per
-  call; a newer write moves it, and the terminal write (the delete and the
-  discharged marker, §5) is the last. The channel that drops a write when full
+  call; a newer write moves it, and the terminal write (the delete) is the
+  last. The channel that drops a write when full
   goes: the turn writes into the change log directly. A delete is kept until
   every backup of the call applied it.
 - **Sent on write.** Replication stays pull-only: the backup opens the
@@ -210,12 +209,18 @@ forged peer can trigger it. Its triggers are closed:
 1. a final in a dialog whose CSeq is strictly above the dialog's local sequence,
    any method;
 2. a final at or below the local sequence, under a branch of ours that no
-   request record holds and that is not a retransmission of a settled one (the
-   copy re-used a sequence number the dead owner had sent);
-3. an ACK naming an INVITE on a leg for which the call record holds no final
-   sent;
+   request record holds, at the CSeq of a request the record holds open under
+   another branch (the copy re-used a sequence number the dead owner had sent,
+   and this final answers the dead owner's request);
+3. an ACK naming a dialog by its To-tag and an INVITE on a leg for which the
+   call record holds no final sent; the caller's own INVITE counts only on a
+   call a takeover copy served (this node is the copy, or the record holds a
+   write a copy made): otherwise the copy that answered her is live and its
+   write is on its way;
 4. a BYE from the callee on a dialog the call record holds as early (RFC 3261
-   §15 forbids it before a 2xx);
+   §15 forbids it before a 2xx); on a call one node served it is a broken
+   callee, whose caller holds no 2xx, and the default `relay-bye` ends the call
+   on it;
 5. a 2xx whose via-extension (§12) names a leg the call record lacks.
 
 A final with no request record that matches none of these is stray and is
@@ -232,29 +237,45 @@ call record or the evidence names:
 - a dialog the evidence names is BYEd with the evidence's tags and the route
   set the call record holds; this is construction, the call record is not
   repaired;
-- a leg the call record holds as unanswered, when the evidence proves its peer
-  leg answered, may hold a 2xx the call record never saw: the node sends the
-  owed non-2xx at once (a UAC that has the 2xx discards it, RFC 6026), keeps the
-  dialog under the leg's tag as possibly confirmed, and BYEs it on its ACK or at
-  64·T1. The tag a B2BUA mints toward the caller at a 2xx is derived from a keyed
-  per-call seed, the leg and the callee's tag (RFC 3261 §19.3), so any owner
-  computes the same tag. A BYE that meets no dialog draws a 481 and does no harm;
-- one CDR, every hold released.
+- a caller the call record holds as unanswered, when the evidence proves a
+  callee leg answered (trigger 4 on a call a copy served, trigger 5), may hold a
+  2xx the call record never saw: the node sends the owed non-2xx at once, under
+  the tag that 2xx carried (a UAC that has the 2xx discards it, RFC 6026), holds
+  that dialog as possibly confirmed, and BYEs it on her ACK naming it or at
+  64·T1; the call stays terminating until then. Every tag a B2BUA mints toward the caller is derived from a per-call
+  seed, drawn from the keyed identifier stream at the call's birth and
+  replicated with its record, and from what the tag fronts (the leg and the
+  callee's tag; RFC 3261 §19.3), so any owner computes the same tag. A BYE that
+  meets no dialog draws a 481 and does no harm; an ACK proves its INVITE
+  answered, so that INVITE's transaction draws no final here;
+- one CDR (§5), every hold released.
 
 Every effect outside SIP is keyed per call: a limiter admit is keyed and expires
-by lease unless an owner refreshes it (ADR-0040); an off-turn request carries
-the key of §1; the CDR carries the key of §5.
+by lease unless an owner refreshes it (ADR-0040), and a consult whose route
+fold the record never applied counts as one that may have sent its admit; an
+off-turn request is delivered at least once (§1); the CDR is written by
+whoever ends the call (§5).
 
-### 5. The CDR: at least once, keyed, deduplicated
+### 5. The CDR: whoever ends the call writes it
 
-The CDR carries the `call_ref` and the call incarnation; `cdr-consumer-runner`
-deduplicates on them over a window at least as long as the replica TTL, so
-downstream sees one CDR per call. A replicated discharged marker, carrying the
-vector and the answered flag, makes a second writer rare: any node ending the
-call writes the CDR unless the marker says another did (a takeover copy, a
-returning primary, the departure sweep, the TTL reap). The tombstone admits an
-unseen terminal as a CDR-only discharge. The departure sweep takes ownership of
-every call of a departed primary, `Terminating` and quiet calls included.
+The CDR carries the `call_ref` and the call incarnation. No CDR key, no
+consumer dedupe and no discharged marker: the node that ends the call writes
+its CDR — the primary, a takeover copy whose primary departed (ADR-0047 D8),
+the departure sweep, the TTL reap; a copy whose primary is still a member
+defers it to the primary (ADR-0020 X3). An HA corner case may lose a CDR or
+write a second one, and both are accepted: a primary killed after ending a call
+whose end its backup never applied, a split.
+
+The departure sweep takes over every call of a departed primary with an INVITE
+transaction to serve, and every `Terminating` one with any request record open
+(its own BYE in flight, a request it held); a `Terminating` call with nothing
+left to serve finished its ending on the departed primary and is discharged
+with its CDR, which may be the second (the primary wrote one when it ended the
+call, and only its delete was lost). By user ruling, a quiet call of a departed
+primary stays reactive (ADR-0014 §1): no eager takeover. The trade-off is a
+ghost call whose parties stay silent: it ends at the endpoints' own timers
+(session refresh, RTP inactivity) or at the replica's TTL, with no BYE and no
+CDR.
 
 ### 6. One author per ordinal: identity, compared for equality
 
@@ -359,27 +380,35 @@ number of takeovers unshifted.
   media-server leg) is cut at every turn point, each split into write in the
   change log, effect left and write applied at the backup, by these incidents:
   - primary killed, backup killed, split, split then healed: each cell ends
-    with an RFC-clean, fully terminated call, one CDR after dedupe, full
-    cleanup; a split cell declares the duplicate-CSeq window of §8;
+    with an RFC-clean, fully terminated call, one CDR, full cleanup; a split
+    cell declares the duplicate-CSeq window of §8, and may leave no CDR or two
+    (§5);
   - replication stalled past the cap of §3, then a kill: a caller whose INVITE
     transaction saw neither final nor provisional from the copy is answered by
-    its own Timer B with no CDR, and a callee whose 2xx tag the call record never
-    held keeps its dialog until its own timers end it;
+    its own Timer B, and a callee whose 2xx tag the call record never held keeps
+    its dialog until its own timers end it; the call leaves one CDR or two (the
+    stalled primary's and the departure sweep's, §5), never none;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
     a kill: a call with no backup is lost as on a non-HA B2BUA.
 
   A split that never heals is not supposed to last: it cuts a representative
   few shapes (the re-INVITE, the REFER), whose cells check the worst case, no
   leaked resource (the call ends on every side, full cleanup, the limiter
-  released), in a declared degraded mode. Two windows are declared, nothing
+  released), in a declared degraded mode. These windows are declared, nothing
   else:
   - a split that never heals: the stale copy's requests into a dialog the
     other copy ended, each closed by the 481 it draws;
+  - a kill of the primary, and a split that heals (user ruling): the §4 clean
+    end's BYE into a dialog the other owner already ended, closed by its 481;
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
     request per dialog; the call still ends or continues cleanly. A kill at an
     applied sub-point is inside the window only when the primary already wrote
-    a later turn.
+    a later turn;
+  - a kill inside the replication window, and a split that heals (user
+    ruling): a copy's reliable provisional under the dialog's derived tag whose
+    RSeq cannot continue the sequence the dead primary sent (RFC 3262 §4); the
+    call still ends cleanly.
 
   A consumer adds shapes through the plug-in base (ADR-0049) and nothing else;
   a consumer shape that needs HA code of its own is a defect of this layer.
@@ -391,11 +420,18 @@ number of takeovers unshifted.
 
 ### 12. A request the worker originates names its leg
 
-The worker's own Via carries a via-extension (§20.42): the leg and the
-request's Request-URI, signed by the worker with the cluster key, bounded in
-size and encoded as a token, so any owner that holds no request record of a
-dialled INVITE can CANCEL it or ACK its non-2xx from the callee's response
-(§9.1, §17.1.1.3). An extension whose signature fails is ignored.
+The worker's own Via carries a via-extension (§20.42): the leg, the request's
+Request-URI and whether it carried a session offer, signed by the worker with
+the cluster key over the decoded `cr`, `lg` and `ci` of the Via, its branch and
+the request's method, bounded in size and encoded as a token, so any owner
+that holds no request record of a dialled INVITE can CANCEL it or ACK its
+non-2xx from the callee's response (§9.1, §17.1.1.3), and ACK and BYE its 2xx,
+with the answer an offer the 2xx makes is owed (§13.2.2.4, RFC 3264 §4). A
+response for a call no node holds draws nothing without an extension that
+verifies. An extension whose signature fails is ignored; a worker with no
+cluster key states none and trusts none, and a worker with replication on
+refuses to start without the key (fail closed). The deployment provides the
+key as a Secret it keeps; nothing draws it at render time.
 
 ### 13. Harness verbs
 
@@ -457,16 +493,14 @@ lands with the consumer's pointer bump.
 
 1. Harness verbs with sub-points (§13), the sweep and its ratchet (§11), on
    today's code.
-2. CDR key and consumer dedupe (§5, first half); worker identity (§6); anchors
-   (§9). Independent of each other.
+2. Worker identity (§6); anchors (§9). Independent of each other.
 3. The replication write path (§3).
 4. The request record, in four changes:
    a. the Via cookie on every method and the one routing rule (§8);
    b. non-INVITE request records and their seeds (§2);
    c. the INVITE fields folded into the request record (§2);
    d. the subscription record, with the consumer's queue deleted.
-5. The via-extension (§12), the evidence rule (§4) and the discharged marker
-   (§5, second half).
+5. The via-extension (§12), the evidence rule (§4) and the CDR of §5.
 6. Containment with the state stamp in the store envelope (§7).
 7. The timer scope and the seam (§10).
 8. The blind/aware boundary and the word net (§11).

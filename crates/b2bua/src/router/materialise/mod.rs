@@ -312,6 +312,17 @@ pub(super) fn has_invite_to_serve(call: &Call) -> bool {
     })
 }
 
+/// Whether `call` names a transaction a live copy must serve — one a
+/// materialisation would seed ([`seeds::seeds_for`]): an INVITE awaiting its
+/// final, whose bound and finals the copy owns, a 2xx awaiting its ACK, whose
+/// retransmission ladder the copy resumes (RFC 3261 §13.3.1.4), or a
+/// non-INVITE request record open on either side — a request sent awaiting
+/// its final, one received awaiting its answer.
+pub(super) fn has_work_to_serve(call: &Call) -> bool {
+    // A seed's instants only bound what is left of it: the latest one is read.
+    !seeds::seeds_for(call, i64::MAX).is_empty()
+}
+
 /// The typed miss of the store read, named from the origin's side.
 fn refusal(origin: Origin, miss: ReplicaMiss) -> Reason {
     match (origin, miss) {

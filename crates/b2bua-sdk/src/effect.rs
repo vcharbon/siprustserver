@@ -124,7 +124,7 @@ impl RuleAction {
             | RuleAction::AnswerHeld { .. }
             | RuleAction::RefuseGlare { .. }
             | RuleAction::AckLeg { .. }
-            | RuleAction::AckLostRound { .. }
+            | RuleAction::EndOnEvidence { .. }
             | RuleAction::ReleaseStraggler2xx { .. }
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }

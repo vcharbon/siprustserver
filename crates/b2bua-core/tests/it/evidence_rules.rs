@@ -1,10 +1,10 @@
 //! An INVITE final on a confirmed dialog, as the default rules read it. One
-//! whose CSeq is above the last the record sent on the dialog, with no relay
-//! pending for it, answers a round the record lost (ADR-0047): it is ACKed —
-//! a 2xx end to end under a raised sequence (RFC 3261 §13.2.2.4), a non-2xx
-//! hop by hop on its own branch (§17.1.1.3) — and the call is ended. A repeat
-//! of that 2xx is re-ACKed with the same ACK. A non-2xx that names no lost
-//! round is not read as the confirmed leg failing.
+//! whose CSeq is above the last the record sent on the dialog, no request
+//! record answering it, is evidence the record cannot explain (ADR-0055 §4):
+//! it is ACKed — a 2xx end to end under a raised sequence (RFC 3261
+//! §13.2.2.4), a non-2xx hop by hop on its own branch (§17.1.1.3) — and the
+//! call is ended. A repeat of that 2xx is re-ACKed with the same ACK. A
+//! non-2xx that is no evidence is not read as the confirmed leg failing.
 
 use std::net::SocketAddr;
 
@@ -167,10 +167,10 @@ pub(super) fn requests_to(result: &HandlerResult, leg: &str) -> Vec<(String, u32
 }
 
 #[test]
-fn a_2xx_to_a_lost_round_is_acked_under_its_cseq_and_the_call_ended() {
+fn a_2xx_beyond_the_record_is_acked_under_its_cseq_and_the_call_ended() {
     let call = bridged();
     let (rule, result) = turn(&call, &final_from_bob(200, RECORDED + 2));
-    assert_eq!(rule, Some("ack-lost-round"));
+    assert_eq!(rule, Some("evidence-final"));
     let result = result.expect("a turn");
     let to_bob = requests_to(&result, "b-1");
     assert_eq!(to_bob[0], ("ACK".into(), RECORDED + 2), "the ACK names the round");
@@ -183,7 +183,7 @@ fn a_2xx_to_a_lost_round_is_acked_under_its_cseq_and_the_call_ended() {
 }
 
 #[test]
-fn a_repeat_of_the_lost_rounds_2xx_is_re_acked_with_the_same_ack() {
+fn a_repeat_of_an_evidence_2xx_is_re_acked_with_the_same_ack() {
     let call = bridged();
     let event = final_from_bob(200, RECORDED + 2);
     let (_, first) = turn(&call, &event);
@@ -207,10 +207,10 @@ fn a_repeat_of_the_lost_rounds_2xx_is_re_acked_with_the_same_ack() {
 }
 
 #[test]
-fn a_non_2xx_to_a_lost_round_is_acked_on_its_own_branch_and_the_call_ended() {
+fn a_non_2xx_beyond_the_record_is_acked_on_its_own_branch_and_the_call_ended() {
     let call = bridged();
     let (rule, result) = turn(&call, &final_from_bob(488, RECORDED + 1));
-    assert_eq!(rule, Some("ack-lost-round"));
+    assert_eq!(rule, Some("evidence-final"));
     let result = result.expect("a turn");
     let ack = result
         .effects
@@ -228,23 +228,23 @@ fn a_non_2xx_to_a_lost_round_is_acked_on_its_own_branch_and_the_call_ended() {
 }
 
 #[test]
-fn a_non_2xx_that_names_no_lost_round_is_not_the_confirmed_leg_failing() {
+fn a_non_2xx_that_is_no_evidence_is_not_the_confirmed_leg_failing() {
     let call = bridged();
     let (rule, _) = turn(&call, &final_from_bob(488, RECORDED));
     assert_ne!(rule, Some("route-failure"), "a confirmed leg is not dialling");
     assert_eq!(rule, None, "no rule claims it");
 }
 
-/// The lost round's INVITE carried no offer (a re-INVITE the record never
+/// The INVITE carried no offer (a re-INVITE the record never
 /// held), and the callee's 2xx makes one: the ACK owes the answer
 /// (RFC 3261 §13.2.2.4, RFC 3264 §4), and this stack answers it rejecting every
 /// stream (RFC 3264 §6) before the BYE.
 #[test]
-fn an_offer_in_a_lost_rounds_2xx_is_answered_in_the_ack_every_stream_rejected() {
+fn an_offer_in_an_evidence_2xx_is_answered_in_the_ack_every_stream_rejected() {
     const OFFER: &str = "v=0\r\no=bob 7 7 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
     let call = bridged();
     let (rule, result) = turn(&call, &final_from_bob_carrying(200, RECORDED + 2, OFFER));
-    assert_eq!(rule, Some("ack-lost-round"));
+    assert_eq!(rule, Some("evidence-final"));
     let result = result.expect("a turn");
     let ack = result
         .effects
@@ -264,7 +264,7 @@ fn an_offer_in_a_lost_rounds_2xx_is_answered_in_the_ack_every_stream_rejected() 
 /// §17.2.1): no transaction here absorbs the repeat, so the record's own ACK is
 /// sent again, the same datagram (§17.1.1.2).
 #[test]
-fn a_repeat_of_the_lost_rounds_non_2xx_is_re_acked_with_the_same_ack() {
+fn a_repeat_of_an_evidence_non_2xx_is_re_acked_with_the_same_ack() {
     let call = bridged();
     let event = final_from_bob(488, RECORDED + 1);
     let (_, first) = turn(&call, &event);
@@ -283,6 +283,6 @@ fn a_repeat_of_the_lost_rounds_non_2xx_is_re_acked_with_the_same_ack() {
             .expect("an ACK")
     };
     let (rule, repeat) = turn(&first.call, &event);
-    assert_eq!(rule, Some("re-ack-lost-round"));
+    assert_eq!(rule, Some("re-ack-evidence"));
     assert_eq!(ack(&repeat.expect("a turn")), ack(&first), "the same ACK");
 }

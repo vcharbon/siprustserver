@@ -1,16 +1,23 @@
-//! The departure sweep (ADR-0047): a peer that left the membership set is
-//! gone, and a caller or callee it left mid-INVITE may send nothing more — a
-//! caller that heard a 100 runs no Timer B (RFC 3261 §17.1.1.2), and a silent
-//! callee stays silent, and nobody else repeats a 2xx the caller lost (RFC
-//! 3261 §13.3.1.4). Every call this node backs up for the peer with an INVITE
-//! transaction to serve — awaiting its final, or its 2xx awaiting the ACK — is
-//! taken over at once: its timers run at their replicated deadlines, its
-//! transactions are rebuilt, and an undecided call is answered. A call with
-//! no INVITE transaction to serve is left to the reactive path
-//! (ADR-0014 §1): taking every quiet dialog over at once is the stale-CSeq
-//! storm that rule exists to avoid. A call a takeover copy here ended and
-//! deferred to the peer, which left without reconciling it, is discharged —
-//! CDR, limiter release, delete — since no node is left to (ADR-0047 D8).
+//! The departure sweep (ADR-0047, ADR-0055 §5): a peer that left the
+//! membership set is gone, and a party it left mid-transaction may send
+//! nothing more — a caller that heard a 100 runs no Timer B (RFC 3261
+//! §17.1.1.2), a silent callee stays silent, nobody else repeats a 2xx the
+//! caller lost (§13.3.1.4), and nobody else ends a call the peer was ending.
+//! Every call this node backs up for the peer with an INVITE transaction to
+//! serve, and every `Terminating` one with any request record open — its own
+//! BYE in flight, a request it held — is taken over at once: its timers run
+//! at their replicated deadlines, its transactions are rebuilt, and an
+//! undecided call is answered. A `Terminating` call with nothing left to serve
+//! finished its ending on the peer, whose last write was lost: it is
+//! discharged, its legs forced terminal, with its CDR, which may be the
+//! second (ADR-0055 §5). Any other call is left to the reactive path by user
+//! ruling (ADR-0014 §1, ADR-0055 §5): a party's retransmission or a final that
+//! fails over takes it over, and taking every quiet dialog over at once is the
+//! stale-CSeq storm that rule exists to avoid; a call whose parties stay
+//! silent ends at their own timers or the replica's TTL. A call a takeover
+//! copy here ended and deferred to the peer, which left without reconciling
+//! it, is discharged — CDR, limiter release, delete — since no node is left
+//! to (ADR-0047 D8).
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
@@ -23,9 +30,11 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use call::CallModelState;
+use call::{Call, CallModelState};
 
-use super::materialise::{has_invite_to_serve, materialise, Materialised, Origin};
+use super::materialise::{
+    has_invite_to_serve, has_work_to_serve, materialise, Materialised, Origin,
+};
 use super::reclaim::discharge_materialized_terminal;
 use super::restore_hygiene::reanchor;
 use super::undecided::{is_undecided, settle_undecided};
@@ -106,37 +115,18 @@ where
     );
 }
 
-/// Discharge `call_ref` when its body is ended, else take it over when it
-/// names an INVITE transaction to serve ([`has_invite_to_serve`]). The body is
-/// read once without the lock to leave a quiet call untouched; a call already
-/// live here is left as it is.
+/// Discharge `call_ref` when its body is ended, or ending with nothing left to
+/// serve, else take it over when it names an INVITE transaction to serve
+/// ([`has_invite_to_serve`]), or is ending with any transaction to serve
+/// ([`has_work_to_serve`]). The body is read once without the lock to leave a
+/// quiet call untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
     let Ok((call, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
-    if call.state == CallModelState::Terminated {
-        // A takeover copy ended the call and deferred it to the peer, which
-        // left without reconciling it: no one else discharges it now. The body
-        // is read again under the lock, which the call's own turns take: one
-        // of them may have deleted it since the read above.
-        let guard = ctx.state.lock(call_ref).await;
-        let ended = match ctx.state.peek_replica(call_ref).await {
-            Ok((mut ended, skew)) if ended.state == CallModelState::Terminated => {
-                reanchor(&mut ended, skew);
-                ended
-            }
-            _ if ctx.state.peek(call_ref).is_some() => return Swept::Left,
-            _ => {
-                drop(guard);
-                ctx.state.discard_orphan(call_ref);
-                return Swept::Left;
-            }
-        };
-        let now_ms = ctx.clock.now_ms();
-        if discharge_materialized_terminal(ctx, call_ref, ended, now_ms, false).await {
-            return Swept::Discharged;
-        }
-        return Swept::Left;
+    if finished(&call) {
+        return discharge_finished(ctx, call_ref).await;
     }
-    if !has_invite_to_serve(&call) {
+    let ending = call.state == CallModelState::Terminating;
+    if !has_invite_to_serve(&call) && !(ending && has_work_to_serve(&call)) {
         return Swept::Left;
     }
     let guard = ctx.state.lock(call_ref).await;
@@ -158,6 +148,44 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
             Swept::Left
         }
     }
+}
+
+/// Whether `call` needs no copy to serve it, only its discharge: ended, or
+/// ending with no transaction left to serve.
+fn finished(call: &Call) -> bool {
+    match call.state {
+        CallModelState::Terminated => true,
+        CallModelState::Terminating => !has_work_to_serve(call),
+        _ => false,
+    }
+}
+
+/// Discharge the finished `call_ref` — a takeover copy here ended it and
+/// deferred it to the peer, or the peer's last write of its ending was lost —
+/// since no one else discharges it now. The body is read again under the
+/// lock, which the call's own turns take: one of them may have deleted it
+/// since the sweep's read. An ending body's legs are forced terminal.
+async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
+    let guard = ctx.state.lock(call_ref).await;
+    let ended = match ctx.state.peek_replica(call_ref).await {
+        Ok((mut ended, skew)) if finished(&ended) => {
+            reanchor(&mut ended, skew);
+            ended
+        }
+        _ if ctx.state.peek(call_ref).is_some() => return Swept::Left,
+        Ok(_) => return Swept::Left,
+        Err(_) => {
+            drop(guard);
+            ctx.state.discard_orphan(call_ref);
+            return Swept::Left;
+        }
+    };
+    let now_ms = ctx.clock.now_ms();
+    let force_terminal = ended.state == CallModelState::Terminating;
+    if discharge_materialized_terminal(ctx, call_ref, ended, now_ms, force_terminal).await {
+        return Swept::Discharged;
+    }
+    Swept::Left
 }
 
 #[cfg(test)]

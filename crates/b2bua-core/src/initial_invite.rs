@@ -49,7 +49,7 @@ pub const STANDARD_HEADERS: &[HeaderName] = &[
 ];
 
 /// Build the initial [`Call`] (a-leg only) from an inbound INVITE, its
-/// incarnation mark drawn from `ids`. Pure.
+/// incarnation mark and its caller-facing tag seed drawn from `ids`. Pure.
 pub fn build_initial_call(
     invite: &SipRequest,
     src: SocketAddr,
@@ -66,6 +66,7 @@ pub fn build_initial_call(
     // unique over time where the call_ref is not (a retried INVITE reuses its
     // Call-ID and From tag).
     let limiter = CallLimiterState::uncounted(call::derive_incarnation(&call_ref, &ids.new_tag()));
+    let tag_seed = ids.draw();
     let (local_addr, remote_addr) = relay::uas_addresses(invite);
     let a_leg = Leg {
         leg_id: "a".to_string(),
@@ -153,6 +154,7 @@ pub fn build_initial_call(
         termination: None,
         message_turn: 1,
         sm_cursors: std::collections::BTreeMap::new(),
+        tag_seed,
     }
 }
 
@@ -321,14 +323,21 @@ pub fn reject_call(
         );
     }
     let mut effects = HandlerEffects::new();
-    // A non-100 final response needs a To-tag (the B2BUA's a-facing tag).
+    // A non-100 final response needs a To-tag: the a-leg's own, as derived for
+    // the call, so a provisional an earlier owner showed carried the same one.
+    let to_tag = call
+        .a_leg
+        .own_tag
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| crate::caller_tags::own(&call));
     if let Some(effect) = relay::response_to_a_leg(
         &mut call,
         &mut effects,
         a_invite,
         status,
         &reason,
-        Some(ids.new_tag()),
+        Some(to_tag),
         None,
         vec![],
         None,

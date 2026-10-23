@@ -34,101 +34,8 @@ pub struct LimiterHeld {
     pub entries: Vec<LimiterEntry>,
 }
 
-/// The honest outcome of one admit.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AdmitOutcome {
-    /// The call's set is now the entries sent, under the admit's number.
-    Admitted,
-    /// An id the call adds is at its cap: the call's set is what it was, or
-    /// nothing when the admit asked for release on refusal, as `held` states.
-    Rejected {
-        /// The first id found at its cap.
-        limiter_id: String,
-        /// The set the limiter holds for the key after the refusal.
-        held: LimiterHeld,
-    },
-    /// The admit's number is not above the one of the set the limiter holds
-    /// for the key (a newer admit of the key landed first): nothing moved.
-    Superseded {
-        /// The set the limiter holds for the key.
-        held: LimiterHeld,
-    },
-    /// The call was released within the last lease: the limiter holds nothing
-    /// for it and re-creates nothing.
-    Released,
-    /// The request left and no usable answer came back (unreachable, slow,
-    /// errored, a bad body): it may have landed.
-    Unavailable,
-    /// No request left (no limiter configured, or a local guard such as an
-    /// open circuit breaker refused to send one): nothing can have landed.
-    NotSent,
-}
-
-impl AdmitOutcome {
-    /// The id a cap refusal names; `None` for any other outcome.
-    pub fn refused_on(&self) -> Option<&str> {
-        match self {
-            AdmitOutcome::Rejected { limiter_id, .. } => Some(limiter_id),
-            _ => None,
-        }
-    }
-
-    /// The outcome's label on the wire of an internal event and in metrics.
-    pub fn label(&self) -> &'static str {
-        match self {
-            AdmitOutcome::Admitted => "admitted",
-            AdmitOutcome::Rejected { .. } => "rejected",
-            AdmitOutcome::Superseded { .. } => "superseded",
-            AdmitOutcome::Released => "released",
-            AdmitOutcome::Unavailable => "unavailable",
-            AdmitOutcome::NotSent => "not_sent",
-        }
-    }
-}
-
-/// One admit of a call's key as the call applies it: the key, the change
-/// number the admit carried, the entries it asked for, and its outcome.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmitReport {
-    /// The limiter key the admit named.
-    pub key: String,
-    /// The change number the admit carried.
-    pub change: u64,
-    /// The entries the admit asked for.
-    pub entries: Vec<LimiterEntry>,
-    /// What came back.
-    pub outcome: AdmitOutcome,
-}
-
-impl AdmitReport {
-    /// The admit of `entries` for `key` under `change` whose answer never
-    /// came: [`AdmitOutcome::Unavailable`].
-    fn lost(key: String, change: u64, entries: Vec<LimiterEntry>) -> Self {
-        Self { key, change, entries, outcome: AdmitOutcome::Unavailable }
-    }
-
-    /// The key whose release this admit owes: a request left, and it may
-    /// have landed. `None` for an admit that sent no request.
-    pub fn owed_release(&self) -> Option<&str> {
-        (self.outcome != AdmitOutcome::NotSent).then_some(self.key.as_str())
-    }
-
-    /// The set the limiter stated it holds for the key: the entries sent when
-    /// admitted, the stated set on a refusal or a supersession, none
-    /// otherwise.
-    pub fn held(&self) -> Option<LimiterHeld> {
-        match &self.outcome {
-            AdmitOutcome::Admitted => {
-                Some(LimiterHeld { change: self.change, entries: self.entries.clone() })
-            }
-            AdmitOutcome::Rejected { held, .. } | AdmitOutcome::Superseded { held } => {
-                Some(held.clone())
-            }
-            AdmitOutcome::Released | AdmitOutcome::Unavailable | AdmitOutcome::NotSent => None,
-        }
-    }
-}
+mod admit;
+pub use admit::{AdmitOutcome, AdmitReport};
 
 /// The call's admission state on the call limiter. The key is minted once at
 /// the call's creation and is unique over time (`call_ref` alone is not: a
@@ -150,10 +57,15 @@ impl AdmitReport {
 /// ([`apply_fold`](Self::apply_fold)); `None` when it runs on its target:
 /// from its creation, and from a resolution after a refused route.
 /// `release_owed` is set on the turn that sends an admit request for the key
-/// (and by its report), whatever its answer, and is never cleared: the
+/// (and by its report), and on the turn that dispatches a consult whose
+/// answer may send one, whatever its answer, and is never cleared: the
 /// request may have landed, so the call releases its key once at its end
-/// ([`owed_release`](Self::owed_release)). The call is counted (refreshes its
-/// lease) iff held is not empty, which implies `release_owed`.
+/// ([`owed_release`](Self::owed_release)). `admit_sent` is set only where a
+/// request left (the sending turn, or its report); `consults_open` counts the
+/// consults dispatched whose route fold the call has not applied — each may
+/// have sent an admit its lost fold would have reported. The call is counted
+/// (refreshes its lease) iff held is not empty, which implies both
+/// `release_owed` and `admit_sent`.
 ///
 /// Every write is an operation of this type; the fields keep their order,
 /// which is the replicated (positional) encoding.
@@ -167,6 +79,8 @@ pub struct CallLimiterState {
     target_change: u64,
     change: u64,
     runs_on: Option<Vec<LimiterEntry>>,
+    admit_sent: bool,
+    consults_open: u32,
 }
 
 /// The change numbers of one epoch: a call's counter moves to the next
@@ -232,6 +146,8 @@ impl CallLimiterState {
             target_change: 0,
             change: 0,
             runs_on: None,
+            admit_sent: false,
+            consults_open: 0,
         }
     }
 
@@ -259,7 +175,18 @@ impl CallLimiterState {
         change: u64,
         runs_on: Option<Vec<LimiterEntry>>,
     ) -> Self {
-        Self { key, release_owed, held, held_change, target, target_change, change, runs_on }
+        Self {
+            key,
+            release_owed,
+            held,
+            held_change,
+            target,
+            target_change,
+            change,
+            runs_on,
+            admit_sent: release_owed,
+            consults_open: 0,
+        }
     }
 
     /// The limiter key every hold of the call is kept under.
@@ -274,10 +201,11 @@ impl CallLimiterState {
     }
 
     /// Whether the limiter may hold a set for the key, whatever held states:
-    /// an admit request may have left for it, its answer lost or not yet
-    /// applied. `false` only when nothing can have landed for the key.
+    /// an admit request left for it, its answer lost or not yet applied, or a
+    /// consult whose fold the call has not applied may have sent one. `false`
+    /// only when nothing can have landed for the key.
     pub fn may_hold(&self) -> bool {
-        self.release_owed || self.counted()
+        self.admit_sent || self.consults_open > 0 || self.counted()
     }
 
     /// The set the limiter last stated it holds for the call.
@@ -360,6 +288,7 @@ impl CallLimiterState {
     pub fn owe_consult(&mut self, n: u64) -> ConsultAdmits {
         let may_hold = self.may_hold();
         self.release_owed = true;
+        self.consults_open = self.consults_open.saturating_add(1);
         ConsultAdmits { first_change: self.reserve_changes(n), may_hold }
     }
 
@@ -381,6 +310,7 @@ impl CallLimiterState {
             return Replacement::NothingToSend { change };
         }
         self.release_owed = true;
+        self.admit_sent = true;
         Replacement::Send { change, held: self.held_set() }
     }
 
@@ -406,7 +336,9 @@ impl CallLimiterState {
     /// A refused or superseded change is not taken: the target is the held
     /// set, the newest statement of all.
     pub fn apply_admit(&mut self, report: &AdmitReport) {
-        self.release_owed |= report.owed_release().is_some();
+        let sent = report.owed_release().is_some();
+        self.release_owed |= sent;
+        self.admit_sent |= sent;
         self.change = self.change.max(report.change);
         if let Some(held) = report.held() {
             self.apply_held(&held);
@@ -424,13 +356,21 @@ impl CallLimiterState {
         self.target_change = report.change;
     }
 
-    /// Apply a route fold's admit ([`apply_admit`](Self::apply_admit)): a
-    /// fold that `runs_route` (a failover route, a release reroute) moves the
-    /// call onto the route's set whatever its outcome, in any report order; a
-    /// resolution after a refused route runs the call on its target.
+    /// Apply a route fold's admit ([`apply_admit`](Self::apply_admit)), which
+    /// closes the consult it answers: a fold that `runs_route` (a failover
+    /// route, a release reroute) moves the call onto the route's set whatever
+    /// its outcome, in any report order; a resolution after a refused route
+    /// runs the call on its target.
     pub fn apply_fold(&mut self, report: &AdmitReport, runs_route: bool) {
-        self.apply_admit(report);
+        self.apply_unawaited_fold(report);
         self.runs_on = runs_route.then(|| report.entries.clone());
+    }
+
+    /// Apply a route fold no consult awaits any more: its admit applies and it
+    /// closes its consult, moving no route onto the call.
+    pub fn apply_unawaited_fold(&mut self, report: &AdmitReport) {
+        self.consults_open = self.consults_open.saturating_sub(1);
+        self.apply_admit(report);
     }
 
     /// Apply a refresh answer for `key` stating `held`, if it states one. An

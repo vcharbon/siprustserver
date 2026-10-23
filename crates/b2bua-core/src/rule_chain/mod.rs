@@ -17,7 +17,7 @@ use crate::answer_deadline::Screened;
 use crate::config::B2buaConfig;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
 use crate::obligations::ObligationSet;
-use crate::rules::actions::{Owed, Settle};
+use crate::rules::actions::{possibly_confirmed, Owed, Settle};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
 use crate::turn_notes::TurnNotes;
@@ -137,6 +137,15 @@ pub fn rule_chain_turn(
     if fired(event, &TimerType::NotifyAnswerCap) {
         let before = call.clone();
         exec.release_at_cap(&mut call, &mut ladder_fx);
+        let released = HandlerResult { call, effects: ladder_fx };
+        return enforced(fw, &before, released, now_ms, &mut exec.turn.notes);
+    }
+    // A caller dialog held possibly confirmed is the framework's: its hold
+    // ends with her ACK naming it or at its deadline, its BYE leaves, and no
+    // rule sees either (ADR-0055 §4).
+    if let Some(tag) = possibly_confirmed::released_by(&call, event, source_leg_id) {
+        let before = call.clone();
+        exec.release_possibly_confirmed(&mut call, &mut ladder_fx, &tag);
         let released = HandlerResult { call, effects: ladder_fx };
         return enforced(fw, &before, released, now_ms, &mut exec.turn.notes);
     }

@@ -45,7 +45,20 @@ sut_helm() { # <verb...> -- [helm args]
   return "$rc"
 }
 
+# The Secret of the workers' shared key (values-kind.yaml names it), drawn
+# once: an existing one is kept, so a redeploy keeps the running pods' key.
+sut_cluster_key() {
+  kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS" >/dev/null \
+    || die "cannot create namespace $NS"
+  kubectl -n "$NS" get secret b2bua-worker-cluster-key >/dev/null 2>&1 && return 0
+  log "drawing the workers' cluster key (secret b2bua-worker-cluster-key)"
+  kubectl -n "$NS" create secret generic b2bua-worker-cluster-key \
+    --from-literal=key="$(head -c 24 /dev/urandom | base64 | tr -d '\n')" >/dev/null \
+    || die "cannot create secret b2bua-worker-cluster-key in $NS"
+}
+
 sut_release() { # [helm args]
+  sut_cluster_key
   log "helm upgrade --install $SUT_RELEASE ($NS, $SUT_CHART)"
   sut_helm upgrade --install -- --create-namespace "$@" --wait --timeout "$ROLLOUT_TIMEOUT"
 }

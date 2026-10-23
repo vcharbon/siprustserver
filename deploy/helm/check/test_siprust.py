@@ -123,6 +123,31 @@ class ProxyKnobs(unittest.TestCase):
         self.assertIn("recvShards", render_error(SIPRUST, *KIND, "--set", "proxy.recvShards=0"))
 
 
+class ClusterKey(unittest.TestCase):
+    """The workers' shared key comes from a Secret the chart never draws (ADR-0055 §12)."""
+
+    @staticmethod
+    def key_ref(docs: list[Doc]) -> list[Doc]:
+        w = container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker")
+        return [e["valueFrom"]["secretKeyRef"] for e in w.get("env", [])
+                if e["name"] == "B2BUA_CLUSTER_KEY"]
+
+    def test_replication_reads_the_key_from_the_named_secret(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "worker.clusterKey.existingSecret=lab-key")
+        self.assertEqual(self.key_ref(docs), [{"name": "lab-key", "key": "key"}])
+        self.assertFalse([d for d in docs if d["kind"] == "Secret"
+                          and "cluster-key" in d["metadata"]["name"]])
+
+    def test_replication_without_a_key_secret_is_refused(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "worker.clusterKey.existingSecret=")
+        self.assertIn("worker.clusterKey.existingSecret", err)
+
+    def test_a_worker_without_replication_reads_no_key(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "worker.replication.enabled=false",
+                      "--set", "worker.clusterKey.existingSecret=")
+        self.assertEqual(self.key_ref(docs), [])
+
+
 class Backends(unittest.TestCase):
     def test_producer_and_consumer_declare_the_same_queue(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "cdr.maxLength=5000", "--set", "cdr.queue=records")

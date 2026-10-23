@@ -1,10 +1,25 @@
 use super::*;
 use std::collections::HashMap;
 
+/// `pairs`, a cluster key among them unless they state one.
 fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-    let map: HashMap<String, String> =
+    let mut map: HashMap<String, String> =
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    map.entry("B2BUA_CLUSTER_KEY".into()).or_insert_with(|| "0123456789abcdef".into());
     move |k| map.get(k).cloned()
+}
+
+#[test]
+fn replication_without_a_cluster_key_refuses_the_boot() {
+    let e = ReplicationSettings::from_lookup(lookup(&[
+        ("B2BUA_REPL", "1"),
+        ("B2BUA_PEERS", "w0@10.0.0.1"),
+        ("B2BUA_CLUSTER_KEY", ""),
+    ]))
+    .expect_err("an HA worker without the cluster key must not start");
+    assert!(e.contains("B2BUA_CLUSTER_KEY"), "{e}");
+    let off = ReplicationSettings::from_lookup(lookup(&[("B2BUA_CLUSTER_KEY", "")]));
+    assert_eq!(off, Ok(None), "a worker without replication needs no key");
 }
 
 fn settings(pairs: &[(&str, &str)]) -> ReplicationSettings {

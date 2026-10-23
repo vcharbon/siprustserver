@@ -87,7 +87,7 @@ impl ActionExecutor<'_> {
         let ack_branch = released.clone().unwrap_or_else(|| self.turn.ids.new_branch());
         let dialog = relay::to_gen_dialog(leg, &straggler);
         let opts = GenerateAckFor2xxOpts {
-            via: Some(relay::leg_via(self.config, marks, leg_id, ack_branch.clone())),
+            via: Some(relay::leg_via(self.config, marks, leg_id, None, ack_branch.clone())),
             cseq: Some(invite_cseq),
             content_type: answer.is_some().then(relay::sdp),
             body: answer.unwrap_or_default(),

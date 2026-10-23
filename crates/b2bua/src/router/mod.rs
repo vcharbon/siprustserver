@@ -34,6 +34,8 @@ mod dialog_gate;
 #[cfg(test)]
 mod dialog_gate_tests;
 mod dropped_on_delete;
+#[cfg(test)]
+mod evidence_gate_tests;
 mod fold_payload;
 mod hold;
 mod incarnation_gate;
@@ -45,6 +47,8 @@ mod materialise;
 mod notes;
 mod owed;
 mod peer_metrics;
+#[cfg(test)]
+mod possibly_confirmed_tests;
 pub(crate) use peer_metrics::outbound_proxy_target;
 mod process;
 #[cfg(test)]
@@ -71,6 +75,7 @@ mod turn_label;
 pub(crate) mod txn_event;
 mod unaddressable;
 mod undecided;
+mod unheld;
 mod unrecoverable;
 #[cfg(test)]
 mod unrecoverable_tests;

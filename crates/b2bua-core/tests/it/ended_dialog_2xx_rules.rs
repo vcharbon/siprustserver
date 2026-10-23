@@ -16,7 +16,7 @@ use sip_ids::TurnIds;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
-use super::lost_round_rules::{bridged, requests_to, turn};
+use super::evidence_rules::{bridged, requests_to, turn};
 
 /// The callee's offer in a 2xx to an offerless re-INVITE.
 const OFFER: &str = "v=0\r\no=bob 2 2 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\na=sendrecv\r\n";
@@ -47,13 +47,27 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
     ActionExecutor { config: &config, turn: &mut ids, now_ms: 0 }.execute(actions, call, &ctx)
 }
 
-/// The callee's `status` final to the `method` of CSeq `cseq` on its dialog,
-/// carrying `sdp`.
-fn from_bob(status: u16, cseq: u32, method: &str, sdp: &str) -> CallEvent {
+/// The branch of the request of CSeq `cseq` the record holds as sent on
+/// `leg`'s dialog: the one its final names.
+fn sent_branch(call: &call::Call, leg: &str, cseq: u32) -> String {
+    let leg = call::helpers::find_leg(call, leg).expect("the leg");
+    let cseq = i64::from(cseq);
+    leg.dialogs
+        .iter()
+        .flat_map(|d| d.sent_invite.iter().chain(d.requests.iter()))
+        .find(|r| r.outbound_cseq == cseq)
+        .and_then(|r| r.branch().map(str::to_string))
+        .expect("a request the record holds at that number")
+}
+
+/// The callee's `status` final to the `method` of CSeq `cseq` this stack sent
+/// on its dialog of `call`, carrying `sdp`.
+fn from_bob(call: &call::Call, status: u16, cseq: u32, method: &str, sdp: &str) -> CallEvent {
+    let branch = sent_branch(call, "b-1", cseq);
     let typed = if sdp.is_empty() { "" } else { "Content-Type: application/sdp\r\n" };
     let raw = format!(
         "SIP/2.0 {status} OK\r\n\
-Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK{method}{cseq}\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch={branch}\r\n\
 From: <sip:svc@10.0.0.9>;tag=svc\r\n\
 To: <sip:bob@10.0.0.2>;tag=bobtag\r\n\
 Call-ID: bcid@x\r\n\
@@ -117,7 +131,7 @@ fn ack_to_bob(result: &HandlerResult) -> (u32, String) {
 #[test]
 fn a_2xx_crossing_our_bye_is_acked_its_offer_rejected() {
     let (call, reinvite, _) = reinvite_then_bye();
-    let (rule, result) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
+    let (rule, result) = turn(&call, &from_bob(&call, 200, reinvite, "INVITE", OFFER));
     assert_eq!(rule, Some("ack-2xx-on-ended-dialog"));
     let result = result.expect("a turn");
     let (cseq, answer) = ack_to_bob(&result);
@@ -132,9 +146,9 @@ fn a_2xx_crossing_our_bye_is_acked_its_offer_rejected() {
 #[test]
 fn a_2xx_after_our_bye_was_answered_is_acked() {
     let (call, reinvite, bye) = reinvite_then_bye();
-    let (_, answered) = turn(&call, &from_bob(200, bye, "BYE", ""));
+    let (_, answered) = turn(&call, &from_bob(&call, 200, bye, "BYE", ""));
     let call = answered.expect("the BYE's final resolves the leg").call;
-    let (rule, result) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
+    let (rule, result) = turn(&call, &from_bob(&call, 200, reinvite, "INVITE", OFFER));
     assert_eq!(rule, Some("ack-2xx-on-ended-dialog"));
     let (cseq, answer) = ack_to_bob(&result.expect("a turn"));
     assert_eq!(cseq, reinvite);
@@ -144,7 +158,7 @@ fn a_2xx_after_our_bye_was_answered_is_acked() {
 #[test]
 fn a_repeat_of_that_2xx_is_re_acked_with_the_same_ack() {
     let (call, reinvite, _) = reinvite_then_bye();
-    let event = from_bob(200, reinvite, "INVITE", OFFER);
+    let event = from_bob(&call, 200, reinvite, "INVITE", OFFER);
     let (_, first) = turn(&call, &event);
     let first = first.expect("a turn");
     let (rule, _) = turn(&first.call, &event);
@@ -158,7 +172,7 @@ fn a_2xx_on_a_confirmed_dialog_is_not_this_rules() {
         &[RuleAction::SendReinvite { leg_id: "b-1".into(), body: None, add_headers: vec![] }],
     );
     let cseq = sent_to_bob(&reinvited).remove(0).cseq().seq();
-    let (rule, _) = turn(&reinvited.call, &from_bob(200, cseq, "INVITE", OFFER));
+    let (rule, _) = turn(&reinvited.call, &from_bob(&reinvited.call, 200, cseq, "INVITE", OFFER));
     assert_ne!(rule, Some("ack-2xx-on-ended-dialog"));
 }
 
@@ -166,7 +180,7 @@ fn a_2xx_on_a_confirmed_dialog_is_not_this_rules() {
 fn a_2xx_answering_our_offer_is_acked_bare() {
     let ours = Body::own(OFFER.replace("bob", "svc").into_bytes(), None);
     let (call, reinvite, _) = reinvite_carrying_then_bye(Some(ours));
-    let (rule, result) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
+    let (rule, result) = turn(&call, &from_bob(&call, 200, reinvite, "INVITE", OFFER));
     assert_eq!(rule, Some("ack-2xx-on-ended-dialog"));
     let (_, answer) = ack_to_bob(&result.expect("a turn"));
     assert!(answer.is_empty(), "the 2xx answered our offer: the ACK is bare: {answer}");
@@ -179,7 +193,7 @@ fn a_2xx_whose_relayed_ack_is_still_owed_is_left_to_its_originator() {
     let dialog = leg.dialogs.established_mut().expect("the callee's dialog");
     call::helpers::sent_exchange_mut(dialog).expect("the re-INVITE's record").awaited_ack_cseq =
         Some(i64::from(reinvite));
-    let (rule, _) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
+    let (rule, _) = turn(&call, &from_bob(&call, 200, reinvite, "INVITE", OFFER));
     assert_ne!(rule, Some("ack-2xx-on-ended-dialog"));
 }
 
@@ -192,7 +206,7 @@ fn the_rejecting_answer_continues_the_session_the_stack_stated() {
     let leg = call.b_legs.iter_mut().find(|l| l.leg_id == "b-1").expect("the callee's leg");
     leg.sdp_session.sent_origin = Some("- 708 708 IN IP4 10.10.0.9".into());
     leg.sdp_session.sent_media = vec!["audio 4000 RTP/AVP 0".into()];
-    let (_, result) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
+    let (_, result) = turn(&call, &from_bob(&call, 200, reinvite, "INVITE", OFFER));
     let (_, answer) = ack_to_bob(&result.expect("a turn"));
     assert!(answer.contains("\r\no=- 708 709 IN IP4 10.10.0.9\r\n"), "{answer}");
     assert!(answer.contains("m=audio 0 "), "{answer}");
@@ -200,10 +214,11 @@ fn the_rejecting_answer_continues_the_session_the_stack_stated() {
 
 /// The caller's `status` final to the re-INVITE of CSeq `cseq` this stack sent
 /// on her dialog, carrying `sdp`.
-fn from_alice(status: u16, cseq: u32, sdp: &str) -> CallEvent {
+fn from_alice(call: &call::Call, status: u16, cseq: u32, sdp: &str) -> CallEvent {
+    let branch = sent_branch(call, "a", cseq);
     let raw = format!(
         "SIP/2.0 {status} OK\r\n\
-Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bKa{cseq}\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5080;branch={branch}\r\n\
 From: <sip:bob@host>;tag=b2bua-a\r\n\
 To: <sip:alice@host>;tag=atag\r\n\
 Call-ID: c1@alice\r\n\
@@ -234,6 +249,7 @@ fn on_the_callers_leg_the_rejecting_answer_continues_the_stacks_session() {
     call::testkit::stage_leg(&mut call.a_leg, call::LegState::Terminated);
     let config = B2buaConfig::default();
     let event = from_alice(
+        &call,
         200,
         u32::try_from(cseq).unwrap(),
         OFFER.replace("bob 2 2", "alice 9 9").as_str(),

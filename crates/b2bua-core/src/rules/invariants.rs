@@ -40,6 +40,7 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     if result.call.state == CallModelState::Terminating
         && is_fully_resolved(&result.call)
         && !super::actions::holds_requests(&result.call)
+        && !super::actions::possibly_confirmed::holds_any(&result.call)
     {
         result.call.state = CallModelState::Terminated;
     }
@@ -155,7 +156,7 @@ fn answer_a_leg_if_unanswered(
 ) {
     if matches!(before.a_leg.state(), LegState::Trying | LegState::Early) {
         let (call, effects) = (&mut result.call, &mut result.effects);
-        answer_unanswered_caller(call, effects, now_ms, advertisement, notes);
+        answer_unanswered_caller(call, effects, now_ms, advertisement, notes, None);
     }
 }
 
@@ -169,15 +170,19 @@ pub(crate) fn answer_unanswered_caller(
     now_ms: i64,
     advertisement: &CapabilitySet,
     notes: &mut TurnNotes,
+    under: Option<String>,
 ) {
     if call.a_leg_invite.headers.is_empty() || call.a_leg.invite_final_sent().is_some() {
         return;
     }
     let Some(a_invite) = super::relay::caller_invite(call, notes) else { return };
     let a_leg_id = call.a_leg.leg_id.clone();
-    // Reuse the a-leg's own tag when an 18x already pinned one (Early);
-    // otherwise `generate_response`'s deterministic fallback tag applies.
-    let to_tag = call.a_leg.own_tag.clone().filter(|t| !t.is_empty());
+    // The a-leg's own tag when an 18x already pinned one (Early), else the
+    // one the call derives for it: the tag a provisional its earlier owner
+    // showed carried (ADR-0055 §4).
+    let to_tag = under
+        .or_else(|| call.a_leg.own_tag.clone().filter(|t| !t.is_empty()))
+        .or_else(|| Some(crate::caller_tags::own(call)));
     let mut own = Vec::new();
     super::capabilities::stamp_own_advertisement(advertisement, |_| false, &mut own);
     let Some(mut effect) = super::relay::response_to_a_leg(

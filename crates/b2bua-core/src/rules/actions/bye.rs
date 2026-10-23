@@ -149,7 +149,17 @@ impl ActionExecutor<'_> {
         // this dialog's `our_cseq + 1`, the next sequence number within THIS
         // dialog (a forked sibling's CSeq is irrelevant — distinct dialog).
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, marks, leg_id, branch)),
+            via: Some(relay::leg_via(
+                self.config,
+                marks,
+                leg_id,
+                Some(relay::RequestFacts {
+                    method: "BYE",
+                    uri: &dialog.remote_target,
+                    offer: false,
+                }),
+                branch,
+            )),
             extra_headers,
             body: relayed.body,
             content_type: relayed.content_type,

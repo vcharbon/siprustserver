@@ -5,14 +5,18 @@
 //! without an external lookup, and a straggler of an earlier call on the same
 //! `callRef` is told from the live one. The Via also states the call's other
 //! owner (`bak`), which the front proxy signs into the leg's stickiness cookie
-//! (ADR-0055 §8).
+//! (ADR-0055 §8), and, signed with the cluster key, the leg and the request's
+//! Request-URI (`vx`, ADR-0055 §12): a node that holds no record of the
+//! request reads them off its response.
 //!
 //! `callRef` contains `|` (and Call-IDs may contain `@`/`:`), which are unsafe
 //! in a SIP param value, so the values are percent-encoded here and decoded by
 //! [`decode_param`] on the read path.
 
 use crate::config::B2buaConfig;
+use sip_ids::SigningKey;
 use sip_message::header::{self, ParamValue, Uri, Via};
+use sip_message::via_extension::{self, ViaExtension};
 use sip_message::SipStr;
 // The cr/lg/callRef param codec lives in sip-message so the encoder and its
 // inverse can't drift across crates; re-export so existing `stack_identity::`
@@ -31,6 +35,21 @@ pub struct StackIdentityOpts<'a> {
     /// The worker that owns the call beside the sender, `None` for a call
     /// with one owner.
     pub other_owner: Option<&'a str>,
+    /// What the request the Via rides states about itself — its Request-URI
+    /// and whether it carries a session offer — with the cluster key that
+    /// signs it into the via-extension; `None` states none.
+    pub request: Option<(RequestFacts<'a>, &'a SigningKey)>,
+}
+
+/// What an outbound request states about itself in the via-extension.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestFacts<'a> {
+    /// The request's method, as its CSeq states it.
+    pub method: &'a str,
+    /// The request's Request-URI.
+    pub uri: &'a str,
+    /// Whether the request carries a session offer (RFC 3264 §4).
+    pub offer: bool,
 }
 
 /// A parameter carrying an encoded value.
@@ -39,11 +58,13 @@ fn encoded(value: &str) -> ParamValue {
 }
 
 /// Build the B2BUA Via for an outbound message (with `cr`/`lg`/`ci`/`rport`
-/// params, and `bak` naming the call's other owner when it has one).
+/// params, `bak` naming the call's other owner when it has one, and the
+/// signed `vx` when the request states its Request-URI and it fits).
 pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
+    let cr = encode_param(opts.call_ref);
     let mut via = Via::udp(SipStr::owned(opts.local_ip), opts.local_port)
         .with_branch(SipStr::owned(&branch))
-        .with_param("cr", encoded(opts.call_ref))
+        .with_param("cr", ParamValue::Token(SipStr::owned(&cr)))
         .with_param("lg", encoded(opts.leg))
         .with_param("ci", encoded(opts.incarnation_mark))
         .requesting_rport();
@@ -53,7 +74,74 @@ pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
     if let Some(owner) = opts.other_owner.filter(|o| !o.is_empty()) {
         via = via.with_param("bak", encoded(owner));
     }
+    if let Some((facts, key)) = opts.request {
+        let ext = ViaExtension {
+            leg: opts.leg.to_string(),
+            request_uri: facts.uri.to_string(),
+            offer: facts.offer,
+        };
+        let stated = Stated {
+            call_ref: opts.call_ref,
+            leg: opts.leg,
+            incarnation_mark: opts.incarnation_mark,
+            branch: &branch,
+            method: facts.method,
+        };
+        let signature = key.sign(&signed_parts(&stated, &ext));
+        if let Some(value) = ext.param(&signature) {
+            via = via.with_param(via_extension::PARAM, value);
+        }
+    }
     via
+}
+
+/// The via-extension `via` carries on a response to a `method` request, when
+/// its signature verifies under `key` for the call, leg, incarnation and
+/// branch the Via names; `None` without a key, an extension, or a signature
+/// that verifies (ADR-0055 §12: a failed signature is ignored).
+pub fn read_via_extension(
+    via: &Via,
+    method: &str,
+    key: Option<&SigningKey>,
+) -> Option<ViaExtension> {
+    let key = key?;
+    let decoded = |name: &str| via.param(name).and_then(ParamValue::as_str).map(decode_param);
+    let (call_ref, leg, incarnation_mark) = (decoded("cr")?, decoded("lg")?, decoded("ci")?);
+    let stated = Stated {
+        call_ref: &call_ref,
+        leg: &leg,
+        incarnation_mark: &incarnation_mark,
+        branch: via.branch()?,
+        method,
+    };
+    let (ext, signature) = via_extension::read(via)?;
+    key.verify(&signed_parts(&stated, &ext), &signature).then_some(ext)
+}
+
+/// What the Via states beside the extension, decoded, that its signature
+/// binds the extension to.
+struct Stated<'a> {
+    call_ref: &'a str,
+    leg: &'a str,
+    incarnation_mark: &'a str,
+    branch: &'a str,
+    method: &'a str,
+}
+
+/// What the via-extension's signature covers: the call, leg and incarnation
+/// the Via names, its branch, the request's method, and the extension's leg,
+/// Request-URI and offer flag.
+fn signed_parts<'a>(stated: &'a Stated, ext: &'a ViaExtension) -> [&'a [u8]; 8] {
+    [
+        stated.call_ref.as_bytes(),
+        stated.leg.as_bytes(),
+        stated.incarnation_mark.as_bytes(),
+        stated.branch.as_bytes(),
+        stated.method.as_bytes(),
+        ext.leg.as_bytes(),
+        ext.request_uri.as_bytes(),
+        ext.offer_flag().as_bytes(),
+    ]
 }
 
 /// Build the B2BUA Contact for an outbound message (with `callRef`/`leg`/`ci` params).
@@ -149,6 +237,76 @@ mod tests {
         assert_eq!(via.branch(), Some("z9hG4bKabc"));
     }
 
+    fn facts(uri: &str) -> RequestFacts<'_> {
+        RequestFacts { method: "INVITE", uri, offer: true }
+    }
+
+    fn key(byte: u8) -> SigningKey {
+        SigningKey::new(&[byte; 32]).expect("a 32-byte key")
+    }
+
+    #[test]
+    fn a_request_stating_its_uri_carries_the_signed_extension() {
+        let k = key(1);
+        let o = StackIdentityOpts {
+            request: Some((facts("sip:bob@10.0.0.2:5070"), &k)),
+            ..opts(false)
+        };
+        let via = build_call_via(&o, "z9hG4bKabc".to_string());
+        let ext = read_via_extension(&via, "INVITE", Some(&k)).expect("a verified extension");
+        assert_eq!(ext.leg, "b-1");
+        assert_eq!(ext.request_uri, "sip:bob@10.0.0.2:5070");
+        assert!(ext.offer);
+    }
+
+    #[test]
+    fn an_extension_is_trusted_under_the_signing_key_only() {
+        let k = key(1);
+        let o = StackIdentityOpts { request: Some((facts("sip:bob@10.0.0.2"), &k)), ..opts(false) };
+        let via = build_call_via(&o, "z9hG4bKabc".to_string());
+        assert_eq!(read_via_extension(&via, "INVITE", Some(&key(2))), None);
+        assert_eq!(read_via_extension(&via, "INVITE", None), None);
+    }
+
+    #[test]
+    fn an_extension_moved_to_another_call_fails_its_signature() {
+        let k = key(1);
+        let o = StackIdentityOpts { request: Some((facts("sip:bob@10.0.0.2"), &k)), ..opts(false) };
+        let signed = build_call_via(&o, "z9hG4bKabc".to_string());
+        let value = signed.param(via_extension::PARAM).cloned().expect("vx");
+        let other = StackIdentityOpts { call_ref: "w1|other|tag", ..opts(false) };
+        let moved = build_call_via(&other, "z9hG4bKabc".to_string())
+            .with_param(via_extension::PARAM, value);
+        assert_eq!(read_via_extension(&moved, "INVITE", Some(&k)), None);
+    }
+
+    #[test]
+    fn an_extension_is_bound_to_its_branch_method_leg_and_incarnation() {
+        let k = key(1);
+        let o = StackIdentityOpts { request: Some((facts("sip:bob@10.0.0.2"), &k)), ..opts(false) };
+        let signed = build_call_via(&o, "z9hG4bKabc".to_string());
+        assert!(read_via_extension(&signed, "INVITE", Some(&k)).is_some());
+        assert_eq!(read_via_extension(&signed, "BYE", Some(&k)), None, "another method");
+        let value = signed.param(via_extension::PARAM).cloned().expect("vx");
+        for other in [
+            StackIdentityOpts { leg: "b-2", ..opts(false) },
+            StackIdentityOpts { incarnation_mark: "other", ..opts(false) },
+        ] {
+            let moved = build_call_via(&other, "z9hG4bKabc".to_string())
+                .with_param(via_extension::PARAM, value.clone());
+            assert_eq!(read_via_extension(&moved, "INVITE", Some(&k)), None);
+        }
+        let rebranched = build_call_via(&opts(false), "z9hG4bKother".to_string())
+            .with_param(via_extension::PARAM, value);
+        assert_eq!(read_via_extension(&rebranched, "INVITE", Some(&k)), None, "another branch");
+    }
+
+    #[test]
+    fn a_via_without_a_request_states_no_extension() {
+        let via = build_call_via(&opts(false), "z9hG4bKabc".to_string());
+        assert_eq!(via.param(via_extension::PARAM), None);
+    }
+
     fn opts(is_emergency: bool) -> StackIdentityOpts<'static> {
         StackIdentityOpts {
             local_ip: "10.0.0.1",
@@ -158,6 +316,7 @@ mod tests {
             incarnation_mark: "k3x9",
             is_emergency,
             other_owner: None,
+            request: None,
         }
     }
 

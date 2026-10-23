@@ -278,13 +278,18 @@ fn a_ringing_call_seeds_the_a_leg_server_invite_and_the_b_leg_client_invite_once
     );
 }
 
-/// A call still `Trying` — nothing above a 100 went to the caller — seeds the
-/// a-leg INVITE with no To-tag: the layer mints one on its first response.
+/// A call still `Trying` in its record — nothing above a 100 recorded toward
+/// the caller — seeds the a-leg INVITE under the tag the call derives for
+/// her: what a provisional an earlier owner showed carried (ADR-0055 §4).
 #[test]
-fn an_unrung_a_leg_seeds_no_to_tag() {
+fn an_unrung_a_leg_seeds_the_derived_caller_tag() {
     let call = call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
     let seeds = seeds_for(&call, 0);
-    assert_eq!(server_identity(&seeds[0]), Some(("acid@alice", "atag", None, Some("a"))));
+    let own = b2bua_core::caller_tags::own(&call);
+    assert_eq!(
+        server_identity(&seeds[0]),
+        Some(("acid@alice", "atag", Some(own.as_str()), Some("a")))
+    );
 }
 
 /// An established call names no in-flight INVITE: the answered handles stay

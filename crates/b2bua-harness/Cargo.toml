@@ -10,6 +10,8 @@ description = "Test-only harness: binds a real `b2bua` B2buaCore as a System-Und
 workspace = true
 
 [dependencies]
+# The cluster key every harness worker signs its via-extension with.
+sip-ids = { path = "../sip-ids" }
 b2bua = { path = "../b2bua", features = ["testkit"] }
 call = { path = "../call" }
 sip-message = { path = "../sip-message", features = ["sniff"] }

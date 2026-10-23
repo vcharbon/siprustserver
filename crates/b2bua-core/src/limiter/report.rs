@@ -113,7 +113,7 @@ pub fn apply_to_call(
             if awaited {
                 call.limiter.apply_fold(&report, runs_route);
             } else {
-                call.limiter.apply_admit(&report);
+                call.limiter.apply_unawaited_fold(&report);
             }
         }
         _ => call.limiter.apply_admit(&report),

@@ -255,6 +255,15 @@
         "outboundProxy": {
           "type": "boolean"
         },
+        "clusterKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": {
+              "type": "string"
+            }
+          }
+        },
         "replication": {
           "type": "object",
           "additionalProperties": false,

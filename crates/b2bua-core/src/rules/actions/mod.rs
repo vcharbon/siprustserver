@@ -8,7 +8,10 @@
 //! - `record_write` — the actions that write the record or hand a request to a
 //!   service or the limiter, with no SIP leaving
 //! - `ack_leg` — the ACK of a 2xx toward a leg, relayed or this stack's own
-//! - `lost_round` — the ACK of an INVITE final for a round the record lost
+//! - `evidence` — what evidence the record cannot explain is owed, and the
+//!   dialog state it proves (ADR-0055 §4)
+//! - `possibly_confirmed` — the caller dialog held while it may carry a 2xx
+//!   another owner sent (ADR-0055 §4)
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
 //! - `relay_pending_response` — a response to a request this stack relayed
 //! - `request_record` — the non-INVITE request records: written as a request
@@ -44,10 +47,11 @@ mod create_leg;
 mod dialog_end;
 mod dialog_track;
 mod dispatch;
+mod evidence;
 mod ladder;
-mod lost_round;
 mod originate;
 mod peer_bye;
+pub mod possibly_confirmed;
 mod prack;
 mod provisional_arrival;
 mod record_write;

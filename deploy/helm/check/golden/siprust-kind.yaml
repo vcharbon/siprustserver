@@ -832,6 +832,11 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        - name: B2BUA_CLUSTER_KEY
+          valueFrom:
+            secretKeyRef:
+              key: key
+              name: b2bua-worker-cluster-key
         - name: B2BUA_ADVERTISE
           value: $(POD_IP)
         - name: B2BUA_CDR_RABBITMQ_MAX_LEN

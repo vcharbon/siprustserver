@@ -68,6 +68,7 @@ pub mod site;
 #[cfg(feature = "sniff")]
 pub mod sniff;
 pub mod trace_sample;
+pub mod via_extension;
 pub mod worker_report;
 pub mod write_check;
 

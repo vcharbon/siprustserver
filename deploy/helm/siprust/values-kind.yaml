@@ -29,6 +29,9 @@ worker:
   # The lab is the HA lab: worker kills fail over to the survivor.
   replication:
     enabled: true
+  # Created by kind-lab.sh deploy before the release (lib/sut.sh).
+  clusterKey:
+    existingSecret: b2bua-worker-cluster-key
   nodeSelector: { tier: app }
   # One worker per app node: a node fault takes one worker, and a primary
   # and its backup share no CPU.

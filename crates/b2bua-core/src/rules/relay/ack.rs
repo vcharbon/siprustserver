@@ -72,7 +72,7 @@ pub fn ack_b_leg(
     let ack_cseq =
         acked_invite_cseq(leg, dialog).unwrap_or_else(|| super::wire_cseq(dialog.our_cseq));
     let opts = GenerateAckFor2xxOpts {
-        via: Some(leg_via(config, marks, &leg.leg_id, branch.clone())),
+        via: Some(leg_via(config, marks, &leg.leg_id, None, branch.clone())),
         cseq: Some(ack_cseq),
         body,
         content_type,
