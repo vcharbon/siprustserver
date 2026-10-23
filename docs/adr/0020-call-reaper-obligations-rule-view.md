@@ -1,6 +1,8 @@
 # 0020 — Call reaper, obligation vocabulary, and the narrowed rule-facing call view
 
 **Status:** accepted (2026-06-11)
+Amended (2026-10-23): X3, the CDR is written at least once with a key and a discharged
+marker (ADR-0055 §5).
 
 ## Context
 

@@ -1,6 +1,7 @@
 # A timer dies with its scope; attempts are in the call model
 
 **Status:** accepted (2026-10-10)
+Amended (2026-10-23): §2, the business re-check moves into timer scopes (ADR-0055 §10).
 
 **Owner:** `crates/call/src/model/timer.rs`, `attempt.rs` and
 `helpers/attempt.rs`; the engine side is `crates/b2bua/src/router/timer_screen.rs`,

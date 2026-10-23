@@ -3,6 +3,8 @@
 **Status:** accepted (2026-09-13). Amended (2026-10-12): the case table, leaving the slice takes over
 the worker's calls with an INVITE in flight (ADR-0047). Amended (2026-10-16): D4, the proxy's
 `Draining` grace is removed; Draining reports `new=refuse` on an OPTIONS `200` (ADR-0050).
+Amended (2026-10-23): D2, D4 and the per-axis fold, replaced by containment and one
+routing rule (ADR-0055 §3, §7, §8).
 
 **Source:** this codebase. Triggered by the failover-harness scenario
 `crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs` and its views

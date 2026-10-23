@@ -3,6 +3,8 @@
 **Status:** accepted (2026-07-03). Amended (2026-10-12): X4, the front proxy relays the worker's 100, and an
 INVITE response bound for a dead worker fails over on the cookie of its Record-Route or of the proxy's Via.
 Amended (2026-10-12): X4 and X5, a caller that heard the 100 is answered when its worker departs (ADR-0047).
+Amended (2026-10-23): the first provisional of an INVITE leaves after the call's write,
+up to a cap (ADR-0055 §3).
 
 ## Context
 

@@ -8,6 +8,8 @@ wire-protocol, and terminal-discharge design lives in ADR-0014: takeover is
 discharge to the primary), reconciliation is the `(p,b)` version vector, and the
 wire is four frames over two single-flow sockets. The sections below are trimmed
 to what ADR-0014 did not replace.
+Amended (2026-10-23): X5, fencing by worker identity compared for equality (ADR-0055
+§6).
 
 **Source:** sipjsserver @ `fffc4ac6`,
 `src/replication/{ReplLogServer,PullerFiber,ReplicationProtocol,ReplicationSupervisor,PeerScanBootstrap,ChannelStream,ChannelIndex,EpochCounter,genCounter,EchoApply,ReadinessController,PullerHttpTransport}.ts`,

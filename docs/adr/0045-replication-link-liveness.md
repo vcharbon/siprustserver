@@ -1,6 +1,8 @@
 # Replication link liveness
 
 **Status:** accepted (2026-10-11)
+Amended (2026-10-23): the hold of the ACK and the first provisional reads the applied
+position (ADR-0055 §3).
 
 **Owner:** `crates/b2bua/src/repl/puller.rs` (connect, idle and send bounds,
 the backoff), `repl/server.rs` (the `Noop` interval, the blocked-send bound,

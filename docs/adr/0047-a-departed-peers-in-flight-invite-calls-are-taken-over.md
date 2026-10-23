@@ -1,6 +1,8 @@
 # A departed peer's in-flight INVITE calls are taken over
 
 **Status:** accepted (2026-10-12)
+Amended (2026-10-23): D5 and its residuals, the lost round becomes the evidence rule of
+any method (ADR-0055 §3, §4).
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),

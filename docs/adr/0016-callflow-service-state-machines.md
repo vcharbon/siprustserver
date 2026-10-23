@@ -1,6 +1,8 @@
 # 0016 — Callflow services as explicit per-call state machines
 
 **Status:** accepted (2026-06-06)
+Amended (2026-10-23): the SDK carries no HA event and no HA configuration (ADR-0055
+§10).
 
 ## Context
 

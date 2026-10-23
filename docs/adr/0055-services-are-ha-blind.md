@@ -1,0 +1,442 @@
+# Services are HA-blind
+
+**Status:** proposed (2026-10-23)
+
+**Amends:** ADR-0011 X5 (fencing by identity, §6), ADR-0014 (the replication
+write path, the confirm-race trade-off, the INVITE-only seeds, §2–§4), ADR-0016
+(the SDK surface, §10), ADR-0020 X3 (the CDR discharge, §5), ADR-0022 (the first
+provisional of an INVITE, §3), ADR-0031 D2 and D4 and its per-axis fold (§3,
+§7, §8), ADR-0037 items 4 and 6 (a replica left out makes the call non-HA, §3),
+ADR-0042 §2 (the business re-check moves into timer scopes, §10), ADR-0045 (the
+hold reads the applied position, §3), ADR-0047 D5 and its residuals (the lost
+round becomes the rule of §4, any method; the creation write before the first
+provisional, §3).
+
+**Owner:** `crates/call` (the request record, the subscription record, timer
+scopes), `crates/b2bua-core` (the method table, the settle paths, the evidence
+rule), `crates/b2bua` (the turn engine, the replication write path, the store
+and its envelope, materialise, reclaim, departure, stand-down), `crates/repl-net`
+(send on write, explicit replica refusal), `crates/sip-txn` (seeds for every
+method, the first provisional handed to the turn engine), `crates/sip-proxy` (the
+routing rule, the Via cookie on every method), `crates/b2bua-sdk` (the seam),
+`crates/cdr-consumer-runner` (dedupe), `crates/failover-harness` (placement,
+steering, turn points, the sweep), `scripts/purity.py` (the blind/aware
+boundary).
+
+## Terms
+
+- **Call record**: the replicated `Call`.
+- **Request record**: one transaction the call takes part in (§2).
+- **Call incarnation**: the RFC 3261 §8.1.3.5 retry identity of a call on one
+  `call_ref` (`call/src/incarnation.rs`).
+- **Worker identity**: one boot of one worker ordinal (§6).
+- **Owner**: the primary or the backup of a call; a call with no backup has one
+  owner.
+
+## Context
+
+The call record is the unit of replication (ADR-0008, ADR-0011), so a service's
+own state (`ext`, cursors, the timer ledger) replicates without an opt-in, and
+`RuleCall` exposes no topology and no takeover mark
+(`b2bua-sdk/src/rule_call.rs:21`). The SDK as a whole is not HA-free:
+`CallEvent::CallQuiesced` (`b2bua-sdk/src/event.rs:94-97`), the takeover and
+reclaim knobs of `B2buaConfig` (`config.rs:110-113, 429`) and
+`CallEvent::Sip.matched_client_txn` (`event.rs:17-24`) sit in it. Below the seam,
+three facts make every in-dialog method a separate HA problem:
+
+1. **The wire runs ahead of the replica, and the replica can miss a write.** A
+   turn replaces the live copy, queues its flush and sends at once
+   (`router/interpret.rs:77-171`). The flush goes through a bounded channel whose
+   `try_send` drops the write when full (`store/terminate_writer.rs:1-3, 69`); the
+   backup polls every 100 ms (`repl/server.rs:65`); a backup at its memory
+   ceiling leaves a new call's replica out (ADR-0037 item 4). The transaction
+   layer sends the 100 Trying of every INVITE before any turn
+   (`sip-txn/src/layer/server.rs:342-364`). ADR-0014 accepts the window as the
+   confirm-race; corrections inside it were written per case (`lost_round`,
+   `ack-lost-round`).
+2. **Only INVITE is a round.** Takeover seeds INVITE transactions only
+   (`router/materialise/seeds.rs`, `sip-txn/src/seed.rs:15-40`); the fold, the
+   stand-down weighing and the proxy's response failover know INVITE rounds
+   only (`sip-proxy/src/core/response.rs:137-161`; the Via cookie covers INVITE,
+   CANCEL and ACK, `core/request/via_cookie.rs:51-53`). A request in flight lives
+   in `inbound_pending_requests`, `pending_invite_txn`, five 2xx/ACK fields
+   (`ack_branch`, `pending_reinvite_2xx`, `awaited_ack_cseq`, `answered_2xx`,
+   `emitted_ack`), `owed_answer`, `own_notify`, `RetiredDialog::open_relays`, the
+   `provisionals` ladder, and records of its own or none for BYE, keepalive
+   OPTIONS and a service's own request. `handle-timeout` sits behind four
+   per-method intercepts.
+3. **Reconciliation is per axis.** A rounds-only fold keeps the local copy's
+   service state while taking the other copy's dialog facts
+   (`call/src/helpers/round.rs:76-82`), so service progress made only on the
+   other copy is dropped; the lifecycle order the fold reads is partial
+   (`call/src/helpers/lifecycle.rs:55-75`).
+
+In the history of HA corrections that touched in-dialog behaviour, about two in
+five needed rule or per-method code to learn about takeover, and the same
+correction was made again for a second method or phase at least eight times.
+
+## Decision
+
+### 1. The contract
+
+A service or per-method author writes single-node logic. HA lives only in the
+aware crates (§11). The blind crates hold no HA type, no HA term and no HA
+branch.
+
+What a service may rely on, and all it must know:
+
+- every per-call fact lives in the call record (`ext`, a typed slice, the
+  ledger);
+- an off-turn request is delivered at least once: the backend may receive it
+  more than once, and its answer may come back as "no answer" at the deadline
+  though the backend acted (ADR-0039). The platform puts a stable key on every
+  attempt (the `call_ref`, the call incarnation, a per-call request sequence
+  reserved by the sending turn); only the first answer the call awaits reaches
+  the service;
+- a call may end cleanly at any instant (§4).
+
+None of these is an HA statement: a single node already behaves this way
+(`http-net/src/backend/retry.rs:38-52` re-sends after a timeout or a reset).
+
+### 2. One request record for every transaction of a call
+
+Every transaction the call takes part in, the dialog-creating INVITEs included,
+is one request record: direction (received and owed an answer, or sent and
+awaited), origin (relayed from the peer leg, own, held for a later answer, or
+queued and not sent yet), method, CSeq, branch, the request image as sent, the
+linked request record on the peer leg for a relay, the deadline, the owed ACK of
+an INVITE 2xx, and the dialog usage it belongs to (the INVITE session, or a
+subscription by `Event`/`id`, RFC 6665 §4.5, RFC 5057). A request record
+outlives its dialog's retirement until it settles (a late fork 2xx is ACKed and
+BYEd, RFC 3261 §13.2.2.4). Offer/answer is a fact of the session, not of a
+request record: an offer may open in one transaction and close in another (a
+reliable 18x and its PRACK, RFC 3262 §5; a 2xx and its ACK; an UPDATE, RFC 3311).
+
+One state machine settles a request record on a final, a timeout, a CANCEL, a
+crossing BYE, the leg's end, the call's release and a takeover. It replaces the
+fields listed in the Context, `OwnNotify`, the four `handle-timeout` intercepts
+and the per-method verdicts of `dialog_gate` and `teardown`.
+
+What differs by method is one table that knows no HA:
+
+- INVITE: offer/answer, the reliable-provisional ladder and its RSeq/RAck
+  mapping (RFC 3262 §3), an owed ACK on 2xx, 491 on glare (RFC 3261 §14);
+- UPDATE: offer/answer, 491 on glare (RFC 3311 §5.2);
+- PRACK: may carry the answer (RFC 3262 §5);
+- any non-INVITE: a final ends the exchange; the client side holds through
+  Timer K (§17.1.2);
+- REFER: opens an implicit subscription (RFC 3515);
+- NOTIFY: carries subscription state; after `terminated` no NOTIFY is sent on
+  that subscription (RFC 6665 §4.2.2); NOTIFYs of one subscription leave in
+  order;
+- BYE: ends the dialog; it is queued behind an owed ACK and behind an own NOTIFY
+  in flight (RFC 3261 §15).
+
+A held request record lets a service answer a received request on a later turn.
+A held non-INVITE carries a deadline under the originator's Timer F, 64·T1,
+with a margin, and is answered by the platform when it passes (RFC 4320 §4.1,
+RFC 5057 §5.1). A held re-INVITE owes a provisional (RFC 3261 §13.3.1.1).
+
+Takeover seeds a transaction from every request record, any method, client or
+server, through one path. A seeded client transaction retransmits the request
+record's image under its branch (§17.1.2.2).
+
+### 3. The replication write path
+
+- **Order.** A turn writes the call record into the replication change log
+  before any effect of the turn leaves the node. The order lives in the turn
+  engine alone.
+- **One entry per call, never dropped.** The change log holds one entry per
+  call; a newer write moves it, and the terminal write (the delete and the
+  discharged marker, §5) is the last. The channel that drops a write when full
+  goes: the turn writes into the change log directly. A delete is kept until
+  every backup of the call applied it.
+- **Sent on write.** Replication stays pull-only: the backup opens the
+  connection. The serving side sends a write as soon as it is in the change log;
+  there is no poll cadence.
+- **Calls without a backup.** A call has no backup, for its whole life, when it
+  is admitted while the backlog toward its backup is above a high-water mark,
+  or when its backup refuses the replica at its own memory ceiling (ADR-0037
+  item 4); the refusal is a frame to the primary, and the backup's applied
+  position moves past it. The backlog is measured per backup peer: the entries
+  above that peer's applied position and the age of the oldest. New calls get a
+  backup again once the backlog is under a low-water mark. No call is refused
+  for the backlog. A gauge counts the live calls with no backup; such a call
+  runs as on a non-HA B2BUA.
+- **No effect waits for the peer, with one bounded exception.** The ACK and the
+  first provisional of every INVITE, initial or re-INVITE (the messages that
+  stop a peer retransmitting), leave once the backup has applied the write that
+  records what they answer, or once a cap expires, whichever comes first.
+  "Applied" means the backup's applied position reached the call's current
+  change-log entry. The cap is a configuration value; its default and the
+  first-provisional bound below are set from the SIP timers, and configuration
+  refuses a cap not below T1 and not below the §17.2.1 bound for the 100. The
+  first provisional is counted from the INVITE's receipt: the turn engine sends
+  it after the call's write, and the transaction layer sends the 100 itself if
+  no turn released one by the §17.2.1 bound. A call with no live, bootstrapped
+  backup skips the hold. A held ACK leaves before any later effect on its dialog
+  (RFC 3261 §14.1). Every other effect (a final, a relayed request, the dialled
+  INVITE, media) leaves at once.
+- **A write is abandoned only with its backup.** It stays in the change log
+  until the backup applies it, or until the replication link to that backup is
+  down (ADR-0045 link liveness) and the call loses its backup.
+
+A graceful drain is transparent: it exits once the backup has caught up. A
+kill is not: a final or a relay that left inside the replication window is
+evidence §4 ends the call on. Full transparency is not the goal; the window is
+the transport delay.
+
+### 4. Evidence the call record cannot explain: one rule, any method
+
+One rule, in `b2bua-core`, fires on any node; on a single node only a broken or
+forged peer can trigger it. Its triggers are closed:
+
+1. a final in a dialog whose CSeq is strictly above the dialog's local sequence,
+   any method;
+2. a final at or below the local sequence, under a branch of ours that no
+   request record holds and that is not a retransmission of a settled one (the
+   copy re-used a sequence number the dead owner had sent);
+3. an ACK naming an INVITE on a leg for which the call record holds no final
+   sent;
+4. a BYE from the callee on a dialog the call record holds as early (RFC 3261
+   §15 forbids it before a 2xx);
+5. a 2xx whose via-extension (§12) names a leg the call record lacks.
+
+A final with no request record that matches none of these is stray and is
+discarded or re-ACKed as today (§17.1.1.2, §18.1.2). A caller's BYE on an early
+dialog, an UPDATE, PRACK or INFO on an early dialog, and a request with an
+unknown To-tag (481, §12.2.2) are not evidence. A response for a call no node
+holds is answered as an unknown dialog would be: a 2xx is ACKed and BYEd from
+its own headers, a non-2xx INVITE final is ACKed from the via-extension.
+
+The rule sends what RFC 3261 requires for the message (the ACK of an INVITE
+final, §13.2.2.4, §17.1.1.3) and ends the call cleanly over every dialog the
+call record or the evidence names:
+
+- a dialog the evidence names is BYEd with the evidence's tags and the route
+  set the call record holds; this is construction, the call record is not
+  repaired;
+- a leg the call record holds as unanswered, when the evidence proves its peer
+  leg answered, may hold a 2xx the call record never saw: the node sends the
+  owed non-2xx at once (a UAC that has the 2xx discards it, RFC 6026), keeps the
+  dialog under the leg's tag as possibly confirmed, and BYEs it on its ACK or at
+  64·T1. The tag a B2BUA mints toward the caller at a 2xx is derived from a keyed
+  per-call seed, the leg and the callee's tag (RFC 3261 §19.3), so any owner
+  computes the same tag. A BYE that meets no dialog draws a 481 and does no harm;
+- one CDR, every hold released.
+
+Every effect outside SIP is keyed per call: a limiter admit is keyed and expires
+by lease unless an owner refreshes it (ADR-0040); an off-turn request carries
+the key of §1; the CDR carries the key of §5.
+
+### 5. The CDR: at least once, keyed, deduplicated
+
+The CDR carries the `call_ref` and the call incarnation; `cdr-consumer-runner`
+deduplicates on them over a window at least as long as the replica TTL, so
+downstream sees one CDR per call. A replicated discharged marker, carrying the
+vector and the answered flag, makes a second writer rare: any node ending the
+call writes the CDR unless the marker says another did (a takeover copy, a
+returning primary, the departure sweep, the TTL reap). The tombstone admits an
+unseen terminal as a CDR-only discharge. The departure sweep takes ownership of
+every call of a departed primary, `Terminating` and quiet calls included.
+
+### 6. One author per ordinal: identity, compared for equality
+
+Each worker identity is the orchestrator's pod UID (the informer's
+`targetRef.uid`, its own from the downward API), or a per-boot token in a static
+pool. Membership carries it (`topology::Peer`), and a changed identity is handled
+as a changed address. A worker that finds its own ordinal bound to another
+identity enters `Superseded`: it stops authoring at once (no SIP, no write, no
+CDR) and exits without draining. Peers need no refusal rule: replication is
+pull-only (§3) and a peer pulls from the address membership binds to the ordinal
+(`repl-net/src/frame.rs:136-200`). A request record names a relay's owner by
+ordinal and worker identity. No order is drawn from a clock.
+
+A worker cut off from the orchestrator is not fenced; its writes meet §7 at the
+heal and its SIP meets §4.
+
+### 7. Two writers after a split: containment
+
+Containment holds for two copies of one call incarnation, under pull-only
+replication, and with no vector ever adopted without its body (the adoption mark
+is deleted).
+
+Each copy carries a state stamp in the store envelope: the vector of its last
+write that changed a compared field, set at the one site that bumps the vector.
+Of two concurrent copies, R contains L when L's stamp is at or below R's vector,
+component by component.
+
+- One contains the other: take it whole and merge the exempt fields; the merged
+  copy's vector is the component-wise maximum and its stamp is the container's.
+- Each contains the other: take the primary's.
+- Neither: the node that meets the other copy ends the call cleanly (§4), from
+  the copy ranked higher by `lifecycle_behind` (the primary's on a tie), over
+  the union of both copies' dialogs by tags (ADR-0041): each dialog's state is
+  the further of the two, the BYE goes at the greater CSeq plus one, answered is
+  the OR of both, CDR events are the union.
+
+The exempt fields are a closed list; every other field is compared, so a new
+field fails safe:
+
+- maximum: the vector, each dialog's local and remote CSeq (§12.2.1.1), the
+  message and turn counters, the timer generation;
+- union: CDR events, each leg's message ring;
+- the container's or the base copy's value stands: keepalive request records,
+  keepalive and refresh ledger entries and the ladder rungs a quiet turn moves
+  (none changes a dialog), the limiter's refresh counter (its lease expires),
+  the skew offsets of §9, trace fields.
+
+There is no per-axis fold.
+
+### 8. The proxy routes on one rule
+
+A response, and an in-dialog request toward the B2BUA, goes to the owner that
+holds its transaction; if that owner is not alive, to the call's other owner; a
+call with one owner goes to it. The rule is the same for every method, and the
+proxy's Via cookie is pushed on every method. The call's backup is stated by the
+worker on every request it sends for the call, and the proxy signs it into that
+leg's cookie, so every leg names the same backup.
+
+A worker's own in-dialog requests keep following the route set through the
+proxy, which forwards them without an ownership check. While two copies run (a
+split, or the moment before an owner learns the other took a dialog), both can
+mint one CSeq on a dialog; §11's split cells declare that window as an RFC
+deviation, and §7 ends a call whose copies diverged.
+
+### 9. Every instant in the call record carries its own anchor
+
+Every absolute instant the call record holds (ledger deadlines, `sent_at`
+stamps, the INVITE's send time, the creation time) is replicated with the skew
+composed across hops, and a local write resets the offset, so it survives any
+number of takeovers unshifted.
+
+### 10. The seam carries no HA value
+
+- A leg's ring state is `Silent` or `Rang`. A restore that finds no 18x on
+  record keeps the core's ring deadline running from the INVITE, inside the
+  core; services read the leg as not having rung.
+- A timer declares its scope (ADR-0042), and a scope "until the caller is
+  answered" joins `Call`, `Attempt`, `Leg` and `Obligation`
+  (`call/src/model/timer.rs:259-264`). A fire whose scope ended, on a restored
+  ledger or not, is dropped by the turn engine. A rule never re-checks for a
+  stale ledger, so a service overriding a core rule takes on nothing.
+- `CallEvent` carries no `matched_client_txn` and no `CallQuiesced`;
+  `B2buaConfig` carries no HA field. Both move to the aware crates.
+
+### 11. The proof
+
+- **The blind/aware boundary.** Every crate's manifest declares
+  `[package.metadata.ha] side = "blind" | "aware"`; `scripts/purity.py` checks
+  that a blind crate's normal dependencies are all blind. Blind: `call`,
+  `b2bua-core`, `b2bua-sdk`, consumer service and decision crates. Aware:
+  `b2bua`, `repl-net`, `sip-proxy`, the runners, the harnesses and every
+  end-to-end test crate. The vector leaves the call record for the store
+  envelope; the topology cookie leaves `b2bua-core`; a consumer's decision crate
+  depends on a blind seam crate, not on `b2bua`.
+- **A word net** over the blind crates refuses `takeover`, `reclaim`,
+  `tombstone`, `materialise`/`materialize`, `stand-down` and `replica` as a whole
+  word. These words have no SIP or domain meaning there. No allowlist.
+- **A failover sweep** in `failover-harness`, on the paused clock, in a lane of
+  its own. Every shape of a catalogue (re-INVITE, UPDATE, REFER with its
+  NOTIFYs, INFO, PRACK, a BYE crossing each, the keepalive, a forked answer, a
+  media-server leg) is cut at every turn point, each split into write in the
+  change log, effect left and write applied at the backup, by these incidents:
+  - primary killed, backup killed, split, split then healed: each cell ends
+    with an RFC-clean, fully terminated call, one CDR after dedupe, full
+    cleanup; a split cell declares the duplicate-CSeq window of §8;
+  - replication stalled past the cap of §3, then a kill: a caller whose INVITE
+    transaction saw neither final nor provisional from the copy is answered by
+    its own Timer B with no CDR, and a callee whose 2xx tag the call record never
+    held keeps its dialog until its own timers end it;
+  - a backlog over the high-water mark, or a backup at its memory ceiling, then
+    a kill: a call with no backup is lost as on a non-HA B2BUA.
+
+  A consumer adds shapes through the plug-in base (ADR-0049) and nothing else;
+  a consumer shape that needs HA code of its own is a defect of this layer.
+- **A ratchet.** A cell that fails before its correction lands is listed with
+  the change that owns it. A new failure fails the lane, so does a listed cell
+  that passes. Each change flips the tests that pin the residual it removes
+  (`new_call_replication_window.rs`, `lost_round_rules.rs`, …) in the same
+  commit. The list only shrinks and is empty when §2–§12 have landed.
+
+### 12. A request the worker originates names its leg
+
+The worker's own Via carries a via-extension (§20.42): the leg and the
+request's Request-URI, signed by the worker with the cluster key, bounded in
+size and encoded as a token, so any owner that holds no request record of a
+dialled INVITE can CANCEL it or ACK its non-2xx from the callee's response
+(§9.1, §17.1.1.3). An extension whose signature fails is ignored.
+
+### 13. Harness verbs
+
+`failover-harness` gains: placement of a call on a named primary and backup (it
+picks a Call-ID that lands there); steering of a party's next request or of its
+responses to a named role, carried out through real causes (health, kill,
+partition), never by bypassing the proxy; turn points with their three
+sub-points, so an incident arms at turn k; and views named by role (primary,
+backup, copy).
+
+## Considered and rejected
+
+- **Wait for the backup before any effect leaves**, on every changing turn or on
+  lifecycle edges. It puts the peer's latency on call treatment. §3 holds only
+  the ACK and the first provisional, and only up to the cap.
+- **Drop a write when the queue is full.** A dropped confirm makes §4 end an
+  established call at the next kill. §3 keeps one entry per call and gives new
+  calls no backup instead.
+- **Refuse new calls on replication backlog.** A non-HA call is better than a
+  refused one.
+- **Repair by inference** on the copy. Each inference is per state and per
+  method. §4 constructs the end from the evidence and repairs nothing.
+- **A per-axis fold, or a lifecycle winner after a split.** The lifecycle order
+  is partial and undefined on concurrent writes. §7 decides by containment and
+  uses the lifecycle rank only to pick the base of an ending.
+- **An ordered epoch.** The worker generation is wall-clock derived and can step
+  backward (`repl/changelog.rs:366-386`); "refuse the elder" would fence the
+  live node.
+- **The proxy refusing a worker's own request when it routes the call
+  elsewhere.** It would close the duplicate-CSeq window of a split, but a health
+  flap would refuse a healthy worker's keepalive or BYE, and the two proxy
+  replicas can disagree. §8 declares the window instead.
+- **A word list over every crate.** "fold", "seed", "incarnation", "epoch",
+  "backup" carry non-HA meanings in the blind crates. §11 makes the boundary a
+  dependency rule.
+- **Exactly-once CDR.** No design without consensus delivers it across a split.
+
+## Consequences
+
+- A call whose write was lost at a kill, or whose copies diverged across a
+  split, ends cleanly. With replication sent on write the window is the
+  transport delay; at a few hundred state-changing turns a second, it is under
+  one call per kill.
+- No signalling latency depends on the peer, except the ACK and the first
+  provisional of an INVITE, by at most the cap.
+- Under a replication backlog or a backup at its memory ceiling, new calls run
+  without HA; the gauge shows how many.
+- The call record, `Dialog` and the SDK change shape; no compatibility is kept.
+- The rule files that know about takeover today lose that knowledge; a new
+  in-dialog method or service gets HA by a row in the method table and a shape in
+  the catalogue.
+- The CDR writer's overload buffer is outside this decision; the sweep reads
+  CDRs from the in-memory writer.
+
+## Implementation order
+
+Each step lands on its own with the ratchet green; a step that changes the SDK
+lands with the consumer's pointer bump.
+
+1. Harness verbs with sub-points (§13), the sweep and its ratchet (§11), on
+   today's code.
+2. CDR key and consumer dedupe (§5, first half); worker identity (§6); anchors
+   (§9). Independent of each other.
+3. The replication write path (§3).
+4. The request record, in four changes:
+   a. the Via cookie on every method and the one routing rule (§8);
+   b. non-INVITE request records and their seeds (§2);
+   c. the INVITE fields folded into the request record (§2);
+   d. the subscription record, with the consumer's queue deleted.
+5. The via-extension (§12), the evidence rule (§4) and the discharged marker
+   (§5, second half).
+6. Containment with the state stamp in the store envelope (§7).
+7. The timer scope and the seam (§10).
+8. The blind/aware boundary and the word net (§11).

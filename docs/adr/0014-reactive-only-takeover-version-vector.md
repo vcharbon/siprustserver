@@ -11,6 +11,8 @@ LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vecto
 single-flow sockets (§Stream topology below) with a trimmed wire message set.
 **Plan of record:** [docs/plan/passive-backup-reclaim-strategy.md](../plan/passive-backup-reclaim-strategy.md).
 **Implementation task list:** [docs/plan/0014-rehydration-simplification-tasks.md](../plan/0014-rehydration-simplification-tasks.md).
+Amended (2026-10-23): the replication write path, the confirm-race trade-off and the
+INVITE-only seeds (ADR-0055 §2–§4).
 
 ---
 

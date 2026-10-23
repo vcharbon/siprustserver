@@ -1,6 +1,8 @@
 # Admission is bounded by memory; emergency calls keep a higher ceiling
 
 **Status:** accepted (2026-09-25)
+Amended (2026-10-23): items 4 and 6, a replica left out leaves the call without a backup
+(ADR-0055 §3).
 
 ## Context
 
