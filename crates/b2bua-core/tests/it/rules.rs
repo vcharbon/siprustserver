@@ -3200,8 +3200,8 @@ mod ack_leg_body {
     }
 }
 
+mod bye_order;
 mod create_leg_admission;
-
 mod txn_timeouts;
 
 // ── default_sdp config → CreateLeg body_override (service fake-offer source) ──

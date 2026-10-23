@@ -379,7 +379,8 @@ INVITE transactions the replicated record names**, in one router module
 
 - a `Proceeding` client INVITE for each INVITE handle still open (the record
   says which; a handle kept for a taken 2xx's re-ACK is not in flight), with
-  the INVITE bound armed and no re-send;
+  the INVITE bound armed and no Timer A ladder; one the record holds no
+  provisional for opens `Trying` and re-sends its INVITE once (ADR-0043);
 - a `Proceeding` server INVITE for the a-leg's initial INVITE while the a-leg
   is unanswered (request rebuilt from the replicated snapshot, To-tag pinned),
   and for each pending relayed INVITE, holding the originator's request rebuilt

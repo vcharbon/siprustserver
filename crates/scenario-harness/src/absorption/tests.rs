@@ -197,6 +197,21 @@ fn a_copy_of_an_answered_invite_draws_its_latest_provisional_again() {
     assert!(a.take_repeats().is_empty(), "a 2xx is the TU's to repeat");
 }
 
+/// A copy that arrived after the provisional but before the 2xx left, and is
+/// read only once the 2xx is out, is absorbed with nothing drawn: the 2xx
+/// already answers it, and no provisional follows a final.
+#[test]
+fn a_copy_queued_behind_a_later_answer_draws_nothing() {
+    let a = Absorption::transaction_view();
+    assert_eq!(sight(&a, INVITE).owner, Owner::Tu);
+    let dst: SocketAddr = "10.0.0.1:5060".parse().unwrap();
+    a.note_sent(&parse(RINGING_SENT), RINGING_SENT.as_bytes(), dst, 0);
+    a.note_sent(&parse(OK), OK.as_bytes(), dst, 1);
+    let restamped = INVITE.replace("Call-ID: c1", "Call-ID: c1\r\nX-Restamped: yes");
+    assert_eq!(sight(&a, &restamped).owner, Owner::TxnDuplicate);
+    assert!(a.take_repeats().is_empty(), "nothing drawn after the 2xx");
+}
+
 /// An INVITE of another transaction carrying the Call-ID, From-tag and
 /// CSeq of one received is a merged request: answered 482, below the TU
 /// (RFC 3261 §8.2.2.2).

@@ -59,15 +59,21 @@ impl Identity {
     }
 }
 
-/// What one INVITE transaction last sent, and the first arrival ordinal that
+/// A response one INVITE transaction sent, and the first arrival ordinal that
 /// came after it: a copy still queued when it left arrived before it.
 enum Sent {
-    /// Nothing yet.
-    Nothing,
     /// A 2xx: a copy draws nothing.
     Accepted { after: u64 },
     /// A provisional or a non-2xx final: a copy draws it again.
     Repeat { wire: Vec<u8>, dst: SocketAddr, after: u64 },
+}
+
+impl Sent {
+    fn after(&self) -> u64 {
+        match self {
+            Sent::Accepted { after } | Sent::Repeat { after, .. } => *after,
+        }
+    }
 }
 
 /// What an INVITE arriving at this endpoint is.
@@ -84,14 +90,16 @@ pub(super) enum Copy {
 /// The per-endpoint table of INVITE server transactions.
 #[derive(Default)]
 pub(super) struct Invited {
-    txns: Mutex<HashMap<Key, (Identity, Sent)>>,
+    txns: Mutex<HashMap<Key, (Identity, Vec<Sent>)>>,
 }
 
 impl Invited {
     /// What `r`, the `ordinal`-th arrival, is: a copy of an INVITE whose
     /// transaction this endpoint holds and answered, or a merged request —
     /// `None` for the first copy of one, which opens the transaction, for a
-    /// copy that arrived before any response, and for any other request.
+    /// copy that arrived before any response, and for any other request. A
+    /// copy draws the response its transaction had last sent when it arrived,
+    /// and nothing when a later one already left.
     pub(super) fn sight(&self, r: &SipRequest, ordinal: u64) -> Option<Copy> {
         if r.method().as_str() != "INVITE" {
             return None;
@@ -100,9 +108,13 @@ impl Invited {
         let identity = Identity::of(r);
         let mut txns = self.txns.lock().unwrap();
         if let Some((_, sent)) = txns.get(&key) {
-            return match sent {
-                Sent::Nothing => None,
-                Sent::Accepted { after } | Sent::Repeat { after, .. } if ordinal < *after => None,
+            // The response the copy found sent when it arrived; a later one
+            // already answers it, so it draws nothing again.
+            let found = sent.iter().rposition(|s| s.after() <= ordinal)?;
+            if found + 1 < sent.len() {
+                return Some(Copy::Absorbed);
+            }
+            return match &sent[found] {
                 Sent::Accepted { .. } => Some(Copy::Absorbed),
                 Sent::Repeat { wire, dst, .. } => Some(Copy::Repeat(wire.clone(), *dst)),
             };
@@ -111,7 +123,7 @@ impl Invited {
         if merged {
             return Some(loop_detected(r).map_or(Copy::Absorbed, |(w, d)| Copy::Merged(w, d)));
         }
-        txns.insert(key, (identity, Sent::Nothing));
+        txns.insert(key, (identity, Vec::new()));
         None
     }
 
@@ -125,11 +137,11 @@ impl Invited {
         let Some(key) = Key::of_response(resp) else { return };
         let mut txns = self.txns.lock().unwrap();
         let Some((_, sent)) = txns.get_mut(&key) else { return };
-        *sent = if (200..300).contains(&resp.status()) {
+        sent.push(if (200..300).contains(&resp.status()) {
             Sent::Accepted { after }
         } else {
             Sent::Repeat { wire: wire.to_vec(), dst, after }
-        };
+        });
     }
 }
 

@@ -98,6 +98,10 @@ async fn a_reinvite_answered_after_its_nodes_departure_completes_on_the_live_cop
         hydrated_before + 1,
         "the departure took the call over, its round in flight",
     );
+    // The copy re-sends the re-INVITE it holds no provisional for, once, as a
+    // client in Trying retransmits (RFC 3261 §17.1.1.2).
+    let resent = bob.receive("INVITE").await;
+    assert_eq!(resent.request().top_via().branch(), at_bob.request().top_via().branch());
 
     // ── The callee answers the live copy ─────────────────────────────────────
     at_bob.respond(200, "OK").with_sdp(REANSWER).await;

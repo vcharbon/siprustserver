@@ -12,7 +12,7 @@ ext .rs
 # `exclude <path glob>`.
 
 crates/b2bua-core/src/rules/actions/respond.rs 621
-crates/b2bua-core/src/rules/defaults/core_rules.rs 1572
+crates/b2bua-core/src/rules/defaults/core_rules.rs 1561
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 921
 crates/b2bua-core/tests/it/rules.rs 5000
@@ -89,7 +89,7 @@ crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1722
 crates/scenario-harness/src/actor/response.rs 537
-crates/scenario-harness/src/actor/runner.rs 573
+crates/scenario-harness/src/actor/runner.rs 572
 crates/scenario-harness/src/actor/scenarios.rs 1086
 crates/scenario-harness/src/actor/script.rs 532
 crates/scenario-harness/src/actor/state.rs 667

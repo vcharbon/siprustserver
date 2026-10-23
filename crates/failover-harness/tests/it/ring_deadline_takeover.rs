@@ -8,10 +8,13 @@
 //! - when the primary dies before the callee's first 18x, that 18x reaches the
 //!   survivor, which arms the deadline from it (`a_first_18x_reaching_…`);
 //! - when the turn that took the first 18x dies with the primary before the
-//!   backup holds it, the copy the departure hands the survivor runs the ring
-//!   from the callee's INVITE while the leg reads as not having rung
-//!   (`a_first_18x_lost_with_the_primary_…`), and an 18x it later takes runs
-//!   the ring from that 18x (`a_later_18x_on_the_survivor_…`).
+//!   backup holds it, the copy the departure hands the survivor re-sends the
+//!   INVITE it holds no provisional for, and the callee's transaction repeats
+//!   that 18x (RFC 3261 §17.2.1), which arms the ring on the survivor
+//!   (`a_first_18x_lost_with_the_primary_…`); when that repeat is lost too,
+//!   the copy runs the ring from the callee's INVITE while the leg reads as
+//!   not having rung, and an 18x it later takes runs the ring from that 18x
+//!   (`a_later_18x_on_the_survivor_…`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -224,6 +227,10 @@ async fn a_first_18x_reaching_the_survivor_arms_the_ring_there() {
     // ── the primary dies before bob rings ───────────────────────────────────
     kill(&fh, primary, survivor, &proxy).await;
     fh.advance(Duration::from_millis(1_000)).await;
+    // The copy re-sends the INVITE it holds no provisional for (RFC 3261
+    // §17.1.1.2); bob has sent nothing on it yet.
+    let resent = bob.receive("INVITE").await;
+    assert_eq!(resent.request().top_via().branch(), uas.request().top_via().branch());
 
     // ── bob's first 18x reaches the survivor, which arms the ring from it ───
     let rang = fh.now_ms();
@@ -263,11 +270,13 @@ async fn a_first_18x_reaching_the_survivor_arms_the_ring_there() {
 /// backup holds the call as it was before it — the record a copy reads when
 /// the turn that took a 180 died unreplicated. The caller saw no 180, so the
 /// caller-facing dialog the lost turn would have opened is not in play here.
-/// Returns the call ref, the INVITE's send instant, alice's INVITE and bob's
-/// server transaction.
+/// `resend_lost` cuts bob off the signalling plane across the takeover, so the
+/// INVITE the copy re-sends never reaches him. Returns the call ref, the
+/// INVITE's send instant, alice's INVITE and bob's server transaction.
 async fn ring_lost_with_the_primary(
     c: &mut Cluster,
     primary_is_b1: &mut bool,
+    resend_lost: bool,
 ) -> (String, i64, scenario_harness::ClientInvite, scenario_harness::ServerTxn) {
     let call = c.alice.invite(&c.bob).with_sdp(OFFER).through(c.proxy.addr()).send().await;
     let mut uas = c.bob.receive("INVITE").await;
@@ -293,52 +302,54 @@ async fn ring_lost_with_the_primary(
     uas.respond(180, "Ringing").await;
     c.fh.advance(Duration::from_millis(100)).await;
     c.proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    if resend_lost {
+        c.fh.cut_signalling("bob", c.bob.addr());
+    }
     backup.simulate_peer_removed(&pri_ord);
     c.fh.advance(Duration::from_millis(300)).await;
+    if resend_lost {
+        c.fh.restore_signalling("bob", c.bob.addr());
+    }
     (call_ref, sent_at, call, uas)
 }
 
 /// Bob's 180 dies with the primary, whose departure hands the call to the
-/// survivor: the copy it takes over shows no ring, so it runs bob's ring from
-/// his INVITE and gives the ring up `no_answer_ms` after that INVITE —
-/// not at the setup deadline. Its INVITE transaction holds no provisional on
-/// record, so the CANCEL waits for one (RFC 3261 §9.1) and has the INVITE
-/// re-sent once; bob's transaction answers that retransmission with his latest
-/// provisional (§17.2.1), whose Record-Route brings it to the survivor and
-/// releases the CANCEL; bob's INVITE ends 487.
+/// survivor: the copy it takes over holds no provisional for bob's INVITE, so
+/// it re-sends that INVITE once (RFC 3261 §17.1.1.2). Bob's transaction
+/// answers the copy with his latest provisional (§17.2.1), whose Record-Route
+/// brings it to the survivor: the 180 is on record, relayed to the caller,
+/// and the ring runs from it; at its deadline bob is CANCELled and his INVITE
+/// ends 487.
 #[tokio::test(start_paused = true)]
-async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
-    let mut c = spawn_cluster("ring-deadline-lost-18x-presumed", LOST_RING_MS).await;
+async fn a_first_18x_lost_with_the_primary_is_repeated_to_the_re_sent_invite() {
+    let mut c = spawn_cluster("ring-deadline-lost-18x-repeated", LOST_RING_MS).await;
     let mut primary_is_b1 = true;
-    let (call_ref, sent_at, mut call, mut uas) =
-        ring_lost_with_the_primary(&mut c, &mut primary_is_b1).await;
+    let (call_ref, _sent_at, mut call, mut uas) =
+        ring_lost_with_the_primary(&mut c, &mut primary_is_b1, false).await;
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = c;
     let (primary, survivor) =
         if primary_is_b1 { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
-    let taken = survivor.live_call(&call_ref).expect("the departure handed the call over");
-    assert_eq!(taken.b_legs[0].ring, Ring::Silent, "no 18x of bob's is on record");
-    let fire_at = sent_at + LOST_RING_MS;
-    assert_eq!(ring_deadline(&taken), Some(fire_at), "the ring runs from the INVITE");
-
-    quiet_until(&fh, &bob, fire_at).await;
-    call.expect(480).await;
-    assert_eq!(
-        fh.now_ms(),
-        fire_at + HOPS_IN_MS,
-        "the caller is answered at the presumed deadline"
-    );
-
     // bob's transaction repeats his 180 to the re-sent INVITE (§17.2.1).
-    let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
+    let rang = fh.now_ms();
+    assert!(bob.try_receive_tolerating("INVITE", &[]).await.is_none(), "the copy is absorbed");
     let invites: Vec<_> =
         bob.wire_view().into_iter().filter(|e| e.start_line().starts_with("INVITE ")).collect();
-    let resent = invites.last().expect("the re-sent INVITE reached bob");
-    assert!(invites.len() >= 2, "the INVITE and its re-send");
+    let resent = invites.last().expect("the copy's INVITE reached bob");
     assert_eq!(resent.seen_by(), scenario_harness::absorption::SeenBy::WireOnly);
+    call.expect(180).await;
+    let taken = survivor.live_call(&call_ref).expect("the departure handed the call over");
+    assert_eq!(taken.b_legs[0].ring, Ring::Rang, "the repeated 180 is on record");
+    let fire_at = rang + HOPS_IN_MS + LOST_RING_MS;
+    assert_eq!(ring_deadline(&taken), Some(fire_at), "the ring runs from the repeated 180");
+
+    quiet_until(&fh, &bob, fire_at).await;
+    let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
+    assert_eq!(fh.now_ms(), fire_at + HOPS_IN_MS, "the CANCEL left at the deadline");
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;
+    call.expect(480).await;
     fh.advance(Duration::from_secs(40)).await;
     assert!(bob.try_receive_tolerating("INVITE", &[]).await.is_none(), "re-sent once only");
 
@@ -350,18 +361,22 @@ async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
     assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
 }
 
-/// Same lost 180; bob's 183 then hands the call to the survivor, which first
-/// presumes bob ringing since his INVITE and then, taking that 183, runs his
-/// ring from it.
+/// Same lost 180, and the INVITE the copy re-sends is lost too: the survivor
+/// presumes bob ringing since his INVITE, the leg reading as not having rung;
+/// bob's 183 then reaches it, and taking that 183 it runs his ring from it.
 #[tokio::test(start_paused = true)]
 async fn a_later_18x_on_the_survivor_replaces_the_presumed_ring() {
     let mut c = spawn_cluster("ring-deadline-lost-18x-takeover", LOST_RING_MS).await;
     let mut primary_is_b1 = true;
-    let (call_ref, _sent_at, mut call, mut uas) =
-        ring_lost_with_the_primary(&mut c, &mut primary_is_b1).await;
+    let (call_ref, sent_at, mut call, mut uas) =
+        ring_lost_with_the_primary(&mut c, &mut primary_is_b1, true).await;
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = c;
     let (primary, survivor) =
         if primary_is_b1 { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    let taken = survivor.live_call(&call_ref).expect("the departure handed the call over");
+    assert_eq!(taken.b_legs[0].ring, Ring::Silent, "no 18x of bob's is on record");
+    let presumed = sent_at + LOST_RING_MS;
+    assert_eq!(ring_deadline(&taken), Some(presumed), "the ring runs from the INVITE");
 
     fh.advance(Duration::from_millis(2_000)).await;
     let rang = fh.now_ms();

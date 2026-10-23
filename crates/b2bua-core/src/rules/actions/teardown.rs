@@ -99,9 +99,10 @@ impl ActionExecutor<'_> {
             relayed_teardown(ctx, RelaySituation::request(method, relay::toward_leg(leg_id)))
         };
         let hops = relayed_teardown_hops(ctx);
-        // A teardown a peer's BYE asked for: the ACK an owed answer would
-        // ride will not come.
-        let peer_left = ctx.request().is_some_and(|r| r.method() == Method::Bye);
+        // A teardown a peer's BYE asked for, or the give-up of a 2xx awaiting
+        // its ACK: the ACK an owed answer would ride will not come.
+        let answer_lost = ctx.request().is_some_and(|r| r.method() == Method::Bye)
+            || matches!(ended.0, TerminationCause::Timeout(call::TimeoutKind::Ack));
         // RFC 3326: the firing rule's teardown cause rides each BYE only when
         // it is a structured `SIP;cause=…` value (the `promote18xPemTo200`
         // diagnostic teardown). The CORE rules pass opaque labels
@@ -122,7 +123,7 @@ impl ActionExecutor<'_> {
                 LegState::Confirmed => {
                     let relayed = relayed(&Method::Bye, &id);
                     let reason = reason_header.or_else(|| own_release_reason(ctx));
-                    self.send_bye(call, fx, &id, reason, relayed, hops, peer_left);
+                    self.send_bye(call, fx, &id, reason, relayed, hops, answer_lost);
                     super::dialog_end::end_dialogs(call, ctx, &id, LegEnd::OurByeSent);
                 }
                 // The caller's INVITE is answered by the firing rule, or by
@@ -185,9 +186,6 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         stated: &[(String, String)],
     ) {
-        // A destroyed leg's ladders die with it (RFC 3262 §3): no rung
-        // re-offers a torn-down leg's answer.
-        self.retire(call, fx, Scope::Leg(leg_id));
         let stated: Vec<SipHeader> = stated
             .iter()
             .map(|(name, value)| SipHeader {
@@ -214,6 +212,10 @@ impl ActionExecutor<'_> {
             }
             _ => {}
         }
+        // A destroyed leg's ladders die with it (RFC 3262 §3): no rung
+        // re-offers a torn-down leg's answer, short of the 2xx its BYE waits
+        // behind (RFC 3261 §15).
+        self.retire_byed_leg(call, fx, leg_id);
         self.settle_at_leg_end(call, fx, leg_id);
         *call = call::helpers::update_leg(call.clone(), leg_id, settle_ended_leg);
     }

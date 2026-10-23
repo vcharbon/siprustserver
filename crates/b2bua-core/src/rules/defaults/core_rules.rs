@@ -15,7 +15,6 @@ use call::{
 use sip_message::header::RAck;
 use sip_message::{Method, SipRequest};
 
-use crate::rules::method_table::row;
 use b2bua_sdk::model::{
     LegEnd, Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition,
     RuleHandleResult, TimerDelay, CORE_LAYER,
@@ -91,9 +90,9 @@ pub(crate) fn unacked_2xx_give_up_actions(
 /// Every leg still holding a 2xx whose ACK this stack can compose alone
 /// ([`crate::rules::relay::bare_ack_owed`]). Either face qualifies — a b-leg
 /// answering the call, or the caller's face answering a relayed callee
-/// re-INVITE. Absent: a delayed-offer 2xx (only the silent peer's own ACK
-/// supplies its answer) and the a-leg's initial round, where this stack sent
-/// no INVITE and owes no ACK.
+/// re-INVITE. Absent: a delayed-offer 2xx, whose ACK the teardown composes
+/// rejecting every stream (RFC 3264 §6), and the a-leg's initial round, where
+/// this stack sent no INVITE and owes no ACK.
 pub(crate) fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
     std::iter::once(call.a_leg())
         .chain(call.b_legs().iter())
@@ -245,9 +244,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "reinvite-glare",
             &["relay-reinvite"],
-            Match::request()
-                .method("INVITE")
-                .filter(|ctx| row(&Method::Invite).glare && ctx.invite_glare()),
+            Match::request().method("INVITE").filter(|ctx| ctx.invite_glare()),
             |ctx| ok(vec![RuleAction::RefuseGlare { refusal: ctx.glare_refusal() }]),
         ),
         // UPDATE glare (RFC 3311 §5.2, `RuleContext::update_refusal`): 500 over
@@ -258,9 +255,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "update-glare",
             &["relay-update", "update-peer-unavailable"],
-            Match::request()
-                .method("UPDATE")
-                .filter(|ctx| row(&Method::Update).glare && ctx.update_refusal().is_some()),
+            Match::request().method("UPDATE").filter(|ctx| ctx.update_refusal().is_some()),
             |ctx| {
                 let refusal = ctx.update_refusal()?;
                 ok(vec![RuleAction::RefuseGlare { refusal }])
@@ -938,13 +933,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 // Pre-mark the BYE-sending leg `bye_received` (RFC 3261 §15.1.2) so the
                 // subsequent begin-termination skips it (no duplicate BYE back to the
-                // sender) and only tears down the peer. The 2xx the sender answered
-                // this stack's INVITE with is ACKed first where the ACK owes no answer
-                // (§13.2.2.4): its sender may take no other.
-                let source = ctx.source_leg_id.to_string();
-                let owed = ctx.source_leg().is_some_and(crate::rules::relay::bare_ack_owed);
-                let ack = owed.then(|| RuleAction::AckLeg { leg_id: source.clone(), body: None });
-                let answer = [
+                // sender) and only tears down the peer.
+                ok(vec![
                     RuleAction::Respond {
                         status: 200,
                         reason: "OK".into(),
@@ -952,22 +942,21 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         content_type: None,
                     },
                     RuleAction::TerminateLeg {
-                        leg_id: source.clone(),
+                        leg_id: ctx.source_leg_id.to_string(),
                         end: LegEnd::PeerByeAnswered,
                     },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
-                        leg_id: source.clone(),
+                        leg_id: ctx.source_leg_id.to_string(),
                         status_code: None,
                         reason: None,
                     },
                     RuleAction::BeginTermination {
                         reason: Some("BYE".into()),
                         cause: TerminationCause::RemoteBye,
-                        by_leg: Some(source),
+                        by_leg: Some(ctx.source_leg_id.to_string()),
                     },
-                ];
-                ok(ack.into_iter().chain(answer).collect())
+                ])
             },
         ),
         rule("relay-reinvite", &[], Match::request().method("INVITE"), |_| {

@@ -157,10 +157,9 @@ pub struct ActorState<'c> {
     /// dialog its 2xx confirms continues that dialog's CSeq (RFC 3261
     /// §12.2.1.1).
     pub(super) early_dialogs: HashMap<String, Dialog>,
-    /// `(fork To-tag, RSeq)` pairs of reliable provisionals this caller has
-    /// already PRACKed — so a retransmitted 183 is not double-PRACKed, while
-    /// a FORKED reliable 183 (distinct tag, same RSeq space per §12.1.2 — each
-    /// fork typically starts at RSeq 1) still gets its OWN PRACK (C1/E3).
+    /// `(dialog tag, RSeq)` of the reliable provisionals PRACKed on this leg:
+    /// a caller PRACKs each once per fork (C1/E3); a callee answers a second
+    /// PRACK of one 481 (RFC 3262 §3).
     pub(super) pracked_rseqs: HashSet<(String, u32)>,
     /// A held forking-UAS answer plan (C1/E3): set alongside
     /// `pending_prack_answer` by a RELIABLE [`Disposition::ForkingRing`], so the

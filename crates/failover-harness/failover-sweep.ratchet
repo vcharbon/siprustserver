@@ -73,19 +73,12 @@ media-leg/stalled-killed/t5-left  ADR-0055 §4  # the copy times out an INVITE t
 media-leg/stalled-killed/t5-logged  ADR-0055 §4  # the copy times out an INVITE the dead primary answered
 media-leg/stalled-killed/t6-left  ADR-0055 §4  # the copy times out an INVITE the dead primary answered
 media-leg/stalled-killed/t6-logged  ADR-0055 §4  # the copy times out an INVITE the dead primary answered
-prack/primary-killed/t2-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
-prack/primary-killed/t2-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
-prack/primary-killed/t3-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
 prack/primary-killed/t3-logged  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
 prack/primary-killed/t4-applied  ADR-0055 §12  # a later turn in flight at the kill: the non-2xx final of the CANCELled INVITE nobody ACKs
 prack/primary-killed/t5-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
 prack/primary-killed/t7-left  ADR-0055 §5  # CDR count
 prack/primary-killed/t8-left  ADR-0055 §5  # CDR count
 prack/primary-killed/t8-logged  ADR-0055 §5  # CDR count
-prack/split-healed/t2-left  ADR-0055 §2  # PRACK answered 481
-prack/split-healed/t2-logged  ADR-0055 §2  # PRACK answered 481
-prack/split-healed/t3-left  ADR-0055 §2  # PRACK's 200 reaches a copy holding no record of it
-prack/split-healed/t3-logged  ADR-0055 §2  # PRACK's 200 reaches a copy holding no record of it
 prack/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
 prack/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
 prack/stalled-killed/t2-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary

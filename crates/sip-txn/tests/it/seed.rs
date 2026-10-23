@@ -653,12 +653,13 @@ async fn a_seeded_cancel_with_no_provisional_on_record_waits_for_one() {
 }
 
 /// A client INVITE seeded with no provisional on record re-sends its INVITE
-/// once when a CANCEL is held on it — the CANCEL the seed carries, or one the
-/// TU sends later — so the callee resends its latest provisional (RFC 3261
-/// §17.2.1) and the CANCEL goes out on it. Nothing else is re-sent, and a seed
-/// no CANCEL waits on re-sends nothing.
+/// once, at the seed, as a client in `Trying` retransmits (RFC 3261
+/// §17.1.1.2): the callee resends its latest provisional (§17.2.1), and a
+/// CANCEL held on the seed — the one it carries, or one the TU sends later —
+/// goes out on it. A seed holding a provisional re-sends nothing, and no seed
+/// re-sends twice.
 #[tokio::test(start_paused = true)]
-async fn a_held_cancel_on_a_seed_re_sends_its_invite_once() {
+async fn a_seed_with_no_provisional_re_sends_its_invite_once() {
     let stack = Stack::build(TRANSIT, 64, 64).await;
     let (carried, later) = ("z9hG4bK-seed-carried", "z9hG4bK-seed-later");
     let seed = TxnSeed::ClientInvite {
@@ -674,7 +675,7 @@ async fn a_held_cancel_on_a_seed_re_sends_its_invite_once() {
     ];
     stack.txn.seed(CALL_REF, seeds).await.unwrap();
     elapse_ms(20).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 1, "the carried CANCEL's INVITE");
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 2, "each unanswered seed's INVITE");
 
     stack
         .txn
@@ -683,7 +684,7 @@ async fn a_held_cancel_on_a_seed_re_sends_its_invite_once() {
         .unwrap();
     elapse_ms(20).await;
     let sent = stack.drain_peer();
-    assert_eq!(count_requests(&sent, "INVITE"), 1, "the later CANCEL's INVITE");
+    assert_eq!(count_requests(&sent, "INVITE"), 0, "its INVITE was re-sent at the seed");
     assert_eq!(count_requests(&sent, "CANCEL"), 0, "both CANCELs wait for a 1xx");
 
     for (branch, call_id) in [(carried, "seed-carried"), (later, "seed-later")] {

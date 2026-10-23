@@ -433,14 +433,12 @@ pub(super) async fn react_in_dialog_request(
         // FORKING callee (C1/E3) answers only on the WINNER fork's PRACK — a
         // losing fork's PRACK (identified by its To-tag) is 200'd and absorbed.
         "PRACK" => {
-            // After this leg's own final (or its BYE) the early dialog the
-            // PRACK names is gone: 481 (RFC 3261 §12.2.2, RFC 3262 §3).
-            if st.obs.with_snapshot(|s| s.leg(st.role).phase() == LegPhase::Terminated) {
+            if super::prack_rx::names_nothing(st, uas.request()) {
                 uas.respond(481, "Call/Transaction Does Not Exist").try_send().await?;
                 return Ok(());
             }
-            st.ctx.anchor(&st.agent, "prack", uas.request());
             let prack_tag = uas.request().to().tag().map(str::to_owned);
+            st.ctx.anchor(&st.agent, "prack", uas.request());
             uas.respond(200, "OK").try_send().await?;
             if let Some(tag) = &prack_tag {
                 st.unpracked.remove(tag);

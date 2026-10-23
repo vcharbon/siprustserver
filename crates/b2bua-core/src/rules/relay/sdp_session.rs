@@ -315,16 +315,15 @@ fn continue_session(
 /// ([`b2bua_sdk::open_offer::open_offer`], RFC 3311 §5.2). Nothing else.
 /// `source` is the dialog the request names, as the dialog gate resolved it.
 pub fn note_request(call: &mut Call, leg_id: &str, req: &SipRequest, source: Option<&DialogId>) {
-    let row = crate::rules::method_table::row(req.method());
-    let opens = row.exchange == crate::rules::method_table::Exchange::Opens
-        && match req.method() {
-            Method::Invite => !call::helpers::invite_glare(call, leg_id, source),
-            _ => {
-                req.sdp().is_some()
-                    && !call::helpers::peer_update_pending(call, leg_id, source)
-                    && b2bua_sdk::open_offer::open_offer(call, leg_id, source).is_none()
-            }
-        };
+    let opens = match req.method() {
+        Method::Invite => !call::helpers::invite_glare(call, leg_id, source),
+        Method::Update => {
+            req.sdp().is_some()
+                && !call::helpers::peer_update_pending(call, leg_id, source)
+                && b2bua_sdk::open_offer::open_offer(call, leg_id, source).is_none()
+        }
+        _ => false,
+    };
     if let (true, Some(leg)) = (opens, leg_mut(call, leg_id)) {
         leg.sdp_session.exchanges_opened = leg.sdp_session.exchanges_opened.saturating_add(1);
     }

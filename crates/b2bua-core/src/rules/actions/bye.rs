@@ -3,8 +3,9 @@
 //! the peer's it restates, and its order behind the ACK of the dialog's own
 //! 2xx and behind this stack's own NOTIFY there ([`super::own_notify`]).
 
+use call::helpers::TERMINATING_TIMEOUT_MS;
 use call::TxnKind;
-use call::{Call, Dialog, DialogId, HeldRequest, Leg, Obligation};
+use call::{Call, Dialog, DialogId, HeldRequest, Leg, Obligation, TimerKey, TimerType};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
 use sip_message::{Method, SipHeader};
@@ -23,9 +24,9 @@ impl ActionExecutor<'_> {
     /// (RFC 3261 §15): the PRACKs the leg's responders are owed leave first,
     /// an offer left to the ACK answered rejecting (RFC 3262 §4, §5), then a
     /// 2xx still unACKed is ACKed (§13.2.2.4) — bare where the ACK owes no
-    /// answer, and where it owes one and `peer_left` (the teardown answers a
-    /// peer's BYE, so no ACK will bring that answer) answering every stream
-    /// rejected — then the BYE. The BYE waits for the ACK of the leg's own
+    /// answer, and where it owes one and `answer_lost` (the teardown answers a
+    /// peer's BYE or gives up a 2xx's ACK, so no ACK will bring that answer)
+    /// answering every stream rejected (RFC 3264 §6) — then the BYE. The BYE waits for the ACK of the leg's own
     /// 2xx to its dialog-creating INVITE (§15), and behind this stack's NOTIFY
     /// on the dialog awaiting its final.
     #[allow(clippy::too_many_arguments)]
@@ -37,13 +38,13 @@ impl ActionExecutor<'_> {
         reason: Option<&str>,
         relayed: Relayed,
         hops: Option<u32>,
-        peer_left: bool,
+        answer_lost: bool,
     ) {
         let ack_owed = relay::owes_bare_ack(call, leg_id);
         self.settle_owed_pracks(call, fx, Owed::Leg(leg_id), Settle::Ending);
         if ack_owed {
             self.ack_own_bare(call, fx, leg_id);
-        } else if peer_left {
+        } else if answer_lost {
             self.ack_rejecting(call, fx, leg_id);
         }
         let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
@@ -65,8 +66,9 @@ impl ActionExecutor<'_> {
         self.bye_now(call, fx, leg_id, &id, reason, relayed, hops);
     }
 
-    /// Send `bye`, a BYE held behind this stack's NOTIFY on `leg_id`'s dialog
-    /// `id`, composed now.
+    /// Send `bye`, a BYE held on `leg_id`'s dialog `id` behind an ACK or this
+    /// stack's NOTIFY, composed now. A terminating call's backstop runs again
+    /// from this BYE, so its transaction has its whole bound.
     pub(super) fn send_held_bye(
         &mut self,
         call: &mut Call,
@@ -85,6 +87,10 @@ impl ActionExecutor<'_> {
         let content_type = content_type.as_deref().and_then(relay::media_type);
         let relayed = Relayed { headers, body, content_type };
         self.bye_now(call, fx, leg_id, id, reason.as_deref(), relayed, max_forwards);
+        if call.state == call::CallModelState::Terminating {
+            let backstop = TimerKey::call(TimerType::TerminatingTimeout);
+            self.schedule(call, fx, backstop, TERMINATING_TIMEOUT_MS);
+        }
     }
 
     /// Compose and send the BYE on `leg_id`'s dialog `id`: it takes the

@@ -19,8 +19,9 @@
 //! §13.2.2.4's "after acknowledging … MUST terminate with a BYE" orders (b) on
 //! the other face: a dialog whose 2xx this stack can acknowledge alone gets the
 //! ACK first, then the BYE — the callee's for the call's own answer, the
-//! caller's for a relayed callee re-INVITE she answered. A delayed-offer dialog
-//! gets the BYE alone — its ACK owes the answer only the silent peer could supply.
+//! caller's for a relayed callee re-INVITE she answered. A delayed-offer dialog,
+//! whose ACK owes the answer only the silent peer would have supplied, gets an
+//! ACK answering every stream rejected (RFC 3264 §6), then the BYE.
 //!
 //! Paused-clock; the harness pins a short `ack_timeout_sec` so the give-up
 //! deadline is reached in a handful of `advance`s (CLAUDE.md test-runtime policy:
@@ -390,22 +391,21 @@ async fn a_service_that_parks_the_give_up_does_not_keep_the_session() {
     let _report = h.finish().await;
 }
 
-/// The delayed-offer counter-case to the give-up ACK: alice's INVITE carried no
-/// offer, so the ACK for bob's 2xx owes the answer only her own ACK supplies
-/// (RFC 3264 §4). This stack cannot compose it, so bob gets the BYE alone and
-/// his 2xx stays un-ACKed — his own §13.3.1.4 ladder is what covered the wait.
+/// The delayed-offer give-up: alice's INVITE carried no offer, so the ACK for
+/// bob's 2xx owes the answer only her own ACK would supply (RFC 3264 §4).
+/// Her ACK will not come, so this stack ACKs bob's 2xx itself, answering his
+/// offer with every stream rejected (RFC 3264 §6), before the BYE (RFC 3261
+/// §13.2.2.4).
 #[tokio::test(start_paused = true)]
-async fn a_delayed_offer_callee_gets_the_give_up_bye_with_no_ack() {
+async fn a_delayed_offer_callee_gets_the_give_up_ack_rejecting_every_stream() {
     let h = Harness::new("b2bua-unacked-2xx-delayed-offer-give-up");
-    // Both un-ACKed 2xx are the scenario: alice's silence leaves the answer
-    // relayed to her un-ACKed, and the callee's delayed-offer 2xx can only be
-    // acknowledged by her own ACK (RFC 3264 §4), which never came.
+    // alice's silence leaves the answer relayed to her un-ACKed; the callee's
+    // delayed-offer 2xx waits for her ACK (RFC 3264 §4) until the give-up.
     h.waive(
         WaiverScope::rule(
             "no-ack-to-dialog-creating-2xx",
-            "the caller deliberately never ACKs, so neither her answer nor the callee's \
-             delayed-offer 2xx — whose ACK owes the answer only she could supply — is \
-             acknowledged; that silence is the give-up under test",
+            "the caller deliberately never ACKs the 2xx relayed to her; that silence is \
+             the give-up under test",
         )
         .on_party("alice"),
     );
@@ -422,30 +422,37 @@ async fn a_delayed_offer_callee_gets_the_give_up_bye_with_no_ack() {
     uas.respond(200, "OK").with_sdp(OFFER).await;
     call.expect(200).await; // alice receives the offer — and deliberately stays silent.
 
-    // ── At the deadline: the BYE, and only the BYE, reaches the callee ───────
+    // ── At the deadline: the ACK rejecting his offer, then the BYE ───────────
     h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
-    let mut bob_bye = bob.receive("BYE").await;
-    bob_bye.respond(200, "OK").await;
+    assert_ack_rejects_every_stream(&bob).await;
+    bob.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
 
-    let report = h.finish().await;
-    let acks = report
-        .entries()
-        .iter()
-        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
-        .count();
-    assert_eq!(acks, 0, "a delayed-offer b-leg cannot be ACKed by this stack");
+/// The ACK `bob` receives answers his offer with every stream rejected
+/// (RFC 3264 §6).
+async fn assert_ack_rejects_every_stream(bob: &scenario_harness::Agent) {
+    let ack = bob.receive("ACK").await;
+    let answer = String::from_utf8_lossy(ack.request().body()).to_string();
+    let media: Vec<&str> = answer.split("\r\n").filter(|l| l.starts_with("m=")).collect();
+    assert!(!media.is_empty(), "the ACK answers his offer: {answer:?}");
+    assert!(
+        media.iter().all(|m| m.split(' ').nth(1) == Some("0")),
+        "every stream rejected, port 0: {media:?}"
+    );
 }
 
 /// A route that drops the caller's offer mints the callee's INVITE offerless:
 /// the give-up treats that b-leg as the delayed offer it is (RFC 3264 §4), by
-/// the INVITE that left, not the one that came in — BYE alone, no bare ACK.
+/// the INVITE that left, not the one that came in — its ACK rejects every
+/// stream of the callee's offer, then the BYE.
 #[tokio::test(start_paused = true)]
-async fn a_route_dropped_offer_gets_the_give_up_bye_with_no_ack() {
+async fn a_route_dropped_offer_gets_the_give_up_ack_rejecting_every_stream() {
     use b2bua::decision::test_adapter::route_to;
     use b2bua::decision::{BodyUpdate, NewCallResponse, ScriptedDecisionEngine};
 
@@ -453,9 +460,8 @@ async fn a_route_dropped_offer_gets_the_give_up_bye_with_no_ack() {
     h.waive(
         WaiverScope::rule(
             "no-ack-to-dialog-creating-2xx",
-            "the caller deliberately never ACKs, so neither her answer nor the callee's \
-             2xx to the offerless INVITE the route minted — whose ACK owes an answer only \
-             she could supply — is acknowledged; that silence is the give-up under test",
+            "the caller deliberately never ACKs the 2xx relayed to her; that silence is \
+             the give-up under test",
         )
         .on_party("alice"),
     );
@@ -486,25 +492,19 @@ async fn a_route_dropped_offer_gets_the_give_up_bye_with_no_ack() {
     h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    assert_ack_rejects_every_stream(&bob).await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
-
-    let report = h.finish().await;
-    let acks = report
-        .entries()
-        .iter()
-        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
-        .count();
-    assert_eq!(acks, 0, "the callee's INVITE carried no offer: no bare ACK answers his");
+    let _report = h.finish().await;
 }
 
 /// An INVITE whose body frames no session description is a delayed offer too
-/// (RFC 5621 §3.1): the give-up after the callee's 2xx is the BYE alone, no
-/// bare ACK, whatever else the body carried.
+/// (RFC 5621 §3.1): the give-up after the callee's 2xx ACKs it rejecting
+/// every stream of his offer, then BYEs, whatever else the body carried.
 #[tokio::test(start_paused = true)]
-async fn a_body_without_a_description_gets_the_give_up_bye_with_no_ack() {
+async fn a_body_without_a_description_gets_the_give_up_ack_rejecting_every_stream() {
     use b2bua::decision::test_adapter::route_to;
     use b2bua::decision::{BodyUpdate, NewCallResponse, ScriptedDecisionEngine};
     use sip_message::MultipartPart;
@@ -513,9 +513,8 @@ async fn a_body_without_a_description_gets_the_give_up_bye_with_no_ack() {
     h.waive(
         WaiverScope::rule(
             "no-ack-to-dialog-creating-2xx",
-            "the caller deliberately never ACKs the callee's 2xx to an INVITE whose body \
-             carried no description — its ACK owes an answer only she could supply; that \
-             silence is the give-up under test",
+            "the caller deliberately never ACKs the 2xx relayed to her; that silence is \
+             the give-up under test",
         )
         .on_party("alice"),
     );
@@ -547,18 +546,12 @@ async fn a_body_without_a_description_gets_the_give_up_bye_with_no_ack() {
     h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    assert_ack_rejects_every_stream(&bob).await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
-
-    let report = h.finish().await;
-    let acks = report
-        .entries()
-        .iter()
-        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
-        .count();
-    assert_eq!(acks, 0, "the callee's INVITE carried no offer: no bare ACK answers his");
+    let _report = h.finish().await;
 }
 
 /// The mirrored face: the CALLEE re-INVITEs with an offer, the caller answers,

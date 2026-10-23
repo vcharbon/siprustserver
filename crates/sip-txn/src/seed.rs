@@ -9,16 +9,17 @@ use sip_message::{SipRequest, SipResponse};
 /// One transaction to rebuild, typed on the record's terms
 /// ([`TransactionLayer::seed`](crate::TransactionLayer::seed)). The first copy
 /// of its request, and of its final, already left the wire from the node that
-/// held it: an INVITE seed runs no retransmit ladder.
+/// held it: an INVITE seed runs no retransmit ladder; a client one the record
+/// holds no provisional for re-sends its INVITE once.
 #[derive(Debug, Clone)]
 pub enum TxnSeed {
     /// A client INVITE this side sent toward `dest`, still awaiting its final:
     /// keyed by the INVITE's top-Via branch and attributed from its Via `cr` /
     /// `lg` params. The INVITE bound is armed; no retransmit ladder runs.
     /// `provisional` says the record holds a provisional for it: the seed opens
-    /// `Proceeding`, else `Trying`, where a CANCEL waits for one (RFC 3261 §9.1)
-    /// and, held, has the INVITE re-sent once so the callee resends its latest
-    /// provisional (§17.2.1).
+    /// `Proceeding`, else `Trying`, where a CANCEL waits for one (RFC 3261
+    /// §9.1), and the INVITE is re-sent once at the seed so the callee resends
+    /// its latest provisional (§17.2.1).
     /// `cancel` is a CANCEL the record says this side sent for it while it had
     /// drawn no provisional: held until its first one (§9.1).
     ClientInvite {

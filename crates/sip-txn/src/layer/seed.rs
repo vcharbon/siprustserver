@@ -177,12 +177,15 @@ impl Owner {
     /// `call_ref` when the Via names no `cr`), with the INVITE bound armed and
     /// no retransmit ladder: the node that sent it ran Timer A. It opens
     /// `Proceeding` when the record holds a provisional for it, else `Trying`,
-    /// so a CANCEL on it waits for one (RFC 3261 §9.1); a `Trying` seed keeps
-    /// its INVITE to re-send once when a CANCEL is held on it. The bound runs
-    /// from the seed: the first copy's send instant is not in the record.
-    /// `cancel` is held on it ([`seed_held_cancel`](Self::seed_held_cancel)).
-    /// `false` when the INVITE names no branch or a client transaction holds
-    /// it.
+    /// so a CANCEL on it waits for one (RFC 3261 §9.1). A `Trying` seed
+    /// re-sends its INVITE once, at the seed, as a client in `Trying`
+    /// retransmits (§17.1.1.2): the callee's server transaction answers that
+    /// copy with its latest provisional (§17.2.1), so the copy learns a
+    /// provisional the record lost, PRACKs a reliable one, and releases a
+    /// CANCEL held on it. The bound runs from the seed: the first copy's send
+    /// instant is not in the record. `cancel` is held on it
+    /// ([`seed_held_cancel`](Self::seed_held_cancel)). `false` when the INVITE
+    /// names no branch or a client transaction holds it.
     fn seed_client_invite(
         &mut self,
         call_ref: &str,
@@ -226,6 +229,7 @@ impl Owner {
         if let Some(cancel) = cancel {
             self.seed_held_cancel(&branch, *cancel, dest);
         }
+        self.release_seed_resend(&branch);
         true
     }
 
@@ -305,10 +309,10 @@ impl Owner {
     }
 
     /// Re-send, once, the INVITE of the seeded `Trying` transaction at
-    /// `branch` that a CANCEL is now held on: the callee's server transaction
-    /// answers it with its latest provisional (RFC 3261 §17.2.1), which
-    /// releases the CANCEL. No ladder: the one fire re-arms nothing. A
-    /// transaction past its bound re-sends nothing.
+    /// `branch`: the callee's server transaction answers it with its latest
+    /// provisional (RFC 3261 §17.2.1). No ladder: the one fire re-arms
+    /// nothing. A transaction past its bound, or whose INVITE was already
+    /// re-sent, re-sends nothing.
     pub(super) fn release_seed_resend(&mut self, branch: &str) {
         let Some(buf) = self
             .clients

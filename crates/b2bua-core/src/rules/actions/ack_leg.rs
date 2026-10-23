@@ -185,11 +185,12 @@ impl ActionExecutor<'_> {
         );
     }
 
-    /// The answer a relayed ACK carrying none owes `target_leg`'s delayed offer
-    /// ([`call::OwedAnswer::InAck`]), and whether it is the caller's: the
-    /// offer answered out of her own description (her INVITE's offer, which
-    /// the 2xx answered on her face), else every stream rejected on this
-    /// stack's account (RFC 3264 §6).
+    /// The answer a relayed ACK of the caller's initial INVITE carrying none
+    /// owes `target_leg`'s delayed offer ([`call::OwedAnswer::InAck`]), and
+    /// whether it is the caller's: the offer answered out of her own
+    /// description (her INVITE's offer, which the 2xx answered on her face),
+    /// else every stream rejected on this stack's account (RFC 3264 §6). The
+    /// ACK of a re-INVITE is relayed as it came.
     pub(super) fn answer_owed(
         &mut self,
         call: &Call,
@@ -199,13 +200,16 @@ impl ActionExecutor<'_> {
         if ack.sdp().is_some() {
             return None;
         }
+        let caller = self.caller_invite(call)?;
+        if ack.cseq().seq() != caller.cseq().seq() {
+            return None;
+        }
         let leg = call.b_legs.iter().find(|l| l.leg_id == target_leg)?;
         let ack_cseq = ack.cseq().seq() as i64;
         let offer = match leg.dialogs.confirmed()?.owed_answer.as_ref()? {
             call::OwedAnswer::InAck { ack_cseq: owed, offer } if *owed == ack_cseq => offer.clone(),
             _ => return None,
         };
-        let caller = self.caller_invite(call)?;
         let own = caller.sdp().and_then(|own| {
             sip_message::sdp_answer::answer_from_own(
                 &offer,

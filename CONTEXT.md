@@ -160,12 +160,10 @@ BYE queued behind that ACK (§15), the dialling facts of a leg's dialling
 INVITE, and the final sent on a received one.
 
 **Method table** (`b2bua_core::rules::method_table`):
-What differs by method for a request record: whether it opens or may answer
-an offer/answer exchange, whether a crossing one draws 491 (RFC 3261 §14.2,
-RFC 3311 §5.2), whether its 2xx is ACKed, whether it waits behind an
-unacknowledged answer (§15), what a dialog this side is ending makes of it,
-the final a relay toward an ended leg owes, and whether it waits behind this
-stack's own NOTIFY in flight. Knows no HA. What
+What differs by method for a request record: what a dialog this side is
+ending makes of it, the final a relay toward an ended leg owes, and whether
+it waits behind this stack's own NOTIFY in flight or behind the ACK of this
+stack's 2xx on the dialog (RFC 3261 §15). Knows no HA. What
 the timeout of this stack's own request ends is policy: the default rule's,
 which a service rule outranks for a request its rule sent (the record names
 that rule).
@@ -537,7 +535,8 @@ storage-only step).
 
 **Seed**: a transaction the materialisation rebuilds from a **request
 record**, one path for every method: a client INVITE from the sent image of an
-INVITE awaiting its final, a Proceeding server INVITE holding the request
+INVITE awaiting its final, re-sent once at the seed when the record holds no
+provisional for it (RFC 3261 §17.1.1.2), a Proceeding server INVITE holding the request
 rebuilt from the a-leg snapshot or a pending relayed re-INVITE's record, an
 Accepted server INVITE (RFC 6026) holding a 2xx a dialog retains awaiting its
 ACK, and for a non-INVITE a client transaction retransmitting its sent request

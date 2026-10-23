@@ -47,6 +47,7 @@ mod ladder;
 mod lost_round;
 mod originate;
 mod own_notify;
+mod peer_bye;
 mod prack;
 mod provisional_arrival;
 mod record_write;
@@ -92,7 +93,9 @@ impl ActionExecutor<'_> {
     /// Apply `actions` to a working copy of the authoritative `call`. The
     /// `ctx` view carries the event; the full struct comes in explicitly —
     /// rules never hold it (ADR-0020 X8). An action that breaks ends the list:
-    /// the actions after it are not applied.
+    /// the actions after it are not applied. A peer's BYE the actions answer
+    /// by ending its leg first draws the ACK its 2xx is owed (RFC 3261
+    /// §13.2.2.4).
     pub fn execute(
         &mut self,
         actions: &[RuleAction],
@@ -101,6 +104,7 @@ impl ActionExecutor<'_> {
     ) -> HandlerResult {
         let mut call = call.clone();
         let mut fx = HandlerEffects::new();
+        self.ack_before_peer_bye_answer(&mut call, &mut fx, ctx, actions);
         for action in actions {
             if self.step(action, ctx, &mut call, &mut fx).is_break() {
                 break;

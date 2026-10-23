@@ -342,8 +342,10 @@ async fn the_callers_bye_waits_for_her_ack_until_the_2xx_give_up() {
     );
     let alice = h.agent("alice", "127.0.0.1:5069").await;
     let bob = h.agent("bob", "127.0.0.1:5079").await;
-    let b2bua =
-        B2buaSut::route_all_to("127.0.0.1", 5079).start(&h, "b2bua", "127.0.0.1:5089").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5079)
+        .keep_terminated_calls()
+        .start(&h, "b2bua", "127.0.0.1:5089")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -376,6 +378,13 @@ async fn the_callers_bye_waits_for_her_ack_until_the_2xx_give_up() {
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
+    let ended = b2bua.terminated_calls();
+    let caller = ended.first().and_then(|c| c.a_leg.dialogs.iter().next()).map(|d| &d.state);
+    assert_eq!(
+        caller,
+        Some(&call::DialogState::Ended(call::DialogEnd::OurBye { final_status: Some(200) })),
+        "her 200 answers the BYE: the call ends on it, not on the terminating backstop",
+    );
 
     let _report = h.finish().await;
 }

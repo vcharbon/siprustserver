@@ -4,8 +4,9 @@
 //! scope is disarmed: a leg's timers with the leg, an attempt's as it ends, a
 //! service machine's as it deactivates, the call's as its termination
 //! begins. No rule cancels a timer its scope already took. A 2xx a BYE of
-//! this stack waits behind (RFC 3261 §15) outlives the call's termination:
-//! its ACK or its give-up releases that BYE.
+//! this stack waits behind (RFC 3261 §15) outlives the BYE's leg being
+//! destroyed and the call's termination: its ACK or its give-up releases
+//! that BYE.
 
 use call::helpers::Scope;
 use call::{Call, DialogId, HeldRequest, Obligation, TimerType};
@@ -19,6 +20,30 @@ impl ActionExecutor<'_> {
     /// already ceased still loses the give-up it left armed; at
     /// [`Scope::Call`] a ladder timer the books no longer name goes too.
     pub(super) fn retire(&mut self, call: &mut Call, fx: &mut HandlerEffects, scope: Scope<'_>) {
+        let at_call = scope == Scope::Call;
+        self.retire_keeping(call, fx, scope, at_call);
+    }
+
+    /// Retire `leg_id`'s scope as this stack BYEs it: the 2xx its BYE waits
+    /// behind keeps its ladder until its ACK or its give-up (§15).
+    pub(super) fn retire_byed_leg(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+    ) {
+        self.retire_keeping(call, fx, Scope::Leg(leg_id), true);
+    }
+
+    /// Retire `scope`, keeping the 2xx a held BYE waits behind where
+    /// `keeps_held`.
+    fn retire_keeping(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        scope: Scope<'_>,
+        keeps_held: bool,
+    ) {
         let mut obligations = call::helpers::obligations_in(call, &scope);
         if scope == Scope::Call {
             for o in call.timers.iter().filter_map(|t| t.key.obligation_of()) {
@@ -30,7 +55,7 @@ impl ActionExecutor<'_> {
         let held: Vec<Obligation> =
             obligations.iter().filter(|o| bye_behind(call, o).is_some()).cloned().collect();
         for obligation in obligations {
-            if scope == Scope::Call && held.contains(&obligation) {
+            if keeps_held && held.contains(&obligation) {
                 continue;
             }
             let bye = bye_behind(call, &obligation);
@@ -43,7 +68,10 @@ impl ActionExecutor<'_> {
             }
         }
         match scope {
-            Scope::Leg(leg_id) => self.scrub_where(call, fx, |t| t.leg_id() == Some(leg_id)),
+            Scope::Leg(leg_id) => self.scrub_where(call, fx, |t| {
+                t.leg_id() == Some(leg_id)
+                    && (!keeps_held || t.key.obligation_of().is_none_or(|o| !held.contains(o)))
+            }),
             Scope::Attempt(id) => crate::attempts::retire(call, fx, id),
             Scope::Machine(machine) => self.scrub_where(call, fx, |t| {
                 matches!(t.timer_type(), TimerType::Service { service_id, .. } if service_id == machine)

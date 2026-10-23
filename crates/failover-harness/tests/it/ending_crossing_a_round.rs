@@ -73,9 +73,10 @@ async fn the_copys_ending_ends_the_call_the_primary_holds_a_round_in() {
 
 /// The primary relays the caller's re-INVITE and the copy reads it; the
 /// callee holds its final. The proxy reads the primary dead: the callee hangs
-/// up through the copy, whose teardown answers the caller's re-INVITE 487 and
-/// CANCELs it. The primary takes that ending: the round already has its
-/// final, so the primary sends the caller none of its own.
+/// up through the copy, which re-sends the re-INVITE it holds no provisional
+/// for and whose teardown answers the caller's re-INVITE 487 and CANCELs it.
+/// The primary takes that ending: the round already has its final, so the
+/// primary sends the caller none of its own.
 #[tokio::test(start_paused = true)]
 async fn the_copys_ending_of_a_round_it_read_draws_one_final() {
     let mut est = establish("ending-of-a-round-the-copy-read").await;
@@ -87,6 +88,10 @@ async fn the_copys_ending_of_a_round_it_read_draws_one_final() {
     est.proxy.set_health(&p_ord, WorkerHealth::Dead);
     est.fh.advance(Duration::from_millis(200)).await;
     let mut bye = est.bob_dialog.bye().await;
+    // The copy re-sends the re-INVITE it read, holding no provisional for it,
+    // as a client in Trying retransmits (RFC 3261 §17.1.1.2).
+    let resent = est.bob.receive("INVITE").await;
+    assert_eq!(resent.request().top_via().branch(), at_bob.request().top_via().branch());
     round.expect(487).await;
     est.alice.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
