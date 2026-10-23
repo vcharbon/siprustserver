@@ -68,10 +68,23 @@ impl FailoverHarness {
     /// Heal the repl fabric between two workers: unblock `connect`, lift every
     /// directed fault between them ([`delay`](Self::delay) included) and
     /// release every held stream, which flushes what buffered while the cut
-    /// lasted, in order. Names each ordinal's current incarnation. Marker.
+    /// lasted, in order. Reaches every incarnation of each ordinal, so a fault
+    /// named before a replacement came up is lifted with the others. Marker.
     pub fn heal(&mut self, a: &str, b: &str) {
-        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
-        self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
+        for aa in self.repl_listens(a) {
+            for ba in self.repl_listens(b) {
+                self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
+            }
+        }
         self.mark(a, Some(b), "heal", "");
+    }
+
+    /// The replication listen address of every incarnation `ordinal` has had.
+    fn repl_listens(&self, ordinal: &str) -> Vec<SocketAddr> {
+        let mut listens = self.views.repl_addrs_of(ordinal);
+        listens.push(self.repl_listen(ordinal));
+        listens.sort();
+        listens.dedup();
+        listens
     }
 }

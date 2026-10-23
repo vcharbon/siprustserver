@@ -8,7 +8,7 @@ use std::sync::Arc;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleAction;
 use call::helpers::raise_sequences;
-use call::{Call, Direction, PendingRequest};
+use call::{Call, Direction, PendingRequest, RelayOwner};
 
 use super::super::interpret::process_result;
 use super::super::materialise::relayed_server_key;
@@ -45,8 +45,8 @@ pub(super) async fn discharge_folded_terminal(
     terminal: Call,
     now_ms: i64,
 ) {
-    let by = ctx.config.self_ordinal.as_str();
-    let (answered_there, ours) = own_open_rounds(before, &terminal, by);
+    let by = ctx.config.relay_owner();
+    let (answered_there, ours) = own_open_rounds(before, &terminal, &by);
     for key in answered_there.iter().filter_map(relayed_server_key) {
         let _ = ctx.txn.relinquish_server(key).await;
     }
@@ -119,13 +119,13 @@ fn answer_the_records_rounds(
     result.effects.fire_and_forget.extend(answered.fire_and_forget);
 }
 
-/// The re-INVITE relays node `by` made that `record` holds open, not
+/// The re-INVITE relays worker `by` made that `record` holds open, not
 /// CANCELled: those `ending` holds CANCELled, and the `(leg, outbound CSeq)`
 /// of the others.
 fn own_open_rounds(
     record: &Call,
     ending: &Call,
-    by: &str,
+    by: &RelayOwner,
 ) -> (Vec<PendingRequest>, Vec<(String, i64)>) {
     let legs = || std::iter::once(&record.a_leg).chain(record.b_legs.iter());
     let (mut answered_there, mut ours) = (Vec::new(), Vec::new());
@@ -134,7 +134,7 @@ fn own_open_rounds(
         for d in leg.dialogs.iter() {
             let held = theirs.and_then(|l| l.dialogs.by_tags(&d.our_tag, &d.peer_tag));
             let open = d.inbound_pending_requests.iter().filter(|p| {
-                p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled && p.relayed_by == by
+                p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled && p.relayed_by == *by
             });
             for p in open {
                 let cancelled_there = held.is_some_and(|h| {

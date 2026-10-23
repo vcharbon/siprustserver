@@ -58,6 +58,10 @@ pub struct RunnerEnv {
     pub cdr_queue: usize,
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
     pub ordinal: String,
+    /// `POD_UID` — the worker identity, the orchestrator's pod UID from the
+    /// downward API (ADR-0055 §6). Unset (a static pool): a per-boot token
+    /// drawn from the OS RNG.
+    pub identity: Option<String>,
     /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
     /// back-pressure SAFETY limit, not a rate governor).
     pub concurrency: usize,
@@ -253,6 +257,7 @@ impl RunnerEnv {
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,
             cdr_queue: knob("B2BUA_CDR_QUEUE", "1024")?,
             ordinal: env_or("B2BUA_ORDINAL", "w0"),
+            identity: stated(env::var("POD_UID").ok()),
             // Dispatch throttle ceilings — deliberately high so they never cap
             // throughput below the offered rate; `cap_drops`/`saturation`
             // metrics flag if either is actually hit.

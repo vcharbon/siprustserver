@@ -573,17 +573,17 @@ async fn a_node_handle_is_refused_a_connect_under_a_partition() {
 
     net.apply_fault(Fault::Partition { a, b });
     assert!(
-        matches!(net.as_node("A").connect(b).await, Err(ConnectError::Blocked { .. })),
+        matches!(net.as_node(a).connect(b).await, Err(ConnectError::Blocked { .. })),
         "a node behind a partition is refused the connect, not held after it"
     );
-    let _other = net.as_node("C").connect(b).await.expect("an unpartitioned node connects");
+    let _other = net.as_node(c).connect(b).await.expect("an unpartitioned node connects");
     let _other_server = listener.accept().await.unwrap();
 
     // Healed: the connect succeeds and the stream is attributed at once — a
     // delay named on the listen pair governs its first frame, before any
     // `PullRequest` names the caller.
     net.apply_fault(Fault::Heal { a, b });
-    let client = net.as_node("A").connect(b).await.unwrap();
+    let client = net.as_node(a).connect(b).await.unwrap();
     let server = listener.accept().await.unwrap();
     net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
     send_now(&*server, noop(1)).await.unwrap();
@@ -591,6 +591,44 @@ async fn a_node_handle_is_refused_a_connect_under_a_partition() {
     assert_eq!(has_frame(&*client).await, None, "attributed at connect: the frame waits");
     advance_settled(Duration::from_millis(20)).await;
     assert_eq!(client.recv().await, Some(noop(1)));
+}
+
+/// Two live incarnations of one ordinal, each on its own listen address: the
+/// ordinal declared again at the successor's re-points `PullRequest`
+/// attribution, yet a stream the elder opens through its own handle stays the
+/// elder's — a partition named on the successor holds none of it, one named
+/// on the elder holds it, and a heal on the elder's address lifts it.
+#[tokio::test(start_paused = true)]
+async fn an_elder_incarnation_keeps_its_streams_beside_its_successor() {
+    let net = SimulatedReplicationNetwork::with_delay(1);
+    let (elder, successor, b) = (addr(3108), addr(3308), addr(3208));
+    net.declare_endpoint("A", elder);
+    net.declare_endpoint("B", b);
+    let listener = net.listen(b).await.unwrap();
+    let elder_net = net.as_node(elder);
+    net.declare_endpoint("A", successor);
+
+    net.apply_fault(Fault::Partition { a: successor, b });
+    let client = elder_net.connect(b).await.expect("the elder is not partitioned");
+    let server = listener.accept().await.unwrap();
+    client.send(pull_request("A")).await.unwrap();
+    advance_settled(Duration::from_millis(10)).await;
+    assert_eq!(
+        server.recv().await,
+        Some(pull_request("A")),
+        "the elder's stream was read as its successor's: its PullRequest re-attributed it"
+    );
+    send_now(&*server, noop(1)).await.unwrap();
+    advance_settled(Duration::from_millis(10)).await;
+    assert_eq!(client.recv().await, Some(noop(1)), "and it flows both ways");
+
+    net.apply_fault(Fault::Partition { a: elder, b });
+    send_now(&*server, noop(2)).await.unwrap();
+    advance_settled(Duration::from_millis(10)).await;
+    assert_eq!(has_frame(&*client).await, None, "a partition on the elder holds its stream");
+    net.apply_fault(Fault::Heal { a: elder, b });
+    advance_settled(Duration::from_millis(10)).await;
+    assert_eq!(client.recv().await, Some(noop(2)), "a heal on the elder releases it");
 }
 
 #[tokio::test(start_paused = true)]

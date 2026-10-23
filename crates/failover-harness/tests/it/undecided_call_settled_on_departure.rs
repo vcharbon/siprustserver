@@ -299,13 +299,11 @@ async fn an_undecided_call_of_a_node_replaced_at_once_is_answered_once() {
 }
 
 /// The same removal with a decision that returns inside the process's last
-/// seconds, after a replacement came up: the removed process knows it left the
-/// slice and does not apply the decision: the callee is never dialled, and the
-/// removed process refuses the caller 503 on the transaction it holds. The
-/// backup's sweep answered the caller 503 too, so the caller hears two finals
-/// on one branch, the second after its transaction completed (ADR-0047,
-/// residual). Both the removed process and the backup, which ended the call of
-/// a departed primary, write a CDR: the dual-owner window of ADR-0031 D3.
+/// seconds, after a replacement came up: the removed process saw its ordinal
+/// bound to the replacement's worker identity and stopped authoring
+/// (ADR-0055 §6), so it neither applies the decision nor answers the caller:
+/// the callee is never dialled, the caller hears the backup's 503 alone, and
+/// the backup, which ended the call of a departed primary, writes its one CDR.
 #[tokio::test(start_paused = true)]
 async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     let mut fh = FailoverHarness::new("undecided-call-abrupt-replacement-decision", &["b1", "b2"]);
@@ -318,10 +316,6 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     call.expect(100).await;
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
 
-    fh.accept_rfc_deviations_from_now(
-        "unacked-invite-non-2xx-final",
-        "the removed process's 503 reaches a caller whose transaction completed on the backup's",
-    );
     fh.withdraw(&pri_ord);
     call.expect(503).await;
     fh.advance(Duration::from_millis(400)).await;
@@ -329,6 +323,7 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     fh.readmit(&pri_ord, replacement.sip_addr());
     fh.advance(Duration::from_millis(1_600)).await;
     let (elder, _survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    let elder_superseded = elder.is_superseded();
     let elder_cdrs = elder.cdr_records().iter().filter(|r| r.call_ref == call_ref).count();
     fh.mark(&pri_ord, None, "crash", "the removed process is killed at its grace");
     elder.crash();
@@ -343,11 +338,8 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     fh.advance(Duration::from_secs(10)).await;
 
     assert!(!reached(&fh, &bob), "the callee is never dialled");
-    assert_eq!(
-        finals_to(&fh, &alice, b"SIP/2.0 503"),
-        2,
-        "the backup's 503, then the removed process's"
-    );
+    assert!(elder_superseded, "the removed process read its ordinal bound to its replacement");
+    assert_eq!(finals_to(&fh, &alice, b"SIP/2.0 503"), 1, "the backup's 503 alone");
     assert_eq!(consults.load(Ordering::SeqCst), 1, "the decision was asked once");
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     let nodes = [&replacement, survivor];
@@ -361,12 +353,8 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
         .await;
     assert!(drained, "the cluster drains the call within the settle budget");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    assert_eq!(elder_cdrs, 1, "the removed process wrote the CDR of the call it refused");
-    assert_eq!(
-        total_cdrs_for(&nodes, &call_ref),
-        1,
-        "and the replacement the CDR of the call it reclaimed ended: two in all",
-    );
+    assert_eq!(elder_cdrs, 0, "the superseded process wrote no CDR");
+    assert_eq!(total_cdrs_for(&nodes, &call_ref), 1, "one CDR across the cluster");
     assert_call_fully_released(&nodes, &call_ref).await;
     drop((call, replacement, proxy));
 }

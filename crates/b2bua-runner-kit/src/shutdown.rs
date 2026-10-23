@@ -8,6 +8,10 @@
 //!   `B2BUA_DRAIN_MIN_MS`, or `B2BUA_DRAIN_GRACE_MS`; the queued limiter
 //!   releases flushed within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (ADR-0040 decision
 //!   9). Exit 0; the orchestrator restarts the ordinal.
+//! - **Superseded** — the membership binds the worker's ordinal to another
+//!   worker identity (ADR-0055 §6): the worker has stopped authoring, so no
+//!   drain and no limiter release flush; the CDR sink delivers what was
+//!   written before. Exit non-zero.
 //! - **A loop task ended** — the transaction owner, the router or a vital
 //!   task (the timer driver, the terminate writer, the CDR drainer, the
 //!   changelog server) returned, was aborted or panicked, before or during a
@@ -34,14 +38,17 @@ use crate::RunnerBase;
 /// What ended the worker's service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stop {
+    Superseded,
     Interrupt,
     Terminate,
     Withdrawn,
     LoopEnded(&'static str),
 }
 
-/// The first of the stops to happen; a loop that ended wins a tie.
+/// The first of the stops to happen. A supersession wins a tie, since its
+/// fence ends the loops; a loop that ended wins over the signals.
 pub(crate) async fn next_stop(
+    superseded: impl Future<Output = ()>,
     interrupt: impl Future<Output = ()>,
     terminate: impl Future<Output = ()>,
     withdrawn: impl Future<Output = ()>,
@@ -49,6 +56,7 @@ pub(crate) async fn next_stop(
 ) -> Stop {
     tokio::select! {
         biased;
+        _ = superseded => Stop::Superseded,
         name = loop_ended => Stop::LoopEnded(name),
         _ = interrupt => Stop::Interrupt,
         _ = terminate => Stop::Terminate,
@@ -68,8 +76,9 @@ impl RunnerBase {
     }
 }
 
-/// Serve `core` until `interrupt`, `terminate`, its own withdrawal or a loop
-/// task ending, act on it under `bounds`, and return the exit code.
+/// Serve `core` until `interrupt`, `terminate`, its own withdrawal, its
+/// supersession or a loop task ending, act on it under `bounds`, and return
+/// the exit code.
 pub(crate) async fn serve_until_stop(
     core: &B2buaCore,
     name: &str,
@@ -78,8 +87,11 @@ pub(crate) async fn serve_until_stop(
     terminate: impl Future<Output = ()>,
 ) -> ExitCode {
     let loops = core.loops().clone();
-    let stop = next_stop(interrupt, terminate, core.withdrawn(), loops.wait_ended()).await;
+    let stop =
+        next_stop(core.superseded(), interrupt, terminate, core.withdrawn(), loops.wait_ended())
+            .await;
     match stop {
+        Stop::Superseded => superseded(core, name, bounds).await,
         Stop::Interrupt => interrupted(core, name, bounds).await,
         Stop::Terminate | Stop::Withdrawn => drained(core, name, bounds, stop).await,
         Stop::LoopEnded(ended) => loop_ended(core, name, bounds, ended).await,
@@ -140,6 +152,18 @@ async fn drained(core: &B2buaCore, name: &str, bounds: DrainBounds, stop: Stop) 
     }
     close_cdr(core, name, bounds.cdr_flush).await;
     ExitCode::SUCCESS
+}
+
+/// The worker is superseded (ADR-0055 §6): its authoring already stopped, so
+/// nothing is drained and no queued limiter release leaves; the CDR sink
+/// delivers the records written before, and the process exits non-zero.
+async fn superseded(core: &B2buaCore, name: &str, bounds: DrainBounds) -> ExitCode {
+    tracing::error!(
+        service = name,
+        "own ordinal bound to another worker identity: superseded, exiting without a drain"
+    );
+    close_cdr(core, name, bounds.cdr_flush).await;
+    ExitCode::FAILURE
 }
 
 /// A loop or vital task ended ([`b2bua::loops::WorkerLoops`]): nothing serves

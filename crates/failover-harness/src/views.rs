@@ -382,6 +382,21 @@ impl ViewLedger {
         axes
     }
 
+    /// The replication listen address of every incarnation ever registered
+    /// for `ordinal`, live or dead.
+    pub fn repl_addrs_of(&self, ordinal: &str) -> Vec<SocketAddr> {
+        let inner = self.inner.lock().unwrap();
+        let mut addrs: Vec<SocketAddr> = inner
+            .incarnations
+            .iter()
+            .filter(|i| i.ordinal == ordinal)
+            .map(|i| i.repl_addr)
+            .collect();
+        addrs.sort();
+        addrs.dedup();
+        addrs
+    }
+
     /// The highest incarnation gen ever registered for `ordinal` (`0` if none) —
     /// what a replacement's gen is derived from.
     pub fn max_gen(&self, ordinal: &str) -> u64 {

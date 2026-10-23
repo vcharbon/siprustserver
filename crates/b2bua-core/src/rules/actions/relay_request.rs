@@ -287,7 +287,7 @@ impl ActionExecutor<'_> {
                 offered_100rel: req.offers_100rel(),
                 offered: relay::carries_sdp(req),
                 source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
-                relayed_by: self.config.self_ordinal.clone(),
+                relayed_by: self.config.relay_owner(),
             };
             *call = add_pending_request(call.clone(), target_leg, &t_id, pending);
         }

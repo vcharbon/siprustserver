@@ -64,8 +64,8 @@ impl SimulatedMembership {
         self.state.remove(ordinal);
     }
 
-    /// Change an existing peer's host, emitting [`MemberDelta::AddressChanged`]
-    /// (no-op if unknown or unchanged).
+    /// Change an existing peer's binding — host or worker identity — emitting
+    /// [`MemberDelta::AddressChanged`] (no-op if unknown or unchanged).
     pub fn change_address(&self, peer: Peer) {
         self.state.set_address(peer);
     }
@@ -78,7 +78,7 @@ impl SimulatedMembership {
         let Some(cur) = self.state.resolve(ordinal) else {
             return;
         };
-        self.state.set_conditions(Peer::with_conditions(ordinal, cur.host, ready, terminating));
+        self.state.set_conditions(Peer { ready, terminating, ..cur });
     }
 
     /// Resolve a peer by ordinal (test introspection).

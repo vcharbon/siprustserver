@@ -78,6 +78,10 @@ spec:
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # The worker identity: a pod recreated under the same name is
+            # another one (ADR-0055 §6).
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
             # The routable address peers reach the worker on; the bind address
             # 0.0.0.0 is not routable.
             - name: POD_IP

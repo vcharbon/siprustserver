@@ -5,10 +5,14 @@
 
 use crate::common;
 use call::helpers::{holds_relays_of, raise_sequences};
-use call::model::{Call, Dialog, DialogState, Direction, PendingRequest, RetiredDialog};
+use call::model::{
+    Call, Dialog, DialogState, Direction, PendingRequest, RelayOwner, RetiredDialog,
+};
 
-/// The node that relayed the copy's requests.
-const BY: &str = "w1";
+/// The worker that relayed the copy's requests.
+fn by() -> RelayOwner {
+    RelayOwner::new("w1", "w1-boot-2")
+}
 
 fn caller_mut(call: &mut Call) -> &mut Dialog {
     call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog")
@@ -19,7 +23,12 @@ fn callee_mut(call: &mut Call) -> &mut Dialog {
 }
 
 /// `call` relaying one more `method` toward the caller, awaiting its final.
-fn relaying(mut call: Call, method: &str) -> Call {
+fn relaying(call: Call, method: &str) -> Call {
+    relaying_by(call, method, by())
+}
+
+/// `call` relaying one more `method` toward the caller as `owner`.
+fn relaying_by(mut call: Call, method: &str, owner: RelayOwner) -> Call {
     let d = caller_mut(&mut call);
     d.our_cseq += 1;
     d.inbound_pending_requests.push(PendingRequest {
@@ -35,7 +44,7 @@ fn relaying(mut call: Call, method: &str) -> Call {
         offered_100rel: false,
         offered: false,
         source_timestamp: None,
-        relayed_by: BY.into(),
+        relayed_by: owner,
     });
     call
 }
@@ -45,18 +54,18 @@ fn a_record_holds_the_relays_of_a_copy_only_with_each_of_them() {
     let held = common::representative_call();
     let copy = relaying(held.clone(), "INFO");
     assert!(
-        !holds_relays_of(Some(&held), &copy, BY),
+        !holds_relays_of(Some(&held), &copy, &by()),
         "the copy's INFO is in no record but its own"
     );
-    assert!(holds_relays_of(Some(&copy), &copy, BY));
+    assert!(holds_relays_of(Some(&copy), &copy, &by()));
     assert!(
-        holds_relays_of(Some(&copy), &held, BY),
+        holds_relays_of(Some(&copy), &held, &by()),
         "a relay of the record's own is no relay of the copy"
     );
     let raised = raise_sequences(held.clone(), &copy);
-    assert!(!holds_relays_of(Some(&raised), &copy, BY), "a raised sequence is not the relay");
+    assert!(!holds_relays_of(Some(&raised), &copy, &by()), "a raised sequence is not the relay");
     assert!(
-        holds_relays_of(Some(&held), &relaying(held.clone(), "INVITE"), BY),
+        holds_relays_of(Some(&held), &relaying(held.clone(), "INVITE"), &by()),
         "rounds read their own rule"
     );
 }
@@ -70,11 +79,11 @@ fn a_relay_at_the_same_cseq_for_another_request_is_not_the_copys() {
     let mut other = relaying(held.clone(), "INFO");
     caller_mut(&mut other).inbound_pending_requests.last_mut().expect("the INFO").inbound_cseq =
         2002;
-    assert!(!holds_relays_of(Some(&other), &copy, BY), "another originator CSeq");
+    assert!(!holds_relays_of(Some(&other), &copy, &by()), "another originator CSeq");
     let mut other = relaying(held.clone(), "MESSAGE");
     caller_mut(&mut other).inbound_pending_requests.last_mut().expect("the relay").method =
         "info".into();
-    assert!(holds_relays_of(Some(&other), &copy, BY), "methods compare without case");
+    assert!(holds_relays_of(Some(&other), &copy, &by()), "methods compare without case");
 }
 
 /// A retired dialog's relays still await their finals (RFC 3261 §8.1.3.3).
@@ -85,8 +94,20 @@ fn a_retired_dialogs_open_relays_are_relays_of_the_copy() {
     let d = caller_mut(&mut copy);
     let open_relays = std::mem::take(&mut d.inbound_pending_requests);
     d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
-    assert!(!holds_relays_of(Some(&held), &copy, BY));
-    assert!(holds_relays_of(Some(&copy), &copy, BY));
+    assert!(!holds_relays_of(Some(&held), &copy, &by()));
+    assert!(holds_relays_of(Some(&copy), &copy, &by()));
+}
+
+/// A worker restarted under the same ordinal is another worker: a relay its
+/// former boot made returns there, and is none of the restarted worker's
+/// (ADR-0055 §6).
+#[test]
+fn a_relay_a_former_boot_of_the_ordinal_made_is_not_the_workers() {
+    let held = common::representative_call();
+    let copy = relaying_by(held.clone(), "INFO", RelayOwner::new("w1", "w1-boot-1"));
+    assert!(holds_relays_of(Some(&held), &copy, &by()));
+    assert!(holds_relays_of(None, &copy, &by()), "nor on the record's delete");
+    assert!(!holds_relays_of(None, &copy, &RelayOwner::new("w1", "w1-boot-1")));
 }
 
 #[test]

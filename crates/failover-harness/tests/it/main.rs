@@ -73,6 +73,7 @@ mod spiral_takeover;
 mod split_dialog_sequence;
 mod stale_no_answer_reclaim;
 mod stood_down_round;
+mod superseded_incarnation;
 mod superseded_relay;
 mod sweep;
 mod swept_call_answered_inside_the_lag;

@@ -71,10 +71,12 @@
 //!
 //! A node connects through its own handle ([`NodeReplicationNetwork`], from
 //! [`SimulatedReplicationNetwork::as_node`]) whenever the harness can hand it
-//! one: the stream is then attributed at `connect`, so a partition refuses
-//! the connect outright — the puller never reads a peer it cannot reach as
-//! reached. The `PullRequest` attribution covers a stream opened through the
-//! bare fabric.
+//! one: the stream is then attributed at `connect` to the listen address the
+//! handle was made for, so a partition refuses the connect outright — the
+//! puller never reads a peer it cannot reach as reached — and two live
+//! incarnations of one ordinal, each on its own listen address, keep their
+//! streams apart. The `PullRequest` attribution covers a stream opened through
+//! the bare fabric, and never re-attributes one already attributed.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -95,8 +97,10 @@ use super::{
 
 mod fault;
 mod listener;
+mod node_handle;
 pub use fault::Fault;
 use listener::SimListener;
+pub use node_handle::NodeReplicationNetwork;
 
 /// Directed pair key for the fault tables.
 type Pair = (SocketAddr, SocketAddr);
@@ -228,10 +232,16 @@ impl SimShared {
     }
 
     /// Attribute the stream opened from `client` to the node `caller` names,
-    /// returning that node's address when `caller` is declared.
+    /// returning that node's address when `caller` is declared. A stream
+    /// already attributed — opened through a node's own handle — keeps its
+    /// owner, which is returned.
     fn attribute(&self, client: SocketAddr, caller: &str) -> Option<SocketAddr> {
+        let mut owners = self.stream_owner.lock().unwrap();
+        if let Some(owner) = owners.get(&client) {
+            return Some(*owner);
+        }
         let owner = self.endpoints.lock().unwrap().get(caller).copied()?;
-        self.stream_owner.lock().unwrap().insert(client, owner);
+        owners.insert(client, owner);
         Some(owner)
     }
 
@@ -459,10 +469,11 @@ impl SimulatedReplicationNetwork {
         self
     }
 
-    /// `ordinal`'s own handle on this fabric: every stream it opens is
-    /// attributed to it at `connect` (see [`NodeReplicationNetwork`]).
-    pub fn as_node(&self, ordinal: &str) -> NodeReplicationNetwork {
-        NodeReplicationNetwork { shared: self.shared.clone(), ordinal: ordinal.to_string() }
+    /// The handle of the node listening at `listen`: every stream it opens is
+    /// attributed to `listen` at `connect` (see [`NodeReplicationNetwork`]),
+    /// whatever address its ordinal is declared at later.
+    pub fn as_node(&self, listen: SocketAddr) -> NodeReplicationNetwork {
+        NodeReplicationNetwork::new(self.shared.clone(), listen)
     }
 
     /// Declare `ordinal`'s replication listen address, so a stream its puller
@@ -471,8 +482,9 @@ impl SimulatedReplicationNetwork {
     /// two declared addresses is a node fault (see [`Fault`]). Without a
     /// declaration a stream stands for its own address and a fault between two
     /// listen addresses reaches only the wires that literally run on the pair.
-    /// Declaring an ordinal again re-points it: later attributions and faults
-    /// read the new address.
+    /// Declaring an ordinal again re-points it: later `PullRequest`
+    /// attributions read the new address; a stream opened through a node's
+    /// own handle keeps the address the handle names.
     pub fn declare_endpoint(&self, ordinal: &str, listen: SocketAddr) {
         self.shared.endpoints.lock().unwrap().insert(ordinal.to_string(), listen);
     }
@@ -586,43 +598,6 @@ impl SimulatedReplicationNetwork {
         let _ = incoming_tx.send(Box::new(server) as Box<dyn ReplicationConnection>);
 
         Ok(Box::new(client))
-    }
-}
-
-/// One node's handle on a [`SimulatedReplicationNetwork`]: `connect` draws the
-/// ephemeral local and attributes it to the node's declared listen address
-/// before the fabric decides, so a [`Fault::Partition`] on the node refuses the
-/// connect with [`ConnectError::Blocked`] — a peer behind a partition is never
-/// reached — and a node [`Fault::Cut`] closes the stream at once. An ordinal
-/// with no declaration connects as the bare fabric does. `listen` is the
-/// fabric's own.
-#[derive(Clone)]
-pub struct NodeReplicationNetwork {
-    shared: Arc<SimShared>,
-    ordinal: String,
-}
-
-#[async_trait]
-impl ReplicationNetwork for NodeReplicationNetwork {
-    async fn connect(
-        &self,
-        dst: SocketAddr,
-    ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
-        let local = synth_local(dst);
-        let owner = self.shared.endpoints.lock().unwrap().get(&self.ordinal).copied();
-        if let Some(owner) = owner {
-            self.shared.stream_owner.lock().unwrap().insert(local, owner);
-        }
-        let fabric = SimulatedReplicationNetwork { shared: self.shared.clone() };
-        let conn = fabric.connect_from(local, dst).await;
-        if conn.is_err() {
-            self.shared.forget_stream(local);
-        }
-        conn
-    }
-
-    async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError> {
-        SimulatedReplicationNetwork { shared: self.shared.clone() }.listen(local).await
     }
 }
 

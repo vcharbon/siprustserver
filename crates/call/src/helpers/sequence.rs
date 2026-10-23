@@ -5,26 +5,27 @@
 //! copy relays or takes moves one of them; the next request either copy sends
 //! on a dialog continues from the higher of the two.
 
-use crate::model::{Call, Dialog, Leg, PendingRequest};
+use crate::model::{Call, Dialog, Leg, PendingRequest, RelayOwner};
 
 use super::leg::{every_leg, find_leg};
 
-/// Does `held` — a record, or none — hold every non-INVITE request the node
+/// Does `held` — a record, or none — hold every non-INVITE request the worker
 /// `by` relayed in `other` and awaits a final for, as the same relay on the
 /// same dialog — the CSeq it went out with, the method, and the originator's
 /// CSeq and Call-ID it answers — a retired dialog's open relays included? A
 /// non-INVITE final follows the Via to the node that relayed the request
 /// (RFC 3261 §18.2.2): only `by` sees the final of a relay it made, and a
 /// record that lacks the relay has nothing to relay that final to; a relay
-/// another node made returns to that node. INVITE relays are rounds, read by
+/// another worker made — another ordinal, or a former boot of `by`'s — returns
+/// to that worker. INVITE relays are rounds, read by
 /// `super::round`.
-pub fn holds_relays_of(held: Option<&Call>, other: &Call, by: &str) -> bool {
+pub fn holds_relays_of(held: Option<&Call>, other: &Call, by: &RelayOwner) -> bool {
     every_leg(other).all(|other_leg| {
         let held_leg = held.and_then(|h| find_leg(h, &other_leg.leg_id));
         other_leg.dialogs.iter().all(|o| {
             let ours = held_leg.and_then(|l| l.dialogs.by_tags(&o.our_tag, &o.peer_tag));
             relays(o)
-                .filter(|p| !p.method.eq_ignore_ascii_case("INVITE") && p.relayed_by == by)
+                .filter(|p| !p.method.eq_ignore_ascii_case("INVITE") && p.relayed_by == *by)
                 .all(|p| ours.is_some_and(|d| relays(d).any(|h| same_relay(h, p))))
         })
     })

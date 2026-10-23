@@ -12,7 +12,8 @@
 //! - `Added` → spawn/Connecting (or un-Park: reconnect from the retained W).
 //! - `Removed` → `Parked`: interrupt both flows, **retain W forever** keyed by
 //!   `(ordinal, flow)`, and tell the router the peer departed (ADR-0047).
-//! - `AddressChanged` → reconnect both flows to the new addr from the retained W.
+//! - `AddressChanged` → reconnect both flows to the new binding (host or worker
+//!   identity, ADR-0055 §6) from the retained W.
 //! - `ConditionsChanged` → nothing moves: a member is **pulled while it is in the
 //!   snapshot at all**, ready or not, terminating or not (ADR-0031 D1). Only
 //!   leaving the snapshot parks it. A peer pulled while not ready is logged once
@@ -20,10 +21,12 @@
 //!
 //! Every snapshot is also read for this node's **own** endpoint before self is
 //! filtered out of the desired set: once seen routable, its disappearance is the
-//! node's withdrawal from routing (ADR-0031 D6, [`SelfEndpoint`]), exposed as
+//! node's withdrawal from routing (ADR-0031 D6), and its ordinal bound to
+//! another worker identity is its supersession (ADR-0055 §6) — the
+//! [`SelfEndpoint`](super::SelfEndpoint) state, exposed as
 //! [`is_withdrawn`](ReplicationSupervisor::is_withdrawn) and on a watch the core
-//! turns into the `Draining` latch. Only a source that shows a member itself
-//! ([`Membership::observes_self`]) is read this way.
+//! turns into the `Draining` latch and its fence. Only a source that shows a
+//! member itself ([`Membership::observes_self`]) is read this way.
 //!
 //! ## Boot order: Reclaim first, Backup deferred
 //! A rebooting node prioritises reclaiming **its own** partition over taking on
@@ -59,12 +62,13 @@ use topology::{Membership, Peer};
 
 use super::peer_resolver::AddrResolver;
 use super::puller::{Puller, PullerConfig, PullerStatus};
-use super::self_endpoint::{SelfEndpoint, SelfObserver};
+use super::self_endpoint::SelfObserver;
 use super::ReplicatingCallStore;
 use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 
 mod backup_deferral;
 mod follow;
+mod own_endpoint;
 mod wiring;
 
 /// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
@@ -115,7 +119,7 @@ struct FlowState {
 /// Why a reconcile (re)starts a flow's puller.
 fn flow_reason(drift: bool, ended: bool) -> &'static str {
     match (drift, ended) {
-        (true, _) => "host moved",
+        (true, _) => "binding moved",
         (false, true) => "puller ended",
         (false, false) => "new peer",
     }
@@ -172,17 +176,18 @@ impl FlowState {
     }
 }
 
-/// Per-ordinal retained state: one [`FlowState`] per flow + the last host.
+/// Per-ordinal retained state: one [`FlowState`] per flow + the last binding.
 struct PeerEntry {
     /// Reclaim flow (`partition = Pri`) — drives readiness + reclaim.
     reclaim: FlowState,
     /// Backup flow (`partition = Bak`) — metrics-only, deferred until ready.
     backup: FlowState,
-    /// The membership `host` the running pullers were last spawned for. The drift
-    /// signal for the periodic snapshot reconcile (ADR-0012 D2): a desired peer
-    /// whose host moved (or whose flows are not running) is (re)spawned. `None`
-    /// until a puller has been spawned for this ordinal.
-    host: Option<String>,
+    /// The membership binding — `host` and worker identity — the running
+    /// pullers were last spawned for. The drift signal for the periodic
+    /// snapshot reconcile (ADR-0012 D2): a desired peer whose host moved or
+    /// whose identity changed (ADR-0055 §6), or whose flows are not running,
+    /// is (re)spawned. `None` until a puller has been spawned for this ordinal.
+    binding: Option<(String, Option<String>)>,
     /// The peer's `ready` condition as last reconciled. Not a drift signal — a
     /// condition flip never respawns a flow — only what [`PeerLink::Kept`], the
     /// transition log and the pulled-not-ready gauge read.
@@ -191,7 +196,7 @@ struct PeerEntry {
 
 impl PeerEntry {
     fn cold() -> Self {
-        Self { reclaim: FlowState::cold(), backup: FlowState::cold(), host: None, ready: true }
+        Self { reclaim: FlowState::cold(), backup: FlowState::cold(), binding: None, ready: true }
     }
 
     fn flow(&self, partition: Partition) -> &FlowState {
@@ -292,17 +297,20 @@ impl SupervisorInner {
 }
 
 impl ReplicationSupervisor {
-    /// Build a supervisor for `self_ordinal`. Call [`start`](Self::start) to
-    /// spawn the initial pullers + the topology-reconcile loop.
+    /// Build a supervisor for the worker `self_ordinal` whose identity is
+    /// `self_identity` (`None`: it states none, and is never superseded). Call
+    /// [`start`](Self::start) to spawn the initial pullers + the
+    /// topology-reconcile loop.
     pub fn new(
         self_ordinal: impl Into<String>,
+        self_identity: Option<String>,
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         resolve: AddrResolver,
         config: PullerConfig,
         metrics: crate::metrics::B2buaMetrics,
     ) -> Self {
-        Self::build(self_ordinal, network, store, resolve, config, metrics)
+        Self::build(self_ordinal, self_identity, network, store, resolve, config, metrics)
     }
 
     /// Build with explicit puller backoff config (tests inject short backoff).
@@ -317,6 +325,7 @@ impl ReplicationSupervisor {
     ) -> Self {
         Self::build(
             self_ordinal,
+            None,
             network,
             store,
             resolve,
@@ -328,6 +337,7 @@ impl ReplicationSupervisor {
     #[allow(clippy::too_many_arguments)]
     fn build(
         self_ordinal: impl Into<String>,
+        self_identity: Option<String>,
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         resolve: AddrResolver,
@@ -337,7 +347,7 @@ impl ReplicationSupervisor {
         let self_ordinal = self_ordinal.into();
         Self {
             inner: Arc::new(SupervisorInner {
-                self_endpoint: SelfObserver::new(self_ordinal.clone()),
+                self_endpoint: SelfObserver::new(self_ordinal.clone(), self_identity),
                 self_ordinal: self_ordinal.into(),
                 network,
                 store,
@@ -412,8 +422,9 @@ impl ReplicationSupervisor {
 
         for peer in &desired {
             let entry = peers.entry(peer.ordinal.clone()).or_insert_with(PeerEntry::cold);
-            let drift = entry.host.as_deref() != Some(peer.host.as_str());
-            entry.host = Some(peer.host.clone());
+            let binding = (peer.host.clone(), peer.identity.clone());
+            let drift = entry.binding.as_ref() != Some(&binding);
+            entry.binding = Some(binding);
             if entry.ready != peer.ready {
                 entry.ready = peer.ready;
                 if peer.ready {
@@ -493,29 +504,6 @@ impl ReplicationSupervisor {
         let pulled_not_ready =
             desired.iter().filter(|p| !p.ready).count().try_into().unwrap_or(u64::MAX);
         self.inner.metrics.set_repl_peers_pulled_not_ready(pulled_not_ready);
-    }
-
-    /// Read this node's own endpoint out of `snapshot` (ADR-0031 D6). A
-    /// withdrawal raises the `b2bua_withdrawn_running` gauge; the readiness
-    /// latch follows through [`self_endpoint`](Self::self_endpoint).
-    fn observe_self(&self, snapshot: &[Peer]) {
-        let synced = self.membership_synced();
-        if let Some(SelfEndpoint::Withdrawn(_)) = self.inner.self_endpoint.observe(snapshot, synced)
-        {
-            self.inner.metrics.set_withdrawn_running(true);
-        }
-    }
-
-    /// Whether this node has observed its own endpoint withdrawn from routing
-    /// (ADR-0031 D6): nothing new is routed here. Sticky. Always `false` on a
-    /// membership that does not show the node itself (static list).
-    pub fn is_withdrawn(&self) -> bool {
-        self.inner.self_endpoint.is_withdrawn()
-    }
-
-    /// The node's own endpoint state, as a watch that wakes on each transition.
-    pub fn self_endpoint(&self) -> watch::Receiver<SelfEndpoint> {
-        self.inner.self_endpoint.subscribe()
     }
 
     /// (Re)spawn one flow's puller into `flow`, seeded from its retained W. Cancels

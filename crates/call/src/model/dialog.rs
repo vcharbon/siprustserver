@@ -12,6 +12,7 @@ use super::emission::RetainedEmission;
 use super::invite_txn::InviteTxnHandle;
 use super::owed_answer::OwedAnswer;
 use super::own_notify::OwnNotify;
+use super::relay_owner::RelayOwner;
 use super::sdp_session::LegSdpSession;
 
 /// Direction of an original relayed request.
@@ -58,14 +59,11 @@ pub struct PendingRequest {
     /// back to it echoes (RFC 3261 §8.2.6.1); `None` where it stated none.
     #[serde(default)]
     pub source_timestamp: Option<String>,
-    /// The node that relayed the request, by its ordinal: its client
-    /// transaction carries the relay, and the final returns there (RFC 3261
-    /// §18.2.2). Empty where no node is named. A node restarted under the same
-    /// ordinal reads a relay its former incarnation made as its own; such a
-    /// relay holds no transaction here, so a takeover copy it keeps from
-    /// standing down still self-releases once its own transactions clear.
+    /// The worker that relayed the request, by ordinal and worker identity:
+    /// its client transaction carries the relay, and the final returns there
+    /// (RFC 3261 §18.2.2). The default names no worker.
     #[serde(default)]
-    pub relayed_by: String,
+    pub relayed_by: RelayOwner,
 }
 
 impl PendingRequest {
@@ -86,7 +84,7 @@ impl PendingRequest {
             offered_100rel: false,
             offered: false,
             source_timestamp: None,
-            relayed_by: String::new(),
+            relayed_by: RelayOwner::default(),
         }
     }
 }

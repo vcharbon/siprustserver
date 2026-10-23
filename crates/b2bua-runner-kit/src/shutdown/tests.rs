@@ -49,20 +49,28 @@ const BOUNDS: DrainBounds = DrainBounds {
 
 #[tokio::test]
 async fn a_withdrawal_with_no_signal_is_a_stop() {
-    let stop = next_stop(pending(), pending(), ready(()), pending()).await;
+    let stop = next_stop(pending(), pending(), pending(), ready(()), pending()).await;
     assert_eq!(stop, Stop::Withdrawn);
 }
 
 #[tokio::test]
 async fn a_loop_that_ended_wins_over_a_signal() {
-    let stop = next_stop(pending(), ready(()), pending(), ready("router")).await;
+    let stop = next_stop(pending(), pending(), ready(()), pending(), ready("router")).await;
     assert_eq!(stop, Stop::LoopEnded("router"));
 }
 
 #[tokio::test]
+async fn a_supersession_wins_over_the_loops_its_fence_ends() {
+    let stop = next_stop(ready(()), ready(()), pending(), pending(), ready("router")).await;
+    assert_eq!(stop, Stop::Superseded);
+}
+
+#[tokio::test]
 async fn sigterm_and_interrupt_are_stops() {
-    assert_eq!(next_stop(pending(), ready(()), pending(), pending()).await, Stop::Terminate);
-    assert_eq!(next_stop(ready(()), pending(), pending(), pending()).await, Stop::Interrupt);
+    let terminate = next_stop(pending(), pending(), ready(()), pending(), pending()).await;
+    assert_eq!(terminate, Stop::Terminate);
+    let interrupt = next_stop(pending(), ready(()), pending(), pending(), pending()).await;
+    assert_eq!(interrupt, Stop::Interrupt);
 }
 
 /// An endpoint whose input ends when the test closes it.
@@ -141,6 +149,7 @@ async fn worker_with_cdr(cdr: impl FnOnce(&B2buaMetrics) -> Arc<dyn CdrWriter>) 
     let deps = B2buaDeps {
         config: B2buaConfig {
             self_ordinal: "w0".into(),
+            self_identity: OWN_IDENTITY.into(),
             sip_local_ip: NODE.ip().to_string(),
             sip_local_port: NODE.port(),
             // The test process's own load never refuses the call.
@@ -168,14 +177,22 @@ async fn worker_with_cdr(cdr: impl FnOnce(&B2buaMetrics) -> Arc<dyn CdrWriter>) 
         capacity: None,
     };
     let core = B2buaCore::spawn(Box::new(Closable { inner, closed }), deps);
-    membership.add(Peer::new("w0", "w0"));
+    membership.add(Peer::new("w0", "w0").with_identity(OWN_IDENTITY));
     tokio::time::sleep(Duration::from_millis(100)).await;
     Worker { core, close, membership, caller, _callee }
 }
 
+/// The worker identity of the test's worker.
+const OWN_IDENTITY: &str = "w0-boot-1";
+
 impl Worker {
     fn withdraw(&self) {
         self.membership.set_conditions("w0", false, true);
+    }
+
+    /// The orchestrator binds the worker's ordinal to a recreation of it.
+    fn supersede(&self) {
+        self.membership.add(Peer::new("w0", "w0").with_identity("w0-boot-2"));
     }
 
     fn close_sip(&self) {
@@ -233,6 +250,31 @@ async fn sigterm_drains_a_cordoned_worker_and_exits_zero() {
     assert_eq!(code, ExitCode::SUCCESS);
     assert_eq!(w.core.metrics().drain_exits("quiescent"), 1, "the drain ran");
     assert_eq!(w.core.readiness_state(), b2bua::repl::ReadinessState::Draining);
+}
+
+/// A superseded worker stops at once: no drain of its live call, no release
+/// flush, an exit non-zero (ADR-0055 §6).
+#[tokio::test(start_paused = true)]
+async fn a_superseded_worker_exits_non_zero_without_a_drain() {
+    let w = worker().await;
+    w.ringing_call().await;
+    w.supersede();
+    let code = tokio::time::timeout(
+        Duration::from_millis(100),
+        serve_until_stop(&w.core, "test", BOUNDS, pending(), pending()),
+    )
+    .await
+    .expect("the supersession stops the worker at once");
+    assert_eq!(code, ExitCode::FAILURE);
+    assert!(w.core.is_superseded());
+    for reason in ["quiescent", "caught_up", "grace", "grace_peers_behind"] {
+        assert_eq!(w.core.metrics().drain_exits(reason), 0, "no drain exit: {reason}");
+    }
+    for outcome in
+        [ReleaseFlushOutcome::Empty, ReleaseFlushOutcome::Sent, ReleaseFlushOutcome::GivenUp]
+    {
+        assert_eq!(w.flushes(outcome), 0, "no release flush: {outcome:?}");
+    }
 }
 
 #[tokio::test(start_paused = true)]

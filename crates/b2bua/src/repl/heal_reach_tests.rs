@@ -45,7 +45,7 @@ async fn a_backup_catches_up_within_one_backoff_ceiling_and_one_connect_after_a_
         "A",
         Partition::Bak,
         b,
-        Arc::new(net.as_node("A")),
+        Arc::new(net.as_node(a)),
         store_a.clone(),
         PullerConfig::default(),
         Watermark::new(0, 0),

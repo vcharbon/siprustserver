@@ -151,7 +151,7 @@ impl HaCluster {
     /// (re)build its server+supervisor. The node's handle attributes every
     /// stream it opens at `connect`, so a partition refuses its connects.
     fn wiring_for(&self, ordinal: &str, peers: Vec<Peer>) -> NodeWiring {
-        let network = self.recording.over(Arc::new(self.sim.as_node(ordinal)));
+        let network = self.recording.over(Arc::new(self.sim.as_node(self.addrs[ordinal])));
         NodeWiring {
             network: Arc::new(network) as Arc<dyn ReplicationNetwork>,
             addr_map: self.addrs.clone(),

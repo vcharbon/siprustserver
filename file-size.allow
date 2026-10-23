@@ -27,7 +27,7 @@ crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
 crates/b2bua-runner-kit/src/lib.rs 621
-crates/b2bua-sdk/src/config.rs 884
+crates/b2bua-sdk/src/config.rs 827
 crates/b2bua-sdk/src/model.rs 1195
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
@@ -78,7 +78,7 @@ crates/pivot-schema/src/bundle/verdict.rs 632
 crates/pivot-schema/src/lint/flow_rules.rs 788
 crates/pivot-schema/src/lint/references.rs 505
 crates/pivot-schema/tests/it/lint.rs 2890
-crates/repl-net-testkit/src/simulated.rs 987
+crates/repl-net-testkit/src/simulated.rs 962
 crates/rfc-rules/src/rules/ack.rs 713
 crates/rfc-rules/src/rules/cancel.rs 648
 crates/rfc-rules/src/rules/capability.rs 648

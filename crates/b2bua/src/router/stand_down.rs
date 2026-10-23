@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use call::helpers::{holds_relays_of, holds_rounds_of, round_ahead};
-use call::Call;
+use call::{Call, RelayOwner};
 
 use super::release::{release_call, ReleaseKind};
 use super::{PrimaryWrite, RouterCtx};
@@ -73,7 +73,7 @@ pub(super) async fn stand_down_turn(
     if !ctx.state.is_takeover(call_ref) {
         return;
     }
-    let by = ctx.config.self_ordinal.as_str();
+    let by = &ctx.config.relay_owner();
     let stands_down = match outcome {
         PUT => ctx.state.decode_body(body).is_some_and(|primary| covers(&primary, &copy, by)),
         DELETE => {
@@ -88,7 +88,7 @@ pub(super) async fn stand_down_turn(
 }
 
 /// Whether the primary's body `primary` covers every write the takeover
-/// `copy` made on node `by`: the same call (one incarnation), the primary's
+/// `copy` made on worker `by`: the same call (one incarnation), the primary's
 /// `b` at or past the copy's, no re-INVITE round on which the copy stands
 /// ahead (`call::helpers::round_ahead`), and every request the copy relayed
 /// and awaits a final for held in the primary's record
@@ -97,7 +97,7 @@ pub(super) async fn stand_down_turn(
 /// the primary's body is not one. A primary reaches a `b` by reading the
 /// copy's write that carries it, applied or folded into its record, or
 /// refused and its counter adopted (ADR-0031 D3).
-pub(super) fn covers(primary: &Call, copy: &Call, by: &str) -> bool {
+pub(super) fn covers(primary: &Call, copy: &Call, by: &RelayOwner) -> bool {
     let bak_gen = |c: &Call| c.topology.as_ref().map_or(0, |t| t.bak_gen);
     primary.incarnation() == copy.incarnation()
         && bak_gen(primary) >= bak_gen(copy)
@@ -105,7 +105,7 @@ pub(super) fn covers(primary: &Call, copy: &Call, by: &str) -> bool {
         && finishes_nothing_alone(Some(primary), copy, by)
 }
 
-/// Whether `copy` on node `by` holds no request whose final only it sees
+/// Whether `copy` on worker `by` holds no request whose final only it sees
 /// that `record` — the primary's, or none once deleted — lacks: every
 /// re-INVITE round it holds the transaction of, unfinished, is the record's
 /// transaction or behind a later one (`call::helpers::holds_rounds_of`), and
@@ -114,7 +114,7 @@ pub(super) fn covers(primary: &Call, copy: &Call, by: &str) -> bool {
 /// that sent the request (RFC 3261 §18.2.2): a copy that relinquished it
 /// leaves the originator with no final, so the copy plays on with it and
 /// self-releases once its transactions clear.
-pub(super) fn finishes_nothing_alone(record: Option<&Call>, copy: &Call, by: &str) -> bool {
+pub(super) fn finishes_nothing_alone(record: Option<&Call>, copy: &Call, by: &RelayOwner) -> bool {
     holds_rounds_of(record, copy, by) && holds_relays_of(record, copy, by)
 }
 

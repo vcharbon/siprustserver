@@ -25,9 +25,9 @@
 //!   to `deps.replication`;
 //! - [`RunnerBase::spawn`] / [`RunnerBase::spawn_probe_server`] /
 //!   [`RunnerBase::spawn_gauge_sampler`] / [`RunnerBase::run_until_shutdown`]
-//!   — core spawn, the `/metrics`+`/ready`+`/healthz` probe, the
-//!   memory-attribution sampler, and the stop handling (SIGTERM or the
-//!   worker's own withdrawal drains; a loop task ending exits non-zero);
+//!   — core spawn, the `/metrics`+`/ready`+`/healthz` probe, the memory
+//!   sampler, and the stop handling (SIGTERM or the worker's own withdrawal
+//!   drains; its supersession or a loop task ending exits non-zero);
 //! - the shared helpers ([`env_or`], [`env_flag`], [`resolve`],
 //!   [`split_host_port`], [`NullCdrWriter`]).
 //!
@@ -52,12 +52,11 @@
 //! What deliberately does NOT live here: the decision engine (the one piece a
 //! runner exists to choose), the composed service list, and allocator wiring —
 //! those are the runner's own, injected through the seams above. Replication is
-//! the runner's choice to take: a runner may assign any other
-//! `ReplicationSetup` to `deps.replication`. The CDR sink is the runner's choice too:
-//! the kit ships the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env
-//! grammar) and the discarding default; a runner may give the RabbitMQ sink
-//! its own [`CdrEncoder`] or pass any other [`CdrWriter`] to
-//! [`RunnerBase::deps`].
+//! the runner's choice to take: a runner may assign any other `ReplicationSetup`
+//! to `deps.replication`. The CDR sink is the runner's choice too: the kit ships
+//! the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env grammar) and the
+//! discarding default; a runner may give the RabbitMQ sink its own
+//! [`CdrEncoder`] or pass any other [`CdrWriter`] to [`RunnerBase::deps`].
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -336,6 +335,7 @@ impl RunnerEnv {
 
         let config = B2buaConfig {
             self_ordinal: self.ordinal.clone(),
+            self_identity: entropy::worker_identity(name, self.identity.clone(), &id_gen),
             sip_local_ip: advertise_ip,
             sip_local_port: advertise_port,
             b2b_outbound_proxy: self.outbound_proxy.clone(),

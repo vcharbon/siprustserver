@@ -81,7 +81,8 @@ pub use model::{
 pub use model::{
     ByeDisposition, Dialog, DialogEnd, DialogId, DialogState, Dialogs, Direction, EndingBy,
     HostPort, InviteTxnHandle, LegDisposition, LegKind, LegSdpSession, LegState, OutboundInvite,
-    PeerDialog, PendingRequest, RemoteInfo, RetiredDialog, Ring, StragglerRelease, Unacked2xx,
+    PeerDialog, PendingRequest, RelayOwner, RemoteInfo, RetiredDialog, Ring, StragglerRelease,
+    Unacked2xx,
 };
 // The retained emission every dialog-level retransmission repeats (ADR-0032 X3)
 // and the obligation that discharges its ladder (X4).

@@ -64,6 +64,7 @@ pub mod owed_answer;
 pub mod own_notify;
 pub mod provisional;
 pub mod record;
+pub mod relay_owner;
 pub mod sdp_session;
 pub mod services;
 pub mod sm;
@@ -99,6 +100,7 @@ pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology,
     PolicyUpdateBody, SipHeader,
 };
+pub use relay_owner::RelayOwner;
 pub use sdp_session::LegSdpSession;
 pub use services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase, RerouteState,

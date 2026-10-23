@@ -5,7 +5,9 @@
 use crate::sdp_form::{AsWritten, SdpFormPolicy};
 use crate::service_params::ServiceParams;
 
+mod capacity;
 mod retry_after;
+pub use capacity::{CapacityConfig, Ceilings};
 pub use retry_after::RetryAfterRange;
 
 /// Tunables for a B2BUA worker. Cheap to clone (a handful of scalars + two
@@ -14,6 +16,10 @@ pub use retry_after::RetryAfterRange;
 pub struct B2buaConfig {
     /// This worker's ordinal, encoded into `callRef` for partition routing.
     pub self_ordinal: String,
+    /// This worker's identity: one boot of one worker, compared for equality
+    /// only (ADR-0055 §6). A request this worker relays names it beside the
+    /// ordinal. Empty: the worker states none.
+    pub self_identity: String,
     /// Local signaling IP stamped into Via / Contact.
     pub sip_local_ip: String,
     /// Local signaling port stamped into Via / Contact.
@@ -381,76 +387,6 @@ pub struct B2buaConfig {
     pub service_params: ServiceParams,
 }
 
-/// A pair of admission ceilings on one measured quantity. At or above
-/// `normal` a new non-emergency call is refused; at or above `emergency`
-/// every new call is refused. `None` leaves that class unbounded.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Ceilings {
-    pub normal: Option<u64>,
-    pub emergency: Option<u64>,
-}
-
-impl Ceilings {
-    /// The ceiling a call of this class is refused at: a non-emergency call
-    /// meets the lower of the two, an emergency call only `emergency`.
-    pub fn for_class(&self, is_emergency: bool) -> Option<u64> {
-        if is_emergency {
-            self.emergency
-        } else {
-            match (self.normal, self.emergency) {
-                (Some(n), Some(e)) => Some(n.min(e)),
-                (n, e) => n.or(e),
-            }
-        }
-    }
-
-    fn validate(&self, name: &str) -> Result<(), String> {
-        if self.normal == Some(0) || self.emergency == Some(0) {
-            return Err(format!("capacity.{name}: a ceiling of 0 refuses every call; unset it"));
-        }
-        if let (Some(n), Some(e)) = (self.normal, self.emergency) {
-            if e < n {
-                return Err(format!(
-                    "capacity.{name}: emergency ceiling {e} is below the normal ceiling {n}; \
-                     emergency calls keep priority, so their ceiling must be the higher one"
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// The worker's memory bounds (ADR-0037). Live calls and transactions are
-/// counted exactly; RSS is the process resident set, sampled. The backup
-/// ceilings bound the replica bodies this node holds for its peers: at either
-/// one a replica of a call not yet held is not stored.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CapacityConfig {
-    /// Live calls this worker serves, takeover copies included.
-    pub calls: Ceilings,
-    /// Live SIP transactions, every role and state.
-    pub transactions: Ceilings,
-    /// Process resident set size, in bytes.
-    pub rss_bytes: Ceilings,
-    /// Backup replica bodies held for peers.
-    pub backup_calls: Option<u64>,
-    /// Process RSS above which a new backup replica is not stored.
-    pub backup_rss_bytes: Option<u64>,
-}
-
-impl CapacityConfig {
-    /// Refuses a zero ceiling and an emergency ceiling below its normal one.
-    pub fn validate(&self) -> Result<(), String> {
-        self.calls.validate("calls")?;
-        self.transactions.validate("transactions")?;
-        self.rss_bytes.validate("rss_bytes")?;
-        if self.backup_calls == Some(0) || self.backup_rss_bytes == Some(0) {
-            return Err("capacity: a backup ceiling of 0 stores no backup; unset it".to_string());
-        }
-        Ok(())
-    }
-}
-
 /// What the call keeps of its own SIP traffic for the record it writes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CdrConfig {
@@ -469,6 +405,7 @@ impl Default for B2buaConfig {
     fn default() -> Self {
         Self {
             self_ordinal: "w0".to_string(),
+            self_identity: String::new(),
             sip_local_ip: "127.0.0.1".to_string(),
             sip_local_port: 5060,
             b2b_outbound_proxy: None,
@@ -775,6 +712,12 @@ impl B2buaConfig {
         }
         self.capacity.validate()?;
         Ok(())
+    }
+
+    /// This worker as a request record names the worker that relayed it: its
+    /// ordinal and its identity.
+    pub fn relay_owner(&self) -> call::RelayOwner {
+        call::RelayOwner::new(self.self_ordinal.clone(), self.self_identity.clone())
     }
 
     /// The configured initial-INVITE transaction bound in ms — the value wired

@@ -29,6 +29,8 @@ pub use deps::{B2buaDeps, ReplicationSetup};
 mod drain;
 #[cfg(test)]
 mod drain_tests;
+mod fence;
+use fence::Fence;
 mod introspection;
 #[cfg(test)]
 mod loops_tests;
@@ -68,6 +70,9 @@ pub struct B2buaCore {
     /// loop). [`abort`](Self::abort) aborts them for a simulated crash; ordinary
     /// drop leaves them to die with the endpoint/channels.
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// What stopping this worker's authoring reaches: closed by a simulated
+    /// crash and when the worker is superseded (ADR-0055 §6).
+    fence: Arc<Fence>,
     /// The transaction owner and router loops: their pulses and tasks.
     loops: crate::loops::WorkerLoops,
     /// The X11 fail-back command sender of a wired node, retained so the
@@ -199,8 +204,11 @@ impl B2buaCore {
                     .with_replication(setup.store.clone(), writer)
                     .with_replicated_ttl_ms(replicated_ttl_ms);
 
+                let self_identity =
+                    (!config.self_identity.is_empty()).then(|| config.self_identity.clone());
                 let supervisor = ReplicationSupervisor::new(
                     self_ordinal.clone(),
+                    self_identity,
                     setup.network.clone(),
                     (*setup.store).clone(),
                     setup.addr_resolver.clone(),
@@ -450,6 +458,15 @@ impl B2buaCore {
         // aborted with the other tasks on a simulated `crash()`.
         tasks.push(samplers::spawn_clock_divergence(ctx.clock.clone(), metrics.clone()));
 
+        // A worker superseded by a recreation of its ordinal stops authoring
+        // the instant it observes it (ADR-0055 §6).
+        let fence = Arc::new(Fence {
+            tasks: tasks.iter().map(|t| t.abort_handle()).collect(),
+            ctx: Arc::downgrade(&ctx),
+            supervisor: supervisor.clone(),
+        });
+        tasks.push(spawn_keeping_node(fence.clone().on_superseded()));
+
         Self {
             ctx,
             metrics,
@@ -460,6 +477,7 @@ impl B2buaCore {
             supervisor,
             repl_store,
             tasks,
+            fence,
             loops,
             _repl_tx: repl_tx,
             node,
@@ -520,39 +538,6 @@ impl B2buaCore {
     /// The memory admission gate (ADR-0037) the running core decides with.
     pub fn capacity(&self) -> &CapacityGate {
         &self.ctx.capacity
-    }
-
-    /// CRASH: abort the directly-spawned tasks (serve loop + router) and park
-    /// every replication puller (closing its pulled connections). Mirrors the
-    /// ha-harness `HaNode::crash` discipline at the live-core level: the spawned
-    /// per-connection/per-puller tasks lose their driver and unwind, and dropping
-    /// this `B2buaCore` afterwards releases the last store/supervisor `Arc`s so a
-    /// reboot can re-listen on the same addresses. No per-call body runs on.
-    pub fn abort(&mut self) {
-        for t in std::mem::take(&mut self.tasks) {
-            t.abort();
-        }
-        self.ctx.dispatcher.halt();
-        // Also abort the transaction-layer owner task — it is spawned untracked
-        // inside `TransactionLayer::spawn` and owns the SIP endpoint, so without
-        // this the "crashed" node keeps answering SIP (100/200/487, cached replays,
-        // retransmits) until every surviving per-call task drops its cmd_tx clone.
-        self.ctx.txn.abort_owner();
-        // A crash loses the release queue; a drain still waiting flushes nothing.
-        self.ctx.limiter.stop();
-        if let Some(s) = &self.supervisor {
-            s.shutdown();
-        }
-        // Per-call root spans are this core's runtime state, not replicated
-        // state: they die with the core and return their active-trace slots
-        // (ADR-0026). A survivor taking one of these calls over therefore opens
-        // its OWN linked root, exactly as it does across a process boundary.
-        let traces = crate::trace::traces();
-        self.node.enter(|| {
-            for call_ref in self.ctx.state.live_call_refs() {
-                traces.close(&call_ref);
-            }
-        });
     }
 
     /// This worker's handle on its call limiter: an exit that waits for no

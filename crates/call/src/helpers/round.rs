@@ -14,7 +14,7 @@
 //! state; a dialog's sequence speaks only for a round a non-2xx ended, which
 //! leaves no transaction behind.
 
-use crate::model::{Call, Dialog, DialogId, Obligation, PendingRequest, TimerEntry};
+use crate::model::{Call, Dialog, DialogId, Obligation, PendingRequest, RelayOwner, TimerEntry};
 
 use super::leg::{every_leg, find_leg};
 use super::lens::update_leg;
@@ -48,20 +48,20 @@ pub fn round_ahead(incoming: &Call, held: &Call) -> bool {
 }
 
 /// Does `held` — a record, or none — hold every re-INVITE round `other` holds
-/// open on a relay the node `by` made: the same transaction or a later one,
+/// open on a relay the worker `by` made: the same transaction or a later one,
 /// on the same dialog? The open round's final returns to the node that
 /// relayed it (RFC 3261 §18.2.2). An answered round's final is taken; its ACK
 /// follows the route set, not the node, and the 2xx's retransmissions are
 /// facts of the record ([`round_ahead`] reads a record behind on them). Read
 /// from the transactions alone: a dialog's sequence, which every fold and
 /// refusal raises, says nothing of a round's presence.
-pub fn holds_rounds_of(held: Option<&Call>, other: &Call, by: &str) -> bool {
+pub fn holds_rounds_of(held: Option<&Call>, other: &Call, by: &RelayOwner) -> bool {
     every_leg(other).all(|other_leg| {
         let held_leg = held.and_then(|h| find_leg(h, &other_leg.leg_id));
         other_leg.dialogs.iter().all(|o| {
             let Some(round) = unfinished(o) else { return true };
             let Stage::Open { outbound_cseq } = round.stage else { return true };
-            if !invite_relays(o).any(|p| p.outbound_cseq == outbound_cseq && p.relayed_by == by) {
+            if !invite_relays(o).any(|p| p.outbound_cseq == outbound_cseq && p.relayed_by == *by) {
                 return true;
             }
             let ours = held_leg.and_then(|l| l.dialogs.by_tags(&o.our_tag, &o.peer_tag));

@@ -62,6 +62,7 @@ mod proxy_sut;
 mod release_all;
 mod repl_faults;
 mod repl_wiring;
+mod replacement;
 mod rfc_audit;
 mod settle;
 pub use proxy_sut::ProxySut;
@@ -525,9 +526,16 @@ impl ReplicatedB2buaSut {
         self.retire_incarnation("crash");
     }
 
-    /// The ledger key of this node's live incarnation (`b1#g2`).
+    /// The ledger key of this node's live incarnation (`b1#g2`), also its
+    /// worker identity.
     pub fn incarnation_key(&self) -> String {
-        format!("{}#g{}", self.ordinal, self.gen)
+        incarnation_key(&self.ordinal, self.gen)
+    }
+
+    /// Whether this incarnation observed its ordinal bound to another worker
+    /// identity and stopped authoring (ADR-0055 §6). `false` while crashed.
+    pub fn is_superseded(&self) -> bool {
+        self.core.as_ref().is_some_and(|c| c.is_superseded())
     }
 
     /// Mark the live incarnation's process gone and record it on the ledger.
@@ -732,6 +740,7 @@ impl ReplicatedB2buaSut {
     /// given replication setup.
     async fn spawn_core(&self, replication: Option<ReplicationSetup>) -> B2buaCore {
         let (endpoint, _sa) = self.harness.bind_sut(&self.sip_name, &self.sip_bind).await;
+        let identity = self.incarnation_key();
         let params = B2buaSpawnParams {
             ordinal: self.ordinal.clone(),
             sip_addr: self.sip_addr,
@@ -787,6 +796,7 @@ impl ReplicatedB2buaSut {
             config.keepalive_interval_sec = 300;
             config.keepalive_timeout_sec = 45;
             config.reboot_budget_sec = 600;
+            config.self_identity = identity.clone();
             // The scenario tune runs LAST so it can override any parity
             // default above — on this spawn and on every reboot re-spawn.
             (self.tune)(config);
@@ -927,6 +937,12 @@ pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "cseq-in-dialog-order";
 /// for the same reason: a partitioned owner's CANCEL ladder outlives its copy
 /// (ADR-0034) and crosses a healed plane after the other owner answered.
 pub const RULE_NO_CANCEL_AFTER_FINAL: &str = "no-cancel-after-final";
+
+/// The ledger key of incarnation `gen` of `ordinal` (`b1#g2`), which the
+/// harness also gives it as its worker identity.
+pub(crate) fn incarnation_key(ordinal: &str, gen: u64) -> String {
+    format!("{ordinal}#g{gen}")
+}
 
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
 fn repl_addr_for(index: usize) -> SocketAddr {
@@ -1498,19 +1514,24 @@ impl FailoverHarness {
         // itself, as the informer's slice shows a published pod: that is how it
         // observes its own withdrawal (ADR-0031 D6); the supervisor never pulls
         // itself. A replacement is published by `readmit`, not at spawn.
+        // Every member is bound to the worker identity of its newest
+        // incarnation, the incarnation key, as the informer binds a pod name to
+        // its UID (ADR-0055 §6).
         let published = if gen == 1 { Some(ordinal) } else { None };
         let peer_list: Vec<Peer> = spec
             .peers
             .iter()
             .map(String::as_str)
-            .chain(published)
-            .map(|p| Peer::new(p, p))
+            .map(|p| self.bound_member(p))
+            .chain(published.map(|p| Peer::new(p, p).with_identity(incarnation_key(p, gen))))
             .collect();
         // The node connects through its own handle on the fabric: a stream it
-        // opens is attributed to it at `connect`, so a partition refuses the
-        // connect rather than holding a stream the puller already counts as
-        // reached. A reboot keeps the handle — the ordinal does not change.
-        let network = self.repl_recording.over(Arc::new(self.repl_sim.as_node(ordinal)));
+        // opens is attributed to its listen address at `connect`, so a
+        // partition refuses the connect rather than holding a stream the puller
+        // already counts as reached, and an elder incarnation still running
+        // beside its replacement keeps its own streams. A reboot keeps the
+        // handle — it listens where the incarnation it replaces did.
+        let network = self.repl_recording.over(Arc::new(self.repl_sim.as_node(listen_addr)));
         let wiring = ReplWiring {
             network: Arc::new(network) as Arc<dyn ReplicationNetwork>,
             addr_map: self.repl_resolver.clone(),
@@ -1598,67 +1619,6 @@ impl FailoverHarness {
     pub fn restore_signalling(&mut self, ordinal: &str, addr: SocketAddr) {
         self.sip_cut.lock().unwrap().remove(&addr);
         self.mark(ordinal, None, "sip-heal", &format!("{addr} reachable again"));
-    }
-
-    /// **Start a replacement incarnation of `ordinal` ALONGSIDE the running
-    /// one** — the orchestrator recreating a withdrawn worker while its old
-    /// process is still up. The new incarnation comes up at gen+1 on a fresh SIP
-    /// address (a new pod IP, like a reboot) AND a fresh replication listen
-    /// address, since the old incarnation still holds the declared one; the
-    /// cluster's resolver map is re-pointed at it, so peers reach the
-    /// replacement on their next connect (ADR-0012 D3). The old incarnation is
-    /// untouched — the caller keeps its handle and decides when it dies.
-    ///
-    /// The replacement's SIP + repl binds are asserted, never assumed: a core
-    /// whose replication listen fails is silently unreachable, which would read
-    /// as a replication bug three assertions later.
-    pub async fn spawn_replacement(&mut self, ordinal: &str) -> ReplicatedB2buaSut {
-        let spec = self
-            .worker_specs
-            .get(ordinal)
-            .cloned()
-            .unwrap_or_else(|| panic!("worker {ordinal} was never spawned"));
-        let gen = self.views.max_gen(ordinal) + 1;
-        let octet = u8::try_from(gen).expect("gen fits a host octet (< 256 incarnations)");
-        let sip_addr = SocketAddr::from(([127, 0, octet, 1], spec.sip_base_addr.port()));
-        let declared = self.repl_addrs[ordinal];
-        let listen_addr = SocketAddr::from((
-            declared.ip(),
-            declared.port() + 100 * u16::try_from(gen - 1).expect("gen fits"),
-        ));
-        // Peers must find the replacement, not the incarnation it replaces, and
-        // the fabric must read the ordinal's streams as the replacement's, so a
-        // fault named on the ordinal reaches them (both maps before the spawn:
-        // the streams it opens are attributed to this address).
-        self.repl_resolver.lock().unwrap().insert(ordinal.to_string(), listen_addr);
-        self.repl_sim.declare_endpoint(ordinal, listen_addr);
-
-        let sut = self.spawn_incarnation(ordinal, &spec, gen, sip_addr, listen_addr).await;
-        self.assert_repl_listening(ordinal, listen_addr).await;
-        self.mark(
-            ordinal,
-            None,
-            "replacement",
-            &format!(
-                "gen={gen} alongside the running incarnation; sip={sip_addr} repl={listen_addr}"
-            ),
-        );
-        self.views.record("orchestrator", ordinal, Belief::Running { gen }, "spawn_replacement");
-        sut
-    }
-
-    /// Assert `ordinal`'s new incarnation really owns `listen_addr` on the repl
-    /// fabric. `B2buaCore` spawns its replication server in a task and swallows
-    /// the listen error, so a duplicate bind would otherwise show up only as a
-    /// peer that never pulls.
-    async fn assert_repl_listening(&self, ordinal: &str, listen_addr: SocketAddr) {
-        sip_clock::testkit::settle().await;
-        match self.repl_sim.connect(listen_addr).await {
-            Ok(_probe) => {}
-            Err(e) => panic!(
-                "{ordinal}'s replacement did not take its replication listen address                  {listen_addr} ({e:?}) — its peers would never reach it",
-            ),
-        }
     }
 
     /// **Begin a graceful drain of `node`** ([`B2buaCore::drain`]): latch

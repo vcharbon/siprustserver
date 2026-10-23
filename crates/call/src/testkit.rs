@@ -170,7 +170,7 @@ pub fn stage_reinvite_round(leg: &mut Leg, branch: &str, stage: RoundStage) {
             offered_100rel: false,
             offered: true,
             source_timestamp: None,
-            relayed_by: String::new(),
+            relayed_by: Default::default(),
         }),
         RoundStage::Answered => d.awaited_ack_cseq = Some(STAGED_ROUND_CSEQ),
         RoundStage::Acked => d.ack_branch = Some(format!("{branch}-ack")),

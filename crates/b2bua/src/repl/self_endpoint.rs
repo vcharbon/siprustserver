@@ -1,5 +1,5 @@
 //! [`SelfEndpoint`] — a worker's view of **its own** endpoint in the membership
-//! it pulls its peers from (ADR-0031 D6).
+//! it pulls its peers from (ADR-0031 D6, ADR-0055 §6).
 //!
 //! The informer shows a worker every endpoint of its pool, its own included; the
 //! proxy routes to the same slice. So the one predicate the proxy applies to
@@ -14,6 +14,13 @@
 //! replacement. The worker latches Draining on it and still serves what
 //! reaches it (D5), but applies no routing decision that returns after its
 //! endpoint left the slice: its backups took those calls over (ADR-0047 D6).
+//!
+//! A worker that has seen its ordinal bound to its own worker identity and
+//! then sees it bound to another is `Superseded`, from any state and for good:
+//! the orchestrator recreated the ordinal while this process still runs. The
+//! identities are compared for equality only. Before the worker has seen its
+//! own identity, another one is its predecessor's, still listed: no
+//! supersession.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -52,16 +59,26 @@ pub enum SelfEndpoint {
     Routable,
     /// Was routable, and is no longer (sticky).
     Withdrawn(WithdrawalCondition),
+    /// The ordinal is bound to another worker identity after this worker saw
+    /// it bound to its own (sticky, terminal): this worker authors nothing
+    /// more (ADR-0055 §6).
+    Superseded,
 }
 
 impl SelfEndpoint {
+    /// Whether nothing new is routed to this worker: its endpoint was
+    /// withdrawn, or its ordinal routes to another worker identity.
     pub fn is_withdrawn(self) -> bool {
-        matches!(self, SelfEndpoint::Withdrawn(_))
+        matches!(self, SelfEndpoint::Withdrawn(_) | SelfEndpoint::Superseded)
     }
 
     /// Whether the endpoint left the slice after it was routable (sticky).
     pub fn left_the_slice(self) -> bool {
         self == SelfEndpoint::Withdrawn(WithdrawalCondition::Absent)
+    }
+
+    pub fn is_superseded(self) -> bool {
+        self == SelfEndpoint::Superseded
     }
 }
 
@@ -69,14 +86,21 @@ impl SelfEndpoint {
 /// [`enable`](Self::enable): a static membership never observes itself.
 pub struct SelfObserver {
     self_ordinal: String,
+    /// This worker's identity; `None` when it states none, and the ordinal
+    /// alone then names its endpoint.
+    self_identity: Option<String>,
+    /// Set once a snapshot bound the ordinal to `self_identity`.
+    own_identity_seen: AtomicBool,
     enabled: AtomicBool,
     state: watch::Sender<SelfEndpoint>,
 }
 
 impl SelfObserver {
-    pub fn new(self_ordinal: impl Into<String>) -> Self {
+    pub fn new(self_ordinal: impl Into<String>, self_identity: Option<String>) -> Self {
         Self {
             self_ordinal: self_ordinal.into(),
+            self_identity,
+            own_identity_seen: AtomicBool::new(false),
             enabled: AtomicBool::new(false),
             state: watch::channel(SelfEndpoint::Unobserved).0,
         }
@@ -96,17 +120,27 @@ impl SelfObserver {
         if !self.enabled.load(Ordering::SeqCst) || !synced {
             return None;
         }
-        let observed = classify(snapshot, &self.self_ordinal);
+        let (observed, names_own) =
+            classify(snapshot, &self.self_ordinal, self.self_identity.as_deref());
+        if names_own {
+            self.own_identity_seen.store(true, Ordering::SeqCst);
+        }
+        let own_identity_seen = self.own_identity_seen.load(Ordering::SeqCst);
         let mut transition = None;
         self.state.send_if_modified(|state| {
             let next = match (*state, observed) {
+                (SelfEndpoint::Superseded, _) => return false,
+                (_, Sighting::Elsewhere) if own_identity_seen => SelfEndpoint::Superseded,
                 (SelfEndpoint::Unobserved, Sighting::Ready) => SelfEndpoint::Routable,
                 (SelfEndpoint::Routable, Sighting::Withdrawn(condition)) => {
                     SelfEndpoint::Withdrawn(condition)
                 }
+                (SelfEndpoint::Routable, Sighting::Elsewhere) => {
+                    SelfEndpoint::Withdrawn(WithdrawalCondition::Absent)
+                }
                 (
                     SelfEndpoint::Withdrawn(WithdrawalCondition::Terminating),
-                    Sighting::Withdrawn(WithdrawalCondition::Absent),
+                    Sighting::Withdrawn(WithdrawalCondition::Absent) | Sighting::Elsewhere,
                 ) => SelfEndpoint::Withdrawn(WithdrawalCondition::Absent),
                 _ => return false,
             };
@@ -125,6 +159,11 @@ impl SelfObserver {
                 ordinal = %self.self_ordinal,
                 condition = condition.as_str(),
                 "own endpoint withdrawn from routing; latching Draining, still serving"
+            ),
+            Some(SelfEndpoint::Superseded) => tracing::warn!(
+                node = observe::node(),
+                ordinal = %self.self_ordinal,
+                "own ordinal bound to another worker identity; superseded, authoring stops"
             ),
             _ => {}
         }
@@ -156,18 +195,34 @@ enum Sighting {
     /// Gone from the slice, or in it as a `terminating` endpoint the
     /// orchestrator is removing.
     Withdrawn(WithdrawalCondition),
+    /// The ordinal is in the slice bound to another worker identity.
+    Elsewhere,
 }
 
-/// The [`Sighting`] of `self_ordinal` in `snapshot`. A not-ready endpoint that
-/// is NOT terminating is no withdrawal: `Draining` is terminal, so latching it
-/// on a readiness flap would remove for good a worker meant to come back.
-fn classify(snapshot: &[Peer], self_ordinal: &str) -> Sighting {
-    match snapshot.iter().find(|p| p.ordinal == self_ordinal) {
-        Some(p) if p.ready => Sighting::Ready,
-        Some(p) if p.terminating => Sighting::Withdrawn(WithdrawalCondition::Terminating),
-        Some(_) => Sighting::NotReady,
-        None => Sighting::Withdrawn(WithdrawalCondition::Absent),
-    }
+/// The [`Sighting`] of `self_ordinal` in `snapshot`, and whether the entry
+/// names `self_identity`. An entry naming no identity, or a worker stating
+/// none, is read by the ordinal alone. A not-ready endpoint that is NOT
+/// terminating is no withdrawal: `Draining` is terminal, so latching it on a
+/// readiness flap would remove for good a worker meant to come back.
+fn classify(
+    snapshot: &[Peer],
+    self_ordinal: &str,
+    self_identity: Option<&str>,
+) -> (Sighting, bool) {
+    let Some(p) = snapshot.iter().find(|p| p.ordinal == self_ordinal) else {
+        return (Sighting::Withdrawn(WithdrawalCondition::Absent), false);
+    };
+    let names_own = match (p.identity.as_deref(), self_identity) {
+        (Some(theirs), Some(mine)) if theirs != mine => return (Sighting::Elsewhere, false),
+        (Some(_), Some(_)) => true,
+        _ => false,
+    };
+    let sighting = match p {
+        p if p.ready => Sighting::Ready,
+        p if p.terminating => Sighting::Withdrawn(WithdrawalCondition::Terminating),
+        _ => Sighting::NotReady,
+    };
+    (sighting, names_own)
 }
 
 #[cfg(test)]
@@ -180,7 +235,7 @@ mod tests {
 
     #[test]
     fn disabled_observer_never_moves() {
-        let o = SelfObserver::new("w0");
+        let o = SelfObserver::new("w0", None);
         assert_eq!(o.observe(&peers(&["w0", "w1"]), true), None);
         assert_eq!(o.observe(&peers(&["w1"]), true), None);
         assert_eq!(o.current(), SelfEndpoint::Unobserved);
@@ -189,7 +244,7 @@ mod tests {
 
     #[test]
     fn absent_before_first_publication_is_not_a_withdrawal() {
-        let o = SelfObserver::new("w0");
+        let o = SelfObserver::new("w0", None);
         o.enable();
         assert_eq!(o.observe(&peers(&[]), true), None);
         assert_eq!(o.observe(&peers(&["w1"]), true), None);
@@ -199,7 +254,7 @@ mod tests {
     #[test]
     fn a_published_endpoint_not_ready_yet_is_not_routable() {
         // A booting pod: in the slice, `ready=false, terminating=false`.
-        let o = SelfObserver::new("w0");
+        let o = SelfObserver::new("w0", None);
         o.enable();
         let booting = vec![Peer::with_conditions("w0", "w0", false, false), Peer::new("w1", "w1")];
         assert_eq!(o.observe(&booting, true), None);
@@ -211,7 +266,7 @@ mod tests {
     fn a_terminating_own_endpoint_still_in_the_slice_is_a_withdrawal() {
         // The graceful shape: the endpoint stays in the slice (its peers keep
         // pulling it, D1) reading `ready=false, terminating=true`.
-        let o = SelfObserver::new("w0");
+        let o = SelfObserver::new("w0", None);
         o.enable();
         assert_eq!(o.observe(&peers(&["w0", "w1"]), true), Some(SelfEndpoint::Routable));
         let terminating =
@@ -226,7 +281,7 @@ mod tests {
     #[test]
     fn a_terminating_endpoint_that_then_leaves_the_slice_has_left_it() {
         // The abrupt shape may show one terminating event before the removal.
-        let o = SelfObserver::new("w0");
+        let o = SelfObserver::new("w0", None);
         o.enable();
         o.observe(&peers(&["w0", "w1"]), true);
         let terminating =
@@ -246,7 +301,7 @@ mod tests {
     fn a_readiness_flap_is_not_a_withdrawal() {
         // Case 4: not ready, not terminating, same address — the orchestrator
         // keeps the member and expects it back, and `Draining` is terminal.
-        let o = SelfObserver::new("w0");
+        let o = SelfObserver::new("w0", None);
         o.enable();
         assert_eq!(o.observe(&peers(&["w0", "w1"]), true), Some(SelfEndpoint::Routable));
         let flapping = vec![Peer::with_conditions("w0", "w0", false, false), Peer::new("w1", "w1")];
@@ -257,7 +312,7 @@ mod tests {
 
     #[test]
     fn an_unsynced_snapshot_is_ignored() {
-        let o = SelfObserver::new("w0");
+        let o = SelfObserver::new("w0", None);
         o.enable();
         assert_eq!(o.observe(&peers(&["w0"]), false), None);
         assert_eq!(o.current(), SelfEndpoint::Unobserved);
@@ -265,7 +320,7 @@ mod tests {
 
     #[test]
     fn routable_then_absent_latches_withdrawn_once() {
-        let o = SelfObserver::new("w0");
+        let o = SelfObserver::new("w0", None);
         o.enable();
         let mut rx = o.subscribe();
         assert_eq!(o.observe(&peers(&["w0", "w1"]), true), Some(SelfEndpoint::Routable));
@@ -285,5 +340,67 @@ mod tests {
         assert_eq!(o.observe(&peers(&["w1"]), true), None);
         assert!(o.is_withdrawn());
         assert!(!rx.has_changed().unwrap());
+    }
+
+    fn bound(ordinal: &str, identity: &str) -> Peer {
+        Peer::new(ordinal, ordinal).with_identity(identity)
+    }
+
+    fn named(identity: &str) -> SelfObserver {
+        let o = SelfObserver::new("w0", Some(identity.to_string()));
+        o.enable();
+        o
+    }
+
+    #[test]
+    fn the_ordinal_bound_to_another_identity_supersedes_a_routable_worker() {
+        let o = named("uid-a");
+        assert_eq!(o.observe(&[bound("w0", "uid-a")], true), Some(SelfEndpoint::Routable));
+        assert_eq!(o.observe(&[bound("w0", "uid-b")], true), Some(SelfEndpoint::Superseded));
+        assert!(o.current().is_superseded());
+        assert!(o.is_withdrawn(), "nothing new is routed to it");
+        assert_eq!(o.observe(&[bound("w0", "uid-a")], true), None, "sticky");
+        assert_eq!(o.observe(&[], true), None, "terminal");
+    }
+
+    #[test]
+    fn a_withdrawn_worker_whose_ordinal_returns_under_another_identity_is_superseded() {
+        let o = named("uid-a");
+        o.observe(&[bound("w0", "uid-a")], true);
+        assert_eq!(
+            o.observe(&[], true),
+            Some(SelfEndpoint::Withdrawn(WithdrawalCondition::Absent))
+        );
+        let successor = bound("w0", "uid-b").not_ready();
+        assert_eq!(o.observe(&[successor], true), Some(SelfEndpoint::Superseded));
+    }
+
+    #[test]
+    fn a_worker_seen_published_but_never_ready_is_superseded_too() {
+        let o = named("uid-a");
+        assert_eq!(o.observe(&[bound("w0", "uid-a").not_ready()], true), None);
+        assert_eq!(o.observe(&[bound("w0", "uid-b")], true), Some(SelfEndpoint::Superseded));
+    }
+
+    #[test]
+    fn a_predecessor_still_listed_at_boot_supersedes_nothing() {
+        // The recreated worker boots while the slice still binds its ordinal to
+        // the process it replaces.
+        let o = named("uid-b");
+        assert_eq!(o.observe(&[bound("w0", "uid-a")], true), None);
+        assert_eq!(o.current(), SelfEndpoint::Unobserved);
+        assert_eq!(o.observe(&[bound("w0", "uid-b")], true), Some(SelfEndpoint::Routable));
+    }
+
+    #[test]
+    fn an_entry_naming_no_identity_never_supersedes() {
+        let o = named("uid-a");
+        o.observe(&[bound("w0", "uid-a")], true);
+        assert_eq!(o.observe(&[Peer::new("w0", "w0")], true), None, "read by the ordinal");
+        let unnamed = SelfObserver::new("w0", None);
+        unnamed.enable();
+        unnamed.observe(&[bound("w0", "uid-a")], true);
+        assert_eq!(unnamed.observe(&[bound("w0", "uid-b")], true), None);
+        assert_eq!(unnamed.current(), SelfEndpoint::Routable);
     }
 }

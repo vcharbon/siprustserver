@@ -467,7 +467,7 @@ fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
                     offered_100rel: false,
                     offered: false,
                     source_timestamp,
-                    relayed_by: String::new(),
+                    relayed_by: Default::default(),
                 }
             },
         )

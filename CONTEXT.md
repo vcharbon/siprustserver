@@ -594,6 +594,9 @@ restarts, so `(new_gen, 0) > (old_gen, *)`). *callGen* (`CallTopology.gen`) = th
 **primary counter `p`** of a call's `(p,b)` **version vector** (ADR-0014; `b` =
 `CallTopology.bak_gen`), the per-context reconciliation key. Never conflate the
 incarnation-gen (per node, in the watermark) with the call's `(p,b)` (per call).
+The incarnation-gen resets a puller's changelog position; it never decides which
+of two live processes of one ordinal authors — the **worker identity** does, by
+equality.
 
 **Watermark** `(gen, counter)`:
 A puller's cursor, **one per `(peer, flow)`** — the **Reclaim** and **Backup**
@@ -868,6 +871,23 @@ on the supervisor, the `b2bua_withdrawn_running` gauge), and the worker
 drains and exits as on SIGTERM (D5). A static membership
 never shows a worker itself. Four ways out — graceful, abrupt, vanished, restarted in
 place — in ADR-0031.
+
+**Worker identity**:
+One boot of one worker ordinal: the orchestrator's pod UID (the informer's
+`targetRef.uid`, its own from the downward API as `POD_UID`), or a per-boot
+token in a static pool. Membership binds it to the ordinal (`topology::Peer`);
+a changed identity is a changed binding, handled as a changed address. Compared
+for equality only, never ordered (ADR-0055 §6). A request record names the
+worker that relayed it by ordinal and identity (`call::RelayOwner`). Not the
+**incarnation-gen**, and not the **call incarnation**.
+
+**Superseded**:
+A worker that saw its ordinal bound to its own worker identity and then sees it
+bound to another: the orchestrator recreated the ordinal while this process
+still runs (a forced delete). Sticky and terminal: the worker stops authoring at
+once — no SIP, no write a peer can pull, no CDR — and exits without a drain
+(ADR-0055 §6; `is_superseded` on the core). Another identity seen before its
+own is a predecessor still listed, not a supersession.
 
 **Terminating member**:
 A worker the orchestrator has begun to remove and that still runs. Still a
