@@ -410,8 +410,8 @@ fn an_in_dialog_request_neither_answered_nor_relayed_breaks_the_answer_invariant
     assert_eq!(in_dialog_request_answered_or_relayed(&turn(&answered)), Ok(()), "answered");
 
     let mut relayed = call.clone();
-    relayed.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().inbound_pending_requests.push(
-        call::PendingRequest {
+    relayed.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().requests.push(
+        call::RequestRecord {
             method: "MESSAGE".into(),
             outbound_cseq: 2,
             inbound_cseq: 2,
@@ -419,7 +419,10 @@ fn an_in_dialog_request_neither_answered_nor_relayed_breaks_the_answer_invariant
             source_call_id: "acid@alice".into(),
             source_from: String::new(),
             source_to: String::new(),
-            direction: call::Direction::FromA,
+            origin: Default::default(),
+            usage: Default::default(),
+            sent: None,
+            deadline_ms: None,
             cancelled: false,
             offered: false,
             offered_100rel: false,

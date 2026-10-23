@@ -3,9 +3,9 @@
 //! snapshot. ACK origination toward a leg is [`super::ack_leg`]'s; response
 //! relay is [`super::relay_response`]'s.
 
-use call::helpers::{add_pending_request, bump_our_cseq, find_b_leg, leg_kind};
+use call::helpers::{add_record, bump_our_cseq, find_b_leg, leg_kind};
 use call::TxnKind;
-use call::{ByeDisposition, Call, DialogId, PendingRequest};
+use call::{ByeDisposition, Call, DialogId, RequestRecord};
 use sip_message::generators::{
     self, CapabilitySet, GenerateInDialogRequestOpts, InDialogMethod, RelayScope, RelaySituation,
 };
@@ -269,27 +269,29 @@ impl ActionExecutor<'_> {
             });
         }
 
-        // Snapshot the inbound request so the response can echo its Via/From/To/
-        // Call-ID/CSeq (§8.1.3.3) and so glare detection on the target dialog
-        // sees the in-flight re-INVITE (`reinvite-glare`). The B2BUA answers BYE
-        // locally and ACK has no response, so neither needs correlation.
+        // The relay's record: the inbound request's lines, so the response
+        // echoes its Via/From/To/Call-ID/CSeq (§8.1.3.3), and glare detection
+        // on the target dialog sees the in-flight re-INVITE
+        // (`reinvite-glare`); a non-INVITE's sent half too, which a takeover
+        // retransmits (ADR-0055 §2). The B2BUA answers BYE locally and ACK has
+        // no response, so neither is recorded.
         if !matches!(method, InDialogMethod::Bye) {
-            let pending = PendingRequest {
-                method: req.method().to_string(),
-                outbound_cseq,
-                inbound_cseq,
+            let received = RequestRecord {
                 source_vias: req.raw(HeaderName::Via).map(str::to_string).collect(),
                 source_call_id: req.call_id().as_str().to_string(),
                 source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
                 source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
-                direction: ctx.direction,
-                cancelled: false,
                 offered_100rel: req.offers_100rel(),
                 offered: relay::carries_sdp(req),
                 source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
                 relayed_by: self.config.relay_owner(),
+                ..RequestRecord::relayed(req.method().as_str(), outbound_cseq, inbound_cseq)
             };
-            *call = add_pending_request(call.clone(), target_leg, &t_id, pending);
+            let record = match method {
+                InDialogMethod::Invite => received,
+                _ => self.relayed_sent_half(received, &out_req, &dest),
+            };
+            *call = add_record(call.clone(), target_leg, &t_id, record);
         }
 
         fx.outbound.push(OutboundSipEffect {

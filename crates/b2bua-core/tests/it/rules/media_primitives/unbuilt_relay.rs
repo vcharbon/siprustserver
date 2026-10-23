@@ -17,7 +17,7 @@ fn an_unbuildable_relay_answers_its_sender_and_records_nothing() {
     call = call::helpers::merge_leg(call, "a", "b-1");
     let peer = |c: &call::Call| {
         let dialogs = c.b_legs[0].dialogs.iter();
-        dialogs.map(|d| (d.our_cseq, d.inbound_pending_requests.len())).collect::<Vec<_>>()
+        dialogs.map(|d| (d.our_cseq, d.requests.len())).collect::<Vec<_>>()
     };
     let before = peer(&call);
     let event = CallEvent::sip(

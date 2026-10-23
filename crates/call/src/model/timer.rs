@@ -68,6 +68,11 @@ pub enum TimerType {
     /// exactly while a request is held; it outlives the start of the
     /// termination, whose BYE may be the request held.
     NotifyAnswerCap,
+    /// The earliest deadline of a received request held for a final a service
+    /// gives later ([`crate::RequestRecord::HELD_ANSWER_MS`] after it
+    /// arrived): the platform answers it then. Call-scoped, armed exactly
+    /// while a request is held.
+    HeldAnswer,
     /// The bound on an established call's reroute: the replacement leg's dial,
     /// the realign and the old leg's release.
     RerouteGuard,
@@ -152,6 +157,7 @@ impl PartialEq for TimerType {
             ReferReinviteAnswer => matches!(other, ReferReinviteAnswer),
             ReferOverallSafety => matches!(other, ReferOverallSafety),
             NotifyAnswerCap => matches!(other, NotifyAnswerCap),
+            HeldAnswer => matches!(other, HeldAnswer),
             RerouteGuard => matches!(other, RerouteGuard),
             ServiceHttpAnswer { correlation_id: a } => {
                 matches!(other, ServiceHttpAnswer { correlation_id: b } if a == b)
@@ -209,6 +215,7 @@ impl std::fmt::Debug for TimerType {
             TimerType::ReferReinviteAnswer => f.write_str("ReferReinviteAnswer"),
             TimerType::ReferOverallSafety => f.write_str("ReferOverallSafety"),
             TimerType::NotifyAnswerCap => f.write_str("NotifyAnswerCap"),
+            TimerType::HeldAnswer => f.write_str("HeldAnswer"),
             TimerType::RerouteGuard => f.write_str("RerouteGuard"),
             TimerType::ServiceHttpAnswer { correlation_id } => {
                 write!(f, "ServiceHttpAnswer:{correlation_id}")

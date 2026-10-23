@@ -206,6 +206,64 @@ async fn a_request_toward_a_leg_a_bye_ended_is_told_to_retry() {
     h.finish().await;
 }
 
+/// The keepalive probes the parties still in the call: after the callee's
+/// BYE ended its leg, each tick sends OPTIONS to the caller alone and arms no
+/// liveness deadline for the ended leg, so the caller's side stays up across
+/// several ticks.
+#[tokio::test(start_paused = true)]
+async fn the_keepalive_skips_a_leg_a_bye_ended() {
+    let h = Harness::new("ended-leg-keepalive");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    h.waive(
+        WaiverScope::rule(
+            DIALOG_ENDED,
+            "the test's own service sends the NOTIFY after bob's BYE: its timeout is the subject",
+        )
+        .on_party("bob"),
+    );
+    let b2bua = B2buaSut::builder(decision())
+        .services(vec![lingering::service_def()])
+        // A tick longer than the liveness deadline (32 s): a deadline armed
+        // for a leg falls due before the next tick re-arms it.
+        .tune(|c| c.keepalive_interval_sec = 40)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut b_inv = bob.receive("INVITE").await;
+    b_inv.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let call_ref = call::derive_call_ref(ORDINAL, &call.call_id(), alice_dialog.local_tag());
+
+    let mut bob_dialog = b_inv.dialog();
+    let mut bob_bye = bob_dialog.bye().await;
+    bob_bye.expect(200).await;
+    bob.receive("NOTIFY").await;
+
+    // Three keepalive ticks, the NOTIFY's Timer F and each tick's liveness
+    // deadline among them: only the caller is probed, and answers.
+    for _ in 0..3 {
+        h.advance(Duration::from_secs(40)).await;
+        alice.receive("OPTIONS").await.respond(200, "OK").await;
+    }
+    bob.drain().await; // the NOTIFY's retransmissions
+    assert!(
+        !bob.wire_view().iter().any(|e| e.raw.starts_with(b"OPTIONS ")),
+        "no OPTIONS reaches the ended leg",
+    );
+    let live = b2bua.live_call(&call_ref).expect("the caller's side of the call is live");
+    assert_eq!(live.state, call::CallModelState::Active, "no liveness deadline ended the call");
+
+    let mut alice_bye = alice_dialog.bye().await;
+    alice_bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    h.finish().await;
+}
+
 /// What the SUT sends onto a dialog a BYE ended reaches the callee's dialog
 /// table even when no step pulls it: the drained NOTIFY fails the run.
 #[tokio::test(start_paused = true)]

@@ -9,15 +9,18 @@
 //!   - [`leg`] — role, lookup, resolution, the next leg id
 //!   - [`attempt`] — open, join, end and settle the call's attempts
 //!   - [`leg_end`] — the INVITE outcome and dialog ends a leg's end records
-//!   - [`resolved`] — what a received message names: its dialog, the relay a
-//!     response answers
+//!   - [`resolved`] — what a received message names: its dialog, the request
+//!     record a response answers
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
 //!     of one call compare on them (replication reconciliation)
 //!   - [`round`] — the re-INVITE rounds two copies share, and how one copy's
 //!     view of a round's end or opening lands in the other
 //!   - [`sequence`] — the in-dialog requests two copies of one call carry:
 //!     the sequences they reached, the relays they hold
-//!   - [`dialog`] — CSeq, ACK branch, pending and retired relays, SDP cache
+//!   - [`dialog`] — CSeq, ACK branch, INVITE glare, a retired dialog's
+//!     release, SDP cache
+//!   - [`request_records`] — the request records a call's dialogs hold: add,
+//!     find by final or branch, close (ADR-0055 §2)
 //!   - [`peering`] — caller-facing fronts, active peer pair, relay-peer
 //!     resolution
 //!   - [`reliable`] — the reliable provisionals the call received and where
@@ -51,6 +54,7 @@ pub mod peering;
 pub mod prack_disposition;
 pub mod record;
 pub mod reliable;
+pub mod request_records;
 pub mod resolved;
 pub mod round;
 pub mod sequence;
@@ -65,12 +69,10 @@ pub use attempt::{
 };
 pub use decision_log::mark_decision;
 pub use dialog::{
-    add_pending_request, advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog,
-    cached_sdp_for_leg_dialog, cancel_pending_request, close_rejected_invite_round, close_relay,
-    find_pending_request, invite_glare, invite_transaction_open, leg_relays, peer_update_pending,
-    relayed_pending, remove_pending_request, retain_ack_branch, retain_emitted_ack,
-    retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
-    set_awaited_ack_cseq, settle_straggler_release, take_retired_relays, PendingHolder,
+    advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
+    close_rejected_invite_round, invite_glare, invite_transaction_open, peer_update_pending,
+    retain_ack_branch, retain_emitted_ack, sender_invite_unacknowledged, sender_invite_unanswered,
+    set_awaited_ack_cseq, settle_straggler_release,
 };
 pub use instants::shift_instants;
 pub use leg::{
@@ -104,9 +106,14 @@ pub use prack_disposition::{
 pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_cursors};
 pub use reliable::{
     acknowledge_shown, admits_reliable_provisional, advance_shown_ladder, arrival,
-    cease_shown_ladder, described_before, leg_shown, note_responder_ack, own_prack_branch,
-    provisional, record_provisional, responder_of, show_provisional, shown_as, shown_emission,
+    cease_shown_ladder, described_before, leg_shown, note_responder_ack, provisional,
+    record_provisional, responder_of, show_provisional, shown_as, shown_emission,
     start_shown_ladder, starts_shown_sequence, Arrival,
+};
+pub use request_records::{
+    add_record, answered_record, cancel_relay, close_held, close_record, every_record, find_relay,
+    held_record, next_held_deadline, record_with_branch, records_of, remove_relay,
+    take_overdue_held, take_retired_owed, RecordHolder,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
 pub use round::{holds_rounds_of, merge_rounds, round_ahead, round_further, round_opened};

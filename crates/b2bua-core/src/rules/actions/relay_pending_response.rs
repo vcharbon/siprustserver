@@ -2,8 +2,8 @@
 //! rebuilt from the snapshot taken as the request was relayed, so it echoes
 //! the originator's Via/From/To/CSeq.
 
-use call::helpers::{PendingHolder, Scope};
-use call::{Call, PendingRequest, RSeq};
+use call::helpers::{RecordHolder, Scope};
+use call::{Call, RSeq, RequestRecord};
 use sip_message::generators::{self, RelayScope, RelaySituation};
 use sip_message::header::{From, HeaderValue};
 use sip_message::{Method, SipStr};
@@ -28,8 +28,8 @@ impl ActionExecutor<'_> {
         call: &mut Call,
         fx: &mut HandlerEffects,
         r: &Relaying<'_>,
-        holder: PendingHolder,
-        pending: PendingRequest,
+        holder: RecordHolder,
+        pending: RequestRecord,
     ) {
         let (status, target_leg, source_leg_id) =
             (r.status, r.target_leg, r.source_leg_id.as_str());
@@ -130,8 +130,8 @@ impl ActionExecutor<'_> {
                 peer_tag,
             });
         let relay_body = match &holder {
-            PendingHolder::Retired(_) => r.body.clone(),
-            PendingHolder::Dialog(_) => relay::continue_on_leg(
+            RecordHolder::Retired(_) => r.body.clone(),
+            RecordHolder::Dialog(_) => relay::continue_on_leg(
                 call,
                 target_leg,
                 dialog.as_ref(),
@@ -219,7 +219,7 @@ impl ActionExecutor<'_> {
         call: &mut Call,
         fx: &mut HandlerEffects,
         r: &Relaying<'_>,
-        holder: &PendingHolder,
+        holder: &RecordHolder,
     ) {
         let source_leg_id = r.source_leg_id.as_str();
         // The final ends this transaction: the PRACKs its responder
@@ -238,6 +238,6 @@ impl ActionExecutor<'_> {
             );
             self.retire(call, fx, Scope::Transaction { leg_id: source_leg_id, cseq: r.cseq_num });
         }
-        *call = call::helpers::close_relay(call.clone(), source_leg_id, holder, r.cseq_num);
+        *call = call::helpers::close_record(call.clone(), source_leg_id, holder, r.cseq_num);
     }
 }

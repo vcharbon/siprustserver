@@ -91,6 +91,11 @@ impl ActionExecutor<'_> {
             RuleAction::Respond { status, reason, body, content_type } => {
                 self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref(), vec![]);
             }
+            RuleAction::HoldRequest => self.hold_request(call, fx, ctx),
+            RuleAction::AnswerHeld { leg_id, cseq, status, reason, body, content_type } => {
+                let content_type = content_type.as_deref();
+                self.answer_held(call, fx, leg_id, *cseq, *status, reason, body, content_type);
+            }
             RuleAction::RefuseGlare { refusal } => {
                 self.refuse_glare(call, fx, ctx, *refusal);
             }
@@ -118,7 +123,7 @@ impl ActionExecutor<'_> {
                 self.reject_pending_reinvite(call, fx, leg_id, *outbound_cseq, *status, reason);
             }
             RuleAction::TerminateCall { cause, by_leg } => {
-                self.reject_all_pending_non_invites(call, fx);
+                self.settle_all_at_release(call, fx);
                 terminate_all(call, self.now_ms, *cause, by_leg.clone());
             }
             RuleAction::BeginTermination { reason, cause, by_leg } => {

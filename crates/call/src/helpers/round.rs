@@ -14,7 +14,7 @@
 //! state; a dialog's sequence speaks only for a round a non-2xx ended, which
 //! leaves no transaction behind.
 
-use crate::model::{Call, Dialog, DialogId, Obligation, PendingRequest, RelayOwner, TimerEntry};
+use crate::model::{Call, Dialog, DialogId, Obligation, RelayOwner, RequestRecord, TimerEntry};
 
 use super::leg::{every_leg, find_leg};
 use super::lens::update_leg;
@@ -129,8 +129,8 @@ fn unfinished(dialog: &Dialog) -> Option<Unfinished<'_>> {
     Some(Unfinished { branch: txn.branch.as_str(), cseq: txn.cseq, inbound_cseq, stage })
 }
 
-fn invite_relays(dialog: &Dialog) -> impl Iterator<Item = &PendingRequest> {
-    dialog.inbound_pending_requests.iter().filter(|p| p.method.eq_ignore_ascii_case("INVITE"))
+fn invite_relays(dialog: &Dialog) -> impl Iterator<Item = &RequestRecord> {
+    dialog.requests.iter().filter(|p| p.method.eq_ignore_ascii_case("INVITE"))
 }
 
 /// Whether `incoming`, the same dialog in the other copy, ended `round`.
@@ -140,7 +140,7 @@ fn ended(incoming: &Dialog, round: &Unfinished<'_>) -> bool {
     let later = txn.is_some_and(|t| t.branch != round.branch && t.cseq > round.cseq);
     match round.stage {
         Stage::Open { outbound_cseq } => {
-            let relayed = incoming.inbound_pending_requests.iter().any(|p| {
+            let relayed = incoming.requests.iter().any(|p| {
                 p.outbound_cseq == outbound_cseq && p.method.eq_ignore_ascii_case("INVITE")
             });
             let refused = txn.is_none() && incoming.our_cseq >= outbound_cseq;
@@ -242,8 +242,8 @@ fn merge_round(held: Call, incoming: &Call, round: &RoundAhead) -> Call {
 /// The INVITE round facts of the target dialog, from `theirs`; its own
 /// non-INVITE relays and the higher of the two sequences are kept.
 fn take_round(d: &mut Dialog, theirs: &Dialog) {
-    d.inbound_pending_requests.retain(|p| !p.method.eq_ignore_ascii_case("INVITE"));
-    d.inbound_pending_requests.extend(invite_relays(theirs).cloned());
+    d.requests.retain(|p| !p.method.eq_ignore_ascii_case("INVITE"));
+    d.requests.extend(invite_relays(theirs).cloned());
     d.pending_invite_txn = theirs.pending_invite_txn.clone();
     d.awaited_ack_cseq = theirs.awaited_ack_cseq;
     d.ack_branch = theirs.ack_branch.clone();

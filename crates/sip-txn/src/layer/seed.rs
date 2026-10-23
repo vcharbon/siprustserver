@@ -1,5 +1,5 @@
-//! Seeding (ADR-0014 materialisation): rebuilding INVITE transactions this
-//! layer never saw the first copy of, and re-offering the datagram that
+//! Seeding (ADR-0014 materialisation, ADR-0055 §2): rebuilding transactions
+//! this layer never saw the first copy of, and re-offering the datagram that
 //! arrived before they existed. The FSMs the seeds then run are `layer::client`
 //! and `layer::server`; nothing protocol-shaped lives here.
 
@@ -19,8 +19,8 @@ use super::txn::{CancelWire, HeldCancel, NewTransaction, Timer, TxnId, TxnRef, T
 use super::via_marks::{extract_via_custom_params, ViaMarks};
 
 impl Owner {
-    /// Put every seed in the map of its role as an INVITE transaction, with the
-    /// CANCEL a client seed carries, and return how many went in. A seed whose
+    /// Put every seed in the map of its role, with the CANCEL a client INVITE
+    /// seed carries, and return how many went in. A seed whose
     /// identity already holds a transaction of its role is skipped and counted,
     /// never displaced: the occupant is either the datagram that triggered the
     /// materialisation or a transaction this node built itself, and both
@@ -51,6 +51,12 @@ impl Owner {
                 }
                 TxnSeed::ServerAccepted { response, leg_id } => {
                     self.seed_accepted(endpoint, call_ref, response, leg_id).await
+                }
+                TxnSeed::ClientNonInvite { request, dest } => {
+                    self.seed_client_non_invite(call_ref, request, dest)
+                }
+                TxnSeed::ServerNonInvite { request, leg_id } => {
+                    self.seed_server_non_invite(call_ref, request, leg_id)
                 }
             };
             if went_in {
@@ -220,6 +226,78 @@ impl Owner {
         if let Some(cancel) = cancel {
             self.seed_held_cancel(&branch, *cancel, dest);
         }
+        true
+    }
+
+    /// A client non-INVITE keyed by `request`'s branch, attributed from its
+    /// Via as `do_send_request` attributes what it sends (falling back to
+    /// `call_ref`), `Trying`, with its Timer E ladder and Timer F armed from
+    /// now: the first retransmission leaves T1 after the seed. `false` when
+    /// the request names no branch or a client transaction holds it.
+    fn seed_client_non_invite(
+        &mut self,
+        call_ref: &str,
+        request: SipRequest,
+        dest: SocketAddr,
+    ) -> bool {
+        let Some(branch) = request.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
+        else {
+            return false;
+        };
+        if self.clients.contains_key(&branch) {
+            return false;
+        }
+        let ViaMarks { call_ref: via_call_ref, leg_id, incarnation_mark } =
+            extract_via_custom_params(&request);
+        let buf = bytes::Bytes::from(serialize(&SipMessage::Request(request.clone())));
+        let (max_ms, timeout_kind) = self.client_timeout(TxnKind::NonInvite, &request);
+        self.open_txn(NewTransaction {
+            id: TxnId::Client(branch.clone()),
+            kind: TxnKind::NonInvite,
+            method: request.method().clone(),
+            cseq: request.cseq().seq(),
+            call_id: request.call_id().as_str().to_string(),
+            from_tag: request.from().tag().unwrap_or_default().to_string(),
+            original_request: None,
+            call_ref: via_call_ref.or_else(|| Some(call_ref.to_string())),
+            leg_id,
+            incarnation_mark,
+            state: TxnState::Trying,
+            destination: Some(dest),
+        });
+        self.start_client_retransmit(&branch, buf, dest, max_ms, timeout_kind);
+        true
+    }
+
+    /// A server non-INVITE holding no response, keyed by `request`'s top Via
+    /// and method, `Trying`: a retransmission is absorbed with nothing sent
+    /// until the consumer's final leaves on it (RFC 3261 §17.2.2). `false`
+    /// when the request names no branch or its identity is occupied — the
+    /// occupant is the copy that triggered the materialisation.
+    fn seed_server_non_invite(
+        &mut self,
+        call_ref: &str,
+        request: SipRequest,
+        leg_id: Option<String>,
+    ) -> bool {
+        let Some(key) = ServerTxnKey::of(&request) else { return false };
+        if self.server(key.id()).is_some() {
+            return false;
+        }
+        self.open_txn(NewTransaction {
+            id: TxnId::Server(key.clone()),
+            kind: TxnKind::NonInvite,
+            method: request.method().clone(),
+            cseq: request.cseq().seq(),
+            call_id: request.call_id().as_str().to_string(),
+            from_tag: request.from().tag().unwrap_or_default().to_string(),
+            original_request: None,
+            call_ref: Some(call_ref.to_string()),
+            leg_id,
+            incarnation_mark: None,
+            state: TxnState::Trying,
+            destination: None,
+        });
         true
     }
 

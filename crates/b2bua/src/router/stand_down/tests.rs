@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use call::testkit::{stage_leg, stage_reinvite_round, RoundStage};
-use call::{Call, CallBodyCodec, Direction, LegState, MsgpackCodec, PendingRequest, RelayOwner};
+use call::{Call, CallBodyCodec, LegState, MsgpackCodec, RelayOwner, RequestRecord};
 
 use super::{covers as covers_on, finishes_nothing_alone, offer};
 use crate::config::B2buaConfig;
@@ -103,7 +103,7 @@ fn a_primary_holding_the_copys_round_at_its_stage_or_past_covers_it() {
 fn relaying(mut call: Call, by: RelayOwner) -> Call {
     let d = call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.our_cseq += 1;
-    d.inbound_pending_requests.push(PendingRequest {
+    d.requests.push(RequestRecord {
         method: "INFO".into(),
         outbound_cseq: d.our_cseq,
         inbound_cseq: 9,
@@ -111,7 +111,10 @@ fn relaying(mut call: Call, by: RelayOwner) -> Call {
         source_call_id: String::new(),
         source_from: String::new(),
         source_to: String::new(),
-        direction: Direction::FromB,
+        origin: Default::default(),
+        usage: Default::default(),
+        sent: None,
+        deadline_ms: None,
         cancelled: false,
         offered_100rel: false,
         offered: false,
@@ -159,7 +162,7 @@ fn a_deleted_record_releases_only_a_copy_that_finishes_nothing_alone() {
     assert!(!finishes_nothing_alone(None, &relaying(call.clone(), copy_worker()), &copy_worker()));
     let mut round = in_round(2, Some(RoundStage::Open));
     let d = round.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
-    d.inbound_pending_requests.iter_mut().for_each(|p| p.relayed_by = copy_worker());
+    d.requests.iter_mut().for_each(|p| p.relayed_by = copy_worker());
     assert!(
         !finishes_nothing_alone(None, &round, &copy_worker()),
         "the round's final is the copy's"
@@ -177,7 +180,7 @@ fn a_deleted_record_releases_only_a_copy_that_finishes_nothing_alone() {
 fn a_raised_sequence_is_no_round_the_primary_holds() {
     let mut copy = in_round(2, Some(RoundStage::Open));
     let d = copy.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
-    d.inbound_pending_requests.iter_mut().for_each(|p| p.relayed_by = copy_worker());
+    d.requests.iter_mut().for_each(|p| p.relayed_by = copy_worker());
     let mut primary = in_round(2, None);
     primary.a_leg.dialogs.confirmed_mut().expect("the caller's dialog").our_cseq += 5;
     assert!(!covers(&primary, &copy), "the copy alone holds the round's transaction");

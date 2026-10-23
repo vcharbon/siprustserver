@@ -11,6 +11,9 @@
 //! - `lost_round` — the ACK of an INVITE final for a round the record lost
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
 //! - `relay_pending_response` — a response to a request this stack relayed
+//! - `request_record` — the non-INVITE request records: written as a request
+//!   leaves or is held, settled by its final, timeout, leg end, release or
+//!   deadline (ADR-0055 §2)
 //! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
 //! - `dialog_end` — a leg's dialogs moving to the state its teardown records
 //! - `create_leg` — the new leg's INVITE, opening the attempt it dials
@@ -52,6 +55,7 @@ mod relay_pending_response;
 mod relay_request;
 mod relay_response;
 mod relayed_teardown;
+mod request_record;
 mod respond;
 mod retire;
 mod select;

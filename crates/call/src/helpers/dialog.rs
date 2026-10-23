@@ -1,10 +1,8 @@
 //! Dialog-level helpers: CSeq bookkeeping, the ACK-branch retention rule,
-//! pending transparent-relay entries, a retired dialog's relays and release,
-//! and the per-dialog SDP cache.
+//! INVITE glare, a retired dialog's release, and the per-dialog SDP cache. The
+//! request records a dialog holds are [`super::request_records`]'.
 
-use crate::model::{
-    Call, Dialog, DialogId, DialogState, Leg, PendingRequest, RetainedEmission, RetiredDialog,
-};
+use crate::model::{Call, Dialog, DialogId, DialogState, Leg, RetainedEmission, RetiredDialog};
 
 use super::leg::find_leg;
 use super::lens::{update_dialog, update_leg};
@@ -101,12 +99,7 @@ pub fn set_awaited_ack_cseq(call: Call, leg_id: &str, cseq: Option<i64>) -> Call
     })
 }
 
-// ── Pending transparent-relay requests ──────────────────────────────────────
-
-/// Add a pending transparent-relay entry to a dialog.
-pub fn add_pending_request(call: Call, leg_id: &str, id: &DialogId, entry: PendingRequest) -> Call {
-    update_dialog(call, leg_id, id, |d| d.inbound_pending_requests.push(entry))
-}
+// ── INVITE glare ────────────────────────────────────────────────────────────
 
 /// Whether an INVITE transaction is still open on this dialog (RFC 3261
 /// §14.1): a transparently relayed INVITE awaiting its final response, or an
@@ -117,7 +110,7 @@ pub fn add_pending_request(call: Call, leg_id: &str, id: &DialogId, entry: Pendi
 /// holds, a new INVITE on the dialog is glare and is refused, 491 or 500 by
 /// which INVITE is open (RFC 3261 §14.2).
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
-    dialog.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
+    dialog.requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
         || own_invite_untaken(dialog)
         || dialog.pending_reinvite_2xx.is_some()
         || dialog.answered_2xx.is_some()
@@ -180,9 +173,7 @@ pub fn sender_invite_unanswered(
     source: Option<&DialogId>,
 ) -> bool {
     let relayed = relay_peer_dialog(call, source_leg_id, source).is_some_and(|(_, d)| {
-        d.inbound_pending_requests
-            .iter()
-            .any(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
+        d.requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
     });
     relayed
         || (named_dialog(call, source_leg_id, source).is_some()
@@ -202,113 +193,11 @@ pub fn sender_invite_unacknowledged(
 }
 
 /// Whether an UPDATE that `source_leg_id`'s peer sent is still awaiting its
-/// final (RFC 3311 §5.2): its relay snapshot is on the dialog a request from
+/// final (RFC 3311 §5.2): its relay record is on the dialog a request from
 /// that leg's dialog `source` is relayed on.
 pub fn peer_update_pending(call: &Call, source_leg_id: &str, source: Option<&DialogId>) -> bool {
     relay_peer_dialog(call, source_leg_id, source).is_some_and(|(_, d)| {
-        d.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("UPDATE"))
-    })
-}
-
-/// Where the relay a response answers is kept.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PendingHolder {
-    /// Among the pending relays of the leg's dialog with this identity.
-    Dialog(DialogId),
-    /// Among the open relays of the leg's retired dialog with this identity.
-    Retired(DialogId),
-}
-
-/// The relay a response arriving on `leg_id` with outbound CSeq `cseq`
-/// answers (RFC 3261 §8.1.3.3), and where it is kept: on the dialog the
-/// response's tags name, or among that dialog's open relays once it retired.
-/// A response with no To-tag reads the leg's confirmed dialog. Never another
-/// dialog's relay: two dialogs may carry the same CSeq.
-pub fn relayed_pending(
-    call: &Call,
-    leg_id: &str,
-    to: Option<&str>,
-    from: Option<&str>,
-    cseq: i64,
-) -> Option<(PendingHolder, PendingRequest)> {
-    let leg = find_leg(call, leg_id)?;
-    let d = match to {
-        None => leg.dialogs.confirmed()?,
-        Some(_) => leg.dialogs.of_response(to, from)?,
-    };
-    match d.retired() {
-        Some(r) => r
-            .open_relays
-            .iter()
-            .find(|p| p.outbound_cseq == cseq)
-            .map(|p| (PendingHolder::Retired(d.id()), p.clone())),
-        None => find_pending_request(d, cseq).map(|p| (PendingHolder::Dialog(d.id()), p.clone())),
-    }
-}
-
-/// Close the relay `holder` keeps with outbound CSeq `cseq` on `leg_id`: its
-/// transaction has its final.
-pub fn close_relay(call: Call, leg_id: &str, holder: &PendingHolder, cseq: i64) -> Call {
-    match holder {
-        PendingHolder::Dialog(id) => remove_pending_request(call, leg_id, id, cseq),
-        PendingHolder::Retired(id) => update_dialog(call, leg_id, id, |d| {
-            if let Some(r) = d.retired_mut() {
-                r.open_relays.retain(|p| p.outbound_cseq != cseq);
-            }
-        }),
-    }
-}
-
-/// Close every relay still open in `leg`'s retired dialogs and return them,
-/// each with its dialog: the leg ends, so no final reaches them but the one
-/// this stack answers (RFC 3261 §8.2.6).
-pub fn take_retired_relays(leg: &mut Leg) -> Vec<(DialogId, PendingRequest)> {
-    let mut taken = Vec::new();
-    for d in leg.dialogs.iter_mut() {
-        let id = d.id();
-        if let Some(r) = d.retired_mut() {
-            taken.extend(std::mem::take(&mut r.open_relays).into_iter().map(|p| (id.clone(), p)));
-        }
-    }
-    taken
-}
-
-/// How many relays are still open in `leg`'s retired dialogs.
-pub fn retired_relay_count(leg: &Leg) -> usize {
-    leg.dialogs.iter().filter_map(Dialog::retired).map(|r| r.open_relays.len()).sum()
-}
-
-/// Whether a dialog of `leg`, open or retired, holds a relay of `method` sent
-/// with CSeq `cseq`.
-pub fn leg_relays(leg: &Leg, method: &str, cseq: i64) -> bool {
-    leg.dialogs.iter().any(|d| {
-        let open = d.retired().map_or(&d.inbound_pending_requests, |r| &r.open_relays);
-        open.iter().any(|p| p.outbound_cseq == cseq && p.method.eq_ignore_ascii_case(method))
-    })
-}
-
-/// Find a pending transparent-relay entry by outbound CSeq.
-pub fn find_pending_request(dialog: &Dialog, outbound_cseq: i64) -> Option<&PendingRequest> {
-    dialog.inbound_pending_requests.iter().find(|p| p.outbound_cseq == outbound_cseq)
-}
-
-/// Mark a pending transparent-relay entry CANCELled (RFC 3261 §9): the relayed
-/// (re-)INVITE it snapshots has been CANCELled toward its target, so the
-/// eventual final response resolves locally instead of being relayed back.
-pub fn cancel_pending_request(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) -> Call {
-    update_dialog(call, leg_id, id, |d| {
-        if let Some(p) =
-            d.inbound_pending_requests.iter_mut().find(|p| p.outbound_cseq == outbound_cseq)
-        {
-            p.cancelled = true;
-        }
-    })
-}
-
-/// Remove a pending transparent-relay entry after its response is handled.
-pub fn remove_pending_request(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) -> Call {
-    update_dialog(call, leg_id, id, |d| {
-        d.inbound_pending_requests.retain(|p| p.outbound_cseq != outbound_cseq)
+        d.requests.iter().any(|p| p.is_relay() && p.method.eq_ignore_ascii_case("UPDATE"))
     })
 }
 

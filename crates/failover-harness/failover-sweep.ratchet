@@ -107,7 +107,6 @@ refer-x-bye/primary-killed/t5-applied  ADR-0055 §4  # a later turn in flight at
 refer-x-bye/primary-killed/t6-left  ADR-0055 §4  # request on an ended dialog
 refer-x-bye/primary-killed/t7-left  ADR-0055 §4  # request on an ended dialog
 refer-x-bye/primary-killed/t7-logged  ADR-0055 §4  # request on an ended dialog
-refer-x-bye/primary-killed/t8-left  ADR-0055 §5  # CDR count
 refer-x-bye/primary-killed/t9-left  ADR-0055 §5  # CDR count
 refer-x-bye/primary-killed/t9-logged  ADR-0055 §5  # CDR count
 refer-x-bye/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
@@ -128,16 +127,12 @@ refer/primary-killed/t8-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/primary-killed/t8-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/primary-killed/t9-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/primary-killed/t9-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/split-healed/t10-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split-healed/t10-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split-healed/t11-logged  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split-healed/t7-applied  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split-healed/t7-left  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split-healed/t7-logged  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split-healed/t8-applied  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split-healed/t8-left  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split-healed/t8-logged  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split-healed/t9-applied  ADR-0055 §7  # the stale copy's BYE into a dialog the other copy ended
 refer/split-healed/t9-left  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split-healed/t9-logged  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split/t1-applied  ADR-0055 §7  # two copies

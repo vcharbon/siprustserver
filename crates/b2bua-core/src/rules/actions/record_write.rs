@@ -3,8 +3,7 @@
 //! dispatch table ([`super::dispatch`]).
 
 use call::helpers::{
-    add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_pending_request, split_leg,
-    Scope,
+    add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_relay, split_leg, Scope,
 };
 use call::{Call, CdrEvent};
 
@@ -35,7 +34,7 @@ impl ActionExecutor<'_> {
                 // to the CANCELled relayed re-INVITE resolves here, never
                 // relayed (the txn layer already 487'd the originator).
                 if let Some((t_id, _)) = find_pending_dialog(call, leg_id, *outbound_cseq) {
-                    *call = remove_pending_request(call.clone(), leg_id, &t_id, *outbound_cseq);
+                    *call = remove_relay(call.clone(), leg_id, &t_id, *outbound_cseq);
                 }
             }
             RuleAction::ScheduleTimer { key, delay } => {

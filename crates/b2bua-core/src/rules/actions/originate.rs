@@ -14,6 +14,7 @@ use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::rules::capabilities;
+use crate::rules::method_table::row;
 use crate::rules::relay;
 
 use super::select::{in_dialog_method, leg_at};
@@ -41,7 +42,8 @@ impl ActionExecutor<'_> {
         else {
             return;
         };
-        if self.held_behind_notify(call, leg_id, &id) {
+        let waits = row(&Method::Notify).waits_behind_own_notify;
+        if waits && self.held_behind_notify(call, leg_id, &id) {
             let notify = HeldRequest::Notify {
                 event: event.to_string(),
                 subscription_state: subscription_state.to_string(),
@@ -111,14 +113,16 @@ impl ActionExecutor<'_> {
             res.request,
             dest,
         );
-        fx.outbound.push(OutboundSipEffect {
+        let notify = OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
             destination: dest,
             label: format!("NOTIFY → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
             provenance: Provenance::Authored,
-        });
+        };
+        self.record_own_effect(call, leg_id, id, &notify);
+        fx.outbound.push(notify);
         self.notify_left(call, leg_id, id, outbound_cseq);
     }
 
@@ -388,14 +392,18 @@ impl ActionExecutor<'_> {
         // The one in-dialog OPTIONS this stack originates is the keepalive.
         let provenance =
             if m == InDialogMethod::Options { Provenance::Probe } else { Provenance::Authored };
-        fx.outbound.push(OutboundSipEffect {
+        let request = OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(kind),
             destination: dest,
             label: format!("{method} → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
             provenance,
-        });
+        };
+        if kind == TxnKind::NonInvite {
+            self.record_own_effect(call, leg_id, &t_id, &request);
+        }
+        fx.outbound.push(request);
     }
 
     /// The answer to `offer` rejecting every stream (RFC 3264 §6, port 0) —

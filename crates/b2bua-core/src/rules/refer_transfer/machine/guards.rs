@@ -171,8 +171,9 @@ pub(super) fn referrer_notify_481() -> RuleDefinition {
 /// transfer-notify-timeout — a refer NOTIFY of this stack toward a referrer
 /// still up draws no final before its transaction times out: the implicit
 /// subscription is over (RFC 6665 §4.2.2) and no further NOTIFY leaves on it;
-/// the call and the transfer stand (RFC 5057 §5.2). A relayed NOTIFY's
-/// timeout and a referrer going away stay the core's.
+/// the call and the transfer stand (RFC 5057 §5.2), as the core reads that
+/// timeout too. A relayed NOTIFY's timeout and a referrer going away stay the
+/// core's.
 pub(super) fn referrer_notify_timeout() -> RuleDefinition {
     sm_rule! {
         id: "transfer-notify-timeout",
@@ -181,15 +182,13 @@ pub(super) fn referrer_notify_timeout() -> RuleDefinition {
         transitions: [],
         effects: [],
         matcher: Match::timeout().filter(|ctx| {
-            let (Some(method), Some(cseq), Some(leg)) =
-                (ctx.timeout_method(), ctx.timeout_cseq(), ctx.source_leg())
-            else {
+            let (Some(record), Some(leg)) = (ctx.timed_out_record(), ctx.source_leg()) else {
                 return false;
             };
-            method.eq_ignore_ascii_case("NOTIFY")
+            record.is_own()
+                && record.method.eq_ignore_ascii_case("NOTIFY")
                 && state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)
                 && !call::helpers::leg_is_going_away(ctx.call.state(), leg)
-                && !call::helpers::leg_relays(leg, "NOTIFY", i64::from(cseq))
         }),
         handle: |ctx| {
             let mut st = state(ctx)?.clone();

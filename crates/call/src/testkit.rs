@@ -3,9 +3,9 @@
 //! relayed into a dialog, for tests that start a call mid-flight.
 
 use crate::model::{
-    CSeq, Dialog, DialogEnd, DialogState, Direction, HostPort, InviteTxnHandle, Ladder, Leg,
-    LegKind, LegState, OutboundInvite, PendingRequest, Provisional, ProvisionalId, RSeq,
-    RemoteInfo, ResponderAck, Shown,
+    CSeq, Dialog, DialogEnd, DialogState, HostPort, InviteTxnHandle, Ladder, Leg, LegKind,
+    LegState, OutboundInvite, Provisional, ProvisionalId, RSeq, RemoteInfo, RequestRecord,
+    ResponderAck, Shown,
 };
 
 /// A reliable provisional `rseq` of the responder `responder_tag` on
@@ -152,12 +152,12 @@ pub fn stage_reinvite_round(leg: &mut Leg, branch: &str, stage: RoundStage) {
         original_invite: Vec::new(),
         destination: HostPort { host: "staged.invalid".into(), port: 5060 },
     });
-    d.inbound_pending_requests.retain(|p| !p.method.eq_ignore_ascii_case("INVITE"));
+    d.requests.retain(|p| !p.method.eq_ignore_ascii_case("INVITE"));
     d.ack_branch = None;
     d.emitted_ack = None;
     d.awaited_ack_cseq = None;
     match stage {
-        RoundStage::Open => d.inbound_pending_requests.push(PendingRequest {
+        RoundStage::Open => d.requests.push(RequestRecord {
             method: "INVITE".into(),
             outbound_cseq: d.our_cseq,
             inbound_cseq: STAGED_ROUND_CSEQ,
@@ -165,7 +165,10 @@ pub fn stage_reinvite_round(leg: &mut Leg, branch: &str, stage: RoundStage) {
             source_call_id: String::new(),
             source_from: String::new(),
             source_to: String::new(),
-            direction: Direction::FromA,
+            origin: Default::default(),
+            usage: Default::default(),
+            sent: None,
+            deadline_ms: None,
             cancelled: false,
             offered_100rel: false,
             offered: true,

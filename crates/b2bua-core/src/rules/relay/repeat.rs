@@ -28,5 +28,5 @@ pub(crate) fn retransmitted_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
     }
     let cseq = resp.cseq().seq();
     super::acked_invite_cseq(dialog) == Some(cseq)
-        && call::helpers::find_pending_request(dialog, i64::from(cseq)).is_none()
+        && call::helpers::find_relay(dialog, i64::from(cseq)).is_none()
 }

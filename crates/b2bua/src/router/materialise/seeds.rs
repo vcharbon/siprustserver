@@ -1,6 +1,6 @@
 //! The seeds a materialised call hands the transaction layer: the in-flight
-//! INVITE transactions the record names, read off the `Call` alone. Pure — the
-//! layer takes typed seeds and never learns the record (ADR-0014).
+//! transactions the record names, read off the `Call` alone. Pure — the layer
+//! takes typed seeds and never learns the record (ADR-0014, ADR-0055 §2).
 //!
 //! In flight, on the record's own terms:
 //! - a **client INVITE** this stack sent: the initial INVITE of a leg still
@@ -23,20 +23,30 @@
 //!   a retained 2xx on a dialog (`answered_2xx`, `pending_reinvite_2xx`),
 //!   seeded in RFC 6026 Accepted with that 2xx, so a copy of its INVITE draws
 //!   the 2xx and never reaches the rules.
+//! - a **client non-INVITE** for every non-INVITE request record holding a
+//!   sent request, relayed or this stack's own, on a live or a retired
+//!   dialog: it retransmits the request as it left under its branch, so the
+//!   final its target answered the dead node with is repeated to it
+//!   (RFC 3261 §17.1.2.2, §17.2.2).
+//! - a **server non-INVITE** for every non-INVITE record's received half —
+//!   a relay's originator's request, or a request held for a later final —
+//!   rebuilt from the record, so a copy is absorbed and the final leaves on
+//!   it (§17.2.2).
 
 use std::collections::HashSet;
 
-use call::{Call, Dialog, InviteTxnHandle, Leg, PendingRequest, Unacked2xx};
+use call::helpers::records_of;
+use call::{Call, Dialog, InviteTxnHandle, Leg, RequestRecord, SentRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{HeaderValue, SentBy, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
 use sip_txn::{ServerTxnKey, TxnSeed};
 
-use super::relayed_invite::rebuild_relayed_invite;
+use super::received_request::rebuild_received_request;
 use crate::rules::relay::rebuild_a_leg_invite;
 
-/// Every in-flight INVITE transaction `call` names, one seed per branch.
+/// Every in-flight transaction `call` names, one seed per branch and role.
 pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
     let mut seeds = Vec::new();
     let mut branches = HashSet::new();
@@ -47,6 +57,8 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
             TxnSeed::ClientInvite { invite, .. } => (false, invite.top_via()),
             TxnSeed::ServerInvite { request, .. } => (true, request.top_via()),
             TxnSeed::ServerAccepted { response, .. } => (true, response.top_via()),
+            TxnSeed::ClientNonInvite { request, .. } => (false, request.top_via()),
+            TxnSeed::ServerNonInvite { request, .. } => (true, request.top_via()),
         };
         let branch = via.branch().unwrap_or_default().to_string();
         if !branch.is_empty() && branches.insert((server, branch)) {
@@ -94,7 +106,7 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
                     }
                 }
             }
-            for pending in dialog.inbound_pending_requests.iter().filter(|p| pending_invite(p)) {
+            for pending in dialog.requests.iter().filter(|p| pending_invite(p)) {
                 if let Some(seed) = relayed_server_seed(call, leg, pending) {
                     push(seed);
                 }
@@ -104,9 +116,59 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
                     push(TxnSeed::ServerAccepted { response, leg_id: Some(leg.leg_id.clone()) });
                 }
             }
+            for record in records_of(dialog).iter().filter(|r| !invite_record(r)) {
+                if let Some(seed) = record.sent.as_ref().and_then(client_non_invite_seed) {
+                    push(seed);
+                }
+                if !record.is_own() {
+                    if let Some(seed) = server_non_invite_seed(call, leg, record) {
+                        push(seed);
+                    }
+                }
+            }
         }
     }
     seeds
+}
+
+/// Whether the record is an INVITE's, whose transactions the INVITE seeds
+/// above rebuild.
+fn invite_record(record: &RequestRecord) -> bool {
+    record.method.eq_ignore_ascii_case("INVITE")
+}
+
+/// Whether `branch` names the received half of a non-INVITE record of
+/// `call`: a request a relay was made for, or one held for a later final. A
+/// copy of it is the server seed's to absorb, never a new request.
+pub(in crate::router) fn names_received_branch(call: &Call, branch: &str) -> bool {
+    !branch.is_empty()
+        && call::helpers::every_record(call)
+            .filter(|(_, _, r)| !r.is_own() && !invite_record(r))
+            .filter_map(|(_, _, r)| pending_via(r))
+            .any(|v| v.branch() == Some(branch))
+}
+
+/// The client seed of a sent non-INVITE request: the request as it left and
+/// the wire destination it was sent to. `None` when neither reads back.
+fn client_non_invite_seed(sent: &SentRequest) -> Option<TxnSeed> {
+    let request = parse_request(&sent.image)?;
+    let dest = sip_net::ip_socket_addr(&sent.destination.host, sent.destination.port)?;
+    Some(TxnSeed::ClientNonInvite { request, dest })
+}
+
+/// The server seed of a non-INVITE record's received half: the request
+/// rebuilt from the record, attributed to the leg it arrived on — a relay's
+/// originator is the peer of the leg it was relayed toward.
+fn server_non_invite_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Option<TxnSeed> {
+    let request = rebuild_received_request(record)?;
+    let arrived_on = if record.is_held() {
+        leg.leg_id.clone()
+    } else {
+        call::helpers::get_peer(call, &leg.leg_id)
+            .map(str::to_string)
+            .unwrap_or_else(|| call.a_leg.leg_id.clone())
+    };
+    Some(TxnSeed::ServerNonInvite { request, leg_id: Some(arrived_on) })
 }
 
 /// Whether `branch` names a server seed an INVITE can be a copy of: a relayed
@@ -121,7 +183,7 @@ pub(in crate::router) fn names_server_branch(call: &Call, branch: &str) -> bool 
     let dialogs =
         || std::iter::once(&call.a_leg).chain(&call.b_legs).flat_map(|l| l.dialogs.iter());
     let relayed = dialogs()
-        .flat_map(|d| d.inbound_pending_requests.iter())
+        .flat_map(|d| d.requests.iter())
         .filter(|p| pending_invite(p))
         .filter_map(pending_via)
         .any(|v| v.branch() == Some(branch));
@@ -149,7 +211,7 @@ fn round_open(dialog: &Dialog, handle: &InviteTxnHandle) -> bool {
         return false;
     };
     dialog
-        .inbound_pending_requests
+        .requests
         .iter()
         .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq)
         .all(|p| !p.cancelled)
@@ -157,19 +219,19 @@ fn round_open(dialog: &Dialog, handle: &InviteTxnHandle) -> bool {
 
 /// The INVITE server transaction the originator's request of the pending
 /// relayed re-INVITE `p` opened here: its top-Via branch and sent-by.
-pub(in crate::router) fn relayed_server_key(p: &PendingRequest) -> Option<ServerTxnKey> {
+pub(in crate::router) fn relayed_server_key(p: &RequestRecord) -> Option<ServerTxnKey> {
     let via = pending_via(p)?;
     let branch = via.branch().filter(|b| !b.is_empty())?.to_string();
     Some(ServerTxnKey::invite(branch, SentBy::of(&via)))
 }
 
 /// The originator's top Via a pending relayed request was received with.
-fn pending_via(p: &PendingRequest) -> Option<Via> {
+fn pending_via(p: &RequestRecord) -> Option<Via> {
     let top_via = p.source_vias.first()?;
     Via::parse(&SipStr::owned(top_via)).ok()
 }
 
-fn pending_invite(p: &PendingRequest) -> bool {
+fn pending_invite(p: &RequestRecord) -> bool {
     p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled
 }
 
@@ -211,8 +273,8 @@ fn client_seed(
 /// the originator's request rebuilt from the snapshot, keyed by its top-Via
 /// branch and sent-by, answered under the To-tag its To already carries,
 /// attributed to the originator's leg.
-fn relayed_server_seed(call: &Call, leg: &Leg, pending: &PendingRequest) -> Option<TxnSeed> {
-    let request = rebuild_relayed_invite(pending)?;
+fn relayed_server_seed(call: &Call, leg: &Leg, pending: &RequestRecord) -> Option<TxnSeed> {
+    let request = rebuild_received_request(pending)?;
     let to_tag = request.to().tag().map(str::to_string);
     let originator = call::helpers::get_peer(call, &leg.leg_id)
         .map(str::to_string)

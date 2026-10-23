@@ -311,14 +311,14 @@ fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     else {
         panic!("a relay target");
     };
-    let pending = call::PendingRequest {
+    let pending = call::RequestRecord {
         source_vias: vec![format!("SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-{method}")],
         source_call_id: "c".into(),
         source_from: "<sip:a@192.0.2.1>;tag=a".into(),
         source_to: "<sip:b@192.0.2.100>;tag=b".into(),
         offered_100rel: true,
         offered: with_sdp,
-        ..call::PendingRequest::new(method, 7, 7, call::Direction::FromA)
+        ..call::RequestRecord::relayed(method, 7, 7)
     };
     let target = std::iter::once(&mut call.a_leg)
         .chain(call.b_legs.iter_mut())
@@ -327,7 +327,7 @@ fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     if target.dialogs.confirmed().is_none() {
         target.dialogs.insert(call::Dialog::new("as", "bob", call::DialogState::Confirmed, 1));
     }
-    target.dialogs.confirmed_mut().unwrap().inbound_pending_requests.push(pending);
+    target.dialogs.confirmed_mut().unwrap().requests.push(pending);
 }
 
 /// The peer of `leg` opens an offer/answer exchange with a request carrying a

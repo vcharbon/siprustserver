@@ -81,17 +81,17 @@ fn the_peer_sequence_never_decreases() {
 #[test]
 fn pending_request_lifecycle() {
     let call = representative_call();
-    let entry = PendingRequest {
+    let entry = RequestRecord {
         source_call_id: "cid".into(),
         source_from: "f".into(),
         source_to: "t".into(),
-        ..PendingRequest::new("OPTIONS", 42, 42, Direction::FromB)
+        ..RequestRecord::relayed("OPTIONS", 42, 42)
     };
-    let call = add_pending_request(call, "b-1", &b_id(), entry);
-    assert!(find_pending_request(b_dialog(&call), 42).is_some());
+    let call = add_record(call, "b-1", &b_id(), entry);
+    assert!(find_relay(b_dialog(&call), 42).is_some());
 
-    let call = remove_pending_request(call, "b-1", &b_id(), 42);
-    assert!(find_pending_request(b_dialog(&call), 42).is_none());
+    let call = remove_relay(call, "b-1", &b_id(), 42);
+    assert!(find_relay(b_dialog(&call), 42).is_none());
 }
 
 #[test]
@@ -247,7 +247,7 @@ fn dialog_constructor() {
     assert_eq!(empty.peer_cseq, None);
     assert!(empty.route_set.is_empty());
     assert!(empty.fronts.is_empty());
-    assert!(empty.inbound_pending_requests.is_empty());
+    assert!(empty.requests.is_empty());
     assert!(empty.is_live() && !empty.is_confirmed());
 }
 
@@ -356,7 +356,7 @@ fn settled_call() -> Call {
     let mut call = representative_call();
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         for d in leg.dialogs.iter_mut() {
-            d.inbound_pending_requests.clear();
+            d.requests.clear();
         }
     }
     call
@@ -426,8 +426,6 @@ fn a_prack_is_relayed_answered_or_refused_by_what_it_names() {
     let (mut call, s2) = shown(call, &other, "a1", 1, 9_000);
     note_responder_ack(&mut call, &other, ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() });
     assert_eq!(prack_disposition(&call, "a1", rack(s2, 1), None), PrackDisposition::Answer200);
-    assert!(own_prack_branch(&call, "z9hG4bK-own"));
-    assert!(!own_prack_branch(&call, "z9hG4bK-relayed"));
 }
 
 /// A responder dialog that no longer carries a request — gone, or its INVITE
@@ -446,9 +444,9 @@ fn a_responder_dialog_that_carries_nothing_answers_200_here() {
 /// recorded admits nothing.
 #[test]
 fn a_relayed_provisional_is_reliable_only_to_an_invite_whose_originator_offered_100rel() {
-    let pending = |method: &str, offered_100rel: bool| PendingRequest {
+    let pending = |method: &str, offered_100rel: bool| RequestRecord {
         offered_100rel,
-        ..PendingRequest::new(method, 2, 2, Direction::FromA)
+        ..RequestRecord::relayed(method, 2, 2)
     };
     assert!(admits_reliable_provisional(&pending("INVITE", true)));
     assert!(
@@ -731,7 +729,7 @@ fn the_first_termination_is_recorded_once_and_cut_once() {
 fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
     let pristine = |call: &Call| {
         let mut d = b_dialog(call).clone();
-        d.inbound_pending_requests.clear();
+        d.requests.clear();
         d.pending_reinvite_2xx = None;
         d.answered_2xx = None;
         d.awaited_ack_cseq = None;
@@ -743,11 +741,8 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
 
     // Rule 1: a relayed INVITE still awaiting its final response.
     let mut relayed = base.clone();
-    relayed.inbound_pending_requests = b_dialog(&call).inbound_pending_requests.clone();
-    assert!(
-        !relayed.inbound_pending_requests.is_empty(),
-        "the fixture dialog carries a pending relayed INVITE"
-    );
+    relayed.requests = b_dialog(&call).requests.clone();
+    assert!(!relayed.requests.is_empty(), "the fixture dialog carries a pending relayed INVITE");
     assert!(invite_transaction_open(&relayed));
 
     let unacked = || Unacked2xx {
@@ -897,28 +892,29 @@ fn the_carrying_dialog_is_the_confirmed_or_the_only_live_one() {
 #[test]
 fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
     let mut call = settled_call();
-    let open = PendingRequest {
+    let open = RequestRecord {
         source_call_id: "cid".into(),
         source_from: "f".into(),
         source_to: "t".into(),
         offered: true,
-        ..PendingRequest::new("UPDATE", 3, 3, Direction::FromA)
+        ..RequestRecord::relayed("UPDATE", 3, 3)
     };
     let lost = Dialog {
-        state: DialogState::Retired(RetiredDialog { open_relays: vec![open], release: None }),
+        state: DialogState::Retired(RetiredDialog { open_requests: vec![open], release: None }),
         ..Dialog::new(B_LOCAL_TAG, "lost-fork", DialogState::Early, 3)
     };
     call.b_legs[0].dialogs.insert(lost);
     let (holder, pending) =
-        relayed_pending(&call, "b-1", Some("lost-fork"), Some(B_LOCAL_TAG), 3).expect("found");
+        answered_record(&call, "b-1", Some("lost-fork"), Some(B_LOCAL_TAG), 3, "UPDATE")
+            .expect("found");
     let id = DialogId { our_tag: B_LOCAL_TAG.into(), peer_tag: "lost-fork".into() };
-    assert_eq!(holder, PendingHolder::Retired(id.clone()));
+    assert_eq!(holder, RecordHolder::Retired(id.clone()));
     assert_eq!(pending.method, "UPDATE");
-    assert!(relayed_pending(&call, "b-1", Some(B_TAG), Some(B_LOCAL_TAG), 3).is_none());
+    assert!(answered_record(&call, "b-1", Some(B_TAG), Some(B_LOCAL_TAG), 3, "UPDATE").is_none());
 
-    let call = close_relay(call, "b-1", &holder, 3);
+    let call = close_record(call, "b-1", &holder, 3);
     let kept = call.b_legs[0].dialogs.by_tags(&id.our_tag, &id.peer_tag).expect("kept");
-    assert!(kept.retired().is_some_and(|r| r.open_relays.is_empty()));
+    assert!(kept.retired().is_some_and(|r| r.open_requests.is_empty()));
 }
 
 /// A dialog the peer's BYE ended while early was never established: only

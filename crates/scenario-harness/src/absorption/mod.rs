@@ -11,6 +11,7 @@
 //! | ACK to a non-2xx final | seen | absorbed — hop-by-hop, owned by the INVITE server transaction |
 //! | retransmitted 2xx to INVITE | seen | seen — 2xx retransmission is end-to-end, the TU re-sends |
 //! | ACK to a 2xx (each one) | seen | seen — the UAC core, not the transaction layer, sends every one |
+//! | non-INVITE request of a transaction this endpoint answered, arriving after the final (§17.2.3 match) | seen | absorbed — its final is repeated (§17.2.2) |
 //!
 //! [`Absorption::sight`] is the single seam: every inbound datagram passes it
 //! exactly once, is stamped [`SeenBy`], and lands in the wire log. The **wire
@@ -21,12 +22,16 @@
 //! and the harness's own waits can never disagree.
 //!
 //! **The absorption rule: absorb only a PROVABLE duplicate.** A datagram is a
-//! repeat iff it is byte-identical to one already sighted under the same key.
+//! repeat iff it is byte-identical to one already sighted under the same key,
+//! or a non-INVITE request arriving after the final of the server transaction
+//! its top-Via branch, sent-by and method name (§17.2.3), whatever a proxy
+//! stamped on the copy.
 //! There is no absorb-set, no window and no method-name tolerance list: those
 //! over-approximate "a repeat of what I already saw" into "any message of this
 //! method", which can swallow a genuine signal.
 
 mod abandoned;
+mod answered;
 mod hop_ack;
 mod two_xx_ack;
 mod wire_log;
@@ -60,6 +65,10 @@ pub enum Owner {
     Tu,
     /// A byte-identical repeat the transaction layer absorbs (§17.2).
     TxnDuplicate,
+    /// A request of a non-INVITE server transaction this endpoint completed,
+    /// arriving after its final: the transaction layer repeats the final
+    /// (§17.2.2).
+    TxnCompleted,
     /// The hop ACK of an INVITE server transaction that answered non-2xx
     /// (§17.1.1.3): the transaction layer's to claim, never the TU's.
     TxnHopAck,
@@ -78,7 +87,7 @@ impl Sighting {
     pub fn seen_by(&self) -> SeenBy {
         match self.owner {
             Owner::Tu => SeenBy::Both,
-            Owner::TxnDuplicate | Owner::TxnHopAck => SeenBy::WireOnly,
+            Owner::TxnDuplicate | Owner::TxnCompleted | Owner::TxnHopAck => SeenBy::WireOnly,
         }
     }
 }
@@ -104,6 +113,11 @@ pub struct Absorption {
     /// first-sighting token back, it only asks "is this a repeat".
     sighted: AtomicU64,
     hop_acks: hop_ack::HopAcks,
+    /// The non-INVITE server transactions this endpoint holds, with the final
+    /// each completed one repeats (§17.2.2).
+    answered: answered::Answered,
+    /// The finals a [`Owner::TxnCompleted`] sighting owes, not yet sent.
+    repeats: std::sync::Mutex<Vec<(Vec<u8>, SocketAddr)>>,
     /// The INVITE client transactions whose caller gave up (§9.1) and that
     /// still ACK their non-2xx final (§17.1.1.3).
     abandoned: abandoned::AbandonedInvites,
@@ -119,6 +133,8 @@ impl Absorption {
             tables: RepeatTables::default(),
             sighted: AtomicU64::new(0),
             hop_acks: hop_ack::HopAcks::default(),
+            answered: answered::Answered::default(),
+            repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
             log: wire_log::WireLog::default(),
         }
@@ -132,6 +148,8 @@ impl Absorption {
             tables: RepeatTables::default(),
             sighted: AtomicU64::new(0),
             hop_acks: hop_ack::HopAcks::default(),
+            answered: answered::Answered::default(),
+            repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
             log: wire_log::WireLog::default(),
         }
@@ -148,11 +166,20 @@ impl Absorption {
     /// exactly once per datagram, by the receive core of whichever mode owns
     /// the socket.
     pub fn sight(&self, raw: &[u8], msg: &SipMessage) -> Sighting {
-        let repeat = self.dedup.load(Ordering::Relaxed)
-            && self.tables.note(raw, msg, self.sighted.fetch_add(1, Ordering::Relaxed)).is_some();
+        let dedup = self.dedup.load(Ordering::Relaxed);
+        let ordinal = self.sighted.fetch_add(1, Ordering::Relaxed);
+        let identical = dedup && self.tables.note(raw, msg, ordinal).is_some();
+        let copy = match msg {
+            SipMessage::Request(r) if dedup => self.answered.sight(r, ordinal),
+            _ => None,
+        };
+        let repeat = identical || copy.is_some();
         let owner = if self.hop_ack_claims_msg(msg) {
             Owner::TxnHopAck
-        } else if repeat && !repeat_belongs_to_tu(msg) {
+        } else if let Some(answered::Copy::Repeat(wire, dst)) = copy {
+            self.repeats.lock().unwrap().push((wire, dst));
+            Owner::TxnCompleted
+        } else if copy.is_some() || (repeat && !repeat_belongs_to_tu(msg)) {
             Owner::TxnDuplicate
         } else {
             Owner::Tu
@@ -162,6 +189,24 @@ impl Absorption {
             self.log.push(raw, sighting);
         }
         sighting
+    }
+
+    /// Note a datagram this endpoint sent, `msg` rendered as `wire` toward
+    /// `dst`, while `queued` datagrams wait unsighted on its socket: a final
+    /// to a non-INVITE request completes its server transaction (§17.2.2),
+    /// for the datagrams that arrive after those. Nothing is noted while
+    /// dedup is off.
+    pub fn note_sent(&self, msg: &SipMessage, wire: &[u8], dst: SocketAddr, queued: usize) {
+        if let (true, SipMessage::Response(r)) = (self.dedup.load(Ordering::Relaxed), msg) {
+            let after = self.sighted.load(Ordering::Relaxed) + queued as u64;
+            self.answered.note_sent(r, wire, dst, after);
+        }
+    }
+
+    /// The finals the [`Owner::TxnCompleted`] sightings since the last call
+    /// owe, each with its destination, oldest first (§17.2.2).
+    pub fn take_repeats(&self) -> Vec<(Vec<u8>, SocketAddr)> {
+        std::mem::take(&mut *self.repeats.lock().unwrap())
     }
 
     /// Every datagram sighted, in arrival order — what §14 of the pivot spec
@@ -392,5 +437,58 @@ mod tests {
         a.arm_hop_ack("c1".into(), "z9hG4bK-1".into());
         assert_eq!(sight(&a, HOP_ACK).owner, Owner::TxnHopAck);
         assert!(a.hop_ack_is_fulfilled("c1", "z9hG4bK-1"));
+    }
+
+    const INFO: &str = "INFO sip:bob@10.0.0.2 SIP/2.0\r\n\
+        Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-2;rport=5060\r\n\
+        From: <sip:alice@10.0.0.1>;tag=a1\r\n\
+        To: <sip:bob@10.0.0.2>;tag=b1\r\n\
+        Call-ID: c1\r\n\
+        CSeq: 2 INFO\r\n\
+        Content-Length: 0\r\n\r\n";
+
+    const INFO_OK: &str = "SIP/2.0 200 OK\r\n\
+        Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-2;rport=5060\r\n\
+        From: <sip:alice@10.0.0.1>;tag=a1\r\n\
+        To: <sip:bob@10.0.0.2>;tag=b1\r\n\
+        Call-ID: c1\r\n\
+        CSeq: 2 INFO\r\n\
+        Content-Length: 0\r\n\r\n";
+
+    /// A copy of a non-INVITE request this endpoint received — its branch,
+    /// sent-by and method, whatever a proxy stamped on its Via — is the
+    /// transaction layer's: absorbed while no final left, drawing the final
+    /// again once one did (RFC 3261 §17.2.2); a request of another
+    /// transaction is the TU's.
+    #[tokio::test(start_paused = true)]
+    async fn a_copy_of_an_answered_non_invite_request_draws_its_final_again() {
+        let a = Absorption::transaction_view();
+        assert_eq!(sight(&a, INFO).owner, Owner::Tu);
+        let dst: SocketAddr = "10.0.0.1:5060".parse().unwrap();
+        a.note_sent(&parse(INFO_OK), INFO_OK.as_bytes(), dst, 0);
+        let restamped = INFO.replace("rport=5060", "rport=5061");
+        let copy = sight(&a, &restamped);
+        assert_eq!(copy.owner, Owner::TxnCompleted);
+        assert_eq!(
+            a.take_repeats(),
+            vec![(INFO_OK.as_bytes().to_vec(), dst)],
+            "the final, byte for byte, where it went",
+        );
+        let other = INFO.replace("z9hG4bK-2", "z9hG4bK-3");
+        assert_eq!(sight(&a, &other).owner, Owner::Tu, "another branch is another transaction");
+
+        // A copy that arrived before the final — while the transaction was
+        // open, or still queued when the final left — is absorbed with
+        // nothing sent.
+        let early = Absorption::transaction_view();
+        sight(&early, INFO);
+        assert_eq!(sight(&early, &restamped).owner, Owner::TxnDuplicate, "open: absorbed");
+        early.note_sent(&parse(INFO_OK), INFO_OK.as_bytes(), dst, 1);
+        assert_eq!(sight(&early, &restamped).owner, Owner::TxnDuplicate, "queued before it");
+        assert!(early.take_repeats().is_empty());
+        assert_eq!(sight(&early, &restamped).owner, Owner::TxnCompleted, "arrived after it");
+        tokio::time::sleep(std::time::Duration::from_millis(64 * 500)).await;
+        let later = INFO.replace("rport=5060", "rport=5062");
+        assert_eq!(sight(&a, &later).owner, Owner::Tu, "Timer J ends the transaction");
     }
 }

@@ -2,7 +2,7 @@
 //! pending-request correlation holds: where it is routed, the headers it
 //! states, and the stack's own answer on that transaction.
 
-use call::PendingRequest;
+use call::RequestRecord;
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateError, GenerateRelayedResponseOpts};
 use sip_message::header::{HeaderName, HeaderValue, MediaType, Via};
@@ -14,7 +14,7 @@ use sip_message::{SipHeader, SipResponse, SipStr};
 /// (the `call` crate stores text, ADR-0008) — so each rides as a raw entry and
 /// reaches the wire unaltered.
 pub(super) fn snapshot_response_opts(
-    pending: &PendingRequest,
+    pending: &RequestRecord,
     cseq_method: &str,
     body: Vec<u8>,
     content_type: Option<MediaType>,
@@ -40,7 +40,7 @@ pub(super) fn snapshot_response_opts(
 /// snapshot's headers and nothing else — no body, no relayed header, no
 /// Contact. An originator whose snapshot no response can echo draws none.
 pub(super) fn stack_answer(
-    pending: &PendingRequest,
+    pending: &RequestRecord,
     cseq_method: &str,
     status: u16,
     reason: &str,

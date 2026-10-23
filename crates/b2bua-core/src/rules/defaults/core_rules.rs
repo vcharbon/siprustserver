@@ -25,6 +25,9 @@ use b2bua_sdk::model::{
 };
 
 use super::reaper_verdicts::{reap_handler_panic, reap_message_cap, reap_overflow, reap_stale};
+use super::request_timeouts::{
+    going_away_timeout, record_timeout_actions, straggler_release_timeout,
+};
 
 /// A CORE_LAYER rule.
 pub(super) fn rule(
@@ -110,7 +113,7 @@ pub(crate) fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item 
 fn find_pending_relayed_invite(ctx: &RuleContext, inbound_cseq: i64) -> Option<(String, i64)> {
     std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()).find_map(|leg| {
         leg.dialogs.iter().find_map(|d| {
-            d.inbound_pending_requests
+            d.requests
                 .iter()
                 .find(|p| {
                     p.method.eq_ignore_ascii_case("INVITE")
@@ -530,17 +533,18 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // The non-INVITE sibling of `relay-reinvite-response`
         // (INVITE) alongside `relay-non-invite-200` (the 2xx half): without it
         // the far end's 481/488/491… to a relayed UPDATE/INFO was silently
-        // dropped and the requester timed out. Matches ONLY when the source
-        // dialog holds a pending-relay snapshot for the response CSeq — i.e. a
-        // transaction WE relayed. A B2BUA-originated request (keepalive
-        // OPTIONS, relayFirst18x PRACK, REFER-progress NOTIFY) leaves no
-        // snapshot, so its failures keep their own rules — in particular a
+        // dropped and the requester timed out. Matches ONLY when the response
+        // answers a relay record on the source dialog — i.e. a transaction WE
+        // relayed. A B2BUA-originated request (keepalive OPTIONS,
+        // relayFirst18x PRACK, REFER-progress NOTIFY) records as this stack's
+        // own, so its failures keep their own rules — in particular a
         // keepalive-OPTIONS 481 still reaches `handle-481`'s teardown, which
         // this rule outranks only for relayed transactions. Like a failed
         // re-INVITE (§14.1), a failed relayed non-INVITE leaves the dialog and
         // the call as they were: report the failure to the requester, nothing
-        // more. (BYE never takes this path — it is answered locally and leaves
-        // no snapshot; the relay executor removes the snapshot on this final.)
+        // more. (BYE never takes this path — it is answered locally and
+        // relayed by no record; the relay executor settles the record on this
+        // final.)
         rule(
             "relay-non-invite-failure",
             &["handle-481"],
@@ -711,14 +715,14 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         ),
         // A non-2xx final to a request THIS STACK originated — its own PRACK
         // toward a responder whose provisional the originator was never shown
-        // reliably, or a REFER-progress NOTIFY — leaves no pending-relay
-        // snapshot, and denies one transaction or one subscription, never the
+        // reliably, or a REFER-progress NOTIFY — records as this stack's own,
+        // and denies one transaction or one subscription, never the
         // dialog: a PRACK's 481 is RFC 3262 §3's ordinary answer once the
         // responder no longer holds that provisional unacknowledged. A refer
         // NOTIFY's 481 is the transfer machine's (`transfer-notify-481` ends
         // the subscription, RFC 6665 §4.4.1); this rule keeps the remainder,
         // where nothing is owed and nothing moves. A RELAYED request's failure
-        // has its snapshot and is `relay-non-invite-failure`'s to relay.
+        // is `relay-non-invite-failure`'s to relay.
         rule(
             "absorb-own-request-failure",
             &[],
@@ -737,17 +741,14 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "absorb-options-200",
             &["relay-non-invite-200"],
-            // Only a B2BUA-originated keepalive OPTIONS is absorbed: it leaves no
-            // pending-relay snapshot on the source dialog. A relayed end-to-end
-            // OPTIONS does leave one (matching the response CSeq) → this declines
-            // and `relay-non-invite-200` forwards the 200 to the peer.
-            Match::response().method("OPTIONS").status_class(2).filter(|ctx| {
-                let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
-                match (ctx.dialog(), cseq) {
-                    (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
-                    _ => true,
-                }
-            }),
+            // Only a B2BUA-originated keepalive OPTIONS is absorbed: its record
+            // is this stack's own. A relayed end-to-end OPTIONS's record is a
+            // relay → this declines and `relay-non-invite-200` forwards the 200
+            // to the peer.
+            Match::response()
+                .method("OPTIONS")
+                .status_class(2)
+                .filter(|ctx| !ctx.answers_relayed_request()),
             |ctx| {
                 let leg = ctx.source_leg_id.to_string();
                 ok(vec![RuleAction::cancel(TimerKey::leg(TimerType::KeepaliveTimeout, leg))])
@@ -758,18 +759,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             &["relay-non-invite-200"],
             // Only a B2BUA-originated NOTIFY is absorbed: the `referTransfer`
             // machine's `SendNotify` (refer-progress sipfrag toward the referrer)
-            // leaves no pending-relay snapshot on the source dialog. A **relayed**
-            // NOTIFY — the transparent-REFER path forwards the transferee's
-            // implicit-subscription NOTIFYs (RFC 3515) end-to-end — DOES leave one
-            // (matching the response CSeq) → this declines and `relay-non-invite-200`
-            // forwards the 200 back to the requester. Mirrors `absorb-options-200`.
-            Match::response().method("NOTIFY").status_class(2).filter(|ctx| {
-                let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
-                match (ctx.dialog(), cseq) {
-                    (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
-                    _ => true,
-                }
-            }),
+            // is this stack's own. A **relayed** NOTIFY — the transparent-REFER
+            // path forwards the transferee's implicit-subscription NOTIFYs (RFC
+            // 3515) end-to-end — is a relay → this declines and
+            // `relay-non-invite-200` forwards the 200 back to the requester.
+            // Mirrors `absorb-options-200`.
+            Match::response()
+                .method("NOTIFY")
+                .status_class(2)
+                .filter(|ctx| !ctx.answers_relayed_request()),
             |_ctx| ok(vec![]),
         ),
         // ── fork-straggler release ──────────────────────────────────────────
@@ -805,23 +803,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             },
         )
         .runs_while_terminating(),
-        rule(
-            "absorb-straggler-release-timeout",
-            &[],
-            Match::timeout().filter(|ctx| {
-                let branch = ctx.timeout_branch().unwrap_or_default();
-                ctx.source_leg().is_some_and(|l| {
-                    l.dialogs
-                        .iter()
-                        .filter_map(|d| d.retired())
-                        .any(|r| r.release.as_ref().is_some_and(|rel| rel.bye_branch == branch))
-                })
-            }),
-            |_ctx| ok(vec![]),
-        )
-        .runs_while_terminating(),
     ]);
-    rules.extend(super::own_request_timeouts::own_request_timeouts());
     rules.extend([
         // ── terminating ─────────────────────────────────────────────────────
         rule(
@@ -1040,7 +1022,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // to the peer leg (the implicit REFER subscription's progress reports ride
         // the dialog end-to-end on the transparent-transfer path). Its 200/failure
         // finals relay back via `relay-non-invite-200`/`-failure` (NOTIFY is in both
-        // sets); `absorb-notify-200`'s snapshot filter keeps a B2BUA-*originated*
+        // sets); `absorb-notify-200`'s record filter keeps a B2BUA-*originated*
         // NOTIFY's 200 absorbed. A SERVICE_LAYER rule (e.g. a subscribed transfer
         // machine that owns NOTIFY) out-ranks this CORE default when active.
         rule("relay-notify", &[], Match::request().method("NOTIFY"), |_| {
@@ -1120,6 +1102,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ok(actions)
         }),
         rule("handle-timeout", &[], Match::timeout(), |ctx| {
+            // A request record's timeout reads by the record's origin and the
+            // method table (ADR-0055 §2).
+            if let Some(record) = ctx.timed_out_record() {
+                return ok(record_timeout_actions(ctx, record));
+            }
+            // The BYE that released a fork straggler times out the release's
+            // alone (§15.1.1): the winning dialog on the leg never reads it.
+            if straggler_release_timeout(ctx) {
+                return ok(vec![]);
+            }
             // A **pending b-leg INVITE** transaction timeout (Timer B / the long
             // INVITE backstop) on a failover-capable call is a failure the
             // decision backend must get a shot at — the dead-gateway reroute is
@@ -1148,37 +1140,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // termination finalize on the deadline it already has.
             if let Some(leg) = ctx.source_leg() {
                 if call::helpers::leg_is_going_away(ctx.call.state(), leg) {
-                    // What the leg was awaiting names its end: an unanswered
-                    // BYE times out, anything else is abandoned.
-                    // A leg awaiting its BYE's answer is resolved by that
-                    // BYE's own timeout only: an earlier request's dead
-                    // transaction (the liveness OPTIONS that opened the
-                    // teardown, Timer F still running) says nothing about
-                    // the BYE, which may yet be answered. A leg already ended
-                    // (terminal disposition, no CANCEL in flight) keeps its
-                    // disposition when a request sent after its dialog ended
-                    // times out (a NOTIFY on a surviving subscription usage,
-                    // RFC 5057 §5.2); requests still pending toward it are
-                    // answered by the leg's re-termination.
-                    if leg.disposition() != LegDisposition::Cancelling
-                        && matches!(leg.end(), Some(b) if b.is_terminal())
-                    {
-                        return ok(vec![RuleAction::TerminateLeg {
-                            leg_id: ctx.source_leg_id.to_string(),
-                            end: LegEnd::Settle,
-                        }]);
-                    }
-                    let timed_out_bye =
-                        ctx.timeout_method().is_some_and(|m| m.eq_ignore_ascii_case("BYE"));
-                    let end = match leg.end() {
-                        Some(ByeDisposition::ByeSent) if timed_out_bye => LegEnd::OurByeTimedOut,
-                        Some(ByeDisposition::ByeSent) => return ok(vec![]),
-                        _ => LegEnd::Abandon,
-                    };
-                    return ok(vec![RuleAction::TerminateLeg {
-                        leg_id: ctx.source_leg_id.to_string(),
-                        end,
-                    }]);
+                    return ok(going_away_timeout(ctx, leg));
                 }
             }
             if timed_out_invite && pending_b_leg {

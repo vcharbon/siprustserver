@@ -17,6 +17,7 @@ pub mod executor;
 pub mod invariants;
 pub mod lifecycle_delivery;
 pub mod lost_round;
+pub mod method_table;
 pub mod operator_release;
 mod pending_refusal;
 pub mod promote_pem;

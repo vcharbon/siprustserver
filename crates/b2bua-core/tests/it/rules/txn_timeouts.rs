@@ -1,6 +1,6 @@
 //! A client transaction's timeout on a call: `handle-timeout` on a pending,
-//! cancelling, ending or ended leg, and the timeouts of this stack's own
-//! requests that leave the call as it was.
+//! cancelling, ending or ended leg, and the timeout of a non-INVITE request
+//! record read by its origin and the method table (ADR-0055 §2).
 
 use super::*;
 
@@ -42,6 +42,11 @@ fn handled(
         timeout_kind: call::TxnTimeoutKind::Response,
         incarnation: None,
     };
+    // The engine settles the record the timeout names before the rules read it.
+    let record = call::helpers::record_with_branch(call, leg_id, &format!("z9hG4bK{leg_id}"))
+        .filter(|(_, r)| r.outbound_cseq == i64::from(cseq) && r.method == method)
+        .map(Box::new);
+    let resolved = call::helpers::Resolved { dialog: None, record };
     let ctx = RuleContext {
         call: RuleCall::new(call),
         call_ref: &call.call_ref,
@@ -51,7 +56,7 @@ fn handled(
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
+        resolved: &resolved,
     };
     let rules = default_rules();
     pick_ranked(&rules, call, &ctx)
@@ -180,20 +185,23 @@ fn invite_timeout_on_a_live_pending_leg_still_consults() {
     );
 }
 
-/// The caller's confirmed call, its dialog holding a relayed NOTIFY sent with
-/// CSeq `relayed` when one is given.
-fn answered_call(relayed: Option<i64>) -> call::Call {
+/// The caller's confirmed call, its dialog holding the request record of
+/// `method` sent with CSeq `cseq` on the branch a timeout of the a-leg names,
+/// relayed or this stack's own.
+fn answered_call(method: &str, cseq: i64, origin: call::RequestOrigin) -> call::Call {
     let mut call = test_call();
     call.state = CallModelState::Active;
     let mut d = a_dialog(&call, "atag", DialogState::Confirmed);
-    if let Some(cseq) = relayed {
-        d.inbound_pending_requests.push(call::PendingRequest::new(
-            "NOTIFY",
-            cseq,
-            4,
-            Direction::FromB,
-        ));
-    }
+    let sent = call::SentRequest {
+        branch: "z9hG4bKa".into(),
+        image: Vec::new(),
+        destination: call::HostPort { host: "127.0.0.1".into(), port: 5060 },
+    };
+    d.requests.push(call::RequestRecord {
+        origin,
+        sent: Some(sent),
+        ..call::RequestRecord::relayed(method, cseq, 4)
+    });
     call.a_leg.dialogs.insert(d);
     call.a_leg.own_tag = Some("atag".into());
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
@@ -204,26 +212,60 @@ fn answered_call(relayed: Option<i64>) -> call::Call {
 /// subscription alone: no rule ends the call (RFC 5057 §5.2).
 #[test]
 fn an_own_notify_timeout_leaves_the_call() {
-    let call = answered_call(Some(7));
+    let call = answered_call("NOTIFY", 8, call::RequestOrigin::Own);
     let (rule, actions) = handled(&call, "a", "NOTIFY", 8, Direction::FromA, None);
-    assert_eq!(rule, "absorb-own-notify-timeout");
+    assert_eq!(rule, "handle-timeout");
     assert!(actions.is_empty(), "{actions:?}");
 }
 
-/// A relayed NOTIFY's timeout is not this stack's own: `handle-timeout` takes
-/// it, as before.
+/// The timeout of a PRACK this stack sent itself denies that acknowledgement
+/// alone, whatever the leg: the call stays as it was.
 #[test]
-fn a_relayed_notify_timeout_is_not_absorbed() {
-    let call = answered_call(Some(7));
-    let (rule, _) = handled(&call, "a", "NOTIFY", 7, Direction::FromA, None);
-    assert_eq!(rule, "handle-timeout");
+fn an_own_prack_timeout_leaves_the_call() {
+    let mut call = answered_call("PRACK", 8, call::RequestOrigin::Own);
+    let (_, actions) = handled(&call, "a", "PRACK", 8, Direction::FromA, None);
+    assert!(actions.is_empty(), "{actions:?}");
+    call.state = CallModelState::Terminating;
+    end_dialogs(&mut call.a_leg, DialogState::Ending(EndingBy::Bye));
+    let (_, actions) = handled(&call, "a", "PRACK", 8, Direction::FromA, None);
+    assert!(actions.is_empty(), "on a leg going away too: {actions:?}");
 }
 
-/// A NOTIFY timing out on a leg already ended keeps `handle-timeout`'s
-/// re-termination, its end as it was.
+/// The timeout of an INFO this stack sent itself ends the session.
+#[test]
+fn an_own_info_timeout_ends_the_session() {
+    let call = answered_call("INFO", 8, call::RequestOrigin::Own);
+    let (_, actions) = handled(&call, "a", "INFO", 8, Direction::FromA, None);
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::BeginTermination {
+                cause: TerminationCause::Timeout(call::TimeoutKind::Transaction),
+                ..
+            }]
+        ),
+        "{actions:?}",
+    );
+}
+
+/// A relayed request's timeout is the relayed exchange's: its record is
+/// settled with no 408 to the originator (RFC 4320 §4.2) and the session
+/// stands (RFC 5057 §5.2), whatever the method.
+#[test]
+fn a_relayed_request_timeout_leaves_the_call() {
+    for method in ["NOTIFY", "INFO", "UPDATE", "MESSAGE", "OPTIONS", "REFER", "PRACK"] {
+        let call = answered_call(method, 7, call::RequestOrigin::Relayed);
+        let (rule, actions) = handled(&call, "a", method, 7, Direction::FromA, None);
+        assert_eq!(rule, "handle-timeout");
+        assert!(actions.is_empty(), "{method}: {actions:?}");
+    }
+}
+
+/// A NOTIFY of this stack timing out on a leg already ended keeps
+/// `handle-timeout`'s re-termination, its end as it was.
 #[test]
 fn an_own_notify_timeout_on_an_ended_leg_is_handle_timeouts() {
-    let mut call = answered_call(None);
+    let mut call = answered_call("NOTIFY", 8, call::RequestOrigin::Own);
     end_dialogs(&mut call.a_leg, DialogState::Ended(call::DialogEnd::PeerBye));
     let (rule, actions) = handled(&call, "a", "NOTIFY", 8, Direction::FromA, None);
     assert_eq!(rule, "handle-timeout");

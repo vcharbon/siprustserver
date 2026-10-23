@@ -59,6 +59,7 @@ pub mod provisional;
 pub mod reason_phrase;
 pub mod relayed_final;
 pub mod release_reason;
+mod request_record;
 pub mod rule_call;
 pub mod sdp_form;
 pub mod service;

@@ -389,14 +389,6 @@ impl Agent {
         self.send_bytes(wire, dst).await
     }
 
-    /// One datagram out, nothing fed.
-    async fn send_bytes(&self, wire: &[u8], dst: SocketAddr) -> Result<(), StepError> {
-        self.ep
-            .send_to(wire, dst)
-            .await
-            .map_err(|e| StepError::Transport { who: self.name.clone(), detail: e.to_string() })
-    }
-
     /// THE receive core: one SIP datagram surfaced through the §17.2 receive
     /// view ([`Absorption`]). A timeout / closed queue / parse error is a
     /// [`StepError`]; the functional lane panics on it via [`recv`](Agent::recv).
@@ -495,7 +487,8 @@ impl Agent {
                 return None;
             }
         }
-        if sighting.owner == Owner::TxnDuplicate {
+        self.send_repeats().await;
+        if matches!(sighting.owner, Owner::TxnDuplicate | Owner::TxnCompleted) {
             return None;
         }
         if sighting.owner == Owner::Tu && !sighting.repeat {

@@ -60,12 +60,7 @@ impl ActionExecutor<'_> {
             Settle::Ending,
         );
         fx.outbound.push(cancel.effect);
-        *call = call::helpers::cancel_pending_request(
-            call.clone(),
-            leg_id,
-            &cancel.t_id,
-            outbound_cseq,
-        );
+        *call = call::helpers::cancel_relay(call.clone(), leg_id, &cancel.t_id, outbound_cseq);
         self.retire(call, fx, Scope::Transaction { leg_id, cseq: outbound_cseq });
     }
 
@@ -94,8 +89,7 @@ impl ActionExecutor<'_> {
         let Some((_, dialog)) = find_pending_dialog(call, leg_id, outbound_cseq) else {
             return;
         };
-        let Some(pending) = call::helpers::find_pending_request(&dialog, outbound_cseq).cloned()
-        else {
+        let Some(pending) = call::helpers::find_relay(&dialog, outbound_cseq).cloned() else {
             return;
         };
         if pending.cancelled || !pending.method.eq_ignore_ascii_case("INVITE") {

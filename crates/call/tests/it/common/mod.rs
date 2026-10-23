@@ -18,9 +18,11 @@ use sip_retransmit::Class;
 
 mod emission;
 mod provisional;
+mod request_record;
 mod sdp_session;
 use emission::{arb_own_notify, arb_retained_emission, arb_unacked_2xx};
 use provisional::{arb_owed_answer, arb_provisional};
+use request_record::arb_pending_request;
 use sdp_session::arb_sdp_session;
 
 // ── Representative fixture (port of fixture.ts) ─────────────────────────────
@@ -48,18 +50,13 @@ fn dialog(
     d.peer_cseq = Some(cseq + 1);
     d.remote_target = remote_target.to_string();
     d.route_set = vec!["<sip:fproxy.example.com;lr>".into(), "<sip:edge1.example.com;lr>".into()];
-    d.inbound_pending_requests = (0..pending)
-        .map(|i| PendingRequest {
+    d.requests = (0..pending)
+        .map(|i| RequestRecord {
             source_vias: vec!["SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-x".into()],
             source_call_id: source_call_id.to_string(),
             source_from: "<sip:alice@example.com>;tag=alice-001".into(),
             source_to: "<sip:bob@example.com>;tag=b2bua-aleg".into(),
-            ..PendingRequest::new(
-                "INVITE",
-                cseq + 10 + i as i64,
-                cseq + 10 + i as i64,
-                Direction::FromA,
-            )
+            ..RequestRecord::relayed("INVITE", cseq + 10 + i as i64, cseq + 10 + i as i64)
         })
         .collect();
     d.ack_branch = Some(format!("z9hG4bK-ack-{cseq:x}"));
@@ -406,6 +403,7 @@ fn arb_timer_type() -> impl Strategy<Value = TimerType> {
         Just(TimerType::ReferReinviteAnswer),
         Just(TimerType::ReferOverallSafety),
         Just(TimerType::NotifyAnswerCap),
+        Just(TimerType::HeldAnswer),
         // Service-owned timer: arbitrary (service_id, key) — both deserialise
         // into owned strings on the replica side (Cow::Owned), so the codec
         // P1 round-trip property covers the HA replication path for it.
@@ -428,49 +426,6 @@ fn arb_cdr_type() -> impl Strategy<Value = CdrEventType> {
 }
 fn arb_direction() -> impl Strategy<Value = Direction> {
     prop_oneof![Just(Direction::FromA), Just(Direction::FromB)]
-}
-
-fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
-    (
-        "[A-Z]{3,8}",
-        any::<i64>(),
-        any::<i64>(),
-        proptest::collection::vec("[a-z0-9 /.:;=-]{1,40}", 0..3),
-        arb_tag(),
-        arb_uri(),
-        arb_uri(),
-        arb_direction(),
-        proptest::option::of("[0-9]{1,10}(\\.[0-9]{1,3})?"),
-    )
-        .prop_map(
-            |(
-                method,
-                outbound_cseq,
-                inbound_cseq,
-                source_vias,
-                source_call_id,
-                source_from,
-                source_to,
-                direction,
-                source_timestamp,
-            )| {
-                PendingRequest {
-                    method,
-                    outbound_cseq,
-                    inbound_cseq,
-                    source_vias,
-                    source_call_id,
-                    source_from,
-                    source_to,
-                    direction,
-                    cancelled: false,
-                    offered_100rel: false,
-                    offered: false,
-                    source_timestamp,
-                    relayed_by: Default::default(),
-                }
-            },
-        )
 }
 
 /// Boxed, as [`arb_leg`] is: a debug build otherwise holds the whole value tree
@@ -512,7 +467,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                 (our_tag, peer_tag, state, remote_target, our_cseq, route_set, fronts),
                 (
                     peer_cseq,
-                    inbound_pending_requests,
+                    requests,
                     ack_branch,
                     pending_invite_txn,
                     cached_sdp,
@@ -534,7 +489,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                 fronts,
                 shown,
                 shows_media,
-                inbound_pending_requests,
+                requests,
                 ack_branch,
                 pending_invite_txn,
                 cached_sdp,
@@ -569,7 +524,7 @@ fn arb_dialog_state() -> impl Strategy<Value = DialogState> {
             },
         )),
     )
-        .prop_map(|(open_relays, release)| RetiredDialog { open_relays, release });
+        .prop_map(|(open_requests, release)| RetiredDialog { open_requests, release });
     prop_oneof![
         Just(DialogState::Early),
         Just(DialogState::Confirmed),

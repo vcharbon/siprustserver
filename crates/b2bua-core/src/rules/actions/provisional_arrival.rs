@@ -97,7 +97,7 @@ pub fn invite_open(call: &Call, id: &ProvisionalId) -> bool {
     }
     call::helpers::dialog_with_peer(leg, &id.responder_tag).is_some_and(|d| {
         let relayed = d
-            .inbound_pending_requests
+            .requests
             .iter()
             .any(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq);
         let own_round = invite_cseq_from_handle(d) == Some(cseq)

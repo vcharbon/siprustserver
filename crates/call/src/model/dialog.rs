@@ -1,7 +1,7 @@
 //! One RFC 3261 §12 dialog of a leg ([`Dialog`]): its identity (the two tags;
 //! the Call-ID is the leg's), its state ([`DialogState`]), the two CSeq
 //! sequences, the remote target and route set, and what the B2BUA keeps on it —
-//! pending transparent relays, cached SDP, the retained emissions its
+//! the request records open on it, cached SDP, the retained emissions its
 //! retransmission obligations repeat. The enclosing record is
 //! [`Leg`](crate::model::Leg); a leg's dialogs are reached through
 //! [`Dialogs`](crate::model::Dialogs).
@@ -12,7 +12,7 @@ use super::emission::RetainedEmission;
 use super::invite_txn::InviteTxnHandle;
 use super::owed_answer::OwedAnswer;
 use super::own_notify::OwnNotify;
-use super::relay_owner::RelayOwner;
+use super::request_record::RequestRecord;
 use super::sdp_session::LegSdpSession;
 
 /// Direction of an original relayed request.
@@ -21,72 +21,6 @@ use super::sdp_session::LegSdpSession;
 pub enum Direction {
     FromA,
     FromB,
-}
-
-/// Snapshot of an inbound request the B2BUA relays transparently, stored on the
-/// target-leg dialog so its response can be rebuilt with the right
-/// Via/From/To/Call-ID/CSeq (RFC 3261 §8.1.3.3).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingRequest {
-    pub method: String,
-    pub outbound_cseq: i64,
-    pub inbound_cseq: i64,
-    pub source_vias: Vec<String>,
-    pub source_call_id: String,
-    pub source_from: String,
-    pub source_to: String,
-    pub direction: Direction,
-    /// The originator CANCELled this relayed (re-)INVITE (RFC 3261 §9): the
-    /// B2BUA CANCELled the outbound client transaction and the txn layer
-    /// already answered the originator (200 + 487), so the target's eventual
-    /// final response is resolved locally — never relayed. A crossing 2xx
-    /// (target answered before the CANCEL landed) is ACKed and absorbed.
-    pub cancelled: bool,
-    /// The originator's request offered reliable provisionals — `100rel` in its
-    /// own `Require` or `Supported` (RFC 3262 §3). The request this stack built
-    /// toward the target may offer it where the originator did not (a declared
-    /// advertisement), so the originator's licence is recorded here: a
-    /// reliable provisional relays reliably only under it; without it the
-    /// provisional relays unreliably and this stack acknowledges the responder
-    /// itself.
-    pub offered_100rel: bool,
-    /// The originator's request carried a description (RFC 3264): an offer,
-    /// on an INVITE or an UPDATE. An offerless INVITE has its offer made by
-    /// the answerer.
-    #[serde(default)]
-    pub offered: bool,
-    /// The originator's request's `Timestamp` value, which the response relayed
-    /// back to it echoes (RFC 3261 §8.2.6.1); `None` where it stated none.
-    #[serde(default)]
-    pub source_timestamp: Option<String>,
-    /// The worker that relayed the request, by ordinal and worker identity:
-    /// its client transaction carries the relay, and the final returns there
-    /// (RFC 3261 §18.2.2). The default names no worker.
-    #[serde(default)]
-    pub relayed_by: RelayOwner,
-}
-
-impl PendingRequest {
-    /// A relay of `method` sent at `outbound_cseq` for the originator's
-    /// request at `inbound_cseq`, coming `direction`; nothing else is known of
-    /// it yet.
-    pub fn new(method: &str, outbound_cseq: i64, inbound_cseq: i64, direction: Direction) -> Self {
-        PendingRequest {
-            method: method.into(),
-            outbound_cseq,
-            inbound_cseq,
-            source_vias: Vec::new(),
-            source_call_id: String::new(),
-            source_from: String::new(),
-            source_to: String::new(),
-            direction,
-            cancelled: false,
-            offered_100rel: false,
-            offered: false,
-            source_timestamp: None,
-            relayed_by: RelayOwner::default(),
-        }
-    }
 }
 
 /// A 2xx to an INVITE this side sent and still awaits the ACK for (RFC 3261
@@ -157,14 +91,14 @@ pub enum DialogEnd {
     OurBye { final_status: Option<u16> },
 }
 
-/// What a retired dialog still carries: the relays it holds open until their
-/// finals reach their originators (§8.1.3.3), and the release this stack sent
+/// What a retired dialog still carries: the request records it holds open
+/// until they settle (§8.1.3.3, ADR-0055 §2), and the release this stack sent
 /// when the dialog, as a losing fork, answered with a 2xx anyway (§13.2.2.4).
 /// The dialog's own `our_cseq` stays the sequence that release continues.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RetiredDialog {
-    /// Requests relayed into the dialog before it retired, awaiting finals.
-    pub open_relays: Vec<PendingRequest>,
+    /// The dialog's request records still open when it retired.
+    pub open_requests: Vec<RequestRecord>,
     /// The ACK and BYE this stack answered the dialog's late 2xx with.
     pub release: Option<StragglerRelease>,
 }
@@ -241,8 +175,9 @@ pub struct Dialog {
     /// route: requests on the dialog go where [`Self::fronts`] sends them.
     #[serde(default)]
     pub shows_media: Option<String>,
-    /// Pending transparently-relayed inbound requests awaiting response here.
-    pub inbound_pending_requests: Vec<PendingRequest>,
+    /// The requests open on the dialog (ADR-0055 §2): relayed into it, sent
+    /// by this stack, or received and held for a later answer.
+    pub requests: Vec<RequestRecord>,
     /// Via branch of the first ACK for this dialog's 2xx (§13.2.2.4 re-ACK).
     pub ack_branch: Option<String>,
     /// In-flight INVITE client transaction handle on this dialog.
@@ -321,7 +256,7 @@ impl Dialog {
             fronts: Vec::new(),
             shown: false,
             shows_media: None,
-            inbound_pending_requests: Vec::new(),
+            requests: Vec::new(),
             ack_branch: None,
             pending_invite_txn: None,
             cached_sdp: None,

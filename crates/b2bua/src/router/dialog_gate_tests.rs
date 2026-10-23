@@ -21,7 +21,7 @@ fn dialog(state: DialogState) -> Dialog {
 
 fn retired(release: Option<bool>) -> DialogState {
     let release = release.map(|settled| StragglerRelease { settled, ..Default::default() });
-    DialogState::Retired(RetiredDialog { open_relays: vec![], release })
+    DialogState::Retired(RetiredDialog { open_requests: vec![], release })
 }
 
 const METHODS: [Method; 12] = [

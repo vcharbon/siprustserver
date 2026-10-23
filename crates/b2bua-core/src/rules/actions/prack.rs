@@ -181,14 +181,16 @@ impl ActionExecutor<'_> {
             res.request,
             dest,
         );
-        fx.outbound.push(OutboundSipEffect {
+        let prack = OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
             destination: dest,
             label: format!("PRACK → {}", id.leg),
             leg_id: Some(id.leg.clone()),
             provenance: Provenance::Authored,
-        });
+        };
+        self.record_own_effect(call, &id.leg, &t_id, &prack);
+        fx.outbound.push(prack);
     }
 }
 

@@ -7,7 +7,6 @@
 pub mod message_cap;
 pub mod quiet_turn;
 pub mod response_facts;
-pub mod superseded_relay;
 pub mod timer_screen;
 
 use call::helpers::{Arrival, Resolved};
@@ -95,7 +94,7 @@ pub fn rule_chain_turn(
         call_ref,
         source_leg_id,
         direction,
-        resolved,
+        mut resolved,
         matched_client_txn,
         now_ms,
     } = input;
@@ -108,7 +107,10 @@ pub fn rule_chain_turn(
     // call around message 200, BYEing a healthy dialog mid-call.
     let bumped = if fired(event, &TimerType::Keepalive) {
         0
-    } else if fired(event, &TimerType::Rung) || fired(event, &TimerType::NotifyAnswerCap) {
+    } else if fired(event, &TimerType::Rung)
+        || fired(event, &TimerType::NotifyAnswerCap)
+        || fired(event, &TimerType::HeldAnswer)
+    {
         call.message_count.unwrap_or(0)
     } else {
         call.message_count.unwrap_or(0) + 1
@@ -153,6 +155,14 @@ pub fn rule_chain_turn(
         let released = HandlerResult { call, effects: ladder_fx };
         return enforced(fw, &before, released, now_ms, &mut exec.turn.notes);
     }
+    // The deadline of a request held for a service's final is the
+    // framework's: the platform answers it, and no rule sees the fire.
+    if fired(event, &TimerType::HeldAnswer) {
+        let before = call.clone();
+        exec.answer_overdue_held(&mut call, &mut ladder_fx);
+        let answered = HandlerResult { call, effects: ladder_fx };
+        return enforced(fw, &before, answered, now_ms, &mut exec.turn.notes);
+    }
     let start = TurnStart::of(&call);
     // A reliable provisional is the engine's before it is any rule's (RFC
     // 3262): recorded with its early dialog and offer, or — a repeat, or out
@@ -171,6 +181,9 @@ pub fn rule_chain_turn(
             exec.release_answered_notify(&mut call, &mut ladder_fx, leg, resp);
         }
     }
+    // The request record a final or a timeout settles is settled before the
+    // rules read the event, which they read on `resolved` (ADR-0055 §2).
+    exec.settle_before_rules(&mut call, event, source_leg_id, &mut resolved);
     // The end of a BYE that released a retired dialog, its final or its
     // timeout, settles that release (§15.1.1) before the rules read it.
     if let Some(branch) = bye_transaction_end(event) {

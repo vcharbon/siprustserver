@@ -54,11 +54,6 @@ impl<'a> RuleCall<'a> {
     ) -> PrackDisposition {
         call::helpers::prack_disposition(self.0, tag, rack, discharged)
     }
-    /// Whether `branch` is a PRACK client transaction this stack originated
-    /// itself, never one it relayed.
-    pub fn own_prack_branch(&self, branch: &str) -> bool {
-        call::helpers::own_prack_branch(self.0, branch)
-    }
     /// Whether `obligation` is the caller's ACK of the a-leg's INITIAL answer
     /// rather than of a re-INVITE's 2xx — what tells the `RepeatGiveUp` of the
     /// call's own setup from an in-dialog one (RFC 3261 §13.3.1.4). A rule

@@ -909,10 +909,9 @@ impl CallState {
             let mut call_pend = 0u64;
             for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
                 dialogs += leg.dialogs.len() as u64;
-                call_pend += call::helpers::retired_relay_count(leg) as u64;
                 for d in &leg.dialogs {
                     rset += d.route_set.len() as u64;
-                    call_pend += d.inbound_pending_requests.len() as u64;
+                    call_pend += call::helpers::records_of(d).len() as u64;
                 }
             }
             pend += call_pend;

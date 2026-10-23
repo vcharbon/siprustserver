@@ -7,11 +7,12 @@ use call::TxnKind;
 use call::{Call, Dialog, DialogId, HeldRequest, Leg};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
-use sip_message::SipHeader;
+use sip_message::{Method, SipHeader};
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
+use crate::rules::method_table::row;
 use crate::rules::relay;
 
 use super::teardown::{is_media, without_reason, Relayed};
@@ -44,7 +45,8 @@ impl ActionExecutor<'_> {
             (reason, relayed)
         };
         let Some(id) = leg.dialogs.confirmed().map(|d| d.id()) else { return };
-        if self.held_behind_notify(call, leg_id, &id) {
+        let waits = row(&Method::Bye).waits_behind_own_notify;
+        if waits && self.held_behind_notify(call, leg_id, &id) {
             self.hold(call, fx, leg_id, &id, relayed.held_bye(reason, hops));
             return;
         }
@@ -74,7 +76,7 @@ impl ActionExecutor<'_> {
     }
 
     /// Compose and send the BYE on `leg_id`'s dialog `id`: it takes the
-    /// dialog's next CSeq (§12.2.1.1).
+    /// dialog's next CSeq (§12.2.1.1) and is recorded until it settles.
     #[allow(clippy::too_many_arguments)]
     fn bye_now(
         &mut self,
@@ -91,6 +93,7 @@ impl ActionExecutor<'_> {
         let marks = relay::CallMarks::of(call);
         let Some(bye) = self.bye_on_dialog(marks, leg, d, reason, relayed, hops) else { return };
         *call = call::helpers::bump_our_cseq(call.clone(), leg_id, id, 1);
+        self.record_own_effect(call, leg_id, id, &bye);
         fx.outbound.push(bye);
     }
 

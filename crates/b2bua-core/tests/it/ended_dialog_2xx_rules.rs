@@ -239,7 +239,7 @@ fn on_the_callers_leg_the_rejecting_answer_continues_the_stacks_session() {
     );
     let resolved = call::helpers::Resolved {
         dialog: Some(call::DialogId { our_tag: "b2bua-a".into(), peer_tag: "atag".into() }),
-        relay: None,
+        record: None,
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),

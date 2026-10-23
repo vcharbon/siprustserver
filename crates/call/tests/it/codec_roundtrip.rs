@@ -262,7 +262,7 @@ fn a_pending_requests_timestamp_survives_a_takeover_copy() {
         .b_legs
         .iter_mut()
         .flat_map(|leg| leg.dialogs.iter_mut())
-        .flat_map(|d| d.inbound_pending_requests.iter_mut())
+        .flat_map(|d| d.requests.iter_mut())
         .next()
         .expect("the representative call holds a pending request");
     pending.source_timestamp = Some("54.2".into());
@@ -272,7 +272,7 @@ fn a_pending_requests_timestamp_survives_a_takeover_copy() {
         .b_legs
         .iter()
         .flat_map(|leg| leg.dialogs.iter())
-        .flat_map(|d| d.inbound_pending_requests.iter())
+        .flat_map(|d| d.requests.iter())
         .find_map(|p| p.source_timestamp.clone());
     assert_eq!(echoed.as_deref(), Some("54.2"));
 }

@@ -28,6 +28,8 @@
 //!   - [`dialog`] — one §12 dialog: identity, state, sequences, what the
 //!     B2BUA keeps on it
 //!   - [`dialogs`] — a leg's dialogs and the one lookup surface over them
+//!   - [`request_record`] — one request a dialog holds open: relayed, own or
+//!     held for a later answer (ADR-0055 §2)
 //!   - [`outbound_invite`] — the dialog-creating INVITE a leg sent
 //!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats
 //!     and the key that discharges it (ADR-0032)
@@ -65,6 +67,7 @@ pub mod own_notify;
 pub mod provisional;
 pub mod record;
 pub mod relay_owner;
+pub mod request_record;
 pub mod sdp_session;
 pub mod services;
 pub mod sm;
@@ -76,8 +79,8 @@ pub use cdr::{CdrEvent, CdrEventType};
 pub use deadline::{millis_i64, millis_u64, Deadline};
 pub use decision_log::{DecisionKind, DecisionMark};
 pub use dialog::{
-    Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog, PendingRequest,
-    RetiredDialog, StragglerRelease, Unacked2xx,
+    Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog, RetiredDialog,
+    StragglerRelease, Unacked2xx,
 };
 pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};
@@ -101,6 +104,7 @@ pub use record::{
     PolicyUpdateBody, SipHeader,
 };
 pub use relay_owner::RelayOwner;
+pub use request_record::{DialogUsage, RequestOrigin, RequestRecord, SentRequest};
 pub use sdp_session::LegSdpSession;
 pub use services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase, RerouteState,

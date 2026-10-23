@@ -291,7 +291,7 @@ impl Owner {
         }
     }
 
-    fn start_client_retransmit(
+    pub(super) fn start_client_retransmit(
         &mut self,
         branch: &str,
         buf: Bytes,

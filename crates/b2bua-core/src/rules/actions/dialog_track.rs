@@ -387,8 +387,8 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
         if d.our_tag == tag {
             d.state = DialogState::Confirmed;
         } else if matches!(d.state, DialogState::Early | DialogState::Confirmed) {
-            let open_relays = std::mem::take(&mut d.inbound_pending_requests);
-            d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
+            let open_requests = std::mem::take(&mut d.requests);
+            d.state = DialogState::Retired(RetiredDialog { open_requests, release: None });
         }
     }
     call.a_leg.own_tag = Some(tag.to_string());

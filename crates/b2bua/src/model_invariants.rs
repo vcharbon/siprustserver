@@ -422,9 +422,10 @@ fn no_cancelled_dialog_past_its_invites_final(turn: &Turn<'_>) -> Result<(), Str
 }
 
 /// An in-dialog request the turn handled — an ACK aside, which takes no
-/// answer (§17.1.1.3) — ends the turn answered or relayed: a final sent on
-/// its transaction (§8.2.6), or its relay recorded on the dialog it went into,
-/// whose final answers it there (§8.1.3.3).
+/// answer (§17.1.1.3) — ends the turn answered, relayed or held: a final sent
+/// on its transaction (§8.2.6), or a record of its relay on the dialog it went
+/// into, whose final answers it there (§8.1.3.3), or of its hold for a
+/// service's later final (ADR-0055 §2).
 fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> {
     let Some(req) = turn.received else { return Ok(()) };
     let method = req.method();
@@ -444,10 +445,8 @@ fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> 
     });
     let relayed = legs(turn.after)
         .flat_map(|l| l.dialogs.iter())
-        .flat_map(|d| {
-            let retired = d.retired().map(|r| r.open_relays.as_slice()).unwrap_or_default();
-            d.inbound_pending_requests.iter().chain(retired)
-        })
+        .flat_map(|d| call::helpers::records_of(d).iter())
+        .filter(|p| !p.is_own())
         .any(|p| {
             p.method.eq_ignore_ascii_case(method.as_str())
                 && p.inbound_cseq == i64::from(cseq)

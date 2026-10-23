@@ -17,10 +17,11 @@
 //! | `Retired` | 481; one whose release BYE is in flight reads as `Ending` |
 //!
 //! A dialog this side is ending still exists until its BYE or its INVITE
-//! takes a final (§15.1.2): a BYE crossing ours and a PRACK pass to their
-//! rules; an INFO, MESSAGE, NOTIFY or OPTIONS is answered 200 here and goes
-//! no further; any other request, an INVITE, UPDATE, REFER or SUBSCRIBE among
-//! them, is answered 487 (§21.4.25). A request below its dialog's last CSeq
+//! takes a final (§15.1.2): what it makes of a request is the method table's
+//! (`crate::rules::method_table`) — a BYE crossing ours and a PRACK pass
+//! to their rules; an INFO, MESSAGE, NOTIFY or OPTIONS is answered 200 here
+//! and goes no further; any other request, an INVITE, UPDATE, REFER or
+//! SUBSCRIBE among them, is answered 487 (§21.4.25). A request below its dialog's last CSeq
 //! draws 500 (§12.2.2); one the gate passes or answers sets that last CSeq
 //! ([`note_in_order`]). An ACK passes on a dialog
 //! a 2xx established, ended by a BYE since or not (RFC 5407 §2); it is never
@@ -31,6 +32,8 @@
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
 use call::{Call, Dialog, DialogEnd, DialogState};
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
+
+use crate::rules::method_table::OnEnding;
 
 use super::resolve::Resolution;
 use super::responses::{
@@ -133,7 +136,7 @@ pub(super) fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Ve
     if *method != Method::Ack && dialog.peer_cseq.is_some_and(|last| cseq < last) {
         return Verdict::OutOfOrder;
     }
-    taken(Resolved { dialog: Some(dialog.id()), relay: None })
+    taken(Resolved { dialog: Some(dialog.id()), record: None })
 }
 
 /// Note the request the gate passed in order on the dialog it names: its
@@ -189,11 +192,13 @@ pub(super) fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
         DialogState::Retired(r) => r.release_in_flight(),
         DialogState::Ended(_) => false,
     };
-    match method {
-        _ if !ending => Admission::Refuse,
-        Method::Bye | Method::Prack => Admission::Pass,
-        Method::Info | Method::Message | Method::Notify | Method::Options => Admission::Absorb,
-        _ => Admission::Terminate,
+    if !ending {
+        return Admission::Refuse;
+    }
+    match crate::rules::method_table::row(method).on_ending {
+        OnEnding::Pass => Admission::Pass,
+        OnEnding::Absorb => Admission::Absorb,
+        OnEnding::Terminate => Admission::Terminate,
     }
 }
 

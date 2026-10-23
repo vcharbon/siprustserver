@@ -2,7 +2,7 @@
 //! this stack's own number (RFC 3262 §3, §4): the face's sequence, and the
 //! tag of the dialog it is shown in.
 
-use call::{CSeq, Call, PendingRequest, RSeq};
+use call::{CSeq, Call, RSeq, RequestRecord};
 use sip_message::header::{HeaderName, HeaderValue, To};
 use sip_message::{SipHeader, SipStr};
 
@@ -65,6 +65,6 @@ impl ActionExecutor<'_> {
 /// dialog the response is relayed into, read off the originator's `To` (RFC
 /// 3261 §12.2.1.1), which the relayed response echoes verbatim and the
 /// originator's PRACK names again. `None` when that `To` names no tag.
-pub(super) fn shown_tag_of(pending: &PendingRequest) -> Option<String> {
+pub(super) fn shown_tag_of(pending: &RequestRecord) -> Option<String> {
     To::parse(&SipStr::owned(&pending.source_to)).ok().and_then(|to| to.tag().map(str::to_string))
 }

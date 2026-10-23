@@ -5,9 +5,7 @@
 
 use crate::common;
 use call::helpers::{holds_relays_of, raise_sequences};
-use call::model::{
-    Call, Dialog, DialogState, Direction, PendingRequest, RelayOwner, RetiredDialog,
-};
+use call::model::{Call, Dialog, DialogState, RelayOwner, RequestRecord, RetiredDialog};
 
 /// The worker that relayed the copy's requests.
 fn by() -> RelayOwner {
@@ -31,7 +29,7 @@ fn relaying(call: Call, method: &str) -> Call {
 fn relaying_by(mut call: Call, method: &str, owner: RelayOwner) -> Call {
     let d = caller_mut(&mut call);
     d.our_cseq += 1;
-    d.inbound_pending_requests.push(PendingRequest {
+    d.requests.push(RequestRecord {
         method: method.into(),
         outbound_cseq: d.our_cseq,
         inbound_cseq: 2001,
@@ -39,7 +37,10 @@ fn relaying_by(mut call: Call, method: &str, owner: RelayOwner) -> Call {
         source_call_id: String::new(),
         source_from: String::new(),
         source_to: String::new(),
-        direction: Direction::FromB,
+        origin: Default::default(),
+        usage: Default::default(),
+        sent: None,
+        deadline_ms: None,
         cancelled: false,
         offered_100rel: false,
         offered: false,
@@ -77,12 +78,10 @@ fn a_relay_at_the_same_cseq_for_another_request_is_not_the_copys() {
     let held = common::representative_call();
     let copy = relaying(held.clone(), "INFO");
     let mut other = relaying(held.clone(), "INFO");
-    caller_mut(&mut other).inbound_pending_requests.last_mut().expect("the INFO").inbound_cseq =
-        2002;
+    caller_mut(&mut other).requests.last_mut().expect("the INFO").inbound_cseq = 2002;
     assert!(!holds_relays_of(Some(&other), &copy, &by()), "another originator CSeq");
     let mut other = relaying(held.clone(), "MESSAGE");
-    caller_mut(&mut other).inbound_pending_requests.last_mut().expect("the relay").method =
-        "info".into();
+    caller_mut(&mut other).requests.last_mut().expect("the relay").method = "info".into();
     assert!(holds_relays_of(Some(&other), &copy, &by()), "methods compare without case");
 }
 
@@ -92,8 +91,8 @@ fn a_retired_dialogs_open_relays_are_relays_of_the_copy() {
     let held = common::representative_call();
     let mut copy = relaying(held.clone(), "INFO");
     let d = caller_mut(&mut copy);
-    let open_relays = std::mem::take(&mut d.inbound_pending_requests);
-    d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
+    let open_requests = std::mem::take(&mut d.requests);
+    d.state = DialogState::Retired(RetiredDialog { open_requests, release: None });
     assert!(!holds_relays_of(Some(&held), &copy, &by()));
     assert!(holds_relays_of(Some(&copy), &copy, &by()));
 }

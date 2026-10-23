@@ -396,13 +396,13 @@ fn resolve(call: Call, leg: &str, event: &CallEvent) -> Option<(Resolved, Call)>
             let id = dialog.id();
             let cseq = i64::from(req.cseq().seq());
             if *req.method() == Method::Ack {
-                return Some((Resolved { dialog: Some(id), relay: None }, call));
+                return Some((Resolved { dialog: Some(id), record: None }, call));
             }
             if dialog.peer_cseq.is_some_and(|last| cseq < last) {
                 return None;
             }
             let call = call::helpers::advance_peer_cseq(call, leg, &id, cseq);
-            Some((Resolved { dialog: Some(id), relay: None }, call))
+            Some((Resolved { dialog: Some(id), record: None }, call))
         }
     }
 }

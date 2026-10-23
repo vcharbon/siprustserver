@@ -5,7 +5,7 @@
 //! copy relays or takes moves one of them; the next request either copy sends
 //! on a dialog continues from the higher of the two.
 
-use crate::model::{Call, Dialog, Leg, PendingRequest, RelayOwner};
+use crate::model::{Call, Dialog, Leg, RelayOwner, RequestRecord};
 
 use super::leg::{every_leg, find_leg};
 
@@ -32,12 +32,11 @@ pub fn holds_relays_of(held: Option<&Call>, other: &Call, by: &RelayOwner) -> bo
 }
 
 /// The relays a dialog awaits finals for, open or held by its retirement.
-fn relays(d: &Dialog) -> impl Iterator<Item = &PendingRequest> {
-    let retired = d.retired().map(|r| r.open_relays.as_slice()).unwrap_or_default();
-    d.inbound_pending_requests.iter().chain(retired.iter())
+fn relays(d: &Dialog) -> impl Iterator<Item = &RequestRecord> {
+    super::request_records::records_of(d).iter().filter(|p| p.is_relay())
 }
 
-fn same_relay(a: &PendingRequest, b: &PendingRequest) -> bool {
+fn same_relay(a: &RequestRecord, b: &RequestRecord) -> bool {
     a.outbound_cseq == b.outbound_cseq
         && a.inbound_cseq == b.inbound_cseq
         && a.method.eq_ignore_ascii_case(&b.method)

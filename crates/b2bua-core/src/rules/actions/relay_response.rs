@@ -148,7 +148,8 @@ impl ActionExecutor<'_> {
         // may carry the same CSeq, and a final delivered to a transaction it
         // does not answer — or regenerated below as an INVITE response —
         // would turn a `200 (PRACK)` into a spurious `200 (INVITE)`.
-        if let Some((holder, pending)) = ctx.resolved.relay.as_deref().cloned() {
+        let relayed = ctx.resolved.record.as_deref().filter(|(_, r)| r.is_relay()).cloned();
+        if let Some((holder, pending)) = relayed {
             self.relay_pending_response(call, fx, &r, holder, pending);
             return;
         }

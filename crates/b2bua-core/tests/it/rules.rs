@@ -4977,7 +4977,7 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
     // The gate resolves her UPDATE to her dialog `a1`.
     let resolved = call::helpers::Resolved {
         dialog: Some(call::DialogId { our_tag: "a1".into(), peer_tag: "atag".into() }),
-        relay: None,
+        record: None,
     };
     let config = B2buaConfig::default();
     let refusal = |call: &call::Call| {

@@ -5,8 +5,8 @@
 use crate::common;
 use call::helpers::merge_rounds;
 use call::model::{
-    Call, Dialog, Direction, Obligation, OwedAnswer, PendingRequest, RSeq, Repeated,
-    RetainedEmission, TimerEntry, TimerKey, TimerType, Unacked2xx,
+    Call, Dialog, Obligation, OwedAnswer, RSeq, Repeated, RequestRecord, RetainedEmission,
+    TimerEntry, TimerKey, TimerType, Unacked2xx,
 };
 use call::testkit::{stage_reinvite_round, RoundStage, STAGED_ROUND_CSEQ};
 
@@ -62,7 +62,7 @@ fn ladders(call: &Call) -> usize {
 fn info_toward_the_caller(call: &mut Call) {
     let d = call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.our_cseq += 1;
-    d.inbound_pending_requests.push(PendingRequest {
+    d.requests.push(RequestRecord {
         method: "INFO".into(),
         outbound_cseq: d.our_cseq,
         inbound_cseq: 2001,
@@ -70,7 +70,10 @@ fn info_toward_the_caller(call: &mut Call) {
         source_call_id: String::new(),
         source_from: String::new(),
         source_to: String::new(),
-        direction: Direction::FromB,
+        origin: Default::default(),
+        usage: Default::default(),
+        sent: None,
+        deadline_ms: None,
         cancelled: false,
         offered_100rel: false,
         offered: false,
@@ -88,12 +91,12 @@ fn an_answered_round_comes_in_and_the_records_own_request_stays() {
     let merged = merge_rounds(held.clone(), &incoming);
 
     assert_eq!(callee(&merged).awaited_ack_cseq, Some(STAGED_ROUND_CSEQ), "the ACK is awaited");
-    assert!(callee(&merged).inbound_pending_requests.iter().all(|p| p.method != "INVITE"));
+    assert!(callee(&merged).requests.iter().all(|p| p.method != "INVITE"));
     assert_eq!(caller(&merged).pending_reinvite_2xx, caller(&incoming).pending_reinvite_2xx);
     assert_eq!(ladders(&merged), 1, "the 2xx's ladder came in");
     assert_eq!(caller(&merged).our_cseq, caller(&held).our_cseq, "the record's own sequence");
     assert!(
-        caller(&merged).inbound_pending_requests.iter().any(|p| p.method == "INFO"),
+        caller(&merged).requests.iter().any(|p| p.method == "INFO"),
         "the record's own INFO stays pending"
     );
 }
@@ -113,7 +116,7 @@ fn a_refused_round_leaves_nothing_open() {
     let merged = merge_rounds(round(RoundStage::Open), &round(RoundStage::Refused));
     let d = callee(&merged);
     assert!(d.pending_invite_txn.is_none() && d.awaited_ack_cseq.is_none());
-    assert!(d.inbound_pending_requests.iter().all(|p| p.method != "INVITE"));
+    assert!(d.requests.iter().all(|p| p.method != "INVITE"));
 }
 
 #[test]
@@ -144,12 +147,12 @@ fn a_round_the_record_never_reached_comes_in_and_the_records_own_request_stays()
     let merged = merge_rounds(held.clone(), &incoming);
 
     assert_eq!(callee(&merged).pending_invite_txn, callee(&incoming).pending_invite_txn);
-    assert!(callee(&merged).inbound_pending_requests.iter().any(|p| p.method == "INVITE"));
+    assert!(callee(&merged).requests.iter().any(|p| p.method == "INVITE"));
     assert_eq!(callee(&merged).our_cseq, callee(&incoming).our_cseq, "the round's CSeq");
     assert_eq!(caller(&merged).peer_cseq, caller(&incoming).peer_cseq, "the caller's re-INVITE");
     assert_eq!(caller(&merged).our_cseq, caller(&held).our_cseq, "the record's own sequence");
     assert!(
-        caller(&merged).inbound_pending_requests.iter().any(|p| p.method == "INFO"),
+        caller(&merged).requests.iter().any(|p| p.method == "INFO"),
         "the record's own INFO stays pending"
     );
 }
@@ -214,7 +217,7 @@ fn the_next_rounds_request_raises_the_callers_remote_sequence() {
     let next = incoming.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     next.peer_cseq = Some(next.peer_cseq.unwrap_or(0) + 1);
     let merged = merge_rounds(held, &incoming);
-    assert!(callee(&merged).inbound_pending_requests.iter().any(|p| p.method == "INVITE"));
+    assert!(callee(&merged).requests.iter().any(|p| p.method == "INVITE"));
     assert_eq!(caller(&merged).peer_cseq, caller(&incoming).peer_cseq, "the next INVITE's CSeq");
 }
 
@@ -235,5 +238,5 @@ fn an_answered_round_followed_by_the_next_round_ends() {
     let merged = merge_rounds(held, &incoming);
     assert!(callee(&merged).awaited_ack_cseq.is_none(), "the first round's ACK left");
     assert!(caller(&merged).pending_reinvite_2xx.is_none() && ladders(&merged) == 0);
-    assert!(callee(&merged).inbound_pending_requests.iter().any(|p| p.method == "INVITE"));
+    assert!(callee(&merged).requests.iter().any(|p| p.method == "INVITE"));
 }

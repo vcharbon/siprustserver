@@ -33,11 +33,11 @@
 //! The kill is never told to the peers (ADR-0031 cases 3a and 4), so no
 //! departure sweep runs. What each cell pins: the survivor takes the call over
 //! on that re-send, and the cluster settles to exactly one CDR with no trace
-//! and clean memory on both nodes. The non-INVITE cells verify D7's "a relayed
-//! non-INVITE needs no server seed — the peer's re-emission covers it": nothing
-//! on the survivor rebuilds the server transaction the dead primary held, the
-//! re-send builds a fresh one, is answered, and the call continues (UPDATE,
-//! INFO) or ends (BYE). The two INVITE cells verify the seeds (D7, D9): the
+//! and clean memory on both nodes. The relayed non-INVITE cells verify the
+//! request record's seeds (ADR-0055 §2): the survivor absorbs the re-send in
+//! the server transaction it rebuilds and retransmits the relay under its
+//! branch, and the callee repeats its final (RFC 3261 §17.2.2). The BYE cell's
+//! re-send builds a fresh transaction, is answered, and the call ends. The two INVITE cells verify the seeds (D7, D9): the
 //! caller's CANCEL is answered from the a-leg INVITE transaction the survivor
 //! rebuilds from the record, and the caller's re-INVITE re-send is absorbed by
 //! the transaction the record names — one b-leg INVITE for the round, whose
@@ -55,6 +55,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::answer_lost::kill_serving_node_answer_lost;
+use crate::relay_resumed_at_the_takeover::callee_repeats_its_final;
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
@@ -363,7 +364,8 @@ pub(crate) async fn settle_to_one_cdr(
 
 /// An in-dialog **UPDATE** (RFC 3311) relayed to the callee and still unanswered
 /// when the serving node dies: the caller's own re-send takes the call over on
-/// the survivor, which relays it and answers, and the session lives on.
+/// the survivor, which resumes the relay from its record, and the session
+/// lives on.
 #[tokio::test(start_paused = true)]
 async fn an_update_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let mut fh = FailoverHarness::new("inflight-resend-update", &["b1", "b2"]);
@@ -390,9 +392,9 @@ async fn an_update_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Update);
     alice.try_send_datagram(&wire, dst).await.expect("the peer's re-send leaves");
 
-    let mut second_at_bob = bob.receive("UPDATE").await;
-    second_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
-    // The survivor answers the re-sent UPDATE (`expect` fails on any other status).
+    callee_repeats_its_final(&fh, &bob, &first_at_bob).await;
+    // The survivor relays the callee's final to the caller (`expect` fails on
+    // any other status).
     update.expect(200).await;
     fh.advance(Duration::from_millis(200)).await;
     assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
@@ -436,14 +438,11 @@ async fn an_info_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Info);
     alice.try_send_datagram(&wire, dst).await.expect("the peer's re-send leaves");
 
-    let mut second_at_bob = bob.receive("INFO").await;
-    assert_eq!(
-        second_at_bob.request().body(),
-        INFO_BODY,
-        "the survivor relays the re-sent INFO's body onward unchanged",
-    );
-    second_at_bob.respond(200, "OK").await;
-    // The survivor answers the re-sent INFO (`expect` fails on any other status).
+    callee_repeats_its_final(&fh, &bob, &first_at_bob).await;
+    let (copy, _) = last_request_sent(&fh, PROXY.parse().unwrap(), &Method::Info);
+    assert!(copy.ends_with(INFO_BODY), "the survivor retransmits the INFO's body unchanged");
+    // The survivor relays the callee's final to the caller (`expect` fails on
+    // any other status).
     info.expect(200).await;
     fh.advance(Duration::from_millis(200)).await;
     assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);

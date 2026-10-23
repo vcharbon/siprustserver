@@ -30,10 +30,11 @@
 //!    `ring_deadline::arm_unrung_after_restore` arms the ring deadline of an
 //!    unanswered leg with no ring on record from its INVITE;
 //! 5. the residency insert through the store, then `timers.restore`;
-//! 6. **seed** — the in-flight INVITE transactions the record names, and the
-//!    answered ones whose 2xx it retains ([`seeds::seeds_for`]), are rebuilt
-//!    in the transaction layer, on every origin, so the layer owns their ACKs,
-//!    their Timer D / G / L and the copies of their requests;
+//! 6. **seed** — the in-flight transactions the record names, the answered
+//!    INVITEs whose 2xx it retains, and every non-INVITE request record's
+//!    client and server halves ([`seeds::seeds_for`]), are rebuilt in the
+//!    transaction layer, on every origin, so the layer owns their ACKs, their
+//!    Timer D / E / G / L and the copies of their requests;
 //! 7. takeover only: `mark_takeover` + `watch_self_release`, so the copy is
 //!    shed once the transactions it serves — the seeds among them — clear
 //!    (ADR-0014); the watch is armed after the seeds so it cannot fire on a
@@ -52,7 +53,7 @@
 //! mark and no watch. A call never imported into `pri:{self}` (its only copy is
 //! the peer's `bak:{self}`) is a genuine miss here.
 
-mod relayed_invite;
+mod received_request;
 mod seeds;
 pub(in crate::router) use seeds::{names_server_branch, relayed_server_key};
 #[cfg(test)]
@@ -217,9 +218,11 @@ pub(super) async fn materialise(
 /// when the record names its branch as a relayed INVITE a peer already admitted
 /// or an INVITE whose 2xx it retains ([`seeds::names_server_branch`]: a
 /// retransmission the layer's own transaction absorbs, so the rules never mint
-/// a second relay for the round nor refuse its copy as glare);
-/// any other request, a response a transaction here already took, and any
-/// non-SIP event are the turn's to process. `Matched`: the layer re-emitted
+/// a second relay for the round nor refuse its copy as glare); a non-INVITE
+/// request only when the record names its branch as a request it relayed or
+/// holds ([`seeds::names_received_branch`]: a copy of it is absorbed, never
+/// relayed a second time); any other request, a response a transaction here
+/// already took, and any non-SIP event are the turn's to process. `Matched`: the layer re-emitted
 /// whatever it owes, so this turn ends without running the rules; `Unmatched`
 /// (a layer that cannot be asked included): the turn continues.
 pub(super) async fn reoffer_trigger(
@@ -237,7 +240,10 @@ pub(super) async fn reoffer_trigger(
         SipMessage::Request(req) if req.method() == Method::Invite => {
             seeds::names_server_branch(call, req.top_via().branch().unwrap_or_default())
         }
-        SipMessage::Request(_) => false,
+        SipMessage::Request(req) if req.method() == Method::Ack => false,
+        SipMessage::Request(req) => {
+            seeds::names_received_branch(call, req.top_via().branch().unwrap_or_default())
+        }
     };
     if !offer {
         return Reoffer::Unmatched;
@@ -264,7 +270,14 @@ pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnS
 /// final, whose bound and finals the copy owns, or a 2xx awaiting its ACK,
 /// whose retransmission ladder the copy resumes (RFC 3261 §13.3.1.4).
 pub(super) fn has_invite_to_serve(call: &Call) -> bool {
-    !seeds::seeds_for(call).is_empty()
+    seeds::seeds_for(call).iter().any(|s| {
+        matches!(
+            s,
+            sip_txn::TxnSeed::ClientInvite { .. }
+                | sip_txn::TxnSeed::ServerInvite { .. }
+                | sip_txn::TxnSeed::ServerAccepted { .. }
+        )
+    })
 }
 
 /// The typed miss of the store read, named from the origin's side.

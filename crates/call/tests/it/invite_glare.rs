@@ -21,7 +21,7 @@ fn quiet_call() -> Call {
     let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
     for leg in legs {
         for d in leg.dialogs.iter_mut() {
-            d.inbound_pending_requests.clear();
+            d.requests.clear();
             d.pending_invite_txn = None;
             d.pending_reinvite_2xx = None;
             d.answered_2xx = None;

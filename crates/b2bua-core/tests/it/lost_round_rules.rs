@@ -123,7 +123,7 @@ Contact: <sip:bob@10.0.0.2:5070>\r\n\
 /// The callee's dialog, as the engine resolves a response on it.
 fn on_bobs_dialog() -> call::helpers::Resolved {
     let dialog = DialogId { our_tag: "svc".into(), peer_tag: "bobtag".into() };
-    call::helpers::Resolved { dialog: Some(dialog), relay: None }
+    call::helpers::Resolved { dialog: Some(dialog), record: None }
 }
 
 /// The rule that claims `event` from `b-1`, and the turn it makes.

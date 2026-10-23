@@ -98,6 +98,7 @@ mod tests;
 mod tolerant_recv;
 mod ua;
 pub(crate) mod waiver;
+mod wire_out;
 
 pub use client_invite::{CancelHandle, ClientInvite};
 pub(crate) use cseq_applier::shared_cseq_applier;

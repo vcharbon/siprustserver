@@ -137,6 +137,25 @@ _Avoid_: "relayed provisional" for the record (one shown to no one has a
 record too); "owed PRACK" for a PRACK owed TO this stack (that is
 `AwaitPrack`).
 
+**Request record** (ADR-0055 §2, `call::RequestRecord`):
+One request a dialog of the call holds open, by origin: **relayed** from the
+peer leg (its received half is the originator's request, its sent half the
+relay), this stack's **own**, or **held** — received and owed a final a
+service gives on a later turn, which the platform gives (500) at a deadline
+under the sender's Timer F. It carries its method, CSeq, branch, the request
+as sent and its destination, its deadline and the dialog usage it belongs to,
+outlives its dialog's retirement, and settles by its final, its timeout, its
+leg's end, the call's release or its deadline; a takeover seeds a transaction
+from each half. An INVITE's in-flight transaction state lives on its dialog
+(`pending_invite_txn`, the 2xx and ACK fields), beside its record.
+_Avoid_: "pending relay" or "snapshot" for a record that is not a relay.
+
+**Method table** (`b2bua_core::rules::method_table`):
+What differs by method for a non-INVITE request record: what a dialog this
+side is ending makes of it, the final a relay toward an ended leg owes, what
+the timeout of this stack's own request ends, and whether it waits behind
+this stack's own NOTIFY in flight. Knows no HA.
+
 **PRACK disposition**:
 What a PRACK this stack receives draws on the face it showed the
 provisional: relayed, answered 200 here, or refused 481. One reading serves
@@ -505,9 +524,11 @@ storage-only step).
 **Seed**: a transaction the materialisation rebuilds from the record: a
 Proceeding client INVITE from an INVITE handle, a Proceeding server INVITE
 holding the request rebuilt from the a-leg snapshot or a pending relayed
-re-INVITE's snapshot, an Accepted server INVITE (RFC 6026) holding a 2xx a
-dialog retains awaiting its ACK. A fold into the call's record seeds the last
-kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
+re-INVITE's record, an Accepted server INVITE (RFC 6026) holding a 2xx a
+dialog retains awaiting its ACK, and for each non-INVITE **request record** a
+client transaction retransmitting its sent request under its branch and a
+server transaction holding its received request. A fold into the call's
+record seeds the Accepted kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
 are ADR-0032 obligations replicated with the call.
 
 **Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):

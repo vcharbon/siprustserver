@@ -430,25 +430,20 @@ there: its target's responses follow the Via of the node that relayed it, so onl
 that node can CANCEL it or take its final, and a client seed elsewhere would run
 out its bound on a round another node finishes.
 
-**A non-INVITE relay this node cannot finish is superseded.** A non-INVITE request
-that reaches the rules found no server transaction on this node, so the relay the
-record holds for it, if any, was made by another node, or this one's former
-incarnation: the relay's final follows its Via there and a non-INVITE response is
-never failed over (`sip-proxy/src/core/response.rs`), and the target does not repeat
-it (RFC 3261 §17.2.2). This node cannot tell whether the relaying node lives. The
-record drops that relay — same method, originator CSeq, Call-ID, top-Via branch and
-sent-by — before the rules read the call, and the request is relayed afresh, under
-this node's `relayed_by`. Absorbing the retransmission instead would leave its
-originator to run out Timer F when the relaying node is dead. Residuals: the target
-sees the request twice (`superseded_relay.rs`); and when the relaying node lives —
-the proxy read it dead for a moment and routed a Timer E rung here — both relays are
-answered, the originator absorbs the second final as a retransmission, and two
-UPDATE answers that differ can leave the parties' descriptions apart (RFC 3311).
+**A non-INVITE relay is resumed from its record (ADR-0055 §2).** The record
+holds both halves of a non-INVITE relay: a takeover seeds the server transaction
+of the originator's request, which absorbs its retransmission, and the relay's
+client transaction, which retransmits the relayed request under its branch; the
+target repeats its final for it (RFC 3261 §17.2.2), and the proxy hands that
+final to the call's owner alive (ADR-0055 §8). Residual: when the relaying node
+lives — the proxy read it dead for a moment and routed a Timer E rung here — both
+nodes hold the relay, and the originator absorbs a second final as a
+retransmission.
 
 Pinned by `failover-harness/tests/it/{prack_takeover,inflight_resend,released_copy,
-reinvite_server_side_at_the_takeover,retained_2xx_folded_into_the_record,superseded_relay}.rs`,
-`sip-txn/tests/it/{seed,accepted}.rs`, `b2bua/src/router/materialise/tests.rs` and
-`b2bua/src/router/superseded_relay/tests.rs`.
+reinvite_server_side_at_the_takeover,retained_2xx_folded_into_the_record,
+relay_resumed_at_the_takeover}.rs`, `sip-txn/tests/it/{seed,accepted}.rs` and
+`b2bua/src/router/materialise/tests.rs`.
 
 ## Amendment — lifecycle progress folds over a refused reverse flush
 

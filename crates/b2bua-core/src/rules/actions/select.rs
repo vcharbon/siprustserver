@@ -9,7 +9,7 @@ use sip_message::{Method, SipMessage, SipParser};
 
 use b2bua_sdk::model::RuleContext;
 
-use call::helpers::{find_leg, find_pending_request};
+use call::helpers::{find_leg, find_relay};
 
 /// The dialog of `leg_id` (the a-leg or a b-leg) holding the relayed
 /// re-INVITE snapshot for `outbound_cseq`: the leg's established dialog, the
@@ -21,7 +21,7 @@ pub(super) fn find_pending_dialog(
     outbound_cseq: i64,
 ) -> Option<(DialogId, Dialog)> {
     let d = find_leg(call, leg_id)?.dialogs.established()?;
-    find_pending_request(d, outbound_cseq).map(|_| (d.id(), d.clone()))
+    find_relay(d, outbound_cseq).map(|_| (d.id(), d.clone()))
 }
 
 /// The INVITE CSeq cached on a dialog's pending INVITE handle (RFC 3261

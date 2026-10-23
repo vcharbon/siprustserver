@@ -8,7 +8,7 @@ use std::sync::Arc;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleAction;
 use call::helpers::raise_sequences;
-use call::{Call, Direction, PendingRequest, RelayOwner};
+use call::{Call, Direction, RelayOwner, RequestRecord};
 
 use super::super::interpret::process_result;
 use super::super::materialise::relayed_server_key;
@@ -126,21 +126,19 @@ fn own_open_rounds(
     record: &Call,
     ending: &Call,
     by: &RelayOwner,
-) -> (Vec<PendingRequest>, Vec<(String, i64)>) {
+) -> (Vec<RequestRecord>, Vec<(String, i64)>) {
     let legs = || std::iter::once(&record.a_leg).chain(record.b_legs.iter());
     let (mut answered_there, mut ours) = (Vec::new(), Vec::new());
     for leg in legs() {
         let theirs = call::helpers::find_leg(ending, &leg.leg_id);
         for d in leg.dialogs.iter() {
             let held = theirs.and_then(|l| l.dialogs.by_tags(&d.our_tag, &d.peer_tag));
-            let open = d.inbound_pending_requests.iter().filter(|p| {
+            let open = d.requests.iter().filter(|p| {
                 p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled && p.relayed_by == *by
             });
             for p in open {
                 let cancelled_there = held.is_some_and(|h| {
-                    h.inbound_pending_requests
-                        .iter()
-                        .any(|t| t.outbound_cseq == p.outbound_cseq && t.cancelled)
+                    h.requests.iter().any(|t| t.outbound_cseq == p.outbound_cseq && t.cancelled)
                 });
                 if cancelled_there {
                     answered_there.push(p.clone());

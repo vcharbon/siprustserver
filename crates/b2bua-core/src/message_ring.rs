@@ -13,7 +13,7 @@
 //! The header values an entry keeps are read off the parsed message by
 //! `sip-message` here, once; nothing downstream re-reads a datagram.
 
-use call::helpers::{find_leg, find_pending_request, record_message};
+use call::helpers::{find_leg, find_relay, record_message};
 use call::{Call, Dialog, DialogId, MessageDirection, MessageEntry, Obligation};
 use sip_message::{HeaderName, Method, SipMessage, SipRequest, SipResponse};
 
@@ -286,5 +286,5 @@ fn probe_answer(message: &SipMessage, named: Option<&Dialog>) -> bool {
         return false;
     }
     let cseq = i64::from(resp.cseq().seq());
-    named.is_none_or(|d| find_pending_request(d, cseq).is_none())
+    named.is_none_or(|d| find_relay(d, cseq).is_none())
 }

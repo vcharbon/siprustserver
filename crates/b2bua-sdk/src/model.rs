@@ -459,6 +459,23 @@ pub enum RuleAction {
         body: Vec<u8>,
         content_type: Option<String>,
     },
+    /// Hold the current received non-INVITE request for a final a service
+    /// gives on a later turn ([`RuleAction::AnswerHeld`]); nothing answers it
+    /// now. A held request the service has not answered by its deadline, the
+    /// originator's Timer F less T2, is answered `500` by the platform
+    /// (RFC 4320 §4.2, ADR-0055 §2).
+    HoldRequest,
+    /// Answer the request held on `leg_id` whose sender numbered it `cseq`
+    /// ([`RuleAction::HoldRequest`]) with `status`, carrying `body`. A request
+    /// no longer held (answered, or its deadline passed) draws nothing.
+    AnswerHeld {
+        leg_id: String,
+        cseq: i64,
+        status: u16,
+        reason: String,
+        body: Vec<u8>,
+        content_type: Option<String>,
+    },
     /// Refuse the current INVITE that meets glare, or UPDATE over an open
     /// offer, in place (RFC 3261 §14.2, RFC 3311 §5.2), by [`GlareRefusal`].
     RefuseGlare {
@@ -1140,24 +1157,6 @@ impl<'a> RuleContext<'a> {
         } else {
             GlareRefusal::Crossing
         }
-    }
-
-    /// The pending-relay snapshot the current response answers, as the
-    /// engine's dialog gate resolved it ([`Self::resolved`]): kept on the
-    /// dialog the response's tags name, or among the relays of a dialog the
-    /// answer retired — never another dialog's. `None` for any non-response
-    /// event.
-    pub fn relayed_pending(&self) -> Option<call::PendingRequest> {
-        self.response()?;
-        self.resolved.relay.as_deref().map(|(_, p)| p.clone())
-    }
-
-    /// Does the current response answer a request THIS STACK RELAYED
-    /// ([`Self::relayed_pending`])? `false` for a request the B2BUA originated
-    /// itself (keepalive OPTIONS, its own PRACK, a REFER-progress NOTIFY),
-    /// which leaves no snapshot, and for any non-response event.
-    pub fn answers_relayed_request(&self) -> bool {
-        self.relayed_pending().is_some()
     }
 
     /// The leg the event arrived on.

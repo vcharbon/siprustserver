@@ -1,9 +1,7 @@
 use std::net::SocketAddr;
 
 use super::*;
-use call::{
-    Dialog, DialogState, Direction, HostPort, LegKind, LegState, OutboundInvite, RemoteInfo,
-};
+use call::{Dialog, DialogState, HostPort, LegKind, LegState, OutboundInvite, RemoteInfo};
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
@@ -133,8 +131,8 @@ fn b_leg(state: LegState, handle: Option<InviteTxnHandle>) -> Leg {
 
 /// The caller's relayed re-INVITE, pending on the b-leg dialog under
 /// outbound CSeq `outbound_cseq`.
-fn relayed_reinvite(outbound_cseq: i64, cancelled: bool) -> PendingRequest {
-    PendingRequest {
+fn relayed_reinvite(outbound_cseq: i64, cancelled: bool) -> RequestRecord {
+    RequestRecord {
         method: "INVITE".into(),
         outbound_cseq,
         inbound_cseq: 2,
@@ -145,7 +143,10 @@ fn relayed_reinvite(outbound_cseq: i64, cancelled: bool) -> PendingRequest {
         source_call_id: "acid@alice".into(),
         source_from: "<sip:alice@10.0.0.1>;tag=atag".into(),
         source_to: "<sip:bob@10.0.0.9>;tag=svca".into(),
-        direction: Direction::FromA,
+        origin: Default::default(),
+        usage: Default::default(),
+        sent: None,
+        deadline_ms: None,
         cancelled,
         offered_100rel: false,
         offered: false,
@@ -298,7 +299,7 @@ fn a_relayed_reinvite_in_flight_seeds_both_halves_of_the_round() {
     let mut pending = relayed_reinvite(2, false);
     pending.inbound_cseq = 7;
     pending.source_timestamp = Some("54.2".into());
-    confirmed(&mut leg).inbound_pending_requests.push(pending);
+    confirmed(&mut leg).requests.push(pending);
     let call = call_with(LegState::Confirmed, leg);
     let seeds = seeds_for(&call);
     assert_eq!(server_branches(&seeds), vec![RELAYED_BRANCH.to_string()]);
@@ -378,7 +379,7 @@ fn a_cancelled_relayed_reinvite_seeds_nothing() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
     confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
     confirmed(&mut leg).ack_branch = None;
-    confirmed(&mut leg).inbound_pending_requests.push(relayed_reinvite(2, true));
+    confirmed(&mut leg).requests.push(relayed_reinvite(2, true));
     assert!(seeds_for(&call_with(LegState::Confirmed, leg)).is_empty());
 }
 

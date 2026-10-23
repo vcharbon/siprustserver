@@ -7,7 +7,7 @@ use call::helpers::{
     abandon_leg, record_dialled_invite_final, record_termination, retire_early_dialogs, Scope,
     TERMINATING_TIMEOUT_MS,
 };
-use call::{Call, DialogId, Leg, LegKind, LegState, TerminationCause, TimerKey, TimerType};
+use call::{Call, Leg, LegKind, LegState, TerminationCause, TimerKey, TimerType};
 use sip_message::generators::{self, InviteClientTransactionHandle, RelaySituation};
 use sip_message::header::HeaderName;
 use sip_message::parser::custom::CustomParser;
@@ -23,7 +23,6 @@ use b2bua_sdk::model::{LegEnd, RuleContext};
 
 pub(super) use super::relayed_teardown::Relayed;
 use super::relayed_teardown::{relayed_teardown, relayed_teardown_hops};
-use super::snapshot_answer::{stack_answer, via_sent_by};
 use super::{ActionExecutor, Owed, Settle};
 
 impl ActionExecutor<'_> {
@@ -47,7 +46,7 @@ impl ActionExecutor<'_> {
     /// §15.1.2: a UAS ending a dialog still responds to its pending requests,
     /// 487 recommended), its target CANCELled, so no INVITE transaction is
     /// left open behind the BYEs — a takeover copy is resident exactly while
-    /// one is (ADR-0014).
+    /// one is (ADR-0014). Every request a service held is answered 487 too.
     ///
     /// `source_leg_id` is intentionally *not* special-cased here: rules that
     /// consume a BYE end their source leg (`TerminateLeg`) before emitting
@@ -76,7 +75,7 @@ impl ActionExecutor<'_> {
             .chain(call.b_legs.iter())
             .flat_map(|leg| leg.dialogs.iter().map(move |d| (leg, d)))
             .flat_map(|(leg, d)| {
-                d.inbound_pending_requests
+                d.requests
                     .iter()
                     .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
                     .map(move |p| (leg.leg_id.clone(), p.outbound_cseq))
@@ -92,6 +91,8 @@ impl ActionExecutor<'_> {
                 "Request Terminated",
             );
         }
+        // No service answers a request it held once the call ends (§15.1.2).
+        self.settle_held_at_release(call, fx);
         // RFC 3261 §16.6: a termination the peer ASKED for restates what it
         // said — the Q.850 cause (RFC 3326 §2), the charging correlation, the
         // end-to-end data and body — on the BYE/CANCEL minted for the other leg.
@@ -129,7 +130,7 @@ impl ActionExecutor<'_> {
                 // are answered too.
                 _ if is_a => {
                     if call.a_leg.invite_final_sent.is_some() {
-                        self.reject_pending_non_invites(call, fx, &id);
+                        self.settle_at_leg_end(call, fx, &id);
                     }
                 }
                 // A b-leg whose INVITE still rings is CANCELled (§9.1), an
@@ -138,7 +139,7 @@ impl ActionExecutor<'_> {
                 _ if ringing => {
                     let relayed = relayed(&Method::Cancel, &id);
                     self.send_cancel(call, fx, &id, &relayed.headers);
-                    self.reject_pending_non_invites(call, fx, &id);
+                    self.settle_at_leg_end(call, fx, &id);
                 }
                 // Already ended or being ended: its CANCEL or BYE left, its
                 // INVITE took its final.
@@ -211,7 +212,7 @@ impl ActionExecutor<'_> {
             }
             _ => {}
         }
-        self.reject_pending_non_invites(call, fx, leg_id);
+        self.settle_at_leg_end(call, fx, leg_id);
         *call = call::helpers::update_leg(call.clone(), leg_id, settle_ended_leg);
     }
 
@@ -242,9 +243,9 @@ impl ActionExecutor<'_> {
         end: LegEnd,
     ) {
         // The terminal leg's ladders die with it (RFC 3262 §3), and the
-        // requests relayed toward it are answered by this stack (§8.2.6).
+        // requests it holds are settled by its end (§8.2.6, §15.1.2).
         self.retire(call, fx, Scope::Leg(leg_id));
-        self.reject_pending_non_invites(call, fx, leg_id);
+        self.settle_at_leg_end(call, fx, leg_id);
         match end {
             LegEnd::InviteRejected => match rejecting_final(ctx, leg_id) {
                 Some((cseq, status)) => {
@@ -260,110 +261,6 @@ impl ActionExecutor<'_> {
             | LegEnd::OurByeTimedOut => super::dialog_end::end_dialogs(call, ctx, leg_id, end),
         }
         *call = call::helpers::update_leg(call.clone(), leg_id, settle_ended_leg);
-    }
-
-    /// Answers every relayed non-INVITE request still pending toward `leg_id`
-    /// where that leg goes `Terminated`: its target's answer relays no further,
-    /// and RFC 3261 §8.2.6 owes the originator a final. A PRACK draws 200 — it
-    /// named a provisional this stack showed under its own number (RFC 3262
-    /// §3); anything else 481 — the relays of early dialogs the answer retired
-    /// included. The snapshot is dropped so a late answer from the target is
-    /// never a second final (§17.2.1). A confirmed leg being
-    /// BYEd keeps its relays; a pending INVITE is [`Self::reject_pending_reinvite`]'s.
-    pub(super) fn reject_pending_non_invites(
-        &mut self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-        leg_id: &str,
-    ) {
-        let leg = if call.a_leg.leg_id == leg_id {
-            Some(&call.a_leg)
-        } else {
-            call.b_legs.iter().find(|l| l.leg_id == leg_id)
-        };
-        let Some(leg) = leg else { return };
-        let mut pending: Vec<(Option<DialogId>, call::PendingRequest)> = leg
-            .dialogs
-            .iter()
-            .flat_map(|d| {
-                let id = d.id();
-                d.inbound_pending_requests
-                    .iter()
-                    .filter(|p| !p.method.eq_ignore_ascii_case("INVITE"))
-                    .map(move |p| (Some(id.clone()), p.clone()))
-            })
-            .collect();
-        // The relays of early dialogs the answer retired end with the leg too.
-        let mut retired = Vec::new();
-        *call = call::helpers::update_leg(call.clone(), leg_id, |l| {
-            retired = call::helpers::take_retired_relays(l);
-        });
-        pending.extend(
-            retired
-                .into_iter()
-                .filter(|(_, p)| !p.method.eq_ignore_ascii_case("INVITE"))
-                .map(|(_, p)| (None, p)),
-        );
-        let originator =
-            call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
-        for (id, p) in pending {
-            if let Some(id) = id {
-                *call = call::helpers::remove_pending_request(
-                    call.clone(),
-                    leg_id,
-                    &id,
-                    p.outbound_cseq,
-                );
-            }
-            // §18.2.2: the final goes to the originator's top Via sent-by.
-            let Some(dest) = p.source_vias.first().and_then(|v| via_sent_by(v)) else {
-                tracing::warn!(
-                    call_ref = %call.call_ref,
-                    leg_id = %leg_id,
-                    method = %p.method,
-                    "pending relay left unanswered — the originator's top Via names no destination"
-                );
-                continue;
-            };
-            let method = p.method.to_ascii_uppercase();
-            let (status, reason) = if method == "PRACK" {
-                (200, "OK")
-            } else {
-                (481, "Call/Transaction Does Not Exist")
-            };
-            let Ok(answer) = stack_answer(&p, &method, status, reason) else {
-                tracing::warn!(
-                    call_ref = %call.call_ref,
-                    leg_id = %leg_id,
-                    method = %p.method,
-                    "pending relay left unanswered — the originator's request lines make no response"
-                );
-                continue;
-            };
-            fx.outbound.push(OutboundSipEffect {
-                body: OutboundBody::Response(answer),
-                mode: OutboundTxnMode::ServerResponse,
-                destination: dest,
-                label: format!("{status} {method} → {originator}"),
-                leg_id: Some(originator.clone()),
-                provenance: Provenance::Authored,
-            });
-        }
-    }
-
-    /// [`Self::reject_pending_non_invites`] over every leg, for a termination
-    /// that brings them all to `Terminated` at once (`TerminateCall`).
-    pub(super) fn reject_all_pending_non_invites(
-        &mut self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-    ) {
-        let ids: Vec<String> = std::iter::once(call.a_leg.leg_id.clone())
-            .chain(call.b_legs.iter().map(|l| l.leg_id.clone()))
-            .collect();
-        for id in ids {
-            self.reject_pending_non_invites(call, fx, &id);
-        }
     }
 
     /// CANCEL `leg_id`'s INVITE carrying `relayed` (RFC 3261 §9.1): the PRACKs

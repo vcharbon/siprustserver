@@ -25,7 +25,6 @@ use super::unrecoverable::discharge_after_turn;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
-use crate::rule_chain::superseded_relay::drop_superseded_relay;
 use crate::rule_chain::{enforced, fired, rule_chain_turn, TurnInput};
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
@@ -209,9 +208,6 @@ pub(super) async fn process(
                 crate::limiter::refresh_turn::on_refresh_due(limiter, call, &call_ref, now_ms);
             enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
         } else {
-            // A relay no node can finish is gone before the rules read the
-            // call, so its request is relayed afresh.
-            let call = drop_superseded_relay(call, &event);
             let input = TurnInput {
                 event: &event,
                 call_ref: &call_ref,

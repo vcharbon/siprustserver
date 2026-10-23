@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use crate::model::{
-    CSeq, Call, Ceased, Ladder, PendingRequest, Provisional, ProvisionalId, RSeq, ResponderAck,
+    CSeq, Call, Ceased, Ladder, Provisional, ProvisionalId, RSeq, RequestRecord, ResponderAck,
     RetainedEmission, Shown,
 };
 
@@ -224,17 +224,6 @@ pub fn note_responder_ack(call: &mut Call, id: &ProvisionalId, ack: ResponderAck
     }
 }
 
-/// Whether `branch` is a PRACK client transaction this stack originated
-/// itself — not one it relayed — so its failure denies that acknowledgement
-/// only (RFC 3261 §14.1 by analogy: one transaction, never the dialog).
-pub fn own_prack_branch(call: &Call, branch: &str) -> bool {
-    !branch.is_empty()
-        && call
-            .provisionals
-            .iter()
-            .any(|p| matches!(&p.responder, ResponderAck::OwnPrack { branch: b } if b == branch))
-}
-
 /// The provisional a shown `rseq` in this stack's `tag` dialog stands for,
 /// as its responder identifies it: what a relayed PRACK's `RAck` names once
 /// translated. `None` when this stack showed no such number there.
@@ -249,7 +238,7 @@ pub fn responder_of<'a>(call: &'a Call, tag: &str, rseq: RSeq) -> Option<&'a Pro
 /// originator's OWN request offered `100rel`, without which "the UAS MUST NOT
 /// send the provisional response reliably". A reliable provisional to a
 /// request this refuses leaves unreliably and is shown to no one.
-pub fn admits_reliable_provisional(pending: &PendingRequest) -> bool {
+pub fn admits_reliable_provisional(pending: &RequestRecord) -> bool {
     pending.method.eq_ignore_ascii_case("INVITE") && pending.offered_100rel
 }
 
