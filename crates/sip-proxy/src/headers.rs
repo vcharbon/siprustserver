@@ -74,6 +74,17 @@ pub fn via_cookie_params(via: &Via) -> RouteParams {
         .collect()
 }
 
+/// The call's other owner a worker states on its own Via, `bak` (ADR-0055 §8):
+/// empty when it states none, for a call with one owner. Read only off a
+/// worker's request, on the internal face.
+pub fn stated_backup(worker_via: &Via) -> String {
+    worker_via
+        .param("bak")
+        .and_then(ParamValue::as_str)
+        .map(sip_message::param_codec::decode_param)
+        .unwrap_or_default()
+}
+
 /// `via` carrying `cookie`'s fields, if any, after its own params; a field
 /// named like a param `via` already carries is left out, never written over it.
 pub fn via_with_cookie(via: Via, cookie: Option<&RouteParams>) -> Via {

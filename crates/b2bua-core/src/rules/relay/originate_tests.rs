@@ -60,7 +60,12 @@ Content-Length: 0\r\n\r\n",
         let mut ids = TurnIds::fixed(0xB2B);
 
         let (leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            CallMarks {
+                call_ref: "w0|call-ref|xyz",
+                incarnation_mark: "k",
+                is_emergency: false,
+                owners: None,
+            },
             "b-1",
             &a,
             ("10.244.2.7".to_string(), 5060),
@@ -138,7 +143,12 @@ Content-Length: 0\r\n\r\n",
     /// Contact header values (the on-the-wire surface, not the builder structs).
     fn b_leg_invite_via_contact(is_emergency: bool) -> (String, String) {
         let (_leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency },
+            CallMarks {
+                call_ref: "w0|call-ref|xyz",
+                incarnation_mark: "k",
+                is_emergency,
+                owners: None,
+            },
             "b-1",
             &a_leg_invite(),
             ("10.244.2.7".to_string(), 5060),
@@ -230,7 +240,12 @@ Content-Length: 0\r\n\r\n",
     fn relay_b_leg_headers(relay_headers: Vec<String>, new_ruri: Option<&str>) -> Vec<MsgHeader> {
         let config = B2buaConfig { relay_headers, ..B2buaConfig::default() };
         let (_leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            CallMarks {
+                call_ref: "w0|call-ref|xyz",
+                incarnation_mark: "k",
+                is_emergency: false,
+                owners: None,
+            },
             "b-1",
             &a_leg_invite_with_relay_header(),
             ("10.244.2.7".to_string(), 5060),
@@ -332,7 +347,12 @@ Content-Length: 0\r\n\r\n",
         let updates =
             vec![("X-Loadgen-Id".to_string(), Some("stated-by-the-decision".to_string()))];
         let bob = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            CallMarks {
+                call_ref: "w0|call-ref|xyz",
+                incarnation_mark: "k",
+                is_emergency: false,
+                owners: None,
+            },
             "b-1",
             &a_leg_invite_with_relay_header(),
             ("10.244.2.7".to_string(), 5060),
@@ -391,7 +411,12 @@ mod withhold_tests {
         name: HeaderName,
     ) -> Vec<String> {
         let (_leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            CallMarks {
+                call_ref: "w0|call-ref|xyz",
+                incarnation_mark: "k",
+                is_emergency: false,
+                owners: None,
+            },
             "b-1",
             a,
             ("10.244.2.7".to_string(), 5060),
@@ -533,7 +558,12 @@ Content-Length: {}\r\n\r\n{body}",
 
     fn minted(a: &SipRequest, body: &Body) -> SipRequest {
         let (_leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            CallMarks {
+                call_ref: "w0|call-ref|xyz",
+                incarnation_mark: "k",
+                is_emergency: false,
+                owners: None,
+            },
             "b-2",
             a,
             ("10.244.2.7".to_string(), 5060),
@@ -625,7 +655,12 @@ Content-Length: {}\r\n\r\n{CALLER_SDP}",
 
     fn minted(a: &SipRequest, body: &Body) -> SipRequest {
         let (_leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            CallMarks {
+                call_ref: "w0|call-ref|xyz",
+                incarnation_mark: "k",
+                is_emergency: false,
+                owners: None,
+            },
             "b-2",
             a,
             ("10.244.2.7".to_string(), 5060),

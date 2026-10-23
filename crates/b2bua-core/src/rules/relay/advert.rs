@@ -85,6 +85,10 @@ pub(crate) mod advertisement_tests {
     use sip_message::parser::custom::CustomParser;
     use sip_message::{SipMessage, SipParser, SipRequest};
 
+    fn marks() -> CallMarks<'static> {
+        CallMarks { call_ref: "w0|c|x", incarnation_mark: "k", is_emergency: false, owners: None }
+    }
+
     fn a_leg_invite() -> SipRequest {
         a_leg_invite_carrying(&[])
     }
@@ -124,7 +128,7 @@ CSeq: 314 INVITE\r\n"
         header_updates: &[(String, Option<String>)],
     ) -> (Option<String>, Option<String>) {
         let (_leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            marks(),
             "b-1",
             a_leg_invite,
             ("10.244.2.7".to_string(), 5060),
@@ -372,7 +376,7 @@ Content-Length: 0\r\n\r\n";
             invite.headers(),
         );
         let (_leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            marks(),
             "b-1",
             &invite,
             ("10.244.2.7".to_string(), 5060),
@@ -405,7 +409,7 @@ Content-Length: 0\r\n\r\n";
             bare.headers(),
         );
         let (_leg, effect) = build_b_leg(
-            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            marks(),
             "b-1",
             &bare,
             ("10.244.2.7".to_string(), 5060),

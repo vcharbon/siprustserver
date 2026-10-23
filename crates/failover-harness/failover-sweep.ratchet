@@ -53,6 +53,8 @@ forked/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
 forked/split/t6-applied  ADR-0055 §7  # second copy acts on an ended dialog
 forked/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
 forked/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
+forked/split/t7-left  ADR-0055 §7  # second copy acts on an ended dialog
+forked/split/t7-logged  ADR-0055 §7  # second copy acts on an ended dialog
 info-x-bye/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
 info-x-bye/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 info-x-bye/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
@@ -211,6 +213,8 @@ prack/split-healed/t1-left  ADR-0055 §7  # two copies
 prack/split-healed/t1-logged  ADR-0055 §7  # two copies
 prack/split-healed/t2-left  ADR-0055 §2  # PRACK answered 481
 prack/split-healed/t2-logged  ADR-0055 §2  # PRACK answered 481
+prack/split-healed/t3-left  ADR-0055 §2  # PRACK's 200 reaches a copy holding no record of it
+prack/split-healed/t3-logged  ADR-0055 §2  # PRACK's 200 reaches a copy holding no record of it
 prack/split/t1-applied  ADR-0055 §7  # second copy acts on an ended dialog
 prack/split/t2-applied  ADR-0055 §7  # second copy acts on an ended dialog
 prack/split/t2-left  ADR-0055 §2  # PRACK answered 481

@@ -12,17 +12,20 @@
 //!   Emergency / in-dialog requests bypass the bucket (they still record the
 //!   admit for the `share` signal); an unobserved worker is admitted
 //!   (bootstrap-friendly). Port of TS LoadBalancer.ts:335-348.
-//! - `encode_stickiness`: recover the target's `WorkerId` (= `w_pri`) by
-//!   address, a departed-address tombstone included, pick the HRW winner among
-//!   the other `Alive` workers that accept new calls, else among the other
-//!   `Alive` ones (= `w_bak`, §7), and sign
-//!   `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>` (HMAC-SHA256 truncated to 128
-//!   bits, base64url) into `{w_pri,w_bak,e,v,kid,sig}`. A dialog a departed
-//!   worker originates is thus pinned to its ordinal, and its INVITE responses
-//!   and in-dialog requests take `w_bak` until the ordinal rejoins, for the
-//!   dialog's life: the core carries the cookie on its own Via too, so it
-//!   outlives the tombstone (ADR-0031 D4). An address neither live nor
-//!   tombstoned gets no cookie.
+//! - `encode_stickiness`: a call the proxy places. Recover the target's
+//!   `WorkerId` (= `w_pri`) by address, pick the HRW winner among the other
+//!   `Alive` workers that accept new calls, else among the other `Alive` ones
+//!   (= `w_bak`, §7), and sign `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>`
+//!   (HMAC-SHA256 truncated to 128 bits, base64url) into
+//!   `{w_pri,w_bak,e,v,kid,sig}`.
+//! - `encode_originated`: a request a worker originates. `w_pri` is the
+//!   originating worker, recovered by address, a departed-address tombstone
+//!   included; `w_bak` is the call's other owner as the worker states it, so
+//!   every leg of a call names the same backup, the one holding its replica
+//!   (ADR-0055 §8). A dialog a departed worker originates is thus pinned to its
+//!   ordinal for the dialog's life: the core carries the cookie on its own Via
+//!   too, so it outlives the tombstone. An address neither live nor tombstoned
+//!   gets no cookie.
 //! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive`,
 //!   else `w_bak` while it is `Alive`, else `Unroutable` (§4, §5); acceptance
 //!   is never read. It resolves the primary by ORDINAL, so a departed-address
@@ -124,6 +127,22 @@ impl LoadBalancerStrategy {
         clock: Clock,
     ) -> Self {
         Self { registry, hmac, observer, metrics, clock }
+    }
+
+    /// The cookie naming `primary` and `backup` for `msg`'s call (`call_id`).
+    fn sign(&self, primary: &str, backup: &str, msg: &SipMessage, call_id: &str) -> RouteParams {
+        let emergency_flag = if is_emergency_invite(msg) { "1" } else { "0" };
+        let input = build_stickiness_input(primary, backup, emergency_flag, call_id);
+        let signed = self.hmac.sign(&input);
+        let sig = URL_SAFE_NO_PAD.encode(&signed.mac[..TRUNCATED_MAC_BYTES]);
+        let mut params = RouteParams::new();
+        params.insert("w_pri".into(), primary.to_string());
+        params.insert("w_bak".into(), backup.to_string());
+        params.insert("e".into(), emergency_flag.to_string());
+        params.insert("v".into(), COOKIE_VERSION.to_string());
+        params.insert("kid".into(), signed.kid);
+        params.insert("sig".into(), sig);
+        params
     }
 
     /// The address of worker `id` while it is `Alive`.
@@ -237,7 +256,6 @@ impl RoutingStrategy for LoadBalancerStrategy {
 
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams> {
         let call_id = call_id_of(msg)?;
-        // A departed-address tombstone answers as the ordinal last bound there.
         let primary = self.registry.lookup_by_address(target)?;
         let snapshot = self.registry.snapshot();
         let backup_keys: Vec<WorkerKey> = placeable(snapshot.iter().filter(|w| w.id != primary.id))
@@ -246,19 +264,20 @@ impl RoutingStrategy for LoadBalancerStrategy {
             .collect();
         let backup_id =
             rendezvous_select(call_id, &backup_keys).map(|k| k.0.clone()).unwrap_or_default();
-        let emergency_flag = if is_emergency_invite(msg) { "1" } else { "0" };
-        let input = build_stickiness_input(&primary.id, &backup_id, emergency_flag, call_id);
-        let signed = self.hmac.sign(&input);
-        let sig = URL_SAFE_NO_PAD.encode(&signed.mac[..TRUNCATED_MAC_BYTES]);
+        Some(self.sign(&primary.id, &backup_id, msg, call_id))
+    }
 
-        let mut params = RouteParams::new();
-        params.insert("w_pri".into(), primary.id.clone());
-        params.insert("w_bak".into(), backup_id);
-        params.insert("e".into(), emergency_flag.to_string());
-        params.insert("v".into(), COOKIE_VERSION.to_string());
-        params.insert("kid".into(), signed.kid);
-        params.insert("sig".into(), sig);
-        Some(params)
+    fn encode_originated(
+        &self,
+        origin: &ProxyAddr,
+        msg: &SipMessage,
+        backup: &str,
+    ) -> Option<RouteParams> {
+        let call_id = call_id_of(msg)?;
+        // A departed-address tombstone answers as the ordinal last bound there.
+        let primary = self.registry.lookup_by_address(origin)?;
+        let backup = if backup == primary.id { "" } else { backup };
+        Some(self.sign(&primary.id, backup, msg, call_id))
     }
 
     fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {

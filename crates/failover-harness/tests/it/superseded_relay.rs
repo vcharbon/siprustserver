@@ -1,8 +1,8 @@
 //! **A non-INVITE relay the dead node made, replicated, and its originator's
-//! retransmission at the takeover.** The callee's final to the dead node's
-//! relay follows that relay's Via to the dead node and is never failed over
-//! (a non-INVITE response is not), and the callee does not repeat it on its
-//! own (RFC 3261 §17.2.2): no node can finish that relay. The originator's
+//! retransmission at the takeover.** The callee answers the dead node's relay
+//! before the proxy reads the node dead, so its final follows that relay's Via
+//! to the dead node and is lost there, and the callee does not repeat it on
+//! its own (RFC 3261 §17.2.2): no node can finish that relay. The originator's
 //! retransmission reaches the survivor, which holds no server transaction for
 //! it, and the relay the record holds for it is superseded: the survivor
 //! relays the retransmission afresh and answers it with the final that relay
@@ -14,7 +14,7 @@
 //!
 //! ```text
 //!   alice ─REQ─▶ primary ─REQ─▶ bob          (relayed, replicated, held OPEN)
-//!               ✗ primary killed ✗   bob's 200 ─╳ (follows the dead node's Via)
+//!               ✗ primary killed ✗   bob's 200 ─╳ (the proxy still reads it alive)
 //!   alice ─REQ─▶ SURVIVOR ─REQ─▶ bob ─200─▶ SURVIVOR ─200─▶ alice
 //! ```
 
@@ -26,10 +26,11 @@ use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
+use crate::answer_lost::kill_serving_node_answer_lost;
 use crate::inflight_resend::{
-    assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
-    last_request_sent, reboot_and_reclaim, settle_to_one_cdr, split_mut, survivor_of,
-    synchronized_call_ref, KILL_SETTLE, REANSWER, REOFFER, REPLICATE, T1,
+    assert_not_taken_over, assert_taken_over_once, bring_up, establish, last_request_sent,
+    reboot_and_reclaim, settle_to_one_cdr, split_mut, survivor_of, synchronized_call_ref, REANSWER,
+    REOFFER, REPLICATE, T1,
 };
 
 const ALICE: &str = "127.0.0.1:5060";
@@ -75,9 +76,10 @@ async fn a_replicated_update_resent_to_the_takeover_supersedes_its_dead_relay() 
     fh.advance(REPLICATE).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
-    fh.advance(RESEND_AT - REPLICATE - KILL_SETTLE).await;
+    let answer = async { first_at_bob.respond(200, "OK").with_sdp(REANSWER).await };
+    let hydrated_before =
+        kill_serving_node_answer_lost(&mut fh, primary, survivor, &pri_ord, &proxy, answer).await;
+    fh.advance(RESEND_AT - REPLICATE - T1).await;
     assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
 
     // ── The caller's Timer E rung: relayed afresh, answered ─────────────────
@@ -126,9 +128,10 @@ async fn a_replicated_info_resent_to_the_takeover_draws_one_final() {
     fh.advance(REPLICATE).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    first_at_bob.respond(200, "OK").await;
-    fh.advance(RESEND_AT - REPLICATE - KILL_SETTLE).await;
+    let answer = async { first_at_bob.respond(200, "OK").await };
+    let hydrated_before =
+        kill_serving_node_answer_lost(&mut fh, primary, survivor, &pri_ord, &proxy, answer).await;
+    fh.advance(RESEND_AT - REPLICATE - T1).await;
     assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
 
     let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Info);

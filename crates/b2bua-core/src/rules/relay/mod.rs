@@ -48,6 +48,8 @@ mod stated_text;
 mod unbuilt;
 
 #[cfg(test)]
+mod identity_tests;
+#[cfg(test)]
 mod originate_charging_tests;
 #[cfg(test)]
 mod originate_line_safety_tests;

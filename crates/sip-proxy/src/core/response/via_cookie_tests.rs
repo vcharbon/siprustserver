@@ -1,6 +1,6 @@
-//! The stickiness cookie on the Via this proxy pushes on a worker's INVITE
-//! transaction, and the reverse-path failover that reads it back off a
-//! response carrying no Record-Route (an in-dialog request's, or a 100).
+//! The stickiness cookie on the Via this proxy pushes on a worker's request,
+//! and the reverse-path failover that reads it back off a response carrying
+//! no Record-Route (an in-dialog request's, or a 100).
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -123,11 +123,12 @@ fn cookie_text(cookie: &RouteParams) -> String {
     cookie.iter().map(|(k, v)| format!(";{k}={v}")).collect()
 }
 
-/// A request `w1` sends toward the UAS through the proxy.
+/// A request `w1` sends toward the UAS through the proxy, stating `w2` as
+/// the call's backup.
 fn request(method: &str, branch: &str, route: &str, to_tag: &str, cseq: &str) -> String {
     format!(
         "{method} sip:bob@{UAS}:5060 SIP/2.0\r\n\
-Via: SIP/2.0/UDP {W1_POD}:5060;branch={branch};rport\r\n\
+Via: SIP/2.0/UDP {W1_POD}:5060;branch={branch};rport;bak=w2\r\n\
 {route}Max-Forwards: 70\r\n\
 From: <sip:b2bua@{W1_POD}>;tag=w\r\n\
 To: <sip:bob@{UAS}>{to_tag}\r\n\
@@ -332,7 +333,7 @@ async fn a_forged_route_cookie_is_not_carried() {
 
 /// `raw` with a `Resource-Priority` emergency value after its Via.
 fn emergency(raw: &str) -> String {
-    raw.replacen("rport\r\n", "rport\r\nResource-Priority: esnet.0\r\n", 1)
+    raw.replacen("bak=w2\r\n", "bak=w2\r\nResource-Priority: esnet.0\r\n", 1)
 }
 
 /// The proxy's Record-Route line that carries the cookie, if any.

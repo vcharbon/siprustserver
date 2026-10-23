@@ -10,7 +10,9 @@
 //!   the core synthesizes a 503.
 //! - [`encode_stickiness`](RoutingStrategy::encode_stickiness) — given a chosen
 //!   target, optionally produce route params the core appends to the
-//!   Record-Route URI it inserts for dialog-creating requests (§16.6.5).
+//!   Record-Route URI it inserts for dialog-creating requests (§16.6.5);
+//!   [`encode_originated`](RoutingStrategy::encode_originated) the same for a
+//!   request a worker originates, naming the backup the worker states.
 //! - [`decode_stickiness`](RoutingStrategy::decode_stickiness) — given the parsed
 //!   params off the top-Route URI (which the core just stripped per §16.4),
 //!   recover the downstream target. Five outcomes, see [`DecodeResult`].
@@ -98,8 +100,25 @@ pub trait RoutingStrategy: Send + Sync {
     async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult;
 
     /// Build the URI params to stamp into the Record-Route for dialog-creating
-    /// requests. `None` → this strategy has no per-dialog stickiness.
+    /// requests the proxy places on `target`. `None` → this strategy has no
+    /// per-dialog stickiness.
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams>;
+
+    /// The cookie of a request a worker originates: `origin` is that worker's
+    /// address and `backup` the call's other owner, as the worker states it on
+    /// its request (empty: the call has one owner). The cookie names the
+    /// stated backup, never one the proxy picks, so every leg of a call names
+    /// the same owners (ADR-0055 §8). `None` → this strategy has no per-dialog
+    /// stickiness.
+    fn encode_originated(
+        &self,
+        origin: &ProxyAddr,
+        msg: &SipMessage,
+        backup: &str,
+    ) -> Option<RouteParams> {
+        let _ = backup;
+        self.encode_stickiness(origin, msg)
+    }
 
     /// The worker id a cookie names as the call's primary, read without
     /// verifying it: which of several cookies on one message belongs to a

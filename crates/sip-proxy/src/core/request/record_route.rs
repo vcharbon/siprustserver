@@ -10,7 +10,7 @@ use sip_message::draft::RequestDraft;
 use sip_message::{SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
-use crate::headers::{record_route, record_route_flagged};
+use crate::headers::{record_route, record_route_flagged, stated_backup};
 use crate::strategy::RouteParams;
 
 use super::super::{is_dialog_creating, ProxyCore};
@@ -69,8 +69,16 @@ impl ProxyCore {
         } else {
             target.clone()
         };
-        let stickiness =
-            repeated.cloned().or_else(|| self.strategy.encode_stickiness(&cookie_addr, msg));
+        // A worker's dialog names the backup the worker states for its call
+        // (ADR-0055 §8); a dialog the proxy places names the one it picks.
+        let stickiness = repeated.cloned().or_else(|| {
+            if is_worker_outbound {
+                let backup = stated_backup(req.top_via());
+                self.strategy.encode_originated(&cookie_addr, msg, &backup)
+            } else {
+                self.strategy.encode_stickiness(&cookie_addr, msg)
+            }
+        });
         // Dual-face (§16.6/§16.7 multi-homed): stamp each half of the
         // double-RR with the advertise of the face facing the party that
         // will USE it —

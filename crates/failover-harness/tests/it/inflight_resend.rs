@@ -54,6 +54,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::answer_lost::kill_serving_node_answer_lost;
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
@@ -89,7 +90,7 @@ pub(crate) const KILL_SETTLE: Duration = Duration::from_millis(300);
 /// crosses the proxy inside it and lands on the dead node's socket, which is
 /// where a shape-**B** request is lost. `HEALTH_LAG + KILL_SETTLE == T1`, so the
 /// peer's re-send still follows the kill by exactly one rung.
-const HEALTH_LAG: Duration = Duration::from_millis(200);
+pub(crate) const HEALTH_LAG: Duration = Duration::from_millis(200);
 /// The pause that lets a relayed round replicate before the kill, when the
 /// cell's contract is what the survivor rebuilds from the record.
 pub(crate) const REPLICATE: Duration = Duration::from_millis(500);
@@ -155,7 +156,7 @@ pub(crate) fn last_request_sent(
 /// Abort the node serving the call with the peer's request unanswered, and open
 /// the RFC deviation window the takeover carries. Returns the survivor's
 /// takeover count before the kill.
-fn crash_serving_node(
+pub(crate) fn crash_serving_node(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
     survivor: &ReplicatedB2buaSut,
@@ -379,11 +380,10 @@ async fn an_update_in_flight_at_the_kill_is_served_on_the_peers_resend() {
 
     // ── The kill lands inside that window ───────────────────────────────────
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    // The callee answers as a UAS must; the response is undeliverable — the node
-    // whose transaction it belongs to is gone.
-    first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
-    fh.advance(T1 - KILL_SETTLE).await;
+    // The callee answers before the proxy reads the node dead: lost with it.
+    let answer = async { first_at_bob.respond(200, "OK").with_sdp(REANSWER).await };
+    let hydrated_before =
+        kill_serving_node_answer_lost(&mut fh, primary, survivor, &pri_ord, &proxy, answer).await;
     assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
 
     // ── The peer re-sends its own datagram at T1 ────────────────────────────
@@ -428,9 +428,9 @@ async fn an_info_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let mut first_at_bob = bob.receive("INFO").await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    first_at_bob.respond(200, "OK").await;
-    fh.advance(T1 - KILL_SETTLE).await;
+    let answer = async { first_at_bob.respond(200, "OK").await };
+    let hydrated_before =
+        kill_serving_node_answer_lost(&mut fh, primary, survivor, &pri_ord, &proxy, answer).await;
     assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
 
     let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Info);

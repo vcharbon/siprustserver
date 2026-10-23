@@ -1,9 +1,8 @@
 //! Response path, single-endpoint: validate ≥2 Via and that the top is us;
-//! route to the next Via (received/rport precedence); reverse-path failover of
-//! an INVITE response to the backup of the cookie naming the destination worker
-//! (on this proxy's Record-Route, else on its own top Via), or to that worker's
-//! new address, when the address it was sent to is confirmed Dead; pop the top
-//! Via entry (comma-aware);
+//! route by the owner rule (`owner`, ADR-0055 §8), every method alike: to the
+//! owner holding the response's transaction, along the next Via
+//! (received/rport precedence) or at the address it holds now, else to the
+//! call's other owner, else nowhere; pop the top Via entry (comma-aware);
 //! forward; remember the ACK-relay hop for a non-2xx INVITE final — the node
 //! the final arrived from (the ACK itself travels end-to-end — see
 //! `core/request`).
@@ -13,25 +12,14 @@
 //! absorbs the downstream 100 nor generates one of its own. A response is
 //! dropped only when its top Via is not this proxy, when it carries fewer than
 //! two Vias, when it arrives on the external face and its next Via names no
-//! registry worker and its top Via no cookie (ADR-0048), when it answers an
-//! INVITE for a Dead worker, or for a cookie's worker that holds no address, and
-//! no cookie of this proxy names a backup to fail it over to, or when its top
-//! Via cannot be popped and the rest re-rendered.
+//! registry worker and its top Via no cookie (ADR-0048), when no owner of its
+//! call can take it, or when its top Via cannot be popped and the rest
+//! re-rendered.
 //!
 //! An address that LEFT the worker set counts as `Dead` here for Timer H past
 //! the last response for it (`registry::tombstone`, re-armed by every response
-//! whose next Via names it): a node whose endpoint is withdrawn while its process
-//! still serves must not take an INVITE response back, so that response follows
-//! the cookie's backup. A non-INVITE response answers a client transaction only
-//! its sender holds (§17.1.2) and follows the Via whatever the sender's health.
-//!
-//! The cookie carries the dialog, not the address: an INVITE response whose
-//! top Via (this proxy's) carries a cookie that verifies, and whose next Via
-//! names neither of the cookie's workers — nobody, past that window, or a
-//! worker that took the address since — goes to the cookie's worker at the
-//! address it holds now, else to the cookie's backup, else nowhere. A worker's
-//! request carries the cookie on that Via (`core/request/via_cookie`); a
-//! stranger's carries none, and its response follows the Via.
+//! whose next Via names it), so a response for it goes to the call's other
+//! owner.
 
 use sip_message::header::Via;
 use sip_message::types::SipResponse;
@@ -40,11 +28,10 @@ use sip_message::{Method, SipMessage};
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{ack_hop_key, invite_txn_key};
 use crate::observability::metrics::{Direction, Face, MessageResult, UntrustedClaim};
-use crate::registry::WorkerHealth;
-use crate::strategy::DecodeResult;
 use crate::trace::emit;
 
 use super::ProxyCore;
+use owner::OwnerRoute;
 
 /// Whether a response this hop relayed rejects the call's SETUP for good — the
 /// class after which the ACK is the only fact left. The two auth challenges are
@@ -64,7 +51,7 @@ impl ProxyCore {
         src: std::net::SocketAddr,
         face: Face,
     ) {
-        let cseq = resp.cseq();
+        let cseq = resp.cseq().clone();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         self.metrics.record_response(cseq.method().as_str(), resp.status());
         // Per-call trace tier (ADR-0026): the parsed Call-ID, one predicted
@@ -100,31 +87,31 @@ impl ProxyCore {
             return;
         }
 
-        // The worker a response is for is named by its Via sent-by (see the
-        // failover below); a response for a departed address, whatever its
-        // method, re-arms that address's window (ADR-0031 D4).
+        // The worker a response is for is named by its Via sent-by — its
+        // advertised registry address, SNAT-immune, never the received/rport
+        // send target, which behind address translation is a node IP and an
+        // ephemeral port; a response for a departed address, whatever its
+        // method, re-arms that address's window.
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         self.registry.rearm_departed(&sent_by);
-        let by_via_cookie = if cseq.method() == Method::Invite {
-            let named = self.registry.lookup_by_address(&sent_by);
-            self.via_cookie_route(&resp, ours, named.as_ref().map(|w| w.id.as_str())).await
-        } else {
-            None
-        };
-        let routed_by_cookie = by_via_cookie.is_some();
-        let (mut host, mut port) = match (by_via_cookie, face) {
-            (Some(Some(target)), _) => (target.host, target.port),
-            (Some(None), _) => {
+
+        // ── The owner rule (ADR-0055 §8), every method alike ────────────────
+        let msg = SipMessage::Response(resp);
+        let route = self.owner_route(&msg, ours, &sent_by).await;
+        let SipMessage::Response(resp) = msg else { return };
+        let (host, port) = match (route, face) {
+            (OwnerRoute::To(target), _) => (target.host, target.port),
+            (OwnerRoute::Nowhere, _) => {
                 self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
                 return;
             }
             // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
-            (None, Face::Internal) => {
+            (OwnerRoute::Via, Face::Internal) => {
                 let (host, port) = next.response_target();
                 (host.to_string(), port)
             }
-            (None, Face::External) => match self.external_response_target(next) {
+            (OwnerRoute::Via, Face::External) => match self.external_response_target(next) {
                 Some(target) => (target.host, target.port),
                 None => {
                     self.metrics.record_external_untrusted(UntrustedClaim::ResponseNotToWorker);
@@ -133,64 +120,6 @@ impl ProxyCore {
                 }
             },
         };
-
-        // ── Reverse-path failover: INVITE responses only ────────────────────
-        // An INVITE response from a **confirmed Dead** next-Via worker answers a
-        // setup the cookie's `w_bak` materialises, so it goes there — unless
-        // the worker that left the address is up again at a new one (a rebooted
-        // pod that reclaimed its calls and their INVITEs, ADR-0014): the
-        // response goes there, cookie or none (a 100 carries none). A non-INVITE
-        // response answers a client transaction only its sender holds (§17.1.2):
-        // no other node can consume it, so it follows the Via (§16.7 step 6) and
-        // is lost with its sender rather than dropped here.
-        //
-        // A worker that is merely `Unknown` (a freshly-rebooted pod the health
-        // probe has not re-confirmed yet), `NotReady` or `Draining` is still up and
-        // owns its transactions, so its responses reach it. (Request-path
-        // routing-around a non-Alive worker is separate; that lives in the
-        // strategy's `decode_stickiness`.)
-        //
-        // The worker is IDENTIFIED by its Via **sent-by** — its advertised
-        // registry address, SNAT-immune (the same signal the request path keys
-        // worker-outbound classification on). The send target above may be the
-        // received/rport address (§18.2.2/RFC 3581), which must not be the
-        // lookup key: behind address translation it is a node IP and an
-        // ephemeral port, which matches no registry entry. A departed address
-        // answers `Dead` from the registry's tombstone, so this branch covers
-        // it too.
-        let dead_worker = (cseq.method() == Method::Invite && !routed_by_cookie)
-            .then(|| self.registry.lookup_by_address(&sent_by))
-            .flatten()
-            .filter(|dest| dest.health == WorkerHealth::Dead);
-        let moved = dead_worker
-            .as_ref()
-            .and_then(|dead| self.registry.resolve(&dead.id))
-            .filter(|w| w.address != sent_by && w.health != WorkerHealth::Dead);
-        if let Some(moved) = moved {
-            host = moved.address.host;
-            port = moved.address.port;
-        } else if let Some(dead) = dead_worker {
-            match self.own_cookie_for(&resp, ours, &dead.id) {
-                Some(params) => match self
-                    .strategy
-                    .decode_stickiness(&params, &SipMessage::Response(resp.clone()))
-                    .await
-                {
-                    DecodeResult::ForwardBackup { target, .. } => {
-                        host = target.host;
-                        port = target.port;
-                    }
-                    _ => {
-                        self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
-                        return;
-                    }
-                },
-                None => {
-                    self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
-                    return;
-                }
-            }
-        }
 
         // Pop our own Via entry (§7.3.1 comma-aware) and forward. The thawed
         // draft reads nothing below that top line, and freezing renders the
@@ -285,69 +214,9 @@ impl ProxyCore {
         let sent_by = ProxyAddr::new(host, port);
         self.registry.lookup_by_address(&sent_by).is_some().then_some(sent_by)
     }
-
-    /// Where an INVITE response goes by the cookie on `ours`, the Via this
-    /// proxy pushed on the request, when the sender's address names neither of
-    /// the cookie's workers (`named` is the worker it names, if any): the
-    /// address no longer names the worker that sent the request, so the dialog
-    /// it created carries the response, not the address. `None`: `ours`
-    /// carries no cookie that verifies (a stranger's request), or the address
-    /// names the cookie's worker or its backup, and the response takes the
-    /// ordinary path. `Some(None)`: the cookie's worker holds no address and
-    /// no backup is usable, so the response goes nowhere. Else the cookie's
-    /// worker at the address it holds now, or the cookie's backup.
-    async fn via_cookie_route(
-        &self,
-        resp: &SipResponse,
-        ours: &Via,
-        named: Option<&str>,
-    ) -> Option<Option<ProxyAddr>> {
-        let msg = SipMessage::Response(resp.clone());
-        let cookie =
-            self.strategy.verified_cookie(&crate::headers::via_cookie_params(ours), &msg)?;
-        let worker = self.strategy.stickiness_primary(&cookie)?;
-        if named.is_some_and(|n| n == worker || Some(n) == self.strategy.stickiness_backup(&cookie))
-        {
-            return None;
-        }
-        if let Some(moved) =
-            self.registry.resolve(worker).filter(|w| w.health != WorkerHealth::Dead)
-        {
-            return Some(Some(moved.address));
-        }
-        match self.strategy.decode_stickiness(&cookie, &msg).await {
-            DecodeResult::ForwardBackup { target, .. } => Some(Some(target)),
-            _ => Some(None),
-        }
-    }
-
-    /// The stickiness cookie for reverse-path failover toward `worker`: the
-    /// bottommost of the proxy's own Record-Route entries (either face) whose
-    /// cookie names `worker` as primary (why the bottommost: ADR-0009 X1), else
-    /// the cookie on the proxy's own Via, `ours` — the one a response carrying
-    /// no Record-Route brings back (`core/request/via_cookie`).
-    fn own_cookie_for(
-        &self,
-        resp: &SipResponse,
-        ours: &Via,
-        worker: &str,
-    ) -> Option<crate::strategy::RouteParams> {
-        let names_worker = |params: &crate::strategy::RouteParams| {
-            self.strategy.stickiness_primary(params) == Some(worker)
-        };
-        resp.list::<sip_message::header::RecordRouteEntry>()
-            .unwrap_or_default()
-            .iter()
-            .rev()
-            .filter(|entry| {
-                let (host, port) = entry.uri().host_port();
-                self.is_self_addr(host, port)
-            })
-            .map(|entry| crate::headers::cookie_params(entry.uri()))
-            .find(names_worker)
-            .or_else(|| Some(crate::headers::via_cookie_params(ours)).filter(names_worker))
-    }
 }
+
+mod owner;
 
 #[cfg(test)]
 mod reverse_failover_tests;

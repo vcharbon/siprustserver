@@ -438,7 +438,7 @@ async fn response_from_an_expired_departed_address_follows_the_via() {
 
 // Every response for a departed address re-arms its window: one seen at T keeps
 // the address `Dead` until T + Timer H, whatever time it departed at, so a
-// worker whose drain outlasts Timer H keeps its INVITE responses on the backup.
+// worker whose drain outlasts Timer H keeps its responses on the backup.
 #[tokio::test(start_paused = true)]
 async fn a_response_for_a_departed_address_re_arms_its_window_to_timer_h() {
     let (core, ep) = core_over(
@@ -461,9 +461,9 @@ async fn a_response_for_a_departed_address_re_arms_its_window_to_timer_h() {
     let backup: SocketAddr = format!("{W2_POD}:5060").parse().unwrap();
     assert_eq!(
         sent.as_slice(),
-        &[snat, backup, snat],
-        "the keepalive's 200 follows its Via; the INVITE's 200 a Timer H later takes the \
-         backup, and one past the re-armed window follows the Via"
+        &[backup, backup, snat],
+        "the keepalive's 200 takes the backup; the INVITE's 200 a Timer H later too, and one \
+         past the re-armed window follows the Via"
     );
 }
 
@@ -498,60 +498,54 @@ async fn a_departed_sender_with_no_usable_backup_drops_the_response() {
     assert!(ep.sent.lock().unwrap().is_empty());
 }
 
-// §17.1.2: a non-INVITE response answers a client transaction only its
-// sender holds — no other node can consume it — so it follows the Via to
-// the received/rport target even when the sender's address has departed,
-// cookie echoed back or not (a CANCEL copies no Record-Route, §9.1).
+// One rule for every method (ADR-0055 §8): a non-INVITE response from a
+// departed address fails over to the backup the cookie names, as an INVITE
+// response does; one whose cookie no header echoes back (a CANCEL copies no
+// Record-Route, §9.1, and this double's cookie rides no Via) names no owner
+// and is dropped, never delivered to the node that left.
 #[tokio::test(start_paused = true)]
-async fn a_non_invite_response_from_a_departed_address_follows_the_via() {
-    for resp in [cancel_200(), cancel_200_without_record_route(), keepalive_200(), bye_200()] {
+async fn a_non_invite_response_from_a_departed_address_fails_over_to_the_backup() {
+    let backup = [format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()];
+    for (resp, expected) in [
+        (cancel_200(), &backup[..]),
+        (keepalive_200(), &backup[..]),
+        (bye_200(), &backup[..]),
+        (cancel_200_without_record_route(), &[][..]),
+    ] {
         let (core, ep) = core_over(
             registry_without_w1(Clock::test_at(0)),
             Arc::new(BackupStrategy),
             Clock::test_at(0),
         );
         core.handle_response_from(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
-
-        let sent = ep.sent.lock().unwrap();
-        assert_eq!(
-            sent.as_slice(),
-            &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()],
-            "neither the backup nor a drop"
-        );
+        assert_eq!(ep.sent.lock().unwrap().as_slice(), expected);
     }
 }
 
-// The same for a worker the health probe confirmed Dead: its own CANCEL's
-// 200 reaches it, so its client transaction completes instead of
-// retransmitting the CANCEL to Timer F.
+// The same for a worker the health probe confirmed Dead.
 #[tokio::test]
-async fn a_non_invite_response_to_a_dead_worker_follows_the_via() {
+async fn a_non_invite_response_to_a_dead_worker_fails_over_to_the_backup() {
     for resp in [cancel_200(), keepalive_200(), bye_200()] {
         let (core, ep) = core_with(WorkerHealth::Dead);
         core.handle_response_from(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
-
-        let sent = ep.sent.lock().unwrap();
         assert_eq!(
-            sent.as_slice(),
-            &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()],
-            "neither the backup nor a drop"
+            ep.sent.lock().unwrap().as_slice(),
+            &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()],
         );
     }
 }
 
 // A departed sender whose cookie names no usable backup: a non-INVITE
-// response still follows the Via — the cookie decides nothing for it.
+// response is dropped, as an INVITE response is.
 #[tokio::test(start_paused = true)]
-async fn a_non_invite_response_needs_no_usable_backup() {
+async fn a_non_invite_response_with_no_usable_backup_is_dropped() {
     let (core, ep) = core_over(
         registry_without_w1(Clock::test_at(0)),
         Arc::new(NoBackupStrategy),
         Clock::test_at(0),
     );
     core.handle_response_from(cancel_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
-
-    let sent = ep.sent.lock().unwrap();
-    assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
+    assert!(ep.sent.lock().unwrap().is_empty());
 }
 
 /// The pool after w1 rebooted at w3's pod: the address it left is tombstoned

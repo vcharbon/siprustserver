@@ -1,7 +1,7 @@
 //! The B2BUA's own per-leg identity (Via + Contact) on outbound messages,
 //! binding [`B2buaConfig`]'s addresses to [`crate::stack_identity`]'s wire
 //! shapes (call-ref/leg/incarnation markers, `;em=1`/`;emerg=1` emergency
-//! stamps).
+//! stamps, the call's other owner on the Via).
 
 use call::Call;
 use sip_message::header::{self, Via};
@@ -10,9 +10,9 @@ use crate::config::B2buaConfig;
 use crate::stack_identity::{build_call_contact, build_call_via, StackIdentityOpts};
 
 /// What of a call the stack stamps on every Via and Contact it emits for it:
-/// its `call_ref`, its incarnation's mark, and its emergency state, whose
+/// its `call_ref`, its incarnation's mark, its emergency state, whose
 /// `;em=1` / `;emerg=1` markers keep an admitted emergency call identifiable
-/// on the wire in every subsequent in-dialog packet.
+/// on the wire in every subsequent in-dialog packet, and its two owners.
 #[derive(Clone, Copy, Debug)]
 pub struct CallMarks<'a> {
     pub call_ref: &'a str,
@@ -20,6 +20,8 @@ pub struct CallMarks<'a> {
     pub incarnation_mark: &'a str,
     /// `call.emergency == Some(true)`.
     pub is_emergency: bool,
+    /// The call's primary and backup, `None` for a call placed without them.
+    pub owners: Option<(&'a str, &'a str)>,
 }
 
 impl<'a> CallMarks<'a> {
@@ -29,7 +31,16 @@ impl<'a> CallMarks<'a> {
             call_ref: &call.call_ref,
             incarnation_mark: call.incarnation_mark(),
             is_emergency: call.emergency == Some(true),
+            owners: call.topology.as_ref().map(|t| (t.pri.as_str(), t.bak.as_str())),
         }
+    }
+
+    /// The owner of the call other than `sender`: the backup for the primary,
+    /// the primary for a copy on the backup. `None` for a call with one owner.
+    fn other_owner(&self, sender: &str) -> Option<&'a str> {
+        let (pri, bak) = self.owners?;
+        let other = if sender == bak { pri } else { bak };
+        (!other.is_empty() && other != sender).then_some(other)
     }
 
     fn opts<'b>(&self, config: &'b B2buaConfig, leg_id: &'b str) -> StackIdentityOpts<'b>
@@ -43,6 +54,7 @@ impl<'a> CallMarks<'a> {
             leg: leg_id,
             incarnation_mark: self.incarnation_mark,
             is_emergency: self.is_emergency,
+            other_owner: self.other_owner(&config.self_ordinal),
         }
     }
 }

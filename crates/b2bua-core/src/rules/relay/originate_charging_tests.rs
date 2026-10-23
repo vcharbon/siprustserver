@@ -37,7 +37,12 @@ fn b_leg_vector_stating(
     header_updates: &[(String, Option<String>)],
 ) -> Option<String> {
     let (_leg, effect) = build_b_leg(
-        CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+        CallMarks {
+            call_ref: "w0|call-ref|xyz",
+            incarnation_mark: "k",
+            is_emergency: false,
+            owners: None,
+        },
         "b-1",
         a_leg_invite,
         ("10.244.2.7".to_string(), 5060),

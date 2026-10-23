@@ -119,11 +119,12 @@ fn parse(raw: &str) -> SipMessage {
 }
 
 /// The initial INVITE the worker at `pod` sends toward the UAS through the
-/// proxy.
+/// proxy, stating the call's other owner: `w2` for `w1`, `w1` for any other.
 fn initial_invite(pod: &str) -> String {
+    let bak = if pod == W1_POD { "w2" } else { "w1" };
     format!(
         "INVITE sip:bob@{UAS}:5060 SIP/2.0\r\n\
-Via: SIP/2.0/UDP {pod}:5060;branch=z9hG4bKdeparted;rport\r\n\
+Via: SIP/2.0/UDP {pod}:5060;branch=z9hG4bKdeparted;rport;bak={bak}\r\n\
 Route: <sip:{PROXY_VIP}:5060;lr>\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:b2bua@{pod}>;tag=w\r\n\
@@ -175,10 +176,10 @@ Content-Length: 0\r\n\r\n"
 
 // The proxy departed w1 a moment before w1's INVITE reached it: the INVITE is
 // still worker-outbound (its Via names a tombstoned worker address), and the
-// cookie it is Record-Routed with names w1 and the alive backup w2, signed for
-// the call. The UAS's 180 and 200 for the departed w1 fail over to w2.
+// cookie it is Record-Routed with names w1 and the backup w1 states, w2,
+// signed for the call. The UAS's 180 and 200 for the departed w1 fail over to w2.
 #[tokio::test]
-async fn a_departed_workers_invite_is_recorded_with_its_ordinal_and_an_alive_backup() {
+async fn a_departed_workers_invite_is_recorded_with_its_ordinal_and_its_stated_backup() {
     let f = fixture();
     f.registry.remove("w1");
     assert_eq!(

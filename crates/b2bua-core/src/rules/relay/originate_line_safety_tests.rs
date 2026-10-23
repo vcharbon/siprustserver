@@ -25,7 +25,12 @@ fn minted(
 ) -> (SipRequest, Vec<WriteRefusal>) {
     let mut skipped = Vec::new();
     let (_leg, effect) = build_b_leg(
-        CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+        CallMarks {
+            call_ref: "w0|call-ref|xyz",
+            incarnation_mark: "k",
+            is_emergency: false,
+            owners: None,
+        },
         "b-1",
         &a_leg_invite_carrying(&[]),
         ("192.0.2.7".to_string(), 5060),
@@ -103,7 +108,12 @@ fn rewritten(
 ) -> Result<(SipRequest, Vec<WriteRefusal>), super::UnreadableAddress> {
     let mut skipped = Vec::new();
     let (_leg, effect) = build_b_leg(
-        CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+        CallMarks {
+            call_ref: "w0|call-ref|xyz",
+            incarnation_mark: "k",
+            is_emergency: false,
+            owners: None,
+        },
         "b-1",
         &a_leg_invite_carrying(&[]),
         ("192.0.2.7".to_string(), 5060),

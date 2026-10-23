@@ -3,7 +3,9 @@
 //! (`cr`), the leg id (`lg`) and the call incarnation's mark (`ci`) in opaque
 //! params so any inbound response/request self-routes back to the owning call
 //! without an external lookup, and a straggler of an earlier call on the same
-//! `callRef` is told from the live one.
+//! `callRef` is told from the live one. The Via also states the call's other
+//! owner (`bak`), which the front proxy signs into the leg's stickiness cookie
+//! (ADR-0055 §8).
 //!
 //! `callRef` contains `|` (and Call-IDs may contain `@`/`:`), which are unsafe
 //! in a SIP param value, so the values are percent-encoded here and decoded by
@@ -26,6 +28,9 @@ pub struct StackIdentityOpts<'a> {
     /// The call's [`call::Call::incarnation_mark`].
     pub incarnation_mark: &'a str,
     pub is_emergency: bool,
+    /// The worker that owns the call beside the sender, `None` for a call
+    /// with one owner.
+    pub other_owner: Option<&'a str>,
 }
 
 /// A parameter carrying an encoded value.
@@ -33,7 +38,8 @@ fn encoded(value: &str) -> ParamValue {
     ParamValue::Token(SipStr::owned(&encode_param(value)))
 }
 
-/// Build the B2BUA Via for an outbound message (with `cr`/`lg`/`ci`/`rport` params).
+/// Build the B2BUA Via for an outbound message (with `cr`/`lg`/`ci`/`rport`
+/// params, and `bak` naming the call's other owner when it has one).
 pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
     let mut via = Via::udp(SipStr::owned(opts.local_ip), opts.local_port)
         .with_branch(SipStr::owned(&branch))
@@ -43,6 +49,9 @@ pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
         .requesting_rport();
     if opts.is_emergency {
         via = via.with_param("em", ParamValue::Token(SipStr::from_static("1")));
+    }
+    if let Some(owner) = opts.other_owner.filter(|o| !o.is_empty()) {
+        via = via.with_param("bak", encoded(owner));
     }
     via
 }
@@ -148,6 +157,7 @@ mod tests {
             leg: "b-1",
             incarnation_mark: "k3x9",
             is_emergency,
+            other_owner: None,
         }
     }
 
