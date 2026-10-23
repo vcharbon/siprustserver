@@ -120,6 +120,7 @@ fn relaying(mut call: Call, by: RelayOwner) -> Call {
         offered: false,
         source_timestamp: None,
         relayed_by: by,
+        author: None,
     });
     call
 }

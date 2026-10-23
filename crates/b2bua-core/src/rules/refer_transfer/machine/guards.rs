@@ -140,8 +140,8 @@ pub(super) fn overall_timeout() -> RuleDefinition {
 /// subscription is over (RFC 6665 §4.4.1) and no further NOTIFY leaves on it;
 /// the dialog and the transfer's own outcome are untouched (RFC 3515 §2.4.6).
 /// Active in every phase because the first NOTIFY is on the wire before the
-/// `/call/refer` consult resolves. Claims only a NOTIFY this stack originated
-/// (no pending-relay snapshot): a RELAYED NOTIFY's 481 answers the peer's
+/// `/call/refer` consult resolves. Claims only the final on a NOTIFY this
+/// stack originated, by its transaction: a RELAYED NOTIFY's 481 answers the peer's
 /// subscription and stays CORE `relay-non-invite-failure`'s to relay. Beats
 /// CORE `absorb-own-request-failure`, the fallback for any other
 /// stack-originated NOTIFY failure.
@@ -158,7 +158,7 @@ pub(super) fn referrer_notify_481() -> RuleDefinition {
             .direction(Direction::FromB)
             .filter(|ctx| {
                 state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)
-                    && !ctx.answers_relayed_request()
+                    && ctx.answered_record().is_some_and(|r| r.is_own())
             }),
         handle: |ctx| {
             let mut st = state(ctx)?.clone();

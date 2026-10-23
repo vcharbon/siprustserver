@@ -79,6 +79,7 @@ fn info_toward_the_caller(call: &mut Call) {
         offered: false,
         source_timestamp: None,
         relayed_by: Default::default(),
+        author: None,
     });
 }
 

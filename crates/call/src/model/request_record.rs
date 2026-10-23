@@ -110,6 +110,11 @@ pub struct RequestRecord {
     /// client transaction carries it, and the final returns there (RFC 3261
     /// §18.2.2). The default names no worker.
     pub relayed_by: RelayOwner,
+    /// The rule whose action sent this stack's own request, by its id: what a
+    /// service reads to know a request, and its timeout, for its own. `None`
+    /// for a request no rule's action sent (a relay, a held request, the
+    /// engine's own PRACK).
+    pub author: Option<String>,
 }
 
 impl RequestRecord {
@@ -145,6 +150,7 @@ impl RequestRecord {
             offered: false,
             source_timestamp: None,
             relayed_by: RelayOwner::default(),
+            author: None,
         }
     }
 
@@ -192,9 +198,19 @@ impl RequestRecord {
         self.sent.as_ref().map(|s| s.branch.as_str())
     }
 
-    /// Whether the record's sent half is the request a final numbered
-    /// `cseq` for `method` answers.
-    pub fn answered_by(&self, method: &str, cseq: i64) -> bool {
-        self.is_sent() && self.outbound_cseq == cseq && self.method.eq_ignore_ascii_case(method)
+    /// Whether the record's sent half is the request a final numbered `cseq`
+    /// for `method`, on the client transaction `branch`, answers: a sent
+    /// transaction by its branch (RFC 3261 §17.1.3), so a final to another
+    /// request reusing the number answers nothing here; an INVITE's by its
+    /// number.
+    pub fn answered_by(&self, method: &str, cseq: i64, branch: Option<&str>) -> bool {
+        let transaction = match &self.sent {
+            Some(sent) => branch == Some(sent.branch.as_str()),
+            None => true,
+        };
+        self.is_sent()
+            && transaction
+            && self.outbound_cseq == cseq
+            && self.method.eq_ignore_ascii_case(method)
     }
 }

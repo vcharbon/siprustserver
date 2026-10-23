@@ -376,6 +376,7 @@ fn resolve(call: Call, leg: &str, event: &CallEvent) -> Option<(Resolved, Call)>
                 cseq: i64::from(cseq.seq()),
                 method: cseq.method().as_str(),
                 status: resp.status(),
+                branch: resp.top_via().branch(),
             };
             match response_origin(&call, leg, facts) {
                 ResponseOrigin::Dialog(resolved) => Some((resolved, call)),

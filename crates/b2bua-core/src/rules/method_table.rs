@@ -5,17 +5,17 @@
 //! client side holds through Timer K below the transaction user (RFC 3261
 //! §17.1.2.2), so a repeat of that final settles nothing. Beyond it:
 //!
-//! | method | usage | on a dialog this side is ending | a relay toward a leg that ended | own timeout |
-//! |---|---|---|---|---|
-//! | BYE | ends the dialog; leaves behind this stack's NOTIFY in flight | passes | — | the leg's end |
-//! | PRACK | the session | passes | 200 (RFC 3262 §3) | denies that acknowledgement alone |
-//! | NOTIFY | carries a subscription's state; leaves behind this stack's NOTIFY in flight | 200 | 481 | ends its subscription (RFC 6665 §4.2.2) |
-//! | REFER | opens an implicit subscription (RFC 3515 §2.4.4) | 487 | 481 | ends the session |
-//! | INFO, MESSAGE, OPTIONS | the session | 200 | 481 | ends the session |
-//! | UPDATE, SUBSCRIBE, any other | the session | 487 (§21.4.25) | 481 | ends the session |
+//! | method | usage | on a dialog this side is ending | a relay toward a leg that ended |
+//! |---|---|---|---|
+//! | BYE | ends the dialog; leaves behind this stack's NOTIFY in flight | passes | — |
+//! | PRACK | the session | passes | 200 (RFC 3262 §3) |
+//! | NOTIFY | carries a subscription's state; leaves behind this stack's NOTIFY in flight | 200 | 481 |
+//! | REFER | opens an implicit subscription (RFC 3515 §2.4.4) | 487 | 481 |
+//! | INFO, MESSAGE, OPTIONS | the session | 200 | 481 |
+//! | UPDATE, SUBSCRIBE, any other | the session | 487 (§21.4.25) | 481 |
 //!
-//! A request whose leg is going away when its own timeout comes is that leg's
-//! end, whatever its method. The INVITE row is the dialog's INVITE
+//! What the timeout of this stack's own request ends is the rules' to decide
+//! (`defaults::request_timeouts`); the INVITE row is the dialog's INVITE
 //! transaction state.
 
 use call::DialogUsage;
@@ -34,18 +34,6 @@ pub enum OnEnding {
     Terminate,
 }
 
-/// What the timeout of this stack's own request of the method ends, its leg
-/// still up (RFC 5057 §5.2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OwnTimeout {
-    /// Nothing beyond the transaction: a PRACK's acknowledgement alone.
-    Transaction,
-    /// The usage the request belongs to: a NOTIFY's subscription.
-    Usage,
-    /// The session: the call ends.
-    Session,
-}
-
 /// One row of the method table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MethodRow {
@@ -53,7 +41,6 @@ pub struct MethodRow {
     /// The final this stack owes the originator of a relay toward a leg that
     /// ended (RFC 3261 §8.2.6): its target's answer relays no further.
     pub owed_at_leg_end: (u16, &'static str),
-    pub own_timeout: OwnTimeout,
     /// This stack's request of the method waits behind its own NOTIFY in
     /// flight on the dialog, so loss never delivers its requests out of CSeq
     /// order (RFC 3261 §12.2.2).
@@ -67,25 +54,18 @@ pub fn row(method: &Method) -> MethodRow {
     let ordinary = MethodRow {
         on_ending: OnEnding::Terminate,
         owed_at_leg_end: DOES_NOT_EXIST,
-        own_timeout: OwnTimeout::Session,
         waits_behind_own_notify: false,
     };
     match method {
         Method::Bye => {
             MethodRow { on_ending: OnEnding::Pass, waits_behind_own_notify: true, ..ordinary }
         }
-        Method::Prack => MethodRow {
-            on_ending: OnEnding::Pass,
-            owed_at_leg_end: (200, "OK"),
-            own_timeout: OwnTimeout::Transaction,
-            ..ordinary
-        },
-        Method::Notify => MethodRow {
-            on_ending: OnEnding::Absorb,
-            own_timeout: OwnTimeout::Usage,
-            waits_behind_own_notify: true,
-            ..ordinary
-        },
+        Method::Prack => {
+            MethodRow { on_ending: OnEnding::Pass, owed_at_leg_end: (200, "OK"), ..ordinary }
+        }
+        Method::Notify => {
+            MethodRow { on_ending: OnEnding::Absorb, waits_behind_own_notify: true, ..ordinary }
+        }
         Method::Info | Method::Message | Method::Options => {
             MethodRow { on_ending: OnEnding::Absorb, ..ordinary }
         }

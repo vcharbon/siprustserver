@@ -35,8 +35,9 @@
 
 use std::collections::HashSet;
 
+use b2bua_sdk::event::CallEvent;
 use call::helpers::records_of;
-use call::{Call, Dialog, InviteTxnHandle, Leg, RequestRecord, SentRequest, Unacked2xx};
+use call::{Call, Dialog, InviteTxnHandle, Leg, RequestRecord, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{HeaderValue, SentBy, Via};
 use sip_message::parser::custom::CustomParser;
@@ -46,8 +47,10 @@ use sip_txn::{ServerTxnKey, TxnSeed};
 use super::received_request::rebuild_received_request;
 use crate::rules::relay::rebuild_a_leg_invite;
 
-/// Every in-flight transaction `call` names, one seed per branch and role.
-pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
+/// Every in-flight transaction `call` names at `now_ms`, one seed per branch
+/// and role. A sent non-INVITE request whose deadline passed is not in
+/// flight: its record settles as a timeout ([`overdue_sent`]).
+pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
     let mut seeds = Vec::new();
     let mut branches = HashSet::new();
     let mut push = |seed: TxnSeed| {
@@ -117,7 +120,7 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
                 }
             }
             for record in records_of(dialog).iter().filter(|r| !invite_record(r)) {
-                if let Some(seed) = record.sent.as_ref().and_then(client_non_invite_seed) {
+                if let Some(seed) = client_non_invite_seed(record, now_ms) {
                     push(seed);
                 }
                 if !record.is_own() {
@@ -137,23 +140,80 @@ fn invite_record(record: &RequestRecord) -> bool {
     record.method.eq_ignore_ascii_case("INVITE")
 }
 
-/// Whether `branch` names the received half of a non-INVITE record of
-/// `call`: a request a relay was made for, or one held for a later final. A
-/// copy of it is the server seed's to absorb, never a new request.
-pub(in crate::router) fn names_received_branch(call: &Call, branch: &str) -> bool {
-    !branch.is_empty()
-        && call::helpers::every_record(call)
-            .filter(|(_, _, r)| !r.is_own() && !invite_record(r))
-            .filter_map(|(_, _, r)| pending_via(r))
-            .any(|v| v.branch() == Some(branch))
+/// The non-INVITE record of `call` whose received half `branch` names: a
+/// request a relay was made for, or one held for a later final. A copy of it
+/// is no new request.
+pub(in crate::router) fn received_record<'a>(
+    call: &'a Call,
+    branch: &str,
+) -> Option<&'a RequestRecord> {
+    if branch.is_empty() {
+        return None;
+    }
+    call::helpers::every_record(call)
+        .filter(|(_, _, r)| !r.is_own() && !invite_record(r))
+        .find(|(_, _, r)| pending_via(r).is_some_and(|v| v.branch() == Some(branch)))
+        .map(|(_, _, r)| r)
+}
+
+/// `call` without the relay a copy of its originator's request on `branch`
+/// supersedes: the relay's final returns to another node, so the copy is
+/// relayed afresh and that relay settles nothing here.
+pub(in crate::router) fn drop_superseded(mut call: Call, branch: &str) -> Call {
+    let superseded = |r: &RequestRecord| {
+        r.is_relay() && pending_via(r).is_some_and(|v| v.branch() == Some(branch))
+    };
+    for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
+        for d in leg.dialogs.iter_mut() {
+            d.requests.retain(|r| !superseded(r));
+            if let Some(retired) = d.retired_mut() {
+                retired.open_requests.retain(|r| !superseded(r));
+            }
+        }
+    }
+    call
 }
 
 /// The client seed of a sent non-INVITE request: the request as it left and
 /// the wire destination it was sent to. `None` when neither reads back.
-fn client_non_invite_seed(sent: &SentRequest) -> Option<TxnSeed> {
+fn client_non_invite_seed(record: &RequestRecord, now_ms: i64) -> Option<TxnSeed> {
+    let sent = record.sent.as_ref()?;
+    let bound_ms = remaining_ms(record, now_ms)?;
     let request = parse_request(&sent.image)?;
     let dest = sip_net::ip_socket_addr(&sent.destination.host, sent.destination.port)?;
-    Some(TxnSeed::ClientNonInvite { request, dest })
+    Some(TxnSeed::ClientNonInvite { request, dest, bound_ms })
+}
+
+/// What is left at `now_ms` of the Timer F `record`'s sent request started;
+/// `None` once its deadline passed.
+fn remaining_ms(record: &RequestRecord, now_ms: i64) -> Option<u64> {
+    let full = RequestRecord::TIMER_F_MS;
+    let left = record.deadline_ms.map_or(full, |at| at.saturating_sub(now_ms)).min(full);
+    u64::try_from(left).ok().filter(|left| *left > 0)
+}
+
+/// The timeout each sent non-INVITE request of `call` whose deadline passed
+/// by `now_ms` owes the call: its transaction gave up on the node that sent
+/// it, or would have (RFC 3261 §17.1.2.2), so the copy settles its record as
+/// that node's timeout would have.
+pub(super) fn overdue_sent(call: &Call, now_ms: i64) -> Vec<CallEvent> {
+    call::helpers::every_record(call)
+        .filter(|(_, _, r)| !invite_record(r) && r.sent.is_some())
+        .filter(|(_, _, r)| remaining_ms(r, now_ms).is_none())
+        .filter_map(|(leg, _, r)| {
+            let sent = r.sent.as_ref()?;
+            Some(CallEvent::Timeout {
+                branch: sent.branch.clone(),
+                call_ref: Some(call.call_ref.clone()),
+                leg_id: Some(leg.leg_id.clone()),
+                method: Some(r.method.clone()),
+                cseq: u32::try_from(r.outbound_cseq).ok()?,
+                destination: None,
+                timeout_kind: call::TxnTimeoutKind::Response,
+                incarnation: Some(call.incarnation().to_string()),
+            })
+        })
+        .collect()
 }
 
 /// The server seed of a non-INVITE record's received half: the request

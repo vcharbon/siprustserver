@@ -52,6 +52,9 @@ impl Owner {
                 let on_books = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::on_books);
                 let _ = reply.send(on_books);
             }
+            Command::HoldsClient { branch, reply } => {
+                let _ = reply.send(self.clients.contains_key(&branch));
+            }
             Command::ReleaseTrying { key, reply } => {
                 let _ = reply.send(self.send_first_trying(endpoint, key.id()).await);
             }

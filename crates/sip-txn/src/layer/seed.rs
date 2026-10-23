@@ -52,8 +52,8 @@ impl Owner {
                 TxnSeed::ServerAccepted { response, leg_id } => {
                     self.seed_accepted(endpoint, call_ref, response, leg_id).await
                 }
-                TxnSeed::ClientNonInvite { request, dest } => {
-                    self.seed_client_non_invite(call_ref, request, dest)
+                TxnSeed::ClientNonInvite { request, dest, bound_ms } => {
+                    self.seed_client_non_invite(call_ref, request, dest, bound_ms)
                 }
                 TxnSeed::ServerNonInvite { request, leg_id } => {
                     self.seed_server_non_invite(call_ref, request, leg_id)
@@ -231,14 +231,16 @@ impl Owner {
 
     /// A client non-INVITE keyed by `request`'s branch, attributed from its
     /// Via as `do_send_request` attributes what it sends (falling back to
-    /// `call_ref`), `Trying`, with its Timer E ladder and Timer F armed from
-    /// now: the first retransmission leaves T1 after the seed. `false` when
-    /// the request names no branch or a client transaction holds it.
+    /// `call_ref`), `Trying`, retransmitting `request`'s image on its Timer E
+    /// ladder from now — the first copy T1 after the seed — and giving up
+    /// `bound_ms` from now, at most Timer F. `false` when the request names no
+    /// branch or a client transaction holds it.
     fn seed_client_non_invite(
         &mut self,
         call_ref: &str,
         request: SipRequest,
         dest: SocketAddr,
+        bound_ms: u64,
     ) -> bool {
         let Some(branch) = request.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
         else {
@@ -249,8 +251,9 @@ impl Owner {
         }
         let ViaMarks { call_ref: via_call_ref, leg_id, incarnation_mark } =
             extract_via_custom_params(&request);
-        let buf = bytes::Bytes::from(serialize(&SipMessage::Request(request.clone())));
-        let (max_ms, timeout_kind) = self.client_timeout(TxnKind::NonInvite, &request);
+        let buf = request.image().clone();
+        let (timer_f, timeout_kind) = self.client_timeout(TxnKind::NonInvite, &request);
+        let max_ms = bound_ms.min(timer_f);
         self.open_txn(NewTransaction {
             id: TxnId::Client(branch.clone()),
             kind: TxnKind::NonInvite,

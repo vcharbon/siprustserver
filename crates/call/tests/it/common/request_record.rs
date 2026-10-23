@@ -37,6 +37,7 @@ pub(super) fn arb_pending_request() -> impl Strategy<Value = RequestRecord> {
             any::<i64>(),
             proptest::option::of(arb_sent()),
             proptest::option::of(any::<i64>()),
+            proptest::option::of(arb_tag()),
         ),
         (
             any::<i64>(),
@@ -49,7 +50,7 @@ pub(super) fn arb_pending_request() -> impl Strategy<Value = RequestRecord> {
     )
         .prop_map(
             |(
-                (method, origin, usage, outbound_cseq, sent, deadline_ms),
+                (method, origin, usage, outbound_cseq, sent, deadline_ms, author),
                 (
                     inbound_cseq,
                     source_vias,
@@ -76,6 +77,7 @@ pub(super) fn arb_pending_request() -> impl Strategy<Value = RequestRecord> {
                     offered: false,
                     source_timestamp,
                     relayed_by: Default::default(),
+                    author,
                 }
             },
         )

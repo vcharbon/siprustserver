@@ -94,6 +94,11 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
+    /// Whether a client transaction on `branch` is resident.
+    HoldsClient {
+        branch: String,
+        reply: oneshot::Sender<bool>,
+    },
     /// Forget every non-INVITE server transaction of `call_ref` that has sent
     /// no final; replies with how many.
     ForgetUnansweredOfCall {
@@ -339,6 +344,12 @@ impl TransactionLayer {
     ) -> Result<usize, TransactionLayerClosed> {
         self.roundtrip(|reply| Command::ActiveTxnCount { call_ref: call_ref.to_string(), reply })
             .await
+    }
+
+    /// Whether this layer holds a client transaction on `branch`: the final to
+    /// the request sent on it arrives here (RFC 3261 §17.1.3).
+    pub async fn holds_client(&self, branch: &str) -> Result<bool, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::HoldsClient { branch: branch.to_string(), reply }).await
     }
 
     /// The consumer discarded the non-INVITE request whose server transaction

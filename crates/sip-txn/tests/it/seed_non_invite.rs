@@ -11,6 +11,10 @@ use sip_message::{SipMessage, SipParser, SipRequest};
 use sip_txn::{TransactionEvent, TxnSeed};
 
 const TRANSIT: u64 = 5;
+/// Timer F (RFC 3261 §17.1.2.2), and what is left of it for a seed whose
+/// first copy left 22 s before.
+const TIMER_F: u64 = sip_txn::timers::TIMER_F;
+const LEFT: u64 = TIMER_F - 22_000;
 const CALL_REF: &str = "w0|seeded-call@10.0.0.9|atag";
 
 /// The `Message` events in a drained batch, as `(is_response, status_or_0,
@@ -38,33 +42,38 @@ fn request_bytes(raw: &[u8]) -> SipRequest {
 }
 
 /// An in-dialog INFO the dead node sent on `branch`, attributed to
-/// `CALL_REF` through its Via.
+/// `CALL_REF` through its Via, its `Max-Forwards` laid out as no render here
+/// writes it.
 fn client_info(branch: &str, call_id: &str) -> SipRequest {
     let invite = invite_with_cr_lg(CALL_REF, call_id, branch, "b-1");
     let text = String::from_utf8(invite.image().to_vec()).expect("utf-8");
     let info = text
         .replace("INVITE sip:", "INFO sip:")
         .replace("CSeq: 1 INVITE", "CSeq: 2 INFO")
+        .replace("Max-Forwards: 70", "Max-Forwards:   70")
         .replace("To: <sip:bob@192.0.2.20:5060>", "To: <sip:bob@192.0.2.20:5060>;tag=peer-tag");
     request_bytes(info.as_bytes())
 }
 
-/// A seeded client non-INVITE retransmits its request under its branch on
-/// Timer E from the seed, the first copy T1 after it (RFC 3261 §17.1.2.2),
-/// and hands the final it draws up once, matched, for its call.
+/// A seeded client non-INVITE retransmits its request as it left, byte for
+/// byte, under its branch on Timer E from the seed, the first copy T1 after
+/// it (RFC 3261 §17.1.2.2), and hands the final it draws up once, matched,
+/// for its call.
 #[tokio::test(start_paused = true)]
 async fn a_seeded_client_non_invite_retransmits_its_request_and_takes_its_final() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
     let (branch, call_id) = ("z9hG4bK-seed-info", "seed-info");
-    let seed = TxnSeed::ClientNonInvite { request: client_info(branch, call_id), dest: addr(PEER) };
+    let request = client_info(branch, call_id);
+    let image = request.image().clone();
+    let seed = TxnSeed::ClientNonInvite { request, dest: addr(PEER), bound_ms: TIMER_F };
     assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
     assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
     elapse_ms(400).await;
     assert!(stack.drain_peer().is_empty(), "nothing leaves before T1");
     elapse_ms(200).await;
-    let out = stack.drain_peer();
-    assert_eq!(count_requests(&out, "INFO"), 1, "the request leaves again at T1");
-    assert_eq!(request_branch(&out, "INFO").as_deref(), Some(branch), "under its own branch");
+    let copy = stack.peer.try_recv().expect("the request leaves again at T1");
+    assert_eq!(copy.raw, image, "the recorded image, byte for byte, under its own branch");
+    assert!(stack.peer.try_recv().is_none(), "once");
 
     stack.inject(&response_bytes(200, "OK", "INFO", branch, call_id, true)).await;
     elapse_ms(60).await;
@@ -77,15 +86,16 @@ async fn a_seeded_client_non_invite_retransmits_its_request_and_takes_its_final(
     assert!(stack.drain_peer().is_empty(), "a final ends the retransmissions");
 }
 
-/// A seeded client non-INVITE no final answers gives up on Timer F from the
-/// seed, as a transaction this layer opened does.
+/// A seeded client non-INVITE no final answers gives up when what was left of
+/// its Timer F runs out, measured from the seed (RFC 3261 §17.1.2.2).
 #[tokio::test(start_paused = true)]
-async fn a_seeded_client_non_invite_gives_up_on_timer_f() {
+async fn a_seeded_client_non_invite_gives_up_on_what_is_left_of_timer_f() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
     let (branch, call_id) = ("z9hG4bK-seed-info-f", "seed-info-f");
-    let seed = TxnSeed::ClientNonInvite { request: client_info(branch, call_id), dest: addr(PEER) };
+    let request = client_info(branch, call_id);
+    let seed = TxnSeed::ClientNonInvite { request, dest: addr(PEER), bound_ms: LEFT };
     stack.txn.seed(CALL_REF, vec![seed]).await.unwrap();
-    elapse_ms(sip_txn::timers::TIMER_F - 100).await;
+    elapse_ms(LEFT - 100).await;
     let _ = stack.drain_peer();
     assert!(
         !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
@@ -94,7 +104,7 @@ async fn a_seeded_client_non_invite_gives_up_on_timer_f() {
     elapse_ms(200).await;
     assert!(
         stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "Timer F from the seed ends it"
+        "the Timer F left ends it"
     );
 }
 

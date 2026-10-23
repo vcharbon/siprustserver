@@ -113,11 +113,11 @@ pub use reliable::{
 pub use request_records::{
     add_record, answered_record, cancel_relay, close_held, close_record, every_record, find_relay,
     held_record, next_held_deadline, record_with_branch, records_of, remove_relay,
-    take_overdue_held, take_retired_owed, RecordHolder,
+    take_overdue_held, take_retired_owed, Answers, RecordHolder,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
 pub use round::{holds_rounds_of, merge_rounds, round_ahead, round_further, round_opened};
-pub use sequence::{holds_relays_of, raise_sequences};
+pub use sequence::{holds_records_of, raise_sequences};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,
     refer_processed_locally, relay_first_18x_first_relayed, relay_first_18x_messages,

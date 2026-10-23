@@ -48,7 +48,7 @@ crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1174
 crates/call/tests/it/common/mod.rs 916
-crates/call/tests/it/model_helpers.rs 933
+crates/call/tests/it/model_helpers.rs 902
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1280

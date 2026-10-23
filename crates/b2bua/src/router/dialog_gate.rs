@@ -211,6 +211,7 @@ fn admit_response(call: &Call, leg_id: &str, resp: &SipResponse) -> Gate {
         cseq: i64::from(cseq.seq()),
         method: cseq.method().as_str(),
         status: resp.status(),
+        branch: resp.top_via().branch(),
     };
     match response_origin(call, leg_id, facts) {
         ResponseOrigin::Dialog(resolved) => Gate::Pass(resolved),

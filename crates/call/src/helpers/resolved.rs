@@ -7,7 +7,7 @@
 use crate::model::{Call, Dialog, DialogId, Leg, RequestRecord};
 
 use super::leg::{find_leg, leg_own_tag};
-use super::request_records::{answered_record, RecordHolder};
+use super::request_records::{answered_record, Answers, RecordHolder};
 
 /// The dialog the turn's message names, and the request record a response or
 /// a transaction timeout settles. Empty for any other event, and for a message
@@ -53,6 +53,8 @@ pub struct ResponseFacts<'a> {
     /// The CSeq method: the method of the request it answers.
     pub method: &'a str,
     pub status: u16,
+    /// The top-Via branch: the client transaction it answers.
+    pub branch: Option<&'a str>,
 }
 
 /// What the response `facts` describes answers on `leg_id`.
@@ -63,8 +65,8 @@ pub fn response_origin(call: &Call, leg_id: &str, facts: ResponseFacts<'_>) -> R
         None => leg.dialogs.confirmed().filter(|d| Some(d.our_tag.as_str()) == facts.from),
     };
     if let Some(d) = named {
-        let record = answered_record(call, leg_id, facts.to, facts.from, facts.cseq, facts.method)
-            .map(Box::new);
+        let answers = Answers { method: facts.method, cseq: facts.cseq, branch: facts.branch };
+        let record = answered_record(call, leg_id, facts.to, facts.from, answers).map(Box::new);
         return ResponseOrigin::Dialog(Resolved { dialog: Some(d.id()), record });
     }
     let Some(from) = facts.from.filter(|f| holds_our_tag(leg, f)) else {

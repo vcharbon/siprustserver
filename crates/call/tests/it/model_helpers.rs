@@ -10,8 +10,8 @@ use sip_retransmit::Class;
 
 const A_TAG: &str = "b2bua-to-tag-aleg-9876"; // the a-leg dialog's own tag
 const ALICE_TAG: &str = "alice-from-tag-001"; // the a-leg dialog's peer tag
-const B_LOCAL_TAG: &str = "b2bua-from-tag-bleg-5544"; // the b-1 dialog's own tag
-const B_TAG: &str = "bob-to-tag-007"; // the b-1 dialog's peer tag
+pub(crate) const B_LOCAL_TAG: &str = "b2bua-from-tag-bleg-5544"; // the b-1 dialog's own tag
+pub(crate) const B_TAG: &str = "bob-to-tag-007"; // the b-1 dialog's peer tag
 
 fn a_id() -> DialogId {
     DialogId { our_tag: A_TAG.into(), peer_tag: ALICE_TAG.into() }
@@ -352,7 +352,7 @@ fn an_arrival_reads_as_a_repeat_in_order_or_out_of_order() {
 /// `representative_call` deliberately seeds pending INVITE snapshots for
 /// round-trip coverage; these start from a call with no in-dialog INVITE in
 /// flight.
-fn settled_call() -> Call {
+pub(crate) fn settled_call() -> Call {
     let mut call = representative_call();
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         for d in leg.dialogs.iter_mut() {
@@ -884,37 +884,6 @@ fn the_carrying_dialog_is_the_confirmed_or_the_only_live_one() {
     let ended: Dialogs =
         vec![Dialog { state: DialogState::Ended(DialogEnd::PeerBye), ..early("f1") }].into();
     assert!(ended.carrying().is_none());
-}
-
-/// A relay open in an early dialog the answer retired is found through that
-/// dialog's tags, and closing it leaves the retired record in place (RFC 3261
-/// §8.1.3.3).
-#[test]
-fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
-    let mut call = settled_call();
-    let open = RequestRecord {
-        source_call_id: "cid".into(),
-        source_from: "f".into(),
-        source_to: "t".into(),
-        offered: true,
-        ..RequestRecord::relayed("UPDATE", 3, 3)
-    };
-    let lost = Dialog {
-        state: DialogState::Retired(RetiredDialog { open_requests: vec![open], release: None }),
-        ..Dialog::new(B_LOCAL_TAG, "lost-fork", DialogState::Early, 3)
-    };
-    call.b_legs[0].dialogs.insert(lost);
-    let (holder, pending) =
-        answered_record(&call, "b-1", Some("lost-fork"), Some(B_LOCAL_TAG), 3, "UPDATE")
-            .expect("found");
-    let id = DialogId { our_tag: B_LOCAL_TAG.into(), peer_tag: "lost-fork".into() };
-    assert_eq!(holder, RecordHolder::Retired(id.clone()));
-    assert_eq!(pending.method, "UPDATE");
-    assert!(answered_record(&call, "b-1", Some(B_TAG), Some(B_LOCAL_TAG), 3, "UPDATE").is_none());
-
-    let call = close_record(call, "b-1", &holder, 3);
-    let kept = call.b_legs[0].dialogs.by_tags(&id.our_tag, &id.peer_tag).expect("kept");
-    assert!(kept.retired().is_some_and(|r| r.open_requests.is_empty()));
 }
 
 /// A dialog the peer's BYE ended while early was never established: only

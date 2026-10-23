@@ -180,7 +180,11 @@ pub(super) async fn materialise(
         return Materialised::Resident(ctx.state.peek(call_ref).unwrap_or(call));
     }
     ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
-    let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(&call)).await.ok();
+    let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(&call, now_ms)).await.ok();
+    // A sent request past its deadline is settled as the timeout it drew.
+    for timeout in seeds::overdue_sent(&call, now_ms) {
+        let _ = ctx.reentry_tx.send(timeout);
+    }
     match origin {
         Origin::Takeover => {
             ctx.state.mark_takeover(call_ref);
@@ -221,34 +225,60 @@ pub(super) async fn materialise(
 /// a second relay for the round nor refuse its copy as glare); a non-INVITE
 /// request only when the record names its branch as a request it relayed or
 /// holds ([`seeds::names_received_branch`]: a copy of it is absorbed, never
-/// relayed a second time); any other request, a response a transaction here
-/// already took, and any non-SIP event are the turn's to process. `Matched`: the layer re-emitted
+/// relayed a second time) — a relay whose client transaction this node does
+/// not hold is superseded instead: dropped from the record, and the copy
+/// relayed afresh; any other request, a response a transaction here already
+/// took, and any non-SIP event are the turn's to process. `Matched`: the layer re-emitted
 /// whatever it owes, so this turn ends without running the rules; `Unmatched`
 /// (a layer that cannot be asked included): the turn continues.
 pub(super) async fn reoffer_trigger(
     ctx: &Arc<RouterCtx>,
-    call: &Call,
+    call: Call,
     event: &CallEvent,
     matched_client_txn: bool,
-) -> Reoffer {
+) -> Offered {
     let CallEvent::Sip { message, src } = event else {
-        return Reoffer::Unmatched;
+        return Offered::Turn(Box::new(call));
     };
     let offer = match message.as_ref() {
         SipMessage::Response(_) => !matched_client_txn,
         SipMessage::Request(req) if req.method() == Method::Cancel => true,
         SipMessage::Request(req) if req.method() == Method::Invite => {
-            seeds::names_server_branch(call, req.top_via().branch().unwrap_or_default())
+            seeds::names_server_branch(&call, req.top_via().branch().unwrap_or_default())
         }
         SipMessage::Request(req) if req.method() == Method::Ack => false,
         SipMessage::Request(req) => {
-            seeds::names_received_branch(call, req.top_via().branch().unwrap_or_default())
+            let branch = req.top_via().branch().unwrap_or_default();
+            match seeds::received_record(&call, branch) {
+                None => false,
+                Some(record) => match record.branch() {
+                    // A relay whose client transaction is another node's:
+                    // its final follows that relay's Via there, so its
+                    // originator's copy supersedes it and is relayed afresh.
+                    Some(sent) if !ctx.txn.holds_client(sent).await.unwrap_or(false) => {
+                        let call = seeds::drop_superseded(call, branch);
+                        return Offered::Turn(Box::new(call));
+                    }
+                    _ => true,
+                },
+            }
         }
     };
     if !offer {
-        return Reoffer::Unmatched;
+        return Offered::Turn(Box::new(call));
     }
-    ctx.txn.reoffer((**message).clone(), *src).await.unwrap_or(Reoffer::Unmatched)
+    match ctx.txn.reoffer((**message).clone(), *src).await.unwrap_or(Reoffer::Unmatched) {
+        Reoffer::Matched => Offered::Matched,
+        Reoffer::Unmatched => Offered::Turn(Box::new(call)),
+    }
+}
+
+/// What [`reoffer_trigger`] made of a turn's datagram.
+pub(super) enum Offered {
+    /// A transaction here took it: the turn ends.
+    Matched,
+    /// The turn runs on the call, a relay the datagram supersedes dropped.
+    Turn(Box<Call>),
 }
 
 /// The seeds a fold into the call's record hands the layer: the INVITE server
@@ -259,7 +289,8 @@ pub(super) async fn reoffer_trigger(
 /// answers it is in the record; the rest of a round runs where its Via sends
 /// the target's responses, the node that relayed it.
 pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnSeed> {
-    seeds::seeds_for(call)
+    // No instant moves an INVITE seed: the latest one is read.
+    seeds::seeds_for(call, i64::MAX)
         .into_iter()
         .filter(|s| matches!(s, sip_txn::TxnSeed::ServerAccepted { .. }))
         .collect()
@@ -270,7 +301,8 @@ pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnS
 /// final, whose bound and finals the copy owns, or a 2xx awaiting its ACK,
 /// whose retransmission ladder the copy resumes (RFC 3261 §13.3.1.4).
 pub(super) fn has_invite_to_serve(call: &Call) -> bool {
-    seeds::seeds_for(call).iter().any(|s| {
+    // No instant moves an INVITE seed: the latest one is read.
+    seeds::seeds_for(call, i64::MAX).iter().any(|s| {
         matches!(
             s,
             sip_txn::TxnSeed::ClientInvite { .. }

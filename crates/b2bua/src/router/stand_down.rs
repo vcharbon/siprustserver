@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use call::helpers::{holds_relays_of, holds_rounds_of, round_ahead};
+use call::helpers::{holds_records_of, holds_rounds_of, round_ahead};
 use call::{Call, RelayOwner};
 
 use super::release::{release_call, ReleaseKind};
@@ -90,8 +90,8 @@ pub(super) async fn stand_down_turn(
 /// Whether the primary's body `primary` covers every write the takeover
 /// `copy` made on worker `by`: the same call (one incarnation), the primary's
 /// `b` at or past the copy's, no re-INVITE round on which the copy stands
-/// ahead (`call::helpers::round_ahead`), and every request the copy relayed
-/// and awaits a final for held in the primary's record
+/// ahead (`call::helpers::round_ahead`), and every request record the copy
+/// keeps open held in the primary's record
 /// ([`finishes_nothing_alone`]). One `b` increment is one write the copy made
 /// as the call's acting backup (`CallState::update` on this node); a fold of
 /// the primary's body is not one. A primary reaches a `b` by reading the
@@ -109,13 +109,15 @@ pub(super) fn covers(primary: &Call, copy: &Call, by: &RelayOwner) -> bool {
 /// that `record` — the primary's, or none once deleted — lacks: every
 /// re-INVITE round it holds the transaction of, unfinished, is the record's
 /// transaction or behind a later one (`call::helpers::holds_rounds_of`), and
-/// every other request it relayed is the record's relay
-/// (`call::helpers::holds_relays_of`). A final follows the Via to the node
-/// that sent the request (RFC 3261 §18.2.2): a copy that relinquished it
-/// leaves the originator with no final, so the copy plays on with it and
-/// self-releases once its transactions clear.
+/// every other request record it keeps open — relayed, its own, or held for a
+/// later final — is the record's (`call::helpers::holds_records_of`). A
+/// final follows the Via to the node that sent the request (RFC 3261
+/// §18.2.2), and a held request's final leaves on the server transaction
+/// only the copy holds: a copy that relinquished either leaves its peer with
+/// no final, so the copy plays on with it and self-releases once its
+/// transactions clear.
 pub(super) fn finishes_nothing_alone(record: Option<&Call>, copy: &Call, by: &RelayOwner) -> bool {
-    holds_rounds_of(record, copy, by) && holds_relays_of(record, copy, by)
+    holds_rounds_of(record, copy, by) && holds_records_of(record, copy, by)
 }
 
 #[cfg(test)]

@@ -152,6 +152,7 @@ fn relayed_reinvite(outbound_cseq: i64, cancelled: bool) -> RequestRecord {
         offered: false,
         source_timestamp: None,
         relayed_by: Default::default(),
+        author: None,
     }
 }
 
@@ -252,7 +253,7 @@ fn a_ringing_call_seeds_the_a_leg_server_invite_and_the_b_leg_client_invite_once
         "the caller's INVITE is no in-dialog re-offer target"
     );
     assert!(!names_server_branch(&call, B_BRANCH));
-    let seeds = seeds_for(&call);
+    let seeds = seeds_for(&call, 0);
     assert_eq!(seeds.len(), 2, "{seeds:?}");
     assert_eq!(server_branches(&seeds), vec![A_BRANCH.to_string()]);
     assert_eq!(client_branches(&seeds), vec![B_BRANCH.to_string()]);
@@ -274,7 +275,7 @@ fn a_ringing_call_seeds_the_a_leg_server_invite_and_the_b_leg_client_invite_once
 #[test]
 fn an_unrung_a_leg_seeds_no_to_tag() {
     let call = call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
-    let seeds = seeds_for(&call);
+    let seeds = seeds_for(&call, 0);
     assert_eq!(server_identity(&seeds[0]), Some(("acid@alice", "atag", None, Some("a"))));
 }
 
@@ -284,7 +285,7 @@ fn an_unrung_a_leg_seeds_no_to_tag() {
 fn an_established_call_seeds_nothing() {
     let call =
         call_with(LegState::Confirmed, b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1))));
-    assert!(seeds_for(&call).is_empty());
+    assert!(seeds_for(&call, 0).is_empty());
 }
 
 /// A relayed re-INVITE in flight seeds both halves of the round: the
@@ -301,7 +302,7 @@ fn a_relayed_reinvite_in_flight_seeds_both_halves_of_the_round() {
     pending.source_timestamp = Some("54.2".into());
     confirmed(&mut leg).requests.push(pending);
     let call = call_with(LegState::Confirmed, leg);
-    let seeds = seeds_for(&call);
+    let seeds = seeds_for(&call, 0);
     assert_eq!(server_branches(&seeds), vec![RELAYED_BRANCH.to_string()]);
     let request = seeds
         .iter()
@@ -347,19 +348,19 @@ fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
     confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
     confirmed(&mut leg).ack_branch = None;
     let open = call_with(LegState::Confirmed, leg.clone());
-    let seeds = seeds_for(&open);
+    let seeds = seeds_for(&open, 0);
     assert!(server_branches(&seeds).is_empty(), "nothing was relayed, so no server seed");
     assert_eq!(client_branches(&seeds), vec![REINVITE_BRANCH.to_string()]);
 
     let mut answered = leg.clone();
     confirmed(&mut answered).awaited_ack_cseq = Some(2);
     assert!(
-        seeds_for(&call_with(LegState::Confirmed, answered)).is_empty(),
+        seeds_for(&call_with(LegState::Confirmed, answered), 0).is_empty(),
         "a 2xx taken closes the round"
     );
 
     let rejected = call::helpers::close_rejected_invite_round(open, "b-1", REINVITE_BRANCH);
-    assert!(seeds_for(&rejected).is_empty(), "a non-2xx final closed the round on the record");
+    assert!(seeds_for(&rejected, 0).is_empty(), "a non-2xx final closed the round on the record");
 }
 
 /// The initial INVITE's handle is closed by nothing but the leg's state: a
@@ -380,7 +381,7 @@ fn a_cancelled_relayed_reinvite_seeds_nothing() {
     confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
     confirmed(&mut leg).ack_branch = None;
     confirmed(&mut leg).requests.push(relayed_reinvite(2, true));
-    assert!(seeds_for(&call_with(LegState::Confirmed, leg)).is_empty());
+    assert!(seeds_for(&call_with(LegState::Confirmed, leg), 0).is_empty());
 }
 
 /// A b-leg whose handle does not read seeds only what does.
@@ -389,7 +390,7 @@ fn an_unreadable_handle_is_skipped() {
     let mut handle = b_handle(B_BRANCH, 1);
     handle.original_invite = b"garbage".to_vec();
     let call = call_with(LegState::Early, b_leg(LegState::Trying, Some(handle)));
-    let seeds = seeds_for(&call);
+    let seeds = seeds_for(&call, 0);
     assert_eq!(server_branches(&seeds), vec![A_BRANCH.to_string()]);
     assert!(client_branches(&seeds).is_empty());
 }
@@ -426,7 +427,7 @@ fn a_retained_reinvite_2xx_seeds_an_accepted_server_invite() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
     retain_reinvite_2xx(&mut leg, RELAYED_BRANCH);
     let call = call_with(LegState::Confirmed, leg);
-    let seeds = seeds_for(&call);
+    let seeds = seeds_for(&call, 0);
     assert_eq!(accepted_branches(&seeds), vec![RELAYED_BRANCH.to_string()], "{seeds:?}");
     let leg_id = seeds.iter().find_map(|s| match s {
         TxnSeed::ServerAccepted { leg_id, .. } => leg_id.as_deref(),
@@ -460,14 +461,14 @@ fn client_cancel(seeds: &[TxnSeed]) -> (bool, Option<Vec<String>>) {
 #[test]
 fn a_b_leg_with_no_dialog_seeds_its_invite_with_no_provisional() {
     let call = call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
-    assert_eq!(client_cancel(&seeds_for(&call)), (false, None));
+    assert_eq!(client_cancel(&seeds_for(&call, 0)), (false, None));
 }
 
 /// An early dialog is the record of a provisional.
 #[test]
 fn an_early_b_leg_seeds_its_invite_with_a_provisional() {
     let call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
-    assert_eq!(client_cancel(&seeds_for(&call)), (true, None));
+    assert_eq!(client_cancel(&seeds_for(&call, 0)), (true, None));
 }
 
 /// A CANCEL the record says was sent with no provisional on record is still
@@ -479,9 +480,58 @@ fn a_cancelled_b_leg_seeds_its_held_cancel_with_the_stated_reason() {
     let reason = vec![("Reason".to_string(), "Q.850;cause=16".to_string())];
     let call = call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
     let call = call::helpers::record_cancel_sent(call, "b-1", reason.clone());
-    assert_eq!(client_cancel(&seeds_for(&call)), (false, Some(vec!["Q.850;cause=16".to_string()])));
+    assert_eq!(
+        client_cancel(&seeds_for(&call, 0)),
+        (false, Some(vec!["Q.850;cause=16".to_string()]))
+    );
 
     let call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
     let call = call::helpers::record_cancel_sent(call, "b-1", reason);
-    assert_eq!(client_cancel(&seeds_for(&call)), (true, None));
+    assert_eq!(client_cancel(&seeds_for(&call, 0)), (true, None));
+}
+
+/// This stack's own INFO on the b-leg's confirmed dialog, sent with the
+/// image of the b-leg's INVITE handle under `branch`, its Timer F ending at
+/// `deadline_ms`.
+fn own_info(leg: &mut Leg, branch: &str, deadline_ms: i64) {
+    let image = b_handle(branch, 2).original_invite;
+    let sent = call::SentRequest {
+        branch: branch.into(),
+        image,
+        destination: HostPort { host: "10.0.0.9".into(), port: 5080 },
+    };
+    confirmed(leg).requests.push(RequestRecord::own(
+        "INFO",
+        2,
+        sent,
+        deadline_ms,
+        Default::default(),
+    ));
+}
+
+/// A sent record seeds a client transaction bounded by what is left of its
+/// Timer F; one past its deadline seeds nothing and settles as its timeout.
+#[test]
+fn a_sent_record_seeds_what_is_left_of_its_timer_f_and_none_past_it() {
+    let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
+    own_info(&mut leg, "z9hG4bK-own-info", 30_000);
+    let call = call_with(LegState::Confirmed, leg);
+
+    let bound = seeds_for(&call, 10_000).into_iter().find_map(|s| match s {
+        TxnSeed::ClientNonInvite { bound_ms, .. } => Some(bound_ms),
+        _ => None,
+    });
+    assert_eq!(bound, Some(20_000), "the seed gives up when the first copy's Timer F would");
+    assert!(overdue_sent(&call, 10_000).is_empty());
+
+    let past = seeds_for(&call, 30_000);
+    assert!(
+        !past.iter().any(|s| matches!(s, TxnSeed::ClientNonInvite { .. })),
+        "nothing is re-sent past the deadline"
+    );
+    let overdue = overdue_sent(&call, 30_000);
+    assert!(
+        matches!(overdue.as_slice(), [CallEvent::Timeout { branch, .. }] if branch == "z9hG4bK-own-info"),
+        "the record settles as its timeout: {overdue:?}"
+    );
 }

@@ -143,7 +143,8 @@ peer leg (its received half is the originator's request, its sent half the
 relay), this stack's **own**, or **held** — received and owed a final a
 service gives on a later turn, which the platform gives (500) at a deadline
 under the sender's Timer F. It carries its method, CSeq, branch, the request
-as sent and its destination, its deadline and the dialog usage it belongs to,
+as sent and its destination, its deadline, the dialog usage it belongs to and,
+for an own request, the rule that sent it; a final settles it by its branch,
 outlives its dialog's retirement, and settles by its final, its timeout, its
 leg's end, the call's release or its deadline; a takeover seeds a transaction
 from each half. An INVITE's in-flight transaction state lives on its dialog
@@ -152,9 +153,11 @@ _Avoid_: "pending relay" or "snapshot" for a record that is not a relay.
 
 **Method table** (`b2bua_core::rules::method_table`):
 What differs by method for a non-INVITE request record: what a dialog this
-side is ending makes of it, the final a relay toward an ended leg owes, what
-the timeout of this stack's own request ends, and whether it waits behind
-this stack's own NOTIFY in flight. Knows no HA.
+side is ending makes of it, the final a relay toward an ended leg owes, and
+whether it waits behind this stack's own NOTIFY in flight. Knows no HA. What
+the timeout of this stack's own request ends is policy: the default rule's,
+which a service rule outranks for a request its rule sent (the record names
+that rule).
 
 **PRACK disposition**:
 What a PRACK this stack receives draws on the face it showed the

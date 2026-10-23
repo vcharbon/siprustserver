@@ -17,6 +17,7 @@ mod instants;
 mod invite_glare;
 mod lifecycle;
 mod model_helpers;
+mod request_records;
 mod round;
 mod sequence;
 mod timer_scope;

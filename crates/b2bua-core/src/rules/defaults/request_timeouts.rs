@@ -1,24 +1,48 @@
-//! What a client transaction's timeout means for `handle-timeout`, before its
-//! INVITE readings: the request record the timeout settled, read by its origin
-//! and the method table (ADR-0055 §2); a leg already going away; the BYE that
-//! released a fork straggler.
+//! What a client transaction's timeout means for `handle-timeout`, the
+//! default of the rules, before its INVITE readings: the request record the
+//! timeout settled, read by its origin and method (ADR-0055 §2); a leg
+//! already going away; the BYE that released a fork straggler. A service
+//! rule outranks it for a request of its own
+//! ([`b2bua_sdk::model::RuleContext::timed_out_record`] names the rule that
+//! sent it).
 
 use b2bua_sdk::model::{LegEnd, RuleAction, RuleContext};
 use call::{ByeDisposition, LegDisposition, TerminationCause, TimeoutKind};
 
-use crate::rules::method_table::OwnTimeout;
+use sip_message::Method;
 
-/// What the timeout of the request `record` settled means (ADR-0055 §2). A
-/// relay's is the relayed exchange's: the originator is sent no 408 (RFC 4320
-/// §4.2) and the session stands (RFC 5057 §5.2). This stack's own request's
-/// reads the method table: a PRACK's denies that acknowledgement alone; on a
+/// What the timeout of this stack's own request ends by default, its leg
+/// still up (RFC 5057 §5.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnTimeout {
+    /// Nothing beyond the transaction: a PRACK's acknowledgement alone.
+    Transaction,
+    /// The usage the request belongs to: a NOTIFY's subscription.
+    Usage,
+    /// The session: the call ends.
+    Session,
+}
+
+/// The default reading of the timeout of this stack's own `method`.
+fn own_timeout(method: &str) -> OwnTimeout {
+    match Method::from_wire(method) {
+        Method::Prack => OwnTimeout::Transaction,
+        Method::Notify => OwnTimeout::Usage,
+        _ => OwnTimeout::Session,
+    }
+}
+
+/// What the timeout of the request `record` settled means by default
+/// (ADR-0055 §2). A relay's is the relayed exchange's: the originator is sent
+/// no 408 (RFC 4320 §4.2) and the session stands (RFC 5057 §5.2). This
+/// stack's own request's: a PRACK's denies that acknowledgement alone; on a
 /// leg going away it is the leg's end; a NOTIFY's ends its subscription
 /// alone, which a service owning it reads; any other ends the session.
 pub(super) fn record_timeout_actions(
     ctx: &RuleContext,
     record: &call::RequestRecord,
 ) -> Vec<RuleAction> {
-    let own = crate::rules::method_table::row_of(&record.method).own_timeout;
+    let own = own_timeout(&record.method);
     if record.is_relay() || own == OwnTimeout::Transaction {
         return vec![];
     }

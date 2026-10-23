@@ -20,13 +20,15 @@ pub struct TurnScope {
     pub notes: TurnNotes,
     /// The wire faults the turn emits.
     pub faults: WireFaultSet,
+    /// The rule whose actions run now, by its id; `None` outside them.
+    pub rule: Option<&'static str>,
 }
 
 impl TurnScope {
     /// The scope of the turn `ids` draws for, nothing reported yet, no wire
     /// fault armed.
     pub fn of(ids: TurnIds) -> Self {
-        Self { ids, notes: TurnNotes::default(), faults: WireFaultSet::none() }
+        Self { ids, notes: TurnNotes::default(), faults: WireFaultSet::none(), rule: None }
     }
 
     /// `self`, emitting the wire faults `faults`.

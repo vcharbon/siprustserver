@@ -72,6 +72,7 @@ impl ActionExecutor<'_> {
     ) {
         let record = RequestRecord {
             relayed_by: self.config.relay_owner(),
+            author: self.turn.rule.map(str::to_string),
             ..RequestRecord::own(
                 req.method().as_str(),
                 i64::from(req.cseq().seq()),

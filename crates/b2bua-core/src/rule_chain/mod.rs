@@ -178,7 +178,13 @@ pub fn rule_chain_turn(
             let leg = source_leg_id;
             let fx = &mut ladder_fx;
             response_facts::record(&mut exec, &mut call, fx, leg, resp, screened);
-            exec.release_answered_notify(&mut call, &mut ladder_fx, leg, resp);
+            // Only the final on this stack's NOTIFY's own transaction ends
+            // the wait behind it: a final to another request reusing its
+            // number (a dead owner's) answers nothing here.
+            let own = resolved.record.as_deref().is_some_and(|(_, r)| r.is_own());
+            if own {
+                exec.release_answered_notify(&mut call, &mut ladder_fx, leg, resp);
+            }
         }
     }
     // The request record a final or a timeout settles is settled before the

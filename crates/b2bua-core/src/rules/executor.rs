@@ -118,7 +118,9 @@ pub fn execute_rules(
         let before = call.clone();
         report_diagnostics(rule, call, &outcome);
         check_declared_effects(rule, &outcome.actions, call, &mut exec.turn.notes);
+        exec.turn.rule = Some(rule.id);
         let result = exec.execute(&outcome.actions, call, ctx);
+        exec.turn.rule = None;
         // The rule's OWN cursor move is checked against what the rule
         // produced — the projections, the terminal fold below and the
         // machine deactivation termination performs belong to the engine,

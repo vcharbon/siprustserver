@@ -33,25 +33,36 @@ fn holder_of(d: &Dialog) -> RecordHolder {
     }
 }
 
-/// The sent record a final for `method` numbered `cseq` arriving on `leg_id`
-/// answers (RFC 3261 §8.1.3.3), and where it is kept: on the dialog the
-/// response's tags name, or among that dialog's open requests once it
-/// retired. A response with no To-tag reads the leg's confirmed dialog. Never
-/// another dialog's record: two dialogs may carry the same CSeq.
+/// What a response answers: the method and number of its CSeq, and the
+/// top-Via branch of the client transaction it answers.
+#[derive(Clone, Copy, Debug)]
+pub struct Answers<'a> {
+    pub method: &'a str,
+    pub cseq: i64,
+    pub branch: Option<&'a str>,
+}
+
+/// The sent record a final arriving on `leg_id` answers (RFC 3261
+/// §8.1.3.3), and where it is kept: on the dialog the response's tags name,
+/// or among that dialog's open requests once it retired. A response with no
+/// To-tag reads the leg's confirmed dialog. Never another dialog's record: two
+/// dialogs may carry the same CSeq.
 pub fn answered_record(
     call: &Call,
     leg_id: &str,
     to: Option<&str>,
     from: Option<&str>,
-    cseq: i64,
-    method: &str,
+    answers: Answers<'_>,
 ) -> Option<(RecordHolder, RequestRecord)> {
     let leg = find_leg(call, leg_id)?;
     let d = match to {
         None => leg.dialogs.confirmed()?,
         Some(_) => leg.dialogs.of_response(to, from)?,
     };
-    records_of(d).iter().find(|r| r.answered_by(method, cseq)).map(|r| (holder_of(d), r.clone()))
+    records_of(d)
+        .iter()
+        .find(|r| r.answered_by(answers.method, answers.cseq, answers.branch))
+        .map(|r| (holder_of(d), r.clone()))
 }
 
 /// The sent record whose transaction left on `branch` from `leg_id`, and

@@ -13,9 +13,8 @@ use sip_message::SipMessage;
 use super::admit::UnbornCall;
 use super::incarnation_gate::of_another_incarnation;
 use super::interpret::process_result;
-use sip_txn::Reoffer;
 
-use super::materialise::{materialise, reoffer_trigger, Materialised, Origin, Reason};
+use super::materialise::{materialise, reoffer_trigger, Materialised, Offered, Origin, Reason};
 use super::peer_metrics::record_keepalive_timeout_peer;
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
@@ -183,9 +182,10 @@ pub(super) async fn process(
         // materialisation — this turn's or an earlier one's, whose seeds went in
         // after the datagram was emitted — may hold one now. Re-offered, a match
         // is the layer's to answer and re-emit; this turn ends.
-        if reoffer_trigger(ctx, &call, &event, matched_client_txn).await == Reoffer::Matched {
-            return;
-        }
+        let call = match reoffer_trigger(ctx, call, &event, matched_client_txn).await {
+            Offered::Matched => return,
+            Offered::Turn(call) => *call,
+        };
         // A CANCEL reaches the router only when the transaction layer matched
         // no INVITE for it; the re-offer above was the seeded INVITE's chance.
         // Otherwise RFC 3261 §9.2: 481, and no effect on the call. The rules
