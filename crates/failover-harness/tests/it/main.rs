@@ -34,6 +34,7 @@ mod failover;
 mod failure_dump_names_the_node;
 mod fault_primitives;
 mod forward_flush_never_regresses_backup_progress;
+
 mod held_cancel_takeover;
 mod inflight_resend;
 mod instants_across_takeovers;
@@ -63,6 +64,7 @@ mod release_all;
 mod release_all_takeover;
 mod released_copy;
 mod reoffer_on_the_backup;
+mod replication_hold;
 mod retained_2xx_folded_into_the_record;
 mod retransmission_turn_is_quiet;
 mod retry_on_a_challenged_identity;

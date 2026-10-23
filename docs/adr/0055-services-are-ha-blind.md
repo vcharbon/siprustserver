@@ -93,7 +93,9 @@ What a service may rely on, and all it must know:
   attempt (the `call_ref`, the call incarnation, a per-call request sequence
   reserved by the sending turn); only the first answer the call awaits reaches
   the service;
-- a call may end cleanly at any instant (§4).
+- a call may end cleanly at any instant (§4);
+- it keeps durations or timers in its own state, never absolute times (§9
+  re-anchors the platform's instants only).
 
 None of these is an HA statement: a single node already behaves this way
 (`http-net/src/backend/retry.rs:38-52` re-sends after a timeout or a reset).
@@ -180,6 +182,12 @@ record's image under its branch (§17.1.2.2).
 - **A write is abandoned only with its backup.** It stays in the change log
   until the backup applies it, or until the replication link to that backup is
   down (ADR-0045 link liveness) and the call loses its backup.
+- **Settings.** The cap defaults to half the §17.2.1 bound (100 ms), and the
+  transaction layer's own 100 leaves at the bound itself (200 ms). The backlog
+  marks default to 10 000 entries or 5 s (high) and 1 000 entries and 1 s
+  (low). `B2BUA_REPL_HOLD_CAP_MS` and `B2BUA_REPL_BACKLOG_{HIGH,LOW}_{ENTRIES,AGE_MS}`
+  set them; a boot refuses a cap not above zero and below both bounds, or a
+  low mark not under its high one.
 
 A graceful drain is transparent: it exits once the backup has caught up. A
 kill is not: a final or a relay that left inside the replication window is
@@ -350,6 +358,17 @@ number of takeovers unshifted.
     held keeps its dialog until its own timers end it;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
     a kill: a call with no backup is lost as on a non-HA B2BUA.
+
+  A split that never heals is not supposed to last: it cuts a representative
+  few shapes (the re-INVITE, the REFER), whose cells check the worst case, no
+  leaked resource (the call ends on every side, full cleanup, the limiter
+  released), in a declared degraded mode. Two windows are declared, nothing
+  else:
+  - a split that never heals: the stale copy's requests into a dialog the
+    other copy ended, each closed by the 481 it draws;
+  - a kill inside the replication window: a copy re-uses a CSeq the dead
+    primary sent before the backup applied the write, at most one rejected
+    request per dialog; the call still ends or continues cleanly.
 
   A consumer adds shapes through the plug-in base (ADR-0049) and nothing else;
   a consumer shape that needs HA code of its own is a defect of this layer.

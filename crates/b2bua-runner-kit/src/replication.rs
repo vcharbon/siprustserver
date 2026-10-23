@@ -50,6 +50,7 @@ use crate::is_truthy;
 
 mod link_env;
 mod repl_resolver;
+mod write_path_env;
 use link_env::LinkSettings;
 use repl_resolver::ReplResolver;
 
@@ -84,6 +85,8 @@ pub struct ReplicationSettings {
     pub(crate) membership: MembershipSource,
     /// The link bounds, `B2BUA_REPL_*_MS` ([`link_env`]).
     pub(crate) link: LinkSettings,
+    /// The hold cap and backlog marks ([`write_path_env`]).
+    pub(crate) write_path: b2bua::repl::WritePath,
 }
 
 impl ReplicationSettings {
@@ -118,7 +121,8 @@ impl ReplicationSettings {
             MembershipSource::Static(list)
         };
         let link = LinkSettings::from_lookup(&get)?;
-        Ok(Some(Self { listen, peer_port, membership, link }))
+        let write_path = write_path_env::write_path(&get)?;
+        Ok(Some(Self { listen, peer_port, membership, link, write_path }))
     }
 
     /// How the membership these settings select is addressed.
@@ -169,6 +173,7 @@ impl ReplicationSettings {
             puller: self.link.puller(),
             serve: self.link.serve(),
             replica: b2bua::ReplicaConfig::default(),
+            write_path: self.write_path,
         })
     }
 }

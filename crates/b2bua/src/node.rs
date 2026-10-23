@@ -4,6 +4,7 @@
 //! tests, `Harness::bind_sut`), then drive SIP at the endpoint's address.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use observe::{spawn_keeping_node, NodeScope};
 use sip_message::parser::custom::CustomParser;
@@ -20,7 +21,7 @@ use crate::overload::OverloadSignal;
 use crate::repl::{Readiness, ReplServer, ReplicatingCallStore, ReplicationSupervisor, RouterSink};
 use crate::router::{self, RouterCtx};
 use crate::rules::{compose_rules, default_rules_with, ServiceDef};
-use crate::store::{BufferedTerminateWriter, CallState, CallStore};
+use crate::store::CallState;
 use crate::timers::TimerService;
 
 mod deps;
@@ -174,25 +175,21 @@ impl B2buaCore {
         let mut vital = vec![("timer_driver", timers.task())];
         vital.extend(cdr.task().map(|task| ("cdr_drainer", task)));
 
-        // Replication wiring (opt-in). When present: drain the store write path
-        // through a buffered writer into the replicating store, serve our
-        // changelog, start the puller supervisor, gate readiness on it, and open
-        // the X11 fail-back command channel (puller → router). An unwired node
-        // constructs none of these: no writer task, no channel, no receiver for
-        // the router to poll.
+        // Replication wiring (opt-in). When present: write the store directly,
+        // serve our changelog, start the puller supervisor, gate readiness on
+        // it, and open the X11 fail-back command channel (puller → router). An
+        // unwired node constructs none of these: no store write path, no
+        // channel, no receiver for the router to poll.
         let repl_store = replication.as_ref().map(|s| s.store.clone());
         let replica = replication.as_ref().map(|s| s.replica).unwrap_or_default();
+        let hold_cap = replication.as_ref().map_or(Duration::ZERO, |s| s.write_path.hold_cap);
         let capacity = capacity.unwrap_or_else(CapacityGate::live);
         capacity.configure(&config.capacity);
         capacity.configure_backup(&replica.backup);
         let (readiness, supervisor, fail_back) = match replication {
             Some(setup) => {
                 let self_ordinal = config.self_ordinal.clone();
-                // The writer drains to the replicating store itself so its
-                // changelog bumps on every flush carrying a peer.
-                let writer =
-                    BufferedTerminateWriter::spawn(setup.store.clone() as Arc<dyn CallStore>, 1024);
-                vital.push(("terminate_writer", writer.task()));
+                setup.store.changelog().set_backlog_marks(setup.write_path.backlog);
                 let (repl_tx, repl_rx) =
                     tokio::sync::mpsc::unbounded_channel::<router::ReplCommand>();
                 // Stamp the replicated-body TTL with the **reboot budget** (ADR-0011
@@ -200,7 +197,7 @@ impl B2buaCore {
                 // 1 h max_duration backstop (`ReplicaConfig` outlasts one keepalive).
                 let replicated_ttl_ms = replica.reboot_budget_sec.saturating_mul(1000);
                 state = state
-                    .with_replication(setup.store.clone(), writer)
+                    .with_replication(setup.store.clone())
                     .with_replicated_ttl_ms(replicated_ttl_ms);
 
                 let self_identity =
@@ -384,6 +381,7 @@ impl B2buaCore {
             keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             late_pracks: Default::default(),
+            holds: router::Holds::new(hold_cap),
             reentry_tx,
             // Arc-shared into every per-call `ctx.clone()`, like `decision`.
             adaptation_http: adaptation_http.map(Arc::new),
@@ -491,13 +489,6 @@ impl B2buaCore {
         &self.ctx
     }
 
-    /// The buffered terminate writer the call store write path submits to, for
-    /// the tests that assert what an unwired node constructs.
-    #[cfg(test)]
-    pub(crate) fn terminate_writer(&self) -> Option<&BufferedTerminateWriter> {
-        self.ctx.state.terminate_writer()
-    }
-
     /// The fail-back command sender the router's receiver pairs with, for the
     /// tests that assert what an unwired node constructs.
     #[cfg(test)]
@@ -580,8 +571,9 @@ impl B2buaCore {
         self.ctx.state.sample_store_gauges();
         if let Some(repl) = &self.repl_store {
             let (meta_total, meta_backup) = repl.meta_counts();
-            let (cl_entries, cl_peers) = repl.changelog().depth();
-            self.metrics.set_repl_store_gauges(meta_total, meta_backup, cl_entries, cl_peers);
+            let (entries, peers) = repl.changelog().depth();
+            let unbacked = repl.unbacked_count() as u64;
+            self.metrics.set_repl_store_gauges(meta_total, meta_backup, unbacked, entries, peers);
         }
     }
 }

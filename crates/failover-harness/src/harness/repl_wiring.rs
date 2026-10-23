@@ -24,7 +24,7 @@ pub(super) struct ReplWiring {
     pub(super) peers: Vec<Peer>,
     /// This node's repl listen address (stable across reboots).
     pub(super) listen_addr: SocketAddr,
-    pub(super) ttls: (i64, i64),
+    pub(super) dead_peer_ttl_ms: i64,
     /// The node's replication tunables, the same on every incarnation.
     pub(super) replica: b2bua::ReplicaConfig,
 }
@@ -50,7 +50,8 @@ impl ReplWiring {
         gen: u64,
         clock: &Clock,
     ) -> (ReplicationSetup, Arc<ReplicatingCallStore>, Arc<SimulatedMembership>) {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(self.ttls.0, self.ttls.1);
+        let changelog =
+            Changelog::new(gen, clock.clone()).with_dead_peer_ttl(self.dead_peer_ttl_ms);
         let store = Arc::new(ReplicatingCallStore::with_changelog(changelog, clock.clone()));
         let sim_membership =
             Arc::new(SimulatedMembership::with_clock(self.peers.clone(), clock.clone()));
@@ -78,6 +79,7 @@ impl ReplWiring {
             puller: PullerConfig::default(),
             serve: ServeConfig::default(),
             replica: self.replica,
+            write_path: Default::default(),
         };
         (setup, store, sim_membership)
     }

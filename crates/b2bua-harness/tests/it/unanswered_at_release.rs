@@ -28,7 +28,7 @@ fn panic_on_info(_: &RuleContext) -> Option<RuleHandleResult> {
 }
 
 /// Outranks the core re-INVITE relay and panics on an INVITE in a dialog:
-/// the handler dies after the layer's 100 Trying, before any answer.
+/// the handler dies before any answer, its 100 Trying included.
 fn panic_on_reinvite(ctx: &RuleContext) -> Option<RuleHandleResult> {
     let in_dialog = ctx.request().is_some_and(|r| r.to().tag().is_some());
     if in_dialog {
@@ -101,9 +101,8 @@ async fn an_info_whose_handler_died_draws_481_on_its_retransmission_once_the_cal
     let _ = s.finish().await;
 }
 
-/// alice's re-INVITE kills its handler after the layer's 100 Trying stopped
-/// her retransmissions; the reaper's BYEs end both dialogs and the call is
-/// released with the re-INVITE unanswered. The release answers it 481
+/// alice's re-INVITE kills its handler before any answer; the reaper's BYEs
+/// end both dialogs and the call is released with the re-INVITE unanswered. The release answers it 481
 /// through its server transaction: alice's ACK is absorbed there and the
 /// 481's Timer G copies stop.
 #[tokio::test(start_paused = true)]
@@ -124,7 +123,6 @@ async fn a_reinvite_whose_handler_died_is_answered_481_when_the_call_is_released
     s.bob.receive("ACK").await;
 
     let mut reinvite = dialog.reinvite(Some(OFFER_SDP)).await;
-    reinvite.expect(100).await;
     let mut a_bye = s.alice.try_receive("BYE").await.expect("the reaper sends alice a BYE");
     let mut b_bye = s.bob.try_receive("BYE").await.expect("the reaper sends bob a BYE");
     a_bye.respond(200, "OK").await;

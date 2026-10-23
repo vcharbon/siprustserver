@@ -8,6 +8,7 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
+use sip_txn::timers::TRYING_BOUND;
 use sip_txn::{TransactionConfig, TransactionEvent};
 use tokio::sync::{mpsc, Notify};
 
@@ -198,15 +199,15 @@ async fn a_bye_queued_behind_the_release_is_readmitted_on_its_retransmission() {
 }
 
 /// A peer's re-INVITE that crosses the call's release lands behind it
-/// and is discarded unrun. Its 100 Trying stopped the peer's
-/// retransmissions, so the discard answers it: 481, the dialog being gone
-/// (RFC 3261 §12.2.2).
+/// and is discarded unrun. Nothing else will answer it, so the discard
+/// does, before the transaction layer's own 100 (RFC 3261 §17.2.1): 481,
+/// the dialog being gone (§12.2.2).
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_queued_behind_the_release_is_answered_481() {
     let mut rig = rig().await;
     reinvite_behind_the_release(&mut rig, RemovalClass::Terminated, "z9hG4bK-reinv").await;
     let statuses = statuses(&responses_at_peer(&rig, 100).await);
-    assert_eq!(statuses, vec![100, 481]);
+    assert_eq!(statuses, vec![481]);
     assert_eq!(
         rig.metrics.invite_discard_answered_of_total(Discard::Released(RemovalClass::Terminated)),
         1
@@ -222,8 +223,8 @@ async fn a_reinvite_queued_behind_a_self_release_is_answered_500_with_retry_afte
     reinvite_behind_the_release(&mut rig, RemovalClass::SelfRelease, "z9hG4bK-shed").await;
     let responses = responses_at_peer(&rig, 100).await;
     let statuses = statuses(&responses);
-    assert_eq!(statuses, vec![100, 500]);
-    assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
+    assert_eq!(statuses, vec![500]);
+    assert!(retry_after(&responses[0]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
 }
 
 /// An orphan release looked no dialog up — on an acting backup the
@@ -234,8 +235,8 @@ async fn a_reinvite_queued_behind_an_orphan_release_is_answered_500_with_retry_a
     let mut rig = rig().await;
     reinvite_behind_the_release(&mut rig, RemovalClass::Orphan, "z9hG4bK-orph").await;
     let responses = responses_at_peer(&rig, 100).await;
-    assert_eq!(statuses(&responses), vec![100, 500]);
-    assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
+    assert_eq!(statuses(&responses), vec![500]);
+    assert!(retry_after(&responses[0]).is_some_and(|s| s >= 1), "{:?}", responses[0]);
     let counts = crate::new_calls::NewCallCounts::compose(
         rig.metrics.new_calls(),
         Default::default(),
@@ -263,7 +264,7 @@ async fn an_initial_invite_behind_the_release_waits_for_the_next_queue() {
         });
         rig.offer(&event, body).await;
         gate.notify_one();
-        let statuses = statuses(&responses_at_peer(&rig, 100).await);
+        let statuses = statuses(&responses_at_peer(&rig, TRYING_BOUND + 50).await);
         assert_eq!(statuses, vec![100], "nothing owed at the offer; admitted={admitted}");
         assert_eq!(*removals_at_run.lock().unwrap(), Some(1), "it ran after the release");
         let counts = crate::new_calls::NewCallCounts::compose(
@@ -289,8 +290,8 @@ async fn an_invite_whose_body_ran_is_not_answered_by_the_discard_path() {
     let d = done.clone();
     rig.offer(&event, Box::pin(async move { d.notify_one() })).await;
     done.notified().await;
-    let statuses = statuses(&responses_at_peer(&rig, 100).await);
-    assert_eq!(statuses, vec![100], "only the layer's 100 Trying");
+    let statuses = statuses(&responses_at_peer(&rig, TRYING_BOUND + 50).await);
+    assert_eq!(statuses, vec![100], "only the layer's 100 Trying, at its bound");
     assert_eq!(rig.metrics.invite_discard_answered_total(), 0);
 }
 
@@ -365,8 +366,8 @@ async fn a_reinvite_at_a_full_queue_is_answered_500_with_retry_after() {
     let event = next_event(&mut rig, 100).await.expect("the INVITE reaches the router");
     rig.offer(&event, Box::pin(async {})).await;
     let responses = responses_at_peer(&rig, 100).await;
-    assert_eq!(statuses(&responses), vec![100, 500]);
-    assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
+    assert_eq!(statuses(&responses), vec![500]);
+    assert!(retry_after(&responses[0]).is_some_and(|s| s >= 1), "{:?}", responses[0]);
     assert_eq!(rig.metrics.invite_discard_answered_of_total(Discard::QueueFull), 1);
     gate.notify_one();
 }
@@ -382,8 +383,8 @@ async fn a_reinvite_at_the_global_cap_is_answered_500_with_retry_after() {
     let event = next_event(&mut rig, 100).await.expect("the INVITE reaches the router");
     rig.offer(&event, Box::pin(async {})).await;
     let responses = responses_at_peer(&rig, 100).await;
-    assert_eq!(statuses(&responses), vec![100, 500]);
-    assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
+    assert_eq!(statuses(&responses), vec![500]);
+    assert!(retry_after(&responses[0]).is_some_and(|s| s >= 1), "{:?}", responses[0]);
     assert_eq!(rig.metrics.invite_discard_answered_of_total(Discard::AtCap), 1);
     assert_eq!(rig.metrics.cap_drops_total(), 1);
     gate.notify_one();

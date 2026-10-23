@@ -66,7 +66,7 @@ async fn a_store_with_no_replication_wired_holds_nothing_after_a_call() {
     let store = Arc::new(InMemoryCallStore::new());
     let metrics = B2buaMetrics::new();
     let state = unwired_state(&store, &metrics);
-    assert!(state.terminate_writer().is_none(), "an unwired state constructs no writer");
+    assert!(state.repl_store().is_none(), "an unwired state holds no store write path");
 
     let call = cookie_call();
     let call_ref = call.call_ref.clone();

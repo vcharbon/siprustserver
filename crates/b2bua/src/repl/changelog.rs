@@ -8,10 +8,11 @@
 //! - A node-global monotonic [`counter`](Changelog) under an injected incarnation
 //!   `gen`; together they are the [`Watermark`].
 //! - Per peer ordinal: two [`SubLog`]s. Each maps `counter → callRef` (ascending
-//!   drain order) plus a `callRef → RefState` map (latest counter + op + optional
-//!   tombstone expiry + the deleter's answered statement). A re-update **moves**
-//!   the ref to a new counter (the old counter is removed), so a sub-log never
-//!   grows past its live set.
+//!   drain order) plus a `callRef → RefState` map (latest counter + op + when it
+//!   was written + the deleter's answered statement). A re-update **moves** the
+//!   ref to a new counter (the old counter is removed), so a sub-log never grows
+//!   past its live set. A `Delete` stays until the peer reports applying it
+//!   (ADR-0055 §3), or until the whole peer log is reaped as dead.
 //!
 //! ## A Delete states the answer (ADR-0031 D3)
 //! Compaction folds a ref's last `Put` into the `Delete` that follows it within
@@ -21,18 +22,19 @@
 //! that statement. A later `Delete` stating no answer never clears one an
 //! earlier `Delete` stated; a `Put` of the ref (a new call reusing it) does.
 //!
-//! ## Send model (ADR-0014)
-//! There is **no `Notify`/subscription**: the server is a **pure poll loop** that
-//! calls [`drain_since`](Changelog::drain_since) every ~100ms (bounded by a
-//! `limit` so a huge backlog streams in batches). The `serving` count keeps a
-//! peer log reap-immune while a serve task is active.
+//! ## Send model (ADR-0055 §3)
+//! Every write moves its sub-log's head, which wakes the serve task streaming
+//! that sub-log ([`ServeGuard::written`]): the server drains on write, bounded
+//! by a `limit` so a huge backlog streams in batches. The `serving` count keeps
+//! a peer log reap-immune while a serve task is active.
 //!
 //! ## Flow progress (ADR-0031 D2)
 //! Each sub-log also carries the position its puller last reported applying,
 //! when, and whether a flow is connected at all, so a draining worker can ask
 //! [`flow_caught_up`](Changelog::flow_caught_up) whether a peer holds everything
-//! it ever logged for that peer ([`progress`]). Purely observational — no apply
-//! or send decision reads it.
+//! it ever logged for that peer ([`progress`]). The highest position a flow
+//! reported also releases the turn's held messages and reaps the deletes it
+//! covers; the backlog above it bounds new calls' backups ([`backlog`]).
 //!
 //! ## Lock discipline (ADR-0011 X8)
 //! [`bump_put`](Changelog::bump_put) / [`bump_delete`](Changelog::bump_delete) take the lock *briefly* (move ref + bump counter).
@@ -48,17 +50,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
 
-use repl_net::frame::{Frame, Op, Partition, Watermark};
+use repl_net::frame::{Op, Partition, Watermark};
 use sip_clock::Clock;
+use tokio::sync::watch;
 
-use crate::store::{locked, PartitionRole, REPLICA_CHANGELOG};
+use crate::store::{locked, REPLICA_CHANGELOG};
 
+pub use backlog::BacklogMarks;
 pub use progress::DEFAULT_CLAIM_TTL;
 pub use source::{BodySource, RefMeta};
-
-/// How long a delete tombstone is retained so a disconnected puller still learns
-/// of the removal before the ref is reaped.
-pub const DEFAULT_TOMBSTONE_TTL_MS: i64 = 30_000;
 
 /// How long a peer's whole changelog is kept after its last activity before an
 /// idle [`reap`](Changelog::reap) drops it (the peer re-bootstraps on return).
@@ -69,8 +69,8 @@ pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 300_000;
 struct RefState {
     counter: u64,
     op: Op,
-    /// Set when `op == Delete`: absolute reap deadline for the tombstone.
-    expiry_at_ms: Option<i64>,
+    /// `now_ms` of the write the entry holds: the age of a pending write.
+    written_ms: i64,
     /// A `Delete` of this ref stated that the deleting node had answered the
     /// call. Kept across later `Delete`s of the ref; a `Put` clears it.
     answered: bool,
@@ -89,52 +89,73 @@ struct Due {
 }
 
 /// One compacted ref-log for a single `(peer, partition)`.
-#[derive(Default)]
 struct SubLog {
     /// `counter → callRef`, ascending — the drain order. Compacted: exactly one
     /// counter per live callRef.
     entries: BTreeMap<u64, String>,
     /// `callRef → RefState` — the latest counter/op for the ref.
     by_ref: HashMap<String, RefState>,
-    /// Highest counter DROPPED by tombstone reaping (a delete the puller may have
-    /// missed). A warm puller resuming below this has fallen off the compacted
-    /// tail and must re-bootstrap ([`needs_reset`](Changelog::needs_reset)).
+    /// Highest counter DROPPED by tombstone reaping. A delete is reaped only
+    /// once the flow reported applying it, so a warm puller resuming below this
+    /// stands for a log it never pulled and must re-bootstrap
+    /// ([`needs_reset`](Changelog::needs_reset)).
     retained_floor: u64,
     /// Highest counter ever assigned in this sub-log. Unlike `entries`, it
     /// survives compaction and reaping — it is the position a caught-up puller
     /// must have reported (ADR-0031 D2), not a live-set bound.
     head: u64,
     /// The position the flow's puller last reported applying
-    /// ([`Frame::Position`]). `None` while no flow is connected or none has
-    /// reported yet: a disconnected flow's position is unknown, never stale.
+    /// ([`Frame::Position`](repl_net::frame::Frame::Position)). `None` while
+    /// no flow is connected or none has reported yet: a disconnected flow's
+    /// position is unknown, never stale.
     applied: Option<progress::Claim>,
     /// Serve tasks currently streaming this sub-log. `0` ⇒ no flow carries this
     /// partition to the peer, so nothing it holds can be current.
     streams: usize,
+    /// The highest position the peer ever reported applying on this sub-log
+    /// under this node's incarnation, connected or not ([`progress`]).
+    acked: watch::Sender<Watermark>,
+    /// The sub-log's head counter, moved by every write: the serve task waits
+    /// on it.
+    written: watch::Sender<u64>,
 }
 
 impl SubLog {
-    /// Move `call_ref` to `counter` with `op`/`expiry`, dropping any prior slot.
-    /// A `Delete` over a `Delete` keeps the answer the first one stated; a `Put`
-    /// starts the ref afresh, so a reused ref never inherits a former call's.
-    fn put(
-        &mut self,
-        counter: u64,
-        call_ref: &str,
-        op: Op,
-        expiry_at_ms: Option<i64>,
-        answered: bool,
-        incarnation: Option<String>,
-    ) {
-        let mut answered = answered;
+    fn new(retained_floor: u64) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            by_ref: HashMap::new(),
+            retained_floor,
+            head: 0,
+            applied: None,
+            streams: 0,
+            acked: watch::Sender::new(Watermark::new(0, 0)),
+            written: watch::Sender::new(0),
+        }
+    }
+
+    /// Move `call_ref` to `counter` with `op`, written at `now_ms`, dropping any
+    /// prior slot, and wake the serve task. A `Delete` over a `Delete` keeps the
+    /// answer the first one stated; a `Put` starts the ref afresh, so a reused
+    /// ref never inherits a former call's.
+    fn put(&mut self, counter: u64, call_ref: &str, op: Op, now_ms: i64, stated: Stated) {
+        let Stated { mut answered, incarnation } = stated;
         if let Some(prev) = self.by_ref.get(call_ref) {
             self.entries.remove(&prev.counter);
             answered |= op == Op::Delete && prev.op == Op::Delete && prev.answered;
         }
         self.entries.insert(counter, call_ref.to_string());
-        let state = RefState { counter, op, expiry_at_ms, answered, incarnation };
+        let state = RefState { counter, op, written_ms: now_ms, answered, incarnation };
         self.by_ref.insert(call_ref.to_string(), state);
         self.head = self.head.max(counter);
+        self.written.send_replace(self.head);
+    }
+
+    /// Drop `call_ref`'s entry, whatever its op.
+    fn forget(&mut self, call_ref: &str) {
+        if let Some(st) = self.by_ref.remove(call_ref) {
+            self.entries.remove(&st.counter);
+        }
     }
 
     /// The due entries above `since` (or all when `cold`), ascending, capped at
@@ -158,6 +179,13 @@ impl SubLog {
     }
 }
 
+/// What a `Delete` entry states beside its op ([`Changelog::bump_delete`]).
+#[derive(Default)]
+struct Stated {
+    answered: bool,
+    incarnation: Option<String>,
+}
+
 /// A single peer's two compacted sub-logs + liveness clock + serve guard.
 struct PeerLog {
     pri: SubLog,
@@ -165,14 +193,26 @@ struct PeerLog {
     /// `now_ms` of the last mutation recorded — drives idle reaping.
     last_active_ms: i64,
     /// Count of active serve tasks for this peer. A log with `serving > 0` is
-    /// NOT reaped while idle, so a poll-loop server never loses the log it is
-    /// actively draining out from under itself.
+    /// NOT reaped while idle, so a server never loses the log it is actively
+    /// draining out from under itself.
     serving: usize,
+    /// New calls are admitted with no backup on this peer: its backlog rose
+    /// over the high-water mark and has not fallen under the low one since
+    /// ([`backlog`]).
+    over_high_water: bool,
 }
 
 impl PeerLog {
-    fn new(now_ms: i64) -> Self {
-        Self { pri: SubLog::default(), bak: SubLog::default(), last_active_ms: now_ms, serving: 0 }
+    /// A log opened when the node's counter stood at `counter`: it holds
+    /// nothing logged before, so a warm pull below it re-bootstraps.
+    fn new(now_ms: i64, counter: u64) -> Self {
+        Self {
+            pri: SubLog::new(counter),
+            bak: SubLog::new(counter),
+            last_active_ms: now_ms,
+            serving: 0,
+            over_high_water: false,
+        }
     }
 
     fn sub(&self, partition: Partition) -> &SubLog {
@@ -198,6 +238,17 @@ pub struct ServeGuard {
     changelog: Changelog,
     peer: String,
     partition: Partition,
+    written: watch::Receiver<u64>,
+}
+
+impl ServeGuard {
+    /// Resolves once a write lands in the sub-log after the last call: the
+    /// serve task drains on it. A write between two calls is never missed.
+    pub async fn written(&mut self) {
+        if self.written.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 impl Drop for ServeGuard {
@@ -219,6 +270,9 @@ struct Inner {
     peers: HashMap<String, PeerLog>,
     /// How long a flow's claim vouches for it ([`progress`]).
     claim_ttl: std::time::Duration,
+    /// When the backlog toward a peer stops and resumes giving new calls a
+    /// backup ([`backlog`]).
+    marks: BacklogMarks,
 }
 
 /// Node-global monotonic changelog over per-peer, per-partition compacted
@@ -227,7 +281,6 @@ struct Inner {
 pub struct Changelog {
     gen: u64,
     clock: Clock,
-    tombstone_ttl_ms: i64,
     dead_peer_ttl_ms: i64,
     inner: Arc<Mutex<Inner>>,
 }
@@ -238,12 +291,12 @@ impl Changelog {
         Self {
             gen,
             clock,
-            tombstone_ttl_ms: DEFAULT_TOMBSTONE_TTL_MS,
             dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
             inner: Arc::new(Mutex::new(Inner {
                 counter: 0,
                 peers: HashMap::new(),
                 claim_ttl: DEFAULT_CLAIM_TTL,
+                marks: BacklogMarks::default(),
             })),
         }
     }
@@ -260,9 +313,8 @@ impl Changelog {
         assert!(self.inner.is_poisoned());
     }
 
-    /// Override the tombstone / dead-peer TTLs (tests use short values).
-    pub fn with_ttls(mut self, tombstone_ttl_ms: i64, dead_peer_ttl_ms: i64) -> Self {
-        self.tombstone_ttl_ms = tombstone_ttl_ms;
+    /// Override the dead-peer TTL (tests use short values).
+    pub fn with_dead_peer_ttl(mut self, dead_peer_ttl_ms: i64) -> Self {
         self.dead_peer_ttl_ms = dead_peer_ttl_ms;
         self
     }
@@ -284,18 +336,20 @@ impl Changelog {
     /// reap-immune and marks the partition's flow connected, until the returned
     /// `ServeGuard` drops. Creates the peer log if absent.
     pub fn serving(&self, peer: &str, partition: Partition) -> ServeGuard {
-        {
+        let written = {
             let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
-            let now = self.clock.now_ms();
-            let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now));
+            let (now, counter) = (self.clock.now_ms(), inner.counter);
+            let log =
+                inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now, counter));
             log.serving += 1;
             let sub = log.sub_mut(partition);
             sub.streams += 1;
             // A new flow starts unknown: a claim left by a flow the peer never
             // closed (a dead node sends no FIN) must not vouch for this one.
             sub.applied = None;
-        }
-        ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition }
+            sub.written.subscribe()
+        };
+        ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition, written }
     }
 
     /// Whether a warm puller on `partition` resuming from `since` must
@@ -309,7 +363,8 @@ impl Changelog {
     ///   fast restart (the counter restarted at 0 under a reused gen);
     /// - `since.gen == self.gen` and `since.counter` is below the partition's
     ///   `retained_floor` — fell off the compacted tail (a reaped tombstone the
-    ///   puller may have missed).
+    ///   puller never pulled).
+    ///
     /// `since.gen < self.gen` is the ordinary cold case — `drain_since` already
     /// treats it as drain-everything, no reset needed.
     pub fn needs_reset(&self, peer: &str, partition: Partition, since: Watermark) -> bool {
@@ -333,8 +388,8 @@ impl Changelog {
     /// Record a `Put` of `call_ref` for `(peer, partition)` (Create/Update
     /// merged — ADR-0014). Its body states whether the call was answered, so the
     /// entry states nothing: a `Put` starts the ref afresh.
-    pub fn bump_put(&self, peer: &str, call_ref: &str, partition: Partition) {
-        self.bump(peer, call_ref, Op::Put, partition, false, None);
+    pub fn bump_put(&self, peer: &str, call_ref: &str, partition: Partition) -> Watermark {
+        self.bump(peer, call_ref, Op::Put, partition, Stated::default())
     }
 
     /// Record a `Delete` of `call_ref` for `(peer, partition)`, with the deleting
@@ -349,115 +404,53 @@ impl Changelog {
         partition: Partition,
         answered: bool,
         incarnation: Option<String>,
-    ) {
-        self.bump(peer, call_ref, Op::Delete, partition, answered, incarnation);
+    ) -> Watermark {
+        self.bump(peer, call_ref, Op::Delete, partition, Stated { answered, incarnation })
     }
 
     /// Record a mutation for `(peer, partition)`: assign the next counter,
     /// **compact** (drop the ref's previous counter in that sub-log), set its
-    /// op, and stamp a tombstone expiry on `Delete`. **No notify** (pure-poll
-    /// server).
+    /// op, and wake the serve task streaming the sub-log. Returns the entry's
+    /// position.
     fn bump(
         &self,
         peer: &str,
         call_ref: &str,
         op: Op,
         partition: Partition,
-        answered: bool,
-        incarnation: Option<String>,
-    ) {
+        stated: Stated,
+    ) -> Watermark {
         let now = self.clock.now_ms();
         let inner = &mut *locked(&self.inner, REPLICA_CHANGELOG);
         inner.counter += 1;
         let c = inner.counter;
-
-        let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now));
+        let counter = c - 1;
+        let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now, counter));
         log.last_active_ms = now;
-
-        let expiry_at_ms = match op {
-            Op::Delete => Some(now + self.tombstone_ttl_ms),
-            Op::Put => None,
-        };
-        log.sub_mut(partition).put(c, call_ref, op, expiry_at_ms, answered, incarnation);
+        log.sub_mut(partition).put(c, call_ref, op, now, stated);
+        Watermark::new(self.gen, c)
     }
 
-    /// Drain a `(peer, partition)` sub-log's entries with `counter > since.counter`
-    /// (or **all** when `since.gen < self.gen` — the cold/bootstrap case),
-    /// ascending, **capped at `limit`**, as [`Frame::Data`]. Bodies are read
-    /// **live** from `source` with the changelog lock **dropped**.
-    ///
-    /// `role`/`primary` locate the body in the store's keyspace (fixed by the
-    /// flow: `Pri` ⇒ `(Backup, caller)`, `Bak` ⇒ `(Primary, self)`). A `Delete`
-    /// ref or a vanished body yields `Frame::Data{ op: Delete, body: None, .. }`,
-    /// carrying the answer the ref's tombstone states.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn drain_since(
+    /// Drop `call_ref`'s entry toward `peer` on `partition`: the peer refused
+    /// its replica (ADR-0055 §3), and no later write of the call goes to it.
+    pub fn forget(&self, peer: &str, partition: Partition, call_ref: &str) {
+        let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
+        if let Some(log) = inner.peers.get_mut(peer) {
+            log.sub_mut(partition).forget(call_ref);
+        }
+    }
+
+    /// The position of `call_ref`'s entry toward `peer` on `partition`, `None`
+    /// when it has none.
+    pub fn position_of(
         &self,
         peer: &str,
         partition: Partition,
-        since: Watermark,
-        limit: usize,
-        source: &dyn BodySource,
-        role: PartitionRole,
-        primary: &str,
-    ) -> Vec<Frame> {
-        // Brief lock: snapshot the due entries, then DROP the guard before any
-        // body read/await.
-        let due: Vec<Due> = {
-            let inner = locked(&self.inner, REPLICA_CHANGELOG);
-            let Some(log) = inner.peers.get(peer) else {
-                return Vec::new();
-            };
-            let cold = since.gen < self.gen;
-            log.sub(partition).due(since.counter, cold, limit)
-        };
-
-        let mut frames = Vec::with_capacity(due.len());
-        for Due { counter, call_ref, op, answered, incarnation } in due {
-            let at = Watermark::new(self.gen, counter);
-            if op == Op::Delete {
-                frames.push(delete_frame(at, partition, call_ref, answered, incarnation));
-                continue;
-            }
-            // Body read at send time — lock already dropped. The frame is
-            // stamped at send time, in the frame of the body's instants, so the
-            // receiver re-anchors them against the clock that wrote them.
-            match source.read_entry(role, primary, &call_ref).await {
-                Some((body, meta)) => frames.push(Frame::Data {
-                    at,
-                    op: Op::Put,
-                    partition,
-                    call_ref,
-                    call_gen: meta.call_gen,
-                    call_bgen: meta.call_bgen,
-                    body_ttl_ms: meta.body_ttl_ms,
-                    origin_now_ms: meta.origin_now_ms(self.clock.now_ms()),
-                    indexes: meta.indexes,
-                    body: Some(body),
-                    answered: false,
-                    incarnation: meta.incarnation,
-                }),
-                // Gone between snapshot and read: a delete recorded since then
-                // has an entry of its own and drains with its own answer; any
-                // other loss (an expired body) goes out as a delete stating
-                // what the entry states now.
-                None => match self.current(peer, partition, &call_ref) {
-                    Some((Op::Delete, _)) => {}
-                    current => {
-                        let answered = current.is_some_and(|(_, answered)| answered);
-                        frames.push(delete_frame(at, partition, call_ref, answered, None));
-                    }
-                },
-            }
-        }
-        frames
-    }
-
-    /// The `(op, answered)` `call_ref`'s entry holds now, `None` when it has none.
-    fn current(&self, peer: &str, partition: Partition, call_ref: &str) -> Option<(Op, bool)> {
+        call_ref: &str,
+    ) -> Option<Watermark> {
         let inner = locked(&self.inner, REPLICA_CHANGELOG);
         let st = inner.peers.get(peer)?.sub(partition).by_ref.get(call_ref)?;
-        Some((st.op, st.answered))
+        Some(Watermark::new(self.gen, st.counter))
     }
 
     /// `(entries, peers)` outbound-buffer depth for the memory-attribution
@@ -471,17 +464,19 @@ impl Changelog {
         (entries as u64, inner.peers.len() as u64)
     }
 
-    /// Evict expired tombstones and idle peers. Call after advancing the clock
-    /// (lazy TTL — deterministic, no background task, no `DelayQueue` aliasing).
+    /// Evict the tombstones each peer reported applying, and idle peers. Call
+    /// after advancing the clock (lazy TTL — deterministic, no background task,
+    /// no `DelayQueue` aliasing).
     pub fn reap(&self, now_ms: i64) {
         let dead_peer_ttl = self.dead_peer_ttl_ms;
+        let gen = self.gen;
         let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
         // Drop idle peers wholesale — but NEVER one with an active serve task.
         inner.peers.retain(|_, log| log.serving > 0 || now_ms - log.last_active_ms < dead_peer_ttl);
-        // Reap expired tombstones from each surviving sub-log, raising its floor.
+        // Reap applied tombstones from each surviving sub-log, raising its floor.
         for log in inner.peers.values_mut() {
-            reap_sublog(&mut log.pri, now_ms);
-            reap_sublog(&mut log.bak, now_ms);
+            reap_sublog(&mut log.pri, gen);
+            reap_sublog(&mut log.bak, gen);
         }
     }
 
@@ -504,43 +499,20 @@ impl Changelog {
     }
 }
 
-/// Build a `Delete` `Data` frame (nil body, zero meta) at `at`/`partition`,
-/// stating `answered` (ADR-0031 D3) and naming the incarnation it removed.
-///
-/// `origin_now_ms` is `0`: a delete carries no re-anchorable timers, so the
-/// receiver-side skew offset is never read for it.
-fn delete_frame(
-    at: Watermark,
-    partition: Partition,
-    call_ref: String,
-    answered: bool,
-    incarnation: Option<String>,
-) -> Frame {
-    Frame::Data {
-        at,
-        op: Op::Delete,
-        partition,
-        call_ref,
-        call_gen: 0,
-        call_bgen: 0,
-        body_ttl_ms: 0,
-        origin_now_ms: 0,
-        indexes: Vec::new(),
-        body: None,
-        answered,
-        incarnation,
+/// Remove from `sub` the tombstones its peer reported applying under
+/// incarnation `gen`, raising its `retained_floor`.
+fn reap_sublog(sub: &mut SubLog, gen: u64) {
+    let acked = *sub.acked.borrow();
+    if acked.gen != gen {
+        return;
     }
-}
-
-/// Remove expired tombstones from `sub`, raising its `retained_floor`.
-fn reap_sublog(sub: &mut SubLog, now_ms: i64) {
-    let expired: Vec<String> = sub
-        .by_ref
-        .iter()
-        .filter(|(_, st)| matches!(st.expiry_at_ms, Some(e) if now_ms >= e))
-        .map(|(call_ref, _)| call_ref.clone())
+    let applied: Vec<String> = sub
+        .entries
+        .range(..=acked.counter)
+        .filter(|(_, call_ref)| sub.by_ref.get(*call_ref).is_some_and(|st| st.op == Op::Delete))
+        .map(|(_, call_ref)| call_ref.clone())
         .collect();
-    for call_ref in expired {
+    for call_ref in applied {
         if let Some(st) = sub.by_ref.remove(&call_ref) {
             sub.entries.remove(&st.counter);
             sub.retained_floor = sub.retained_floor.max(st.counter);
@@ -548,6 +520,8 @@ fn reap_sublog(sub: &mut SubLog, now_ms: i64) {
     }
 }
 
+mod backlog;
+mod drain;
 mod progress;
 mod source;
 #[cfg(test)]

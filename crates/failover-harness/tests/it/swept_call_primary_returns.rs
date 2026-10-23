@@ -24,12 +24,12 @@ use crate::ringing_call_taken_over_on_departure::{
     depart, final_at, place, place_ringing_for, ring_until, Callee, Placed, ANSWER, OFFER,
 };
 
-/// A ring deadline that outlives a changelog tombstone and the sweep that reaps
-/// it, inside the call's setup timeout.
+/// A ring deadline that outlives a peer log's dead-peer TTL and the sweep that
+/// reaps it, inside the call's setup timeout.
 const LONG_RING: Duration = Duration::from_secs(140);
-/// How long the replication fabric stays cut: past a tombstone's life (60 s in
-/// the harness) and the next sweep that reaps it (every 30 s).
-const PAST_TOMBSTONE: Duration = Duration::from_secs(100);
+/// How long the replication fabric stays cut: past a peer log's dead-peer TTL
+/// (60 s in the harness) and the next sweep that reaps it (every 30 s).
+const PAST_DEAD_PEER: Duration = Duration::from_secs(100);
 
 /// The SIP port of a worker, every incarnation alike.
 pub(crate) fn port(worker: &str) -> u16 {
@@ -330,8 +330,9 @@ async fn a_swept_call_whose_copy_wrote_and_whose_callee_refuses_at_its_returned_
 
 /// The backup's stream from b1 falls off b1's compacted changelog: the
 /// replication fabric is cut while a short call is placed and hung up on b1,
-/// and stays cut past the life of that call's delete tombstone, so the healed
-/// stream's resumed pull is answered with a reset to bootstrap. Returns the
+/// and stays cut past b1's dead-peer TTL, which drops its log toward the
+/// backup with the call's unapplied delete, so the healed stream's resumed
+/// pull is answered with a reset to bootstrap. Returns the
 /// short call's `call_ref` once the backup's stream from b1 holds a cold
 /// watermark; the backup still holds its replica of the ringing call.
 async fn fall_off_compacted_tail(p: &mut Placed) -> String {
@@ -354,7 +355,7 @@ async fn fall_off_compacted_tail(p: &mut Placed) -> String {
     let mut bye = short.bye().await;
     p.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    p.fh.advance(PAST_TOMBSTONE).await;
+    p.fh.advance(PAST_DEAD_PEER).await;
 
     p.fh.heal("b1", "b2");
     let cold = Watermark::new(0, 0);

@@ -15,6 +15,7 @@ pub(crate) const CDR_MEMORY: &str = "cdr_memory";
 pub(crate) const DISPATCH_BODIES: &str = "dispatch_bodies";
 pub(crate) const DISPATCH_QUEUE: &str = "dispatch_queue";
 pub(crate) const DISPATCH_SLOTS: &str = "dispatch_slots";
+pub(crate) const HELD_ACKS: &str = "held_acks";
 pub(crate) const LATE_PRACKS: &str = "late_pracks";
 pub(crate) const LIMITER_BREAKER: &str = "limiter_breaker";
 pub(crate) const LIMITER_REFRESH_DUE: &str = "limiter_refresh_due";
@@ -32,7 +33,7 @@ pub(crate) const TRACE_PROCESS: &str = "trace_process";
 pub(crate) const TRACE_SPANS: &str = "trace_spans";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 22] = [
+pub const LOCKS: [&str; 23] = [
     ADMIT_BY_CALL,
     BACKEND_GATE,
     CAPACITY_LIMITS,
@@ -40,6 +41,7 @@ pub const LOCKS: [&str; 22] = [
     DISPATCH_BODIES,
     DISPATCH_QUEUE,
     DISPATCH_SLOTS,
+    HELD_ACKS,
     LATE_PRACKS,
     LIMITER_BREAKER,
     LIMITER_REFRESH_DUE,

@@ -32,6 +32,10 @@ pub(super) fn txn_config(
         // The TU's first-response deadline on an initial INVITE
         // (ADR-0044; default Timer B, which arms nothing).
         invite_first_response_timeout_ms: config.invite_first_response_timeout_ms(),
+        // An INVITE's 100 is the router's to release once the call's write is
+        // applied at its backup (ADR-0055 §3); the layer sends it at the
+        // §17.2.1 bound otherwise.
+        trying_bound_ms: sip_txn::timers::TRYING_BOUND,
         strict_to_tag: true,
         deferred_bound: None,
         invite_refusals: Some(refusals.memo().clone()),

@@ -17,10 +17,10 @@
 //! ```
 //!
 //! Timing is the axis ([`Retry`]): the retry either reaches the primary after
-//! the challenged call's delete has replicated, or inside the same replication
-//! poll, so the backup never sees that delete — the primary's changelog keeps
-//! one entry per callRef — and holds the challenged call, at a higher `(p,b)`
-//! than the retry's first versions, when the retry's `Put` lands.
+//! the challenged call's delete has replicated, or while the backup's stream
+//! is down, so the backup never sees that delete — the primary's changelog
+//! keeps one entry per callRef — and holds the challenged call, at a higher
+//! `(p,b)` than the retry's first versions, when the retry's `Put` lands.
 
 use std::time::Duration;
 
@@ -52,9 +52,10 @@ const FROM_TAG: &str = "challenged-from-tag";
 enum Retry {
     /// Half a second after the challenge: the delete has reached the backup.
     AfterTheDeleteReplicated,
-    /// At once: the delete and the retry's first write share one changelog
-    /// entry, which drains as the retry's `Put`.
-    InsideOnePoll,
+    /// While the backup's stream is down (a partition past the idle bound):
+    /// the delete and the retry's first write share one changelog entry,
+    /// which drains as the retry's `Put` once the stream is back.
+    WhileTheStreamIsDown,
 }
 
 /// Decode a stored body.
@@ -132,6 +133,10 @@ async fn a_retry_on_a_challenged_identity(name: &str, retry: Retry) {
         .expect("the challenged call is replicated to the backup");
     let challenged = decode(&challenged);
     let challenged_p = challenged.topology.as_ref().expect("a replicated call has topology").gen;
+    if retry == Retry::WhileTheStreamIsDown {
+        fh.partition(&primary_ord, backup.ordinal());
+        fh.advance(Duration::from_secs(16)).await;
+    }
 
     uas.respond(401, "Unauthorized")
         .with_header("WWW-Authenticate", "Digest realm=\"bob\", nonce=\"n1\"")
@@ -163,11 +168,15 @@ async fn a_retry_on_a_challenged_identity(name: &str, retry: Retry) {
     retry_call.expect(200).await;
     let mut dialog = retry_call.ack().await;
     bob.receive("ACK").await;
+    if retry == Retry::WhileTheStreamIsDown {
+        fh.heal(&primary_ord, backup.ordinal());
+        fh.advance(Duration::from_secs(5)).await;
+    }
     fh.advance(Duration::from_millis(500)).await;
 
     let served = primary.live_call(&call_ref).expect("the primary serves the retry");
     assert_ne!(served.incarnation(), challenged.incarnation(), "the retry is a call of its own");
-    if retry == Retry::InsideOnePoll {
+    if retry == Retry::WhileTheStreamIsDown {
         // This timing is what the scenario is for: the backup held the
         // challenged call when the retry's Put landed, at a version the retry's
         // write does not dominate.
@@ -237,10 +246,10 @@ async fn a_retry_after_the_challenge_replicated_survives_a_takeover() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_retry_inside_one_poll_of_the_challenge_survives_a_takeover() {
+async fn a_retry_while_the_backup_stream_is_down_survives_a_takeover() {
     a_retry_on_a_challenged_identity(
-        "retry-inside-one-poll-of-the-challenge",
-        Retry::InsideOnePoll,
+        "retry-while-the-backup-stream-is-down",
+        Retry::WhileTheStreamIsDown,
     )
     .await;
 }

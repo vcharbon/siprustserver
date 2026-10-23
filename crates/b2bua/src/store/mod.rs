@@ -7,6 +7,7 @@
 //! `sip_index`; the store's `get_index` is the fallback.
 
 mod adoption;
+mod backup;
 mod call_store;
 mod faults;
 mod flush_body;
@@ -22,10 +23,10 @@ mod setup_cancel_tests;
 #[cfg(test)]
 mod spiral_index_tests;
 mod takeover;
-mod terminate_writer;
 #[cfg(test)]
 mod unwired_tests;
 
+pub use backup::HoldTarget;
 pub use call_store::{
     partition_of, role_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
 };
@@ -35,7 +36,6 @@ pub(crate) use poison::*;
 pub use poison::{LOCKS, LOCK_RECOVERIES};
 pub use reconcile::Reconciled;
 pub use takeover::TakeoverProbe;
-pub use terminate_writer::BufferedTerminateWriter;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -173,30 +173,22 @@ impl Inner {
     }
 }
 
-/// The store write path of a wired node: the replicating store the write-side policy
-/// targets and the buffered writer that drains to it. The two exist together
-/// or not at all.
-#[derive(Clone)]
-struct Replication {
-    store: Arc<ReplicatingCallStore>,
-    writer: BufferedTerminateWriter,
-}
-
 /// The call store. Clone-cheap (one `Arc`); share across the stack.
 #[derive(Clone)]
 pub struct CallState {
     inner: Arc<Mutex<Inner>>,
     store: Arc<dyn CallStore>,
-    /// The replication wiring, present only on a wired node. It is the one switch
+    /// The replicating store, present only on a wired node. It is the one switch
     /// on the store write path: `None` and
     /// [`flush`](CallState::flush)/[`remove`](CallState::remove) touch the store
     /// not at all, whatever topology a call carries (the front proxy stamps a
     /// backup peer on every call whenever two workers are alive, and nothing
-    /// reads what an unwired node would write); there is then no writer either.
-    /// `Some` and a call with a non-empty `topology.bak` rides the write-side
-    /// policy ([`ReplicationPlan`]); a call with no backup takes
-    /// `PutOpts::default()`.
-    repl: Option<Replication>,
+    /// reads what an unwired node would write). `Some` and a call with a backup
+    /// ([`backup_of`](CallState::backup_of)) rides the write-side policy
+    /// ([`ReplicationPlan`]); a call with none takes `PutOpts::default()`. Every
+    /// write lands in the store and its change log within the call that makes
+    /// it: none is queued, none dropped (ADR-0055 §3).
+    repl: Option<Arc<ReplicatingCallStore>>,
     codec: MsgpackCodec,
     self_ordinal: String,
     metrics: B2buaMetrics,
@@ -268,31 +260,17 @@ impl CallState {
         self
     }
 
-    /// Opt into replication: open the store write path through `writer`, and
-    /// route the flush/remove of any call that carries a non-empty
-    /// `topology.bak` through the write-side policy. Without this call the
-    /// store is never written and no writer exists. `repl` MUST be the store
-    /// `writer` drains to, so the changelog bump (keyed off the `PutOpts.peer`
-    /// this path sets) fires.
-    pub fn with_replication(
-        mut self,
-        repl: Arc<ReplicatingCallStore>,
-        writer: BufferedTerminateWriter,
-    ) -> Self {
-        self.repl = Some(Replication { store: repl, writer });
+    /// Opt into replication: open the store write path into `repl`, and route
+    /// the flush/remove of any call with a backup through the write-side
+    /// policy. Without this call the store is never written.
+    pub fn with_replication(mut self, repl: Arc<ReplicatingCallStore>) -> Self {
+        self.repl = Some(repl);
         self
     }
 
     /// The replicating store, when replication is wired.
-    fn repl_store(&self) -> Option<&Arc<ReplicatingCallStore>> {
-        self.repl.as_ref().map(|r| &r.store)
-    }
-
-    /// The buffered writer the store write path submits to, when replication
-    /// is wired, for the tests that assert what an unwired node constructs.
-    #[cfg(test)]
-    pub(crate) fn terminate_writer(&self) -> Option<&BufferedTerminateWriter> {
-        self.repl.as_ref().map(|r| &r.writer)
+    pub(crate) fn repl_store(&self) -> Option<&Arc<ReplicatingCallStore>> {
+        self.repl.as_ref()
     }
 
     /// The call map's lock ([`poison::CALL_STORE`]).
@@ -471,20 +449,20 @@ impl CallState {
     }
 
     /// The backup peer for a call from its `CallTopology.bak`, or `None` when no
-    /// replicating store is wired / the call has no topology / `bak` is empty.
-    /// This is the resolver the write-side policy ([`ReplicationPlan`]) needs:
-    /// the proxy already signed the backup into the `w_bak` cookie and the b2bua
-    /// stamped it onto `topology.bak` at INVITE time (see [`crate::initial_invite`]),
-    /// so the b2bua never recomputes HRW — it just echoes `w_bak`.
-    fn backup_of(&self, call_ref: &str) -> Option<String> {
-        self.repl_store()?;
-        let inner = self.locked();
-        inner
-            .calls
-            .get(call_ref)
-            .and_then(|c| c.topology.as_ref())
-            .map(|t| t.bak.clone())
-            .filter(|bak| !bak.is_empty())
+    /// replicating store is wired / the call has no topology / `bak` is empty /
+    /// the call has no backup for life (ADR-0055 §3). This is the resolver the
+    /// write-side policy ([`ReplicationPlan`]) needs: the proxy already signed
+    /// the backup into the `w_bak` cookie and the b2bua stamped it onto
+    /// `topology.bak` at INVITE time (see [`crate::initial_invite`]), so the
+    /// b2bua never recomputes HRW — it just echoes `w_bak`.
+    pub(crate) fn backup_of(&self, call_ref: &str) -> Option<String> {
+        let repl = self.repl_store()?;
+        let bak = {
+            let inner = self.locked();
+            let topology = inner.calls.get(call_ref).and_then(|c| c.topology.as_ref());
+            topology.map(|t| t.bak.clone()).filter(|bak| !bak.is_empty())
+        }?;
+        (!repl.unbacked(call_ref)).then_some(bak)
     }
 
     /// Resolve the store target + propagate opts for `call_ref`, on a wired
@@ -518,7 +496,7 @@ impl CallState {
     pub fn remove(&self, call_ref: &str) {
         // Resolve the replication target BEFORE evicting the in-memory call (the
         // topology lookup `backup_of` needs the call still present).
-        let target = self.repl.as_ref().map(|r| (self.store_target(call_ref), &r.writer));
+        let target = self.repl.as_ref().map(|repl| (self.store_target(call_ref), repl));
 
         // The call map first, the stamp last: a panic between them leaves only
         // derived entries the sweep reconciles.
@@ -540,13 +518,12 @@ impl CallState {
         inner.shrink_idle();
         drop(inner);
 
-        if let (Some(((role, primary, mut opts), writer)), Some(incarnation)) =
-            (target, incarnation)
+        if let (Some(((role, primary, mut opts), repl)), Some(incarnation)) = (target, incarnation)
         {
             // The delete names the call it removes: its tombstone buries that
             // call, not a later one born on the same ref.
             opts.incarnation = Some(incarnation);
-            writer.submit_delete(role, primary, call_ref.to_string(), keys, answered, opts);
+            let _ = repl.write_delete(role, &primary, call_ref, &keys, answered, &opts);
         }
     }
 
@@ -750,14 +727,14 @@ impl CallState {
         true
     }
 
-    /// Encode + submit the call to the store (replication path; non-blocking).
+    /// Encode + write the call to the store (replication path), its change-log
+    /// entry moved before this returns.
     ///
     /// A no-op, allocation-free, when no replicating store is wired. Otherwise,
-    /// when the call carries a non-empty `topology.bak`, the put rides the
-    /// write-side policy (`call_gen = topology.gen`, peer = the backup, direction
-    /// Forward/Reverse) and the `ReplicatingCallStore` the
-    /// [`BufferedTerminateWriter`] drains to bumps its changelog for that peer;
-    /// with no topology / no backup it is the `PutOpts::default()` (no
+    /// when the call has a backup, the put rides the write-side policy
+    /// (`call_gen = topology.gen`, peer = the backup, direction
+    /// Forward/Reverse) and the replicating store moves its changelog entry for
+    /// that peer; with no backup it is the `PutOpts::default()` (no
     /// propagation) path.
     pub fn flush(&self, call: &Call) {
         self.flush_with_ttl(call, self.replicated_ttl_ms);
@@ -777,7 +754,7 @@ impl CallState {
     /// The write behind [`flush`](Self::flush): `adopted` marks a version this
     /// node adopted without its body ([`PutOpts::adopted`]).
     fn submit_flush(&self, call: &Call, ttl_ms: i64, adopted: bool) {
-        let Some(writer) = self.repl.as_ref().map(|r| &r.writer) else {
+        let Some(repl) = self.repl.as_ref() else {
             return;
         };
         let indexes = call_index_keys(call);
@@ -803,16 +780,16 @@ impl CallState {
         if self.backup_of(&call.call_ref).is_some() {
             self.metrics.bump_repl_flush_propagated();
         }
-        writer.submit_put(
+        let _ = repl.write_put(
             role,
-            primary,
-            call.call_ref.clone(),
+            &primary,
+            &call.call_ref,
             body,
-            indexes,
+            &indexes,
             ttl_ms,
             call_gen,
             call_bgen,
-            opts,
+            &opts,
         );
     }
 

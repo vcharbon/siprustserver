@@ -34,6 +34,8 @@ pub struct Parties {
     /// The callee roles sharing bob's address, each with its agent, in
     /// declaration order.
     pub shared: Vec<(&'static str, Agent)>,
+    /// The lane the shared callee roles are recorded under, when any.
+    shared_lane: Option<String>,
 }
 
 impl Parties {
@@ -42,10 +44,12 @@ impl Parties {
     /// ([`SweepShape::shared_callees`](super::SweepShape::shared_callees)):
     /// empty, bob is bound alone; otherwise bob is the first role.
     pub async fn bind(fh: &FailoverHarness, shared: &[(&'static str, &'static str)]) -> Parties {
+        let mut shared_lane = None;
         let shared = if shared.is_empty() {
             Vec::new()
         } else {
             let group = fh.callee_group(BOB, shared).await;
+            shared_lane = Some(group.lane_name().to_string());
             let mut roles: Vec<&'static str> = Vec::new();
             for (role, _) in shared {
                 if !roles.contains(role) {
@@ -65,7 +69,15 @@ impl Parties {
             media: fh.agent(MEDIA_ROLE, MEDIA).await,
             charlie: fh.agent("charlie", CHARLIE).await.transfer_target(),
             shared,
+            shared_lane,
         }
+    }
+
+    /// The name every party's dialog verdicts are recorded under: each UA's,
+    /// and the shared callees' lane.
+    pub fn names(&self) -> Vec<String> {
+        let names = self.all().map(|agent| agent.name().to_string());
+        names.chain(self.shared_lane.clone()).collect()
     }
 
     /// The call environment of a shape run through `via`, every callee role

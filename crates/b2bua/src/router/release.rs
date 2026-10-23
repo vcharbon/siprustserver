@@ -56,6 +56,8 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
     // through — so the active-trace slot returns exactly when the call's runtime
     // state does (ADR-0026). Idempotent, and a no-op for an unsampled call.
     crate::trace::traces().close(call_ref);
+    // What the call's turns still hold leaves before the call's teardown.
+    super::hold::release(ctx, call_ref).await;
     match kind {
         ReleaseKind::Terminated => {
             ctx.state.remove(call_ref);

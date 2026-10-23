@@ -26,18 +26,16 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use repl_net::frame::{Partition, Watermark};
+use repl_net::frame::Partition;
 use sip_clock::Clock;
 
 use super::changelog::{BodySource, Changelog, RefMeta};
-use super::incarnation::is_another_call;
-use super::resurrection::{Burial, ResurrectionTombstones};
-use super::shed_marks::ShedMarks;
+use super::resurrection::ResurrectionTombstones;
 use crate::store::{
     locked, CallStore, InMemoryCallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
-    DISPLACED_BODIES, REPLICA_METADATA, RESURRECTION_TOMBSTONES, SHED_MARKS,
+    DISPLACED_BODIES, REPLICA_METADATA, REPLICA_REFUSALS, RESURRECTION_TOMBSTONES,
 };
-use admission::Write;
+use refusals::{RefusedReplicas, Unbacked};
 
 /// Backstop body-TTL (ms) applied to a replicated call stored with a non-positive
 /// `ttl_ms`. It bounds a ghost — a replica whose `delete` was missed during a
@@ -93,9 +91,9 @@ pub struct ReplicatingCallStore {
     /// under the `meta` lock, in the same step as the entry, so it never
     /// drifts from a scan of `meta`.
     backups: Arc<AtomicU64>,
-    /// Backup replicas left unstored at a backup ceiling (ADR-0037). A mark
-    /// clears when the ref's body is stored or deleted, or expires.
-    shed: Arc<Mutex<ShedMarks>>,
+    /// The replicas this node refused as a backup, and its own calls with no
+    /// backup (ADR-0055 §3).
+    refusals: Arc<Mutex<Refusals>>,
     /// The apply-side resurrection guard: a `Put` of a call deleted inside the
     /// tombstone window is ignored, so a late reverse-flush cannot re-create a
     /// just-discharged call (delete-wins, extended from the replica to the apply
@@ -124,7 +122,7 @@ impl ReplicatingCallStore {
             clock,
             meta: Arc::new(Mutex::new(HashMap::new())),
             backups: Arc::new(AtomicU64::new(0)),
-            shed: Arc::new(Mutex::new(ShedMarks::default())),
+            refusals: Arc::default(),
             tombstones: Arc::new(Mutex::new(ResurrectionTombstones::default())),
             displaced: Arc::new(Mutex::new(HashMap::new())),
             default_ttl_ms: DEFAULT_REPLICATED_TTL_MS,
@@ -263,35 +261,61 @@ impl ReplicatingCallStore {
         self.backups.load(Ordering::Relaxed)
     }
 
-    /// Record that a replica of `call_ref` sent by incarnation `gen` of
-    /// `primary` was left unstored, `floor` being the last position the flow
-    /// could claim before it. The mark expires with the backstop a stored body
-    /// of `ttl_ms` would have.
-    pub fn note_shed(
-        &self,
-        call_ref: &str,
-        primary: &str,
-        gen: u64,
-        floor: Watermark,
-        ttl_ms: i64,
-    ) {
+    /// Refuse the replica of `call_ref` of `primary` at this backup's ceiling
+    /// (ADR-0037 item 4): its writes are refused from here on, the mark
+    /// expiring with the backstop a stored body of `ttl_ms` would have.
+    pub fn refuse_replica(&self, call_ref: &str, primary: &str, ttl_ms: i64) {
         let expiry = self.expiry_for(self.clock.now_ms(), ttl_ms);
-        locked(&self.shed, SHED_MARKS).mark(call_ref, primary, gen, floor, expiry);
+        locked(&self.refusals, REPLICA_REFUSALS).replicas.refuse(call_ref, primary, expiry);
     }
 
-    /// The highest position `primary`'s flow may report while it streams
-    /// incarnation `gen`: the lowest floor of its standing shed marks, `None`
-    /// when it has none. Marks an older incarnation sent are dropped first: a
-    /// rebooted primary serves none of their calls.
-    pub fn shed_floor(&self, primary: &str, gen: u64) -> Option<Watermark> {
-        let mut shed = locked(&self.shed, SHED_MARKS);
-        shed.drop_older(primary, gen);
-        shed.floor(primary)
+    /// Whether this backup refused the replica of `call_ref`.
+    pub fn refused_replica(&self, call_ref: &str) -> bool {
+        locked(&self.refusals, REPLICA_REFUSALS).replicas.contains(call_ref)
     }
 
-    /// Drop every shed mark of `primary`.
-    pub fn clear_shed_of(&self, primary: &str) {
-        locked(&self.shed, SHED_MARKS).clear_primary(primary);
+    /// Drop every refusal of `primary`'s replicas: a new scan of it states
+    /// every call it backs up here.
+    pub fn clear_refusals_of(&self, primary: &str) {
+        locked(&self.refusals, REPLICA_REFUSALS).replicas.clear_primary(primary);
+    }
+
+    /// Standing replica refusals, all primaries.
+    pub fn refused_count(&self) -> usize {
+        locked(&self.refusals, REPLICA_REFUSALS).replicas.len()
+    }
+
+    /// Admit the new call `call_ref` with no backup, for its whole life.
+    pub fn leave_unbacked(&self, call_ref: &str) {
+        locked(&self.refusals, REPLICA_REFUSALS).unbacked.insert(call_ref);
+    }
+
+    /// `backup` refused the replica of this node's call `call_ref`: the call has
+    /// no backup from here on, its entry toward `backup` goes, and no scan of
+    /// this node offers it to `backup` again. A call this node does not hold
+    /// with `backup` as its backup (gone, or another call on the ref) is left
+    /// alone.
+    pub fn backup_refused(&self, backup: &str, call_ref: &str) {
+        {
+            let mut meta = locked(&self.meta, REPLICA_METADATA);
+            let Some(m) = meta.get_mut(call_ref) else { return };
+            if m.role != PartitionRole::Primary || m.backup.as_deref() != Some(backup) {
+                return;
+            }
+            m.backup = None;
+            locked(&self.refusals, REPLICA_REFUSALS).unbacked.insert(call_ref);
+        }
+        self.changelog.forget(backup, Partition::Bak, call_ref);
+    }
+
+    /// Whether this node's call `call_ref` has no backup.
+    pub fn unbacked(&self, call_ref: &str) -> bool {
+        locked(&self.refusals, REPLICA_REFUSALS).unbacked.contains(call_ref)
+    }
+
+    /// This node's live calls with no backup.
+    pub fn unbacked_count(&self) -> usize {
+        locked(&self.refusals, REPLICA_REFUSALS).unbacked.len()
     }
 
     /// Whether a `Put` of `incarnation` of `call_ref` would resurrect a call
@@ -321,11 +345,6 @@ impl ReplicatingCallStore {
             return None;
         }
         locked(&self.meta, REPLICA_METADATA).get(call_ref).and_then(|m| m.meta.incarnation.clone())
-    }
-
-    /// Standing shed marks, all primaries.
-    pub fn shed_count(&self) -> usize {
-        locked(&self.shed, SHED_MARKS).len()
     }
 
     /// Account one `meta` entry leaving role `old` for role `new` (`None` =
@@ -416,8 +435,8 @@ impl ReplicatingCallStore {
     }
 
     /// Reap changelog tombstones/idle peers, prune stale resurrection
-    /// tombstones and shed marks, then evict every expired body and return the
-    /// evicted bodies. The one eviction site of an expired body: a read never
+    /// tombstones and replica refusals, then evict every expired body and
+    /// return the evicted bodies. The one eviction site of an expired body: a read never
     /// evicts, so an expired body that still owes something (a deferred
     /// terminal's limiter release) reaches the caller exactly once. The upkeep
     /// runs first, so nothing runs between the eviction and the return. Call
@@ -425,7 +444,7 @@ impl ReplicatingCallStore {
     #[must_use = "an evicted body may owe a release the caller must settle"]
     pub async fn reap(&self, now_ms: i64) -> Vec<Arc<[u8]>> {
         locked(&self.tombstones, RESURRECTION_TOMBSTONES).prune(now_ms);
-        locked(&self.shed, SHED_MARKS).reap(now_ms);
+        locked(&self.refusals, REPLICA_REFUSALS).replicas.reap(now_ms);
         self.changelog.reap(now_ms);
         let expired = self.expired_snapshot(now_ms);
         self.evict_snapshot(expired, now_ms)
@@ -458,91 +477,7 @@ impl CallStore for ReplicatingCallStore {
         call_bgen: i64,
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
-        let now = self.clock.now_ms();
-        // Apply the backstop TTL for ttl_ms <= 0 so a missed-delete replica still
-        // self-evicts (the wire-carried `body_ttl_ms` keeps the original ttl_ms).
-        let expiry_at_ms = self.expiry_for(now, ttl_ms);
-        // The body's clock offset (ADR-0055 §9): the SAME `now` reading that
-        // anchors `expiry_at_ms` minus the sender's send-time reading in the
-        // body's frame. `None` on a write of this node's own body: its
-        // instants are in this node's frame, whatever the body it replaces.
-        let skew_offset_ms = opts.origin_now_ms.map(|origin| now.saturating_sub(origin));
-        // Everything the write carries is built before the lock: the critical
-        // section is map operations only.
-        let body: Arc<[u8]> = Arc::from(body);
-        let mut ref_meta = RefMeta {
-            call_gen,
-            call_bgen,
-            body_ttl_ms: ttl_ms,
-            indexes: indexes.to_vec(),
-            incarnation: opts.incarnation.clone(),
-            skew_offset_ms,
-        };
-        // A Forward flush carries the backup ordinal as `opts.peer`.
-        let flushed_backup = match (opts.direction, &opts.peer) {
-            (Some(PropagateDirection::Forward), Some(p)) => Some(p.clone()),
-            _ => None,
-        };
-
-        // Store the body and update the per-ref metadata in one critical section
-        // under the metadata lock, the lock the reap evicts under, so a reap
-        // never splits a write. A write CARRIES OVER every field it does not
-        // itself carry: the backup ordinal and the authority's view of the
-        // answer are facts about the ref that only their own writer may change,
-        // and rebuilding the entry from this write alone would silently clear
-        // each of them.
-        {
-            let mut meta = locked(&self.meta, REPLICA_METADATA);
-            // An unnamed write is one of the held call: it takes its name.
-            ref_meta.incarnation = ref_meta
-                .incarnation
-                .take()
-                .or_else(|| meta.get(call_ref).and_then(|m| m.meta.incarnation.clone()));
-            let version = (call_gen, call_bgen);
-            let write =
-                Write { role, direction: opts.direction, now, version, adopted: opts.adopted };
-            if !self.admits(&mut meta, call_ref, ref_meta.incarnation.as_deref(), &body, write) {
-                return Ok(());
-            }
-            self.inner.store_body(role, primary, call_ref, body, indexes);
-            match meta.get_mut(call_ref) {
-                Some(m) => {
-                    self.account_role(Some(m.role), Some(role));
-                    m.meta = ref_meta;
-                    m.role = role;
-                    m.primary = primary.to_string();
-                    m.expiry_at_ms = expiry_at_ms;
-                    if flushed_backup.is_some() {
-                        m.backup = flushed_backup;
-                    }
-                }
-                None => {
-                    self.account_role(None, Some(role));
-                    meta.insert(
-                        call_ref.to_string(),
-                        CallMeta {
-                            meta: ref_meta,
-                            role,
-                            primary: primary.to_string(),
-                            backup: flushed_backup,
-                            expiry_at_ms,
-                            // Until a forward flush shows one, no answer of the
-                            // authority's own stands on this Element.
-                            authority_answered: false,
-                        },
-                    );
-                }
-            }
-        }
-
-        locked(&self.shed, SHED_MARKS).clear(call_ref);
-
-        // HA path only: non-blocking changelog bump for the pulling peer.
-        if let Some(peer) = &opts.peer {
-            let partition = Self::partition_for(opts.direction);
-            self.changelog.bump_put(peer, call_ref, partition);
-        }
-        Ok(())
+        self.write_put(role, primary, call_ref, body, indexes, ttl_ms, call_gen, call_bgen, opts)
     }
 
     async fn delete_call(
@@ -554,37 +489,7 @@ impl CallStore for ReplicatingCallStore {
         answered: bool,
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
-        let deleted_at = self.clock.now_ms();
-        let incarnation = {
-            let mut meta = locked(&self.meta, REPLICA_METADATA);
-            let held = meta.get(call_ref).and_then(|m| m.meta.incarnation.as_deref());
-            let mut tombstones = locked(&self.tombstones, RESURRECTION_TOMBSTONES);
-            // A delete of another call than the held one ends that call alone:
-            // the held call stays, and nothing propagates over its entry.
-            if meta.contains_key(call_ref) && is_another_call(held, opts.incarnation.as_deref()) {
-                tombstones.bury(call_ref, opts.incarnation.clone(), Burial::Deleted, deleted_at);
-                return Ok(());
-            }
-            self.inner.remove_body(role, primary, call_ref, indexes);
-            let gone = meta.remove(call_ref);
-            if let Some(gone) = &gone {
-                self.account_role(Some(gone.role), None);
-            }
-            // Tombstone the call in the same step, so a late reverse-flush cannot
-            // resurrect it (see `put_call`); pruned in `reap`. The delete names
-            // the call it removes, or the body it finds names it.
-            let incarnation =
-                opts.incarnation.clone().or_else(|| gone.and_then(|g| g.meta.incarnation));
-            tombstones.bury(call_ref, incarnation.clone(), Burial::Deleted, deleted_at);
-            incarnation
-        };
-        locked(&self.shed, SHED_MARKS).clear(call_ref);
-
-        if let Some(peer) = &opts.peer {
-            let partition = Self::partition_for(opts.direction);
-            self.changelog.bump_delete(peer, call_ref, partition, answered, incarnation);
-        }
-        Ok(())
+        self.write_delete(role, primary, call_ref, indexes, answered, opts)
     }
 
     /// An index entry of an expired body reads as absent, like the body.
@@ -640,6 +545,10 @@ impl BodySource for ReplicatingCallStore {
         self.scan_call_refs(role, primary)
     }
 
+    fn backup_refused(&self, backup: &str, call_ref: &str) {
+        ReplicatingCallStore::backup_refused(self, backup, call_ref);
+    }
+
     /// Live `pri:{primary}` refs whose captured `backup == backup` — the
     /// **Backup**-flow bootstrap snapshot (ADR-0014 Option B). Expired-but-not-
     /// yet-reaped refs are filtered out (the body would read `None` anyway).
@@ -655,6 +564,15 @@ impl BodySource for ReplicatingCallStore {
     }
 }
 
+/// [`RefusedReplicas`] and [`Unbacked`], under one lock.
+#[derive(Default)]
+struct Refusals {
+    replicas: RefusedReplicas,
+    unbacked: Unbacked,
+}
+
 mod admission;
 #[cfg(test)]
 mod backup_count_tests;
+mod refusals;
+mod write;

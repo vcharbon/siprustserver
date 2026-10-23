@@ -142,7 +142,11 @@ impl LinkSettings {
 }
 
 /// `key` as a positive integer, `default` when unset.
-fn positive(get: &impl Fn(&str) -> Option<String>, key: &str, default: u64) -> Result<u64, String> {
+pub(super) fn positive(
+    get: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: u64,
+) -> Result<u64, String> {
     match get(key) {
         None => Ok(default),
         Some(raw) => match raw.trim().parse::<u64>() {

@@ -542,13 +542,13 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
                 super::held_acks::fire_due_held_ack(st).await?;
             }
         }
-        // `ledger_closed` keeps a leg with an outstanding acknowledgement (its
-        // own reject-final, or any leg's open obligation) REACTIVE through the
-        // settle window — the UA outlives the call, so a re-emitted final /
-        // recovered ACK is consumed, closed, and recorded rather than orphaned.
-        // Bounded: the controller's settle ceiling (64·T1) wins the outer
-        // `select!` and drops still-parked actors either way.
-        if obs.all_terminated() && st.goals.is_exhausted() && obs.ledger_closed() {
+        // An open obligation or a re-INVITE of this leg still unanswered keeps
+        // it REACTIVE through the settle window: the UA outlives the call, so a
+        // re-emitted final is consumed and one crossing the BYE ACKed (RFC 3261
+        // §15, §17.1.1.3). Bounded: the controller's settle ceiling (64·T1)
+        // wins the outer `select!` and drops still-parked actors either way.
+        let settled = obs.all_terminated() && st.goals.is_exhausted() && obs.ledger_closed();
+        if settled && st.sent_reinvites.is_empty() {
             return Ok(());
         }
     }

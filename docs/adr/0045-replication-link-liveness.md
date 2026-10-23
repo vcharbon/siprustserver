@@ -61,6 +61,9 @@ life of the process, silently.
    link bound, an idle bound under twice the `Noop` interval, and a listen
    address that cannot be bound refuse the boot naming the variable. The host
    binds the listener before the core spawns (`ReplicationSetup::listener`).
+   A puller announcing another protocol version is refused at connect with a
+   `StreamRefused` naming the server's, counted
+   (`b2bua_repl_streams_refused_total`), and pulls again after its backoff.
 8. **Kube client retry.** A kube client that fails to build is built again in
    the background (1 s doubling to 30 s). The worker stays wired; its view is
    empty and unsynced until the informer lists.

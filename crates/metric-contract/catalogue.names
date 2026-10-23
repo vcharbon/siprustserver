@@ -26,6 +26,8 @@ b2bua-runner b2bua_handler_panics_total counter fixed {}
 b2bua-runner b2bua_reaper_sweeps_total counter fixed {}
 b2bua-runner b2bua_reaper_sweep_panics_total counter fixed {}
 b2bua-runner b2bua_repl_frames_refused_total counter fixed {}
+b2bua-runner b2bua_repl_streams_refused_total counter fixed {}
+b2bua-runner b2bua_repl_new_calls_unbacked_total counter fixed {}
 b2bua-runner b2bua_departure_takeover_panics_total counter fixed {}
 b2bua-runner b2bua_store_reconciled_orphan_stamps_total counter fixed {}
 b2bua-runner b2bua_store_reconciled_missing_stamps_total counter fixed {}
@@ -120,6 +122,7 @@ b2bua-runner b2bua_store_idx_entries gauge fixed {}
 b2bua-runner b2bua_store_tombstones gauge fixed {}
 b2bua-runner b2bua_repl_meta_total gauge fixed {}
 b2bua-runner b2bua_repl_meta_backup gauge fixed {}
+b2bua-runner b2bua_repl_calls_unbacked gauge fixed {}
 b2bua-runner b2bua_repl_changelog_entries gauge fixed {}
 b2bua-runner b2bua_repl_changelog_peers gauge fixed {}
 b2bua-runner b2bua_withdrawn_running gauge fixed {}

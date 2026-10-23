@@ -25,7 +25,8 @@
 //! `client_give_up` (a client transaction's deadlines and the Timeout it reports) ·
 //! `accepted` (RFC 6026 §7.2: a client INVITE after its 2xx, and who ACKs it) ·
 //! `orphan` (a released call's client transactions, ADR-0034) ·
-//! `server` (§17.2 UAS FSM) · `server_cancel` (§9.2: a CANCEL of a server
+//! `commands` (the command funnel's dispatch) · `server` (§17.2 UAS FSM) ·
+//! `trying` (§17.2.1: an INVITE's first provisional) · `server_cancel` (§9.2: a CANCEL of a server
 //! INVITE) · `shrink` (a drained table's memory returned) · `lifetime` (when a transaction leaves the map:
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
@@ -42,6 +43,7 @@ mod bind;
 mod call_txns;
 mod client;
 mod client_give_up;
+mod commands;
 mod config;
 mod events;
 mod handle;
@@ -58,6 +60,7 @@ mod seed;
 mod server;
 mod server_cancel;
 mod shrink;
+mod trying;
 mod txn;
 mod unanswered;
 mod via_marks;

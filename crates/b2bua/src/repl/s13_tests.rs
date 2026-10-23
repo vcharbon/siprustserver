@@ -8,8 +8,8 @@
 //! Timing is the axis of every scenario: when the late write of the earlier
 //! call lands — in the Reclaim flow's bootstrap or in its tail, before or after
 //! the new call's `Put` reached the backup. A primary that deletes a call and
-//! writes the retry inside one poll drains one changelog entry, the retry's
-//! `Put`, so the backup never sees that delete. All run under
+//! writes the retry before its serve task drains the delete holds one
+//! changelog entry, the retry's `Put`, so the backup never sees that delete. All run under
 //! `#[tokio::test(start_paused = true)]`, the protocol driven between `tick`s.
 
 use std::net::SocketAddr;
@@ -216,9 +216,10 @@ async fn primary_and_backup(
 
 /// **A takeover copy of a replaced call never overwrites the retry.** B holds
 /// the first call and serves a takeover copy of it; A releases the first call
-/// and answers the retry inside one poll, so B gets the retry's `Put` and never
-/// the first call's delete. Whenever the takeover copy writes, B ends holding
-/// the retry: a takeover of the retry after A crashes must read the retry.
+/// and answers the retry before its serve task runs, so B gets the retry's
+/// `Put` and never the first call's delete. Whenever the takeover copy writes,
+/// B ends holding the retry: a takeover of the retry after A crashes must read
+/// the retry.
 async fn a_takeover_write_of_a_replaced_call(at: TakeoverWrite, base: u16) {
     let clock = Clock::test_at(0);
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
@@ -233,7 +234,8 @@ async fn a_takeover_write_of_a_replaced_call(at: TakeoverWrite, base: u16) {
     if let TakeoverWrite::BeforeTheRetryLands = at {
         takeover_write(&b.store, &first, 3, 1).await;
     }
-    // Inside one poll: the delete and the retry's first write share an entry.
+    // Before the serve task runs: the delete and the retry's first write share
+    // an entry.
     primary_delete(&a.store, &first).await;
     let retry = nth("s13-takeover", 2, CallModelState::Active);
     primary_put(&a.store, &retry, 1).await;
@@ -386,12 +388,11 @@ async fn a_replaced_terminal_the_authority_flushed_is_not_counted_lost() {
 #[tokio::test(start_paused = true)]
 async fn a_release_with_no_resident_copy_leaves_the_retry_in_the_store() {
     use crate::metrics::B2buaMetrics;
-    use crate::store::{BufferedTerminateWriter, CallState};
+    use crate::store::CallState;
 
     let store = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
-    let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 16);
     let state = CallState::new(store.clone() as Arc<dyn CallStore>, "A", B2buaMetrics::new())
-        .with_replication(store.clone(), writer);
+        .with_replication(store.clone());
     let retry = nth("s13-release", 2, CallModelState::Active);
     let call_ref = retry.call_ref.clone();
     primary_put(&store, &retry, 1).await;

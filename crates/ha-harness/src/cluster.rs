@@ -26,10 +26,9 @@ use topology::Peer;
 use crate::node::{HaNode, NodeWiring};
 use crate::report::{Marker, ReplReport};
 
-/// Default changelog TTLs for harness nodes: short enough that dead-peer
-/// auto-clean is reachable in a test budget, long enough that steady-state
-/// tombstones survive a few advances. `(tombstone_ms, dead_peer_ms)`.
-const DEFAULT_TTLS: (i64, i64) = (30_000, 300_000);
+/// Default changelog dead-peer TTL for harness nodes: short enough that
+/// dead-peer auto-clean is reachable in a test budget.
+const DEFAULT_DEAD_PEER_TTL_MS: i64 = 300_000;
 
 /// Short backoff + bootstrap hard timeout so a couple of advances trip the
 /// relevant deadline deterministically — the canonical values live on
@@ -58,7 +57,7 @@ pub struct HaCluster {
     /// Injected timeline markers for the report (crash/reboot/partition/…).
     markers: Vec<Marker>,
     config: PullerConfig,
-    ttls: (i64, i64),
+    dead_peer_ttl_ms: i64,
     /// Backstop body-TTL for replicas stored with `ttl_ms <= 0` (long by default;
     /// split-brain tests inject a short value via [`with_replica_backstop_ms`]).
     ///
@@ -120,7 +119,7 @@ impl HaCluster {
             addrs,
             markers: Vec::new(),
             config: fast_config(),
-            ttls: DEFAULT_TTLS,
+            dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
             replica_backstop_ms,
         };
 
@@ -157,7 +156,7 @@ impl HaCluster {
             addr_map: self.addrs.clone(),
             peers,
             config: self.config,
-            ttls: self.ttls,
+            dead_peer_ttl_ms: self.dead_peer_ttl_ms,
             replica_backstop_ms: self.replica_backstop_ms,
         }
     }

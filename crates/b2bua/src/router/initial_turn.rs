@@ -149,13 +149,18 @@ pub(super) async fn initial_invite_turn(
         let a_leg = call.a_leg.leg_id.clone();
         call = ring.invite_received(call, &a_leg, req, now_ms);
     }
+    // The backlog toward the backup the proxy named may leave the call with
+    // none, for life (ADR-0055 §3).
+    let backed = ctx.state.admit_backup(&call);
     ctx.state.create(call.clone());
-    // The caller may already hold this node's 100 and send nothing more, so
-    // the backup holds the call from its birth, not from its decision
-    // (ADR-0047); this turn's own write supersedes this one.
-    if call.topology.as_ref().is_some_and(|t| !t.bak.is_empty()) {
+    // The caller's 100 follows the call's creation write, so the backup holds
+    // the call from before the caller stops retransmitting, not from its
+    // decision (ADR-0047, ADR-0055 §3); this turn's own write supersedes this
+    // one.
+    if backed {
         ctx.state.flush(&call);
     }
+    super::hold::first_provisional(ctx, call_ref, req).await;
     // Born: the call counts as live from here.
     drop(unborn);
     // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The

@@ -147,7 +147,7 @@ fn memory_attribution_gauges_render() {
     assert!(zero.contains("b2bua_repl_meta_backup 0"));
 
     m.set_store_gauges(7, 11, 7, 9, 3, 7);
-    m.set_repl_store_gauges(40, 22, 64, 4);
+    m.set_repl_store_gauges(40, 22, 5, 64, 4);
     let txt = m.prometheus_text();
     // A store_locks (9) > store_calls (7) gap is exactly the lock-leak signal.
     assert!(txt.contains("b2bua_store_calls 7"));
@@ -158,6 +158,7 @@ fn memory_attribution_gauges_render() {
     assert!(txt.contains("b2bua_store_touched 7"));
     assert!(txt.contains("b2bua_repl_meta_total 40"));
     assert!(txt.contains("b2bua_repl_meta_backup 22"));
+    assert!(txt.contains("b2bua_repl_calls_unbacked 5"));
     assert!(txt.contains("b2bua_repl_changelog_entries 64"));
     assert!(txt.contains("b2bua_repl_changelog_peers 4"));
     assert!(txt.contains("b2bua_withdrawn_running 0"));

@@ -31,6 +31,12 @@ pub struct TransactionConfig {
     /// default [`TIMER_B`](crate::timers::TIMER_B), which arms nothing. An
     /// in-dialog INVITE and a non-INVITE never read it.
     pub invite_first_response_timeout_ms: u64,
+    /// The §17.2.1 bound on an INVITE's first provisional, ms: a server INVITE
+    /// transaction whose consumer has sent nothing and released no 100
+    /// ([`TransactionLayer::release_trying`](crate::TransactionLayer::release_trying))
+    /// this long after its INVITE arrived sends the 100 itself. Default
+    /// [`TRYING_BOUND`](crate::timers::TRYING_BOUND); the RFC allows no more.
+    pub trying_bound_ms: u64,
     /// Whether a response the TU hands over under a To-tag other than the
     /// bound one fails a debug build loudly (`debug_assert!`) besides being
     /// re-rendered. The wire is corrected either way; `true` — the default —
@@ -73,7 +79,7 @@ impl TransactionConfig {
     }
 
     /// The defaults, identifiers drawn from `id_gen`: a 256-datagram receive
-    /// queue, the RFC 3261 INVITE bounds, strict To-tag binding, no deferred
+    /// queue, the RFC 3261 INVITE bounds and first-provisional bound, strict To-tag binding, no deferred
     /// bound, no shared refusals, a transaction per OPTIONS, no advertised
     /// address.
     pub fn new(id_gen: Arc<IdGen>) -> Self {
@@ -82,6 +88,7 @@ impl TransactionConfig {
             id_gen,
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
+            trying_bound_ms: crate::timers::TRYING_BOUND,
             strict_to_tag: true,
             deferred_bound: None,
             invite_refusals: None,

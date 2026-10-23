@@ -140,7 +140,7 @@ async fn spawn_reclaimer_core(
 
     // Fresh empty store at a higher incarnation gen (the rebooted node).
     let store = Arc::new(ReplicatingCallStore::with_changelog(
-        Changelog::new(2, clock.clone()).with_ttls(30_000, 300_000),
+        Changelog::new(2, clock.clone()),
         clock.clone(),
     ));
     let addr_map: HashMap<String, SocketAddr> =
@@ -161,6 +161,7 @@ async fn spawn_reclaimer_core(
         puller: PullerConfig::default(),
         serve: ServeConfig::default(),
         replica: crate::node::replica::ReplicaConfig::default(),
+        write_path: Default::default(),
     };
     let config = B2buaConfig {
         self_ordinal: self_ordinal.into(),
@@ -217,7 +218,7 @@ async fn spawn_primary(
     net: &RealReplicationNetwork,
     clock: &Clock,
 ) -> (ReplicatingCallStore, SocketAddr) {
-    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(1, clock.clone());
     let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     let listener = net.listen(loopback()).await.unwrap();
     let addr = listener.local_addr();
@@ -265,10 +266,7 @@ async fn tail_delivers_post_connect_mutation_over_real_tcp() {
 
     // Primary w0 serves; backup w1 pulls w0 into its store.
     let (w0, w0_addr) = spawn_primary("w0", &net, &clock).await;
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (_cancel, metrics) =
         spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Bak);
 
@@ -320,10 +318,7 @@ async fn tail_streams_successive_updates_over_real_tcp() {
     let net = RealReplicationNetwork::new();
 
     let (w0, w0_addr) = spawn_primary("w0", &net, &clock).await;
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (_cancel, metrics) =
         spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Bak);
 
@@ -379,10 +374,7 @@ async fn bootstrap_preseed_delivers_over_real_tcp() {
     .await
     .unwrap();
 
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (_cancel, metrics) =
         spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Pri);
 
@@ -563,10 +555,7 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
     }
 
     // Cold w1 bootstraps the full set; time from connect to last context landed.
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let started = tokio::time::Instant::now();
     let (_cancel, metrics) =
         spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Pri);
@@ -761,10 +750,8 @@ async fn mismatched_ordinal_silently_delivers_nothing() {
 
     // The puller connects as "b2bua-worker-1" — but the primary will bump its
     // changelog for peer "w1" (the proxy's mismatched cookie id).
-    let backup = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let backup =
+        ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (_cancel, metrics) = spawn_puller(
         "b2bua-worker-1",
         "w0",
@@ -824,10 +811,7 @@ async fn measure_bootstrap(
             .await
             .unwrap();
     }
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
 
     // Concurrent live-write storm on w0 (forwarded to a dummy peer so it never
     // reaches w1) — pure contention on w0's meta/inner locks during the scan.
@@ -1004,7 +988,7 @@ async fn measure_bootstrap_latent(
     send_cost: Duration,
 ) -> Duration {
     let net = LatentNet { inner: Arc::new(base.clone()), send_cost };
-    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(1, clock.clone());
     let w0 = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     let listener = net.listen(loopback()).await.unwrap();
     let w0_addr = listener.local_addr();
@@ -1016,10 +1000,7 @@ async fn measure_bootstrap_latent(
             .await
             .unwrap();
     }
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let metrics = B2buaMetrics::new();
     let (puller, _status) = Puller::new_at(
         "w0",
@@ -1153,7 +1134,7 @@ async fn bootstrap_coalesces_into_few_network_rounds() {
         CountingNet { inner: Arc::new(RealReplicationNetwork::new()), rounds: rounds.clone() };
 
     // Primary w0 holds N static bak:w1 bodies; serve over the counting net.
-    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(1, clock.clone());
     let w0 = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     let listener = net.listen(loopback()).await.unwrap();
     let w0_addr = listener.local_addr();
@@ -1167,10 +1148,7 @@ async fn bootstrap_coalesces_into_few_network_rounds() {
     }
 
     // Cold w1 bootstraps over the counting net.
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (puller, _status) = Puller::new_at(
         "w0",
         "w1",

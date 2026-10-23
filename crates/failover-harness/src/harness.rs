@@ -68,10 +68,9 @@ mod settle;
 pub use proxy_sut::ProxySut;
 use repl_wiring::ReplWiring;
 
-/// Changelog TTLs `(tombstone, dead_peer)`: long enough that a backed-up call
-/// survives the whole scenario, short enough that dead-peer auto-clean is
-/// reachable in a test budget.
-const DEFAULT_TTLS: (i64, i64) = (60_000, 600_000);
+/// Changelog dead-peer TTL: a peer silent this long loses its log and pulls
+/// again from a bootstrap, reachable in a test budget.
+const DEFAULT_DEAD_PEER_TTL_MS: i64 = 60_000;
 
 // ===========================================================================
 // ReplicatedB2buaSut — a replicating B2BUA worker on the failover fabric
@@ -1535,8 +1534,8 @@ impl FailoverHarness {
             addr_map: self.repl_resolver.clone(),
             peers: peer_list,
             listen_addr,
-            ttls: DEFAULT_TTLS,
             replica: self.worker_replica,
+            dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
         };
 
         // This node's own wall clock (shared monotonic timeline + per-node anchor

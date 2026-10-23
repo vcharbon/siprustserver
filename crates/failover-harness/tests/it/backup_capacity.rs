@@ -1,18 +1,19 @@
-//! **A backup replica is not stored above the backup RSS ceiling, the backup
-//! does not report its flow caught up meanwhile, and the next write after the
-//! reading falls back stores it** (ADR-0037, ADR-0031 D2). The ceiling is read
-//! from each worker's injected system probe through the live supervisor →
-//! puller wiring; the call itself is never touched by it.
+//! **A backup above its RSS ceiling refuses the replica of a new call, and that
+//! call has no backup for life** (ADR-0037 item 4, ADR-0055 §3). The refusal is
+//! a frame to the primary and the backup's position moves past it, so the
+//! flow reads caught up; the call runs on its primary alone, and no later
+//! write stores it on the backup. The ceiling is read from each worker's
+//! injected system probe through the live supervisor → puller wiring; the
+//! call itself is never touched by it.
 //!
 //! ```text
 //!   call A establishes            its replica lands on its backup
 //!   both workers' RSS → 2 000     above the 1 000 backup ceiling
-//!   call B establishes            its backup does not store it; B's primary
-//!                                 never reads that flow as caught up
+//!   call B establishes            its backup refuses it; B's primary reads
+//!                                 the flow caught up and B as unbacked
 //!   alice INFO on call A          A's held replica still takes the update
 //!   both workers' RSS → 0
-//!   alice INFO on call B          the flush that follows stores B's replica;
-//!                                 the flow reports caught up again
+//!   alice INFO on call B          B's write goes to no backup
 //!   both calls end                one CDR each, nothing left behind
 //! ```
 
@@ -69,7 +70,7 @@ fn roles<'a>(
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_backup_above_its_rss_ceiling_is_stored_by_the_next_write_below_it() {
+async fn a_replica_refused_above_the_rss_ceiling_leaves_its_call_without_a_backup() {
     let mut fh = FailoverHarness::new("backup-capacity-rss", &["b1", "b2"]).with_worker_replica(
         b2bua::ReplicaConfig {
             backup: BackupCeilings { calls: None, rss_bytes: Some(1_000) },
@@ -108,13 +109,10 @@ async fn a_backup_above_its_rss_ceiling_is_stored_by_the_next_write_below_it() {
         .expect("the primary stores call B");
     assert!(!backup_b.scan_backed_up(&primary_b).contains(&ref_b), "B is not backed up");
     assert!(backup_b.capacity().backup_shed_total(BackupBound::Rss) >= 1);
-    for _ in 0..10 {
-        fh.advance(Duration::from_millis(500)).await;
-        assert!(
-            !serving_b.flow_caught_up(backup_b.ordinal(), Partition::Bak),
-            "a flow holding a shed replica never reports caught up"
-        );
-    }
+    assert!(
+        serving_b.flow_caught_up(backup_b.ordinal(), Partition::Bak),
+        "the refused replica moves the backup's position past it"
+    );
 
     let gen_a = backup_a.call_gen(PartitionRole::Backup, &primary_a, &ref_a);
     info(&mut dialog_a, &bob).await;
@@ -124,19 +122,14 @@ async fn a_backup_above_its_rss_ceiling_is_stored_by_the_next_write_below_it() {
         "A's held replica takes updates above the ceiling"
     );
 
-    // ── below the ceiling, the next write stores it ─────────────────────────
+    // ── below the ceiling, B still has no backup ────────────────────────────
     w_b1.system().set_rss_bytes(Some(0));
     w_b2.system().set_rss_bytes(Some(0));
     fh.advance(Duration::from_millis(300)).await;
     info(&mut dialog_b, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
-    assert!(backup_b.scan_backed_up(&primary_b).contains(&ref_b), "B is backed up now");
-    let caught_up = fh
-        .pump_until(Duration::from_millis(100), Duration::from_secs(10), async || {
-            serving_b.flow_caught_up(backup_b.ordinal(), Partition::Bak)
-        })
-        .await;
-    assert!(caught_up, "the flow reports caught up once B is held");
+    assert!(!backup_b.scan_backed_up(&primary_b).contains(&ref_b), "B has no backup for life");
+    assert!(serving_b.flow_caught_up(backup_b.ordinal(), Partition::Bak));
 
     // ── both calls end cleanly ──────────────────────────────────────────────
     scenario_harness::callflow::hangup(&mut dialog_a, &bob).await;

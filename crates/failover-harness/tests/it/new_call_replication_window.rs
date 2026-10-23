@@ -1,12 +1,11 @@
 //! **When a new call first reaches its backup.** The caller's INVITE draws the
-//! worker's 100 Trying the instant its server transaction is born (RFC 3261
-//! §17.2.1), and the stateless front proxy relays that 100 (§16.11), so from
-//! then on the caller sends no retransmission that could re-place the call.
-//! The call is written to its backup at its birth, before the routing decision
-//! is asked for, so a node death after the 100 leaves a replica behind for the
-//! departure sweep to answer (ADR-0047). This cell measures the window from the
-//! caller's 100 to the first replica with a decision that takes a known time
-//! to answer: one replication stream hop, the decision's time no part of it.
+//! worker's 100 Trying once the call's creation write is applied at its backup
+//! (ADR-0055 §3), and the stateless front proxy relays that 100 (RFC 3261
+//! §16.11), so from then on the caller sends no retransmission that could
+//! re-place the call, and its backup already holds it for the departure sweep
+//! to answer (ADR-0047). The creation write precedes the routing decision, so
+//! a decision that takes a known time to answer is no part of the wait: the
+//! 100 leaves well inside the §17.2.1 bound, before the callee is dialled.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,10 +31,8 @@ const B2: &str = "127.0.0.1:5092";
 
 /// How long the routing decision takes to answer.
 const DECISION_DELAY: Duration = Duration::from_millis(1_000);
-/// How long after the call's birth the replica may take to land.
-const STREAM_HOP_BOUND: Duration = Duration::from_millis(50);
-/// The probe's resolution.
-const PROBE_STEP: Duration = Duration::from_millis(5);
+/// The §17.2.1 bound on the INVITE's first provisional.
+const TRYING_BOUND: Duration = Duration::from_millis(200);
 
 /// A decision engine that answers `new_call` after [`DECISION_DELAY`].
 struct SlowDecision(ScriptedDecisionEngine);
@@ -61,7 +58,7 @@ impl CallDecisionEngine for SlowDecision {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_new_call_reaches_its_backup_before_its_routing_decision_answers() {
+async fn a_new_calls_100_leaves_once_its_backup_holds_it() {
     let mut fh = FailoverHarness::new("new-call-replication-window", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -77,25 +74,19 @@ async fn a_new_call_reaches_its_backup_before_its_routing_decision_answers() {
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
-    // ── The caller hears the worker's 100; the replica follows at once ──────
+    // ── The caller hears the worker's 100 once the replica is held ──────────
+    let sent_at = fh.now_ms();
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     call.expect(100).await;
-    let heard_at = fh.now_ms();
-    let replicated = async || {
-        w_b1.scan_one_backed_up("b2").await.is_some()
-            || w_b2.scan_one_backed_up("b1").await.is_some()
-    };
-    let routed = || fh.sip_entries().iter().any(|e| e.to == bob.addr());
-    while !replicated().await {
-        assert!(fh.now_ms() - heard_at < 2 * DECISION_DELAY.as_millis() as i64, "never replicated");
-        fh.advance(PROBE_STEP).await;
-    }
-    let window = Duration::from_millis((fh.now_ms() - heard_at) as u64);
-    assert!(!routed(), "the replica precedes the routing decision");
+    let heard = Duration::from_millis((fh.now_ms() - sent_at) as u64);
+    let replicated = w_b1.scan_one_backed_up("b2").await.is_some()
+        || w_b2.scan_one_backed_up("b1").await.is_some();
+    assert!(replicated, "the caller's 100 leaves once its backup holds the call");
     assert!(
-        window <= STREAM_HOP_BOUND,
-        "from the caller's 100 to the first replica: one stream hop, measured {window:?}",
+        !fh.sip_entries().iter().any(|e| e.to == bob.addr()),
+        "the 100 precedes the routing decision"
     );
+    assert!(heard < TRYING_BOUND, "the 100 leaves inside the §17.2.1 bound: {heard:?}");
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak) = worker_ordinals(uas.request());
     let backup = if pri_ord == "b1" { &w_b2 } else { &w_b1 };

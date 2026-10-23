@@ -75,6 +75,6 @@ pub use relay::{
 pub use relay_policy::{
     MessageClass, RelayDirection, RelayDrop, RelayPolicy, RelaySituation, RelayedMessage,
 };
-pub use response::{generate_response, GenerateResponseOpts};
+pub use response::{delayed_trying_timestamp, generate_response, GenerateResponseOpts};
 pub use session_timer::{offers_session_timer, withdraw_session_timer};
 pub use spec::{InviteClientTransactionHandle, StackDialog};

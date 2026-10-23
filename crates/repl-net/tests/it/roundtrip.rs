@@ -145,6 +145,20 @@ fn roundtrip_position() {
 }
 
 #[test]
+fn roundtrip_replica_refused() {
+    assert_roundtrip(&Frame::ReplicaRefused {
+        at: Watermark::new(3, 9),
+        call_ref: "w0|c|t".into(),
+    });
+}
+
+#[test]
+fn roundtrip_stream_refused() {
+    let reason = "this server speaks protocol 4".to_string();
+    assert_roundtrip(&Frame::StreamRefused { proto_ver: repl_net::PROTO_VER, reason });
+}
+
+#[test]
 fn roundtrip_reset_to_bootstrap() {
     assert_roundtrip(&Frame::ResetToBootstrap { reason: "since fell off compacted tail".into() });
     assert_roundtrip(&Frame::ResetToBootstrap { reason: String::new() });

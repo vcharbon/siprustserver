@@ -81,7 +81,13 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
 
     let position = watermark_strat().prop_map(|at| Frame::Position { at });
 
-    prop_oneof![pull, data, noop, reset, position]
+    let refused =
+        (watermark_strat(), ".*").prop_map(|(at, call_ref)| Frame::ReplicaRefused { at, call_ref });
+
+    let stream_refused = (any::<u16>(), ".*")
+        .prop_map(|(proto_ver, reason)| Frame::StreamRefused { proto_ver, reason });
+
+    prop_oneof![pull, data, noop, reset, position, refused, stream_refused]
 }
 
 proptest! {

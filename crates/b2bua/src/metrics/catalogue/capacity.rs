@@ -1,5 +1,6 @@
 //! The capacity gate's families: its level, its last RSS sample, its
-//! ceilings, and the backup replicas it kept out.
+//! ceilings, the backup replicas it kept out, and the live calls left with no
+//! backup.
 
 use metric_catalogue::{assert_exposition_order, label_values, Dim, Family, Labels};
 
@@ -42,4 +43,10 @@ pub const REPL_BACKUP_SHED: Family = Family::counter(
     "b2bua_repl_backup_shed_total",
     Labels::Product(&[BACKUP_BOUND]),
     "Backup replicas not stored because a backup ceiling was reached.",
+);
+
+pub const REPL_CALLS_UNBACKED: Family = Family::gauge(
+    "b2bua_repl_calls_unbacked",
+    Labels::None,
+    "live calls of this node with no backup for life: admitted over a backlog high-water mark, or refused by their backup at its ceiling (ADR-0055 §3)",
 );

@@ -40,9 +40,14 @@ pub fn addr(s: &str) -> SocketAddr {
     s.parse().unwrap()
 }
 
-/// The layer's defaults, identifiers drawn deterministically.
+/// The layer's defaults, identifiers drawn deterministically, under a TU that
+/// releases no 100: an INVITE's 100 leaves on the layer's next turn, as at a
+/// bound of zero. The bound itself is `first_provisional`'s.
 pub fn config() -> TransactionConfig {
-    TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
+    TransactionConfig {
+        trying_bound_ms: 0,
+        ..TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
+    }
 }
 
 /// A bound transaction layer over the simulated fabric, plus a peer endpoint

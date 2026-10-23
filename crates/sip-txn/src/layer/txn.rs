@@ -114,6 +114,10 @@ pub(super) enum Timer {
     /// transaction runs on to Timer B. Its key is never stored — the fire
     /// reads the transaction's state and is a no-op on anything else.
     FirstResponse(String),
+    /// The §17.2.1 bound of the server INVITE transaction opened at the
+    /// instant it carries: its 100 leaves then if nothing has (`layer::trying`).
+    /// Its key is never stored; the fire reads the transaction's state.
+    Trying(ServerTxnKey, tokio::time::Instant),
     /// The transaction's end of life, due at its [`Lifetime`] deadline — the
     /// backstop of an active one, the end of a hold otherwise. Every resident
     /// transaction has exactly one; firing removes the transaction.

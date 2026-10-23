@@ -85,7 +85,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use call::MsgpackCodec;
-use repl_net::frame::{Frame, Partition, Watermark};
+use repl_net::frame::{Frame, Partition, Watermark, PROTO_VER};
 use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
 use tokio::sync::watch;
 use topology::Peer;
@@ -98,12 +98,6 @@ mod config;
 mod wiring;
 use apply::{ApplyMode, ApplyOutcome};
 pub use config::PullerConfig;
-
-/// Protocol version stamped on the `PullRequest`. **v3** (ADR-0014 stream split):
-/// the four-frame `{PullRequest, Data, Noop, ResetToBootstrap}` form (one
-/// socket = one flow, scan-then-tail), `Op` = `{Put, Delete}`. A v3 node cannot
-/// interpret a v2 peer's frames.
-const PROTO_VER: u16 = 3;
 
 /// Shared, observable per-`(peer, flow)` puller status. The supervisor reads
 /// `current` for readiness (scoped to the **Reclaim** flow) and the retained
@@ -265,20 +259,6 @@ impl Puller {
             },
             status_rx,
         )
-    }
-
-    /// The position this flow may report having applied, given it received
-    /// up to `at`: a Backup flow never claims past a replica it left unstored
-    /// (ADR-0037), so a draining primary does not read a shed call as held
-    /// (ADR-0031 D2). A Reclaim flow sheds nothing.
-    fn claimable(&self, at: Watermark) -> Watermark {
-        if self.is_reclaim() {
-            return at;
-        }
-        match self.store.shed_floor(self.peer_ordinal(), at.gen) {
-            Some(floor) if floor < at => floor,
-            _ => at,
-        }
     }
 
     /// Convenience constructor for a puller that always connects to a **fixed**
@@ -572,12 +552,11 @@ impl Puller {
         // advance W and apply the Reverse rule from the first frame. A cold pull
         // starts pre-bootstrap: apply ungated, hold W until the first Noop.
         let mut bootstrapped = since != Watermark::new(0, 0);
-        // A Backup scan re-sends every live body of the primary, so the shed
-        // marks of an earlier stream (an old incarnation, a ref deleted while
-        // disconnected) say nothing about it: they go, and a body still left
-        // out marks itself again (ADR-0037).
+        // A Backup scan re-sends every live body the primary still offers
+        // this node, so the refusals of an earlier stream say nothing about
+        // it: they go (ADR-0037 item 4).
         if !bootstrapped && !self.is_reclaim() {
-            self.store.clear_shed_of(self.peer_ordinal());
+            self.store.clear_refusals_of(self.peer_ordinal());
         }
         // Bodies imported during the pre-`Noop` bootstrap phase — the
         // re-hydration diagnostic (Reclaim flow only): a pass that re-stalls at
@@ -670,15 +649,14 @@ impl Puller {
                             mode,
                         )
                         .await;
+                    // A replica refused at this backup's ceiling: the primary is
+                    // told, and the call has no backup for life (ADR-0055 §3).
                     if outcome == ApplyOutcome::Shed {
-                        let floor = self.status_tx.borrow().watermark;
-                        self.store.note_shed(
-                            &call_ref,
-                            self.peer_ordinal(),
-                            at.gen,
-                            floor,
-                            body_ttl_ms,
-                        );
+                        self.store.refuse_replica(&call_ref, self.peer_ordinal(), body_ttl_ms);
+                        let refused = Frame::ReplicaRefused { at, call_ref: call_ref.clone() };
+                        if !self.send(conn.as_ref(), refused).await {
+                            return self.ended(connected_at);
+                        }
                     }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
@@ -694,10 +672,7 @@ impl Puller {
                         // frames all share `at = W`: claiming W before the whole
                         // scan is applied would be false, so the bootstrap claim
                         // is made once, on the first catch-up `Noop`.
-                        if !self
-                            .send(conn.as_ref(), Frame::Position { at: self.claimable(at) })
-                            .await
-                        {
+                        if !self.send(conn.as_ref(), Frame::Position { at }).await {
                             return self.ended(connected_at);
                         }
                     }
@@ -728,7 +703,7 @@ impl Puller {
                     // the first one is the bootstrap's own claim (every scan body
                     // is applied by now), the idle ones keep the claim fresh
                     // (ADR-0031 D2).
-                    if !self.send(conn.as_ref(), Frame::Position { at: self.claimable(at) }).await {
+                    if !self.send(conn.as_ref(), Frame::Position { at }).await {
                         return self.ended(connected_at);
                     }
                 }
@@ -758,7 +733,23 @@ impl Puller {
                     self.note_state("reset_to_bootstrap", "server dropped our watermark");
                     return self.ended(connected_at);
                 }
-                // PullRequest is client→server; never expected here. Ignore.
+                // The peer speaks another protocol: nothing it would send can be
+                // read, so the stream is left and pulled again after the
+                // backoff (ADR-0045).
+                Some(Frame::StreamRefused { proto_ver, reason }) => {
+                    self.metrics.bump_repl_stream_refused();
+                    tracing::error!(
+                        node = observe::node(),
+                        peer = %self.peer.ordinal,
+                        flow = self.flow_label(),
+                        ours = PROTO_VER,
+                        theirs = proto_ver,
+                        reason,
+                        "replication stream refused: the peer speaks another protocol"
+                    );
+                    return self.ended(connected_at);
+                }
+                // Client→server frames; never expected here. Ignore.
                 Some(_) => {}
                 None => return self.ended(connected_at),
             }

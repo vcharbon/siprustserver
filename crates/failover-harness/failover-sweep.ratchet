@@ -3,209 +3,86 @@
 # correction. A change that makes a cell pass removes its line; a new failure
 # is never added without its owner. The list only shrinks.
 #
-# The owner is read from the finding: a missing or extra CDR §5, a final under
-# another tag than the provisional §3 at a kill and §4 in a split, a request a
-# copy sends without the record of what the dead owner sent §4, the non-2xx
-# final of a dialled INVITE nobody ACKs §12, a PRACK or an in-dialog request
-# left unanswered §2, and any other finding of a split cell §7.
+# The owner is read from the finding: a missing or extra CDR §5; a final
+# under another tag than a provisional that left inside the replication
+# window, a request a copy sends without the record of what the dead owner
+# sent, and a request into a dialog the other copy ended §4; the non-2xx final
+# of a dialled INVITE nobody ACKs §12; a PRACK, an owed ACK or an in-dialog
+# request left unanswered §2; a 2xx repeat routed through the other owner §8;
+# and any other finding of a split cell §7.
 
-basic/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
 basic/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-basic/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-basic/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 basic/primary-killed/t5-left  ADR-0055 §5  # CDR count
 basic/primary-killed/t6-left  ADR-0055 §5  # CDR count
 basic/primary-killed/t6-logged  ADR-0055 §5  # CDR count
-basic/split/t1-applied  ADR-0055 §7  # two copies
-basic/split/t2-applied  ADR-0055 §7  # two copies
-basic/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-basic/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-basic/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-basic/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
-basic/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-basic/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-basic/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-basic/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-forked/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
-forked/primary-killed/t3-left  ADR-0055 §3  # final under another tag than the provisional
-forked/primary-killed/t3-logged  ADR-0055 §3  # final under another tag than the provisional
-forked/primary-killed/t4-left  ADR-0055 §3  # final under another tag than the provisional
-forked/primary-killed/t4-logged  ADR-0055 §3  # final under another tag than the provisional
+basic/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+basic/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+basic/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+basic/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 forked/primary-killed/t5-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-forked/primary-killed/t6-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-forked/primary-killed/t6-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 forked/primary-killed/t7-left  ADR-0055 §4  # request on an ended dialog
-forked/primary-killed/t8-left  ADR-0055 §4  # request on an ended dialog
-forked/primary-killed/t8-logged  ADR-0055 §4  # request on an ended dialog
-forked/split/t1-applied  ADR-0055 §7  # two copies
-forked/split/t2-applied  ADR-0055 §7  # two copies
-forked/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-forked/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-forked/split/t3-applied  ADR-0055 §7  # two copies
-forked/split/t3-left  ADR-0055 §4  # final under another tag than the provisional
-forked/split/t3-logged  ADR-0055 §4  # final under another tag than the provisional
-forked/split/t4-applied  ADR-0055 §7  # two copies
-forked/split/t4-left  ADR-0055 §4  # final under another tag than the provisional
-forked/split/t4-logged  ADR-0055 §4  # final under another tag than the provisional
-forked/split/t5-applied  ADR-0055 §7  # second copy acts on an ended dialog
-forked/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
-forked/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-forked/split/t6-applied  ADR-0055 §7  # second copy acts on an ended dialog
-forked/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
-forked/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
-forked/split/t7-left  ADR-0055 §7  # second copy acts on an ended dialog
-forked/split/t7-logged  ADR-0055 §7  # second copy acts on an ended dialog
-info-x-bye/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
+forked/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+forked/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+forked/stalled-killed/t5-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+forked/stalled-killed/t5-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+forked/stalled-killed/t7-left  ADR-0055 §5  # a missing or extra CDR
+forked/stalled-killed/t7-logged  ADR-0055 §5  # a missing or extra CDR
+forked/stalled-killed/t8-left  ADR-0055 §5  # a missing or extra CDR
+forked/stalled-killed/t8-logged  ADR-0055 §5  # a missing or extra CDR
 info-x-bye/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-info-x-bye/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-info-x-bye/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 info-x-bye/primary-killed/t5-left  ADR-0055 §5  # CDR count
 info-x-bye/primary-killed/t6-left  ADR-0055 §5  # CDR count
 info-x-bye/primary-killed/t6-logged  ADR-0055 §5  # CDR count
-info-x-bye/split/t1-applied  ADR-0055 §7  # two copies
-info-x-bye/split/t2-applied  ADR-0055 §7  # two copies
-info-x-bye/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-info-x-bye/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-info-x-bye/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-info-x-bye/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
-info-x-bye/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-info-x-bye/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-info-x-bye/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-info-x-bye/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-info/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
+info-x-bye/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+info-x-bye/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+info-x-bye/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+info-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 info/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-info/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-info/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-info/primary-killed/t5-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-info/primary-killed/t6-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-info/primary-killed/t6-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 info/primary-killed/t7-left  ADR-0055 §5  # CDR count
-info/primary-killed/t7-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 info/primary-killed/t8-left  ADR-0055 §5  # CDR count
 info/primary-killed/t8-logged  ADR-0055 §5  # CDR count
-info/split/t1-applied  ADR-0055 §7  # two copies
-info/split/t2-applied  ADR-0055 §7  # two copies
-info/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-info/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-info/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
-info/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/primary-killed/t14-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-keepalive/primary-killed/t15-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-keepalive/primary-killed/t15-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
-keepalive/primary-killed/t16-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-keepalive/primary-killed/t16-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
+info/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+info/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+info/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+info/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 keepalive/primary-killed/t18-left  ADR-0055 §5  # CDR count
 keepalive/primary-killed/t19-left  ADR-0055 §5  # CDR count
 keepalive/primary-killed/t19-logged  ADR-0055 §5  # CDR count
-keepalive/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
 keepalive/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-keepalive/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-keepalive/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-keepalive/primary-killed/t5-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-keepalive/primary-killed/t5-logged  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-keepalive/primary-killed/t6-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-keepalive/primary-killed/t6-logged  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-keepalive/split/t1-applied  ADR-0055 §7  # two copies
-keepalive/split/t10-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t10-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t10-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t11-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t11-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t11-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t12-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t12-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t12-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t13-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t13-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t13-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t14-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t14-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t14-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t15-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t15-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t15-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t16-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t16-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t16-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t17-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t17-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t17-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t2-applied  ADR-0055 §7  # two copies
-keepalive/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-keepalive/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-keepalive/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t5-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t6-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t7-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t7-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t7-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t8-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t8-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t8-logged  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t9-applied  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t9-left  ADR-0055 §7  # second copy acts on an ended dialog
-keepalive/split/t9-logged  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
-media-leg/primary-killed/t3-left  ADR-0055 §3  # final under another tag than the provisional
-media-leg/primary-killed/t3-logged  ADR-0055 §3  # final under another tag than the provisional
+keepalive/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+keepalive/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+keepalive/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+keepalive/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+media-leg/primary-killed/t2-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
+media-leg/primary-killed/t2-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
 media-leg/primary-killed/t4-left  ADR-0055 §2  # in-dialog request neither answered nor relayed
 media-leg/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
+media-leg/primary-killed/t5-applied  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
 media-leg/primary-killed/t5-left  ADR-0055 §2  # in-dialog request neither answered nor relayed
 media-leg/primary-killed/t5-logged  ADR-0055 §2  # in-dialog request neither answered nor relayed
 media-leg/primary-killed/t6-left  ADR-0055 §4  # request on an ended dialog
 media-leg/primary-killed/t6-logged  ADR-0055 §2  # in-dialog request neither answered nor relayed
-media-leg/primary-killed/t7-left  ADR-0055 §4  # request on an ended dialog
-media-leg/primary-killed/t7-logged  ADR-0055 §4  # request on an ended dialog
 media-leg/primary-killed/t8-left  ADR-0055 §5  # CDR count
 media-leg/primary-killed/t9-left  ADR-0055 §5  # CDR count
 media-leg/primary-killed/t9-logged  ADR-0055 §5  # CDR count
 media-leg/split-healed/t1-left  ADR-0055 §7  # two copies
 media-leg/split-healed/t1-logged  ADR-0055 §7  # two copies
-media-leg/split/t1-applied  ADR-0055 §7  # a node keeps the call
-media-leg/split/t2-applied  ADR-0055 §7  # a node keeps the call
-media-leg/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-media-leg/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-media-leg/split/t3-applied  ADR-0055 §7  # a node keeps the call
-media-leg/split/t3-left  ADR-0055 §4  # final under another tag than the provisional
-media-leg/split/t3-logged  ADR-0055 §4  # final under another tag than the provisional
-media-leg/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t4-left  ADR-0055 §2  # in-dialog request neither answered nor relayed
-media-leg/split/t4-logged  ADR-0055 §2  # in-dialog request neither answered nor relayed
-media-leg/split/t5-applied  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t6-applied  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t7-applied  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t7-left  ADR-0055 §7  # second copy acts on an ended dialog
-media-leg/split/t7-logged  ADR-0055 §7  # second copy acts on an ended dialog
-prack/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
-prack/primary-killed/t3-left  ADR-0055 §3  # final under another tag than the provisional
-prack/primary-killed/t3-logged  ADR-0055 §3  # final under another tag than the provisional
-prack/primary-killed/t4-left  ADR-0055 §3  # final under another tag than the provisional
-prack/primary-killed/t4-logged  ADR-0055 §3  # final under another tag than the provisional
-prack/primary-killed/t5-left  ADR-0055 §3  # final under another tag than the provisional
-prack/primary-killed/t5-logged  ADR-0055 §3  # final under another tag than the provisional
-prack/primary-killed/t6-left  ADR-0055 §3  # final under another tag than the provisional
-prack/primary-killed/t6-logged  ADR-0055 §3  # final under another tag than the provisional
+media-leg/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+media-leg/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+media-leg/stalled-killed/t2-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+media-leg/stalled-killed/t2-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+media-leg/stalled-killed/t4-left  ADR-0055 §4  # a request into a dialog the other copy ended
+media-leg/stalled-killed/t4-logged  ADR-0055 §4  # a request into a dialog the other copy ended
+media-leg/stalled-killed/t5-left  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
+media-leg/stalled-killed/t5-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
+media-leg/stalled-killed/t6-left  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
+media-leg/stalled-killed/t6-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
+prack/primary-killed/t2-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
+prack/primary-killed/t2-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
+prack/primary-killed/t3-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
+prack/primary-killed/t3-logged  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
+prack/primary-killed/t4-applied  ADR-0055 §12  # a non-2xx final nobody ACKs
+prack/primary-killed/t5-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
 prack/primary-killed/t7-left  ADR-0055 §5  # CDR count
 prack/primary-killed/t8-left  ADR-0055 §5  # CDR count
 prack/primary-killed/t8-logged  ADR-0055 §5  # CDR count
@@ -215,127 +92,96 @@ prack/split-healed/t2-left  ADR-0055 §2  # PRACK answered 481
 prack/split-healed/t2-logged  ADR-0055 §2  # PRACK answered 481
 prack/split-healed/t3-left  ADR-0055 §2  # PRACK's 200 reaches a copy holding no record of it
 prack/split-healed/t3-logged  ADR-0055 §2  # PRACK's 200 reaches a copy holding no record of it
-prack/split/t1-applied  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t2-applied  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t2-left  ADR-0055 §2  # PRACK answered 481
-prack/split/t2-logged  ADR-0055 §2  # PRACK answered 481
-prack/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t3-left  ADR-0055 §4  # final under another tag than the provisional
-prack/split/t3-logged  ADR-0055 §4  # final under another tag than the provisional
-prack/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t5-applied  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t6-applied  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
-prack/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer-x-bye/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
+prack/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+prack/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+prack/stalled-killed/t2-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+prack/stalled-killed/t2-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+prack/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+prack/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+prack/stalled-killed/t4-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+prack/stalled-killed/t4-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+prack/stalled-killed/t5-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+prack/stalled-killed/t5-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 refer-x-bye/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-refer-x-bye/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-refer-x-bye/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-refer-x-bye/primary-killed/t5-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
+refer-x-bye/primary-killed/t5-applied  ADR-0055 §4  # a request into a dialog the other copy ended
 refer-x-bye/primary-killed/t6-left  ADR-0055 §4  # request on an ended dialog
-refer-x-bye/primary-killed/t6-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer-x-bye/primary-killed/t7-left  ADR-0055 §4  # request on an ended dialog
 refer-x-bye/primary-killed/t7-logged  ADR-0055 §4  # request on an ended dialog
 refer-x-bye/primary-killed/t8-left  ADR-0055 §5  # CDR count
-refer-x-bye/primary-killed/t8-logged  ADR-0055 §4  # request on an ended dialog
 refer-x-bye/primary-killed/t9-left  ADR-0055 §5  # CDR count
 refer-x-bye/primary-killed/t9-logged  ADR-0055 §5  # CDR count
-refer-x-bye/split/t1-applied  ADR-0055 §7  # two copies
-refer-x-bye/split/t2-applied  ADR-0055 §7  # two copies
-refer-x-bye/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-refer-x-bye/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-refer-x-bye/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-refer-x-bye/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer-x-bye/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer-x-bye/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-refer-x-bye/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer-x-bye/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/primary-killed/t10-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t10-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t11-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t11-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t12-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t12-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
+refer-x-bye/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+refer-x-bye/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+refer-x-bye/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+refer-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 refer/primary-killed/t13-left  ADR-0055 §5  # CDR count
-refer/primary-killed/t13-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/primary-killed/t14-left  ADR-0055 §5  # CDR count
 refer/primary-killed/t14-logged  ADR-0055 §5  # CDR count
 refer/primary-killed/t15-left  ADR-0055 §5  # CDR count
 refer/primary-killed/t15-logged  ADR-0055 §5  # CDR count
-refer/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
 refer/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-refer/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-refer/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-refer/primary-killed/t5-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t6-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t6-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
+refer/primary-killed/t7-applied  ADR-0055 §2  # an owed ACK of a 2xx across the kill
 refer/primary-killed/t7-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/primary-killed/t7-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
+refer/primary-killed/t8-applied  ADR-0055 §2  # an owed ACK of a 2xx across the kill
 refer/primary-killed/t8-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/primary-killed/t8-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/primary-killed/t9-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/primary-killed/t9-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/split-healed/t10-left  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split-healed/t10-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split-healed/t11-left  ADR-0055 §7  # second copy acts on an ended dialog
+refer/split-healed/t11-left  ADR-0055 §7  # any other finding of a split cell
 refer/split-healed/t11-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split-healed/t12-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split-healed/t12-logged  ADR-0055 §7  # second copy acts on an ended dialog
+refer/split-healed/t7-applied  ADR-0055 §7  # a split cell
+refer/split-healed/t7-left  ADR-0055 §7  # a split cell
+refer/split-healed/t7-logged  ADR-0055 §7  # a split cell
+refer/split-healed/t8-applied  ADR-0055 §7  # a split cell
+refer/split-healed/t8-left  ADR-0055 §7  # a split cell
+refer/split-healed/t8-logged  ADR-0055 §7  # a split cell
+refer/split-healed/t9-applied  ADR-0055 §7  # any other finding of a split cell
+refer/split-healed/t9-left  ADR-0055 §7  # a split cell
+refer/split-healed/t9-logged  ADR-0055 §7  # a split cell
 refer/split/t1-applied  ADR-0055 §7  # two copies
-refer/split/t10-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t10-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t11-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t11-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t12-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t12-logged  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split/t2-applied  ADR-0055 §7  # two copies
 refer/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
 refer/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-refer/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
+refer/split/t7-applied  ADR-0055 §7  # a split cell
 refer/split/t7-left  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split/t7-logged  ADR-0055 §7  # second copy acts on an ended dialog
+refer/split/t8-applied  ADR-0055 §7  # a split cell
 refer/split/t8-left  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split/t8-logged  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split/t9-left  ADR-0055 §7  # second copy acts on an ended dialog
 refer/split/t9-logged  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite-x-bye/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
+refer/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+refer/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+refer/stalled-killed/t10-left  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t10-logged  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t11-left  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t11-logged  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t12-left  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t12-logged  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+refer/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+refer/stalled-killed/t7-left  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t7-logged  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t8-left  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t8-logged  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t9-left  ADR-0055 §5  # a missing or extra CDR
+refer/stalled-killed/t9-logged  ADR-0055 §5  # a missing or extra CDR
 reinvite-x-bye/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-reinvite-x-bye/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-reinvite-x-bye/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 reinvite-x-bye/primary-killed/t5-left  ADR-0055 §5  # CDR count
 reinvite-x-bye/primary-killed/t6-left  ADR-0055 §5  # CDR count
 reinvite-x-bye/primary-killed/t6-logged  ADR-0055 §5  # CDR count
-reinvite-x-bye/split/t1-applied  ADR-0055 §7  # two copies
-reinvite-x-bye/split/t2-applied  ADR-0055 §7  # two copies
-reinvite-x-bye/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-reinvite-x-bye/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-reinvite-x-bye/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite-x-bye/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite-x-bye/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite-x-bye/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite-x-bye/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite-x-bye/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
+reinvite-x-bye/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+reinvite-x-bye/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+reinvite-x-bye/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+reinvite-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 reinvite/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-reinvite/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-reinvite/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 reinvite/primary-killed/t6-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
 reinvite/primary-killed/t6-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
-reinvite/primary-killed/t7-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-reinvite/primary-killed/t7-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 reinvite/primary-killed/t8-left  ADR-0055 §5  # CDR count
 reinvite/primary-killed/t9-left  ADR-0055 §5  # CDR count
 reinvite/primary-killed/t9-logged  ADR-0055 §5  # CDR count
@@ -345,60 +191,32 @@ reinvite/split/t1-applied  ADR-0055 §7  # two copies
 reinvite/split/t2-applied  ADR-0055 §7  # two copies
 reinvite/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
 reinvite/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-reinvite/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t5-applied  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t6-applied  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t7-applied  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t7-left  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t7-logged  ADR-0055 §7  # second copy acts on an ended dialog
-update-x-bye/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
+reinvite/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+reinvite/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+reinvite/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+reinvite/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+reinvite/stalled-killed/t6-left  ADR-0055 §2  # an owed ACK of a 2xx across the kill
+reinvite/stalled-killed/t6-logged  ADR-0055 §2  # an owed ACK of a 2xx across the kill
 update-x-bye/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-update-x-bye/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-update-x-bye/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 update-x-bye/primary-killed/t5-left  ADR-0055 §5  # CDR count
 update-x-bye/primary-killed/t6-left  ADR-0055 §5  # CDR count
 update-x-bye/primary-killed/t6-logged  ADR-0055 §5  # CDR count
-update-x-bye/split/t1-applied  ADR-0055 §7  # two copies
-update-x-bye/split/t2-applied  ADR-0055 §7  # two copies
-update-x-bye/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-update-x-bye/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-update-x-bye/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-update-x-bye/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
-update-x-bye/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-update-x-bye/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-update-x-bye/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-update-x-bye/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-update/primary-killed/t2-left  ADR-0055 §3  # final under another tag than the provisional
+update-x-bye/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+update-x-bye/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+update-x-bye/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+update-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 update/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-update/primary-killed/t4-left  ADR-0055 §4  # copy CANCELs an INVITE answered and ACKed
-update/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-update/primary-killed/t5-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-update/primary-killed/t6-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-update/primary-killed/t6-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 update/primary-killed/t7-left  ADR-0055 §5  # CDR count
-update/primary-killed/t7-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 update/primary-killed/t8-left  ADR-0055 §5  # CDR count
 update/primary-killed/t8-logged  ADR-0055 §5  # CDR count
-update/split/t1-applied  ADR-0055 §7  # two copies
-update/split/t2-applied  ADR-0055 §7  # two copies
-update/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-update/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-update/split/t3-applied  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t3-left  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t3-logged  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t4-applied  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t4-left  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t4-logged  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t6-left  ADR-0055 §7  # second copy acts on an ended dialog
-update/split/t6-logged  ADR-0055 §7  # second copy acts on an ended dialog
+update/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+update/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
+update/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
+update/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered

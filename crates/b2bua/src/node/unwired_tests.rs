@@ -1,6 +1,6 @@
 //! What a core constructs is decided by its replication switch alone: an
 //! unwired node (`B2buaDeps.replication = None`) exposes no replicating store,
-//! no supervisor, no terminate writer and no fail-back sender; the router's
+//! no supervisor, no store write path and no fail-back sender; the router's
 //! fail-back receiver exists only alongside that sender, created in the same
 //! arm of the core's replication match. A wired node exposes all four.
 //! Asserted by construction on the `Option`s, never by counting tasks.
@@ -64,7 +64,7 @@ async fn an_unwired_core_constructs_no_replication_part() {
     let core = unwired_core("w0").await;
     assert!(core.repl_store().is_none(), "no replicating store on an unwired node");
     assert!(core.supervisor().is_none(), "no replication supervisor on an unwired node");
-    assert!(core.terminate_writer().is_none(), "no terminate writer on an unwired node");
+    assert!(core.router_ctx().state.repl_store().is_none(), "no store write path either");
     assert!(
         core.fail_back_sender().is_none(),
         "no fail-back sender on an unwired node; the receiver exists only alongside it"
@@ -79,6 +79,6 @@ async fn a_wired_core_constructs_every_replication_part() {
     let node = test_support::node("w0").await;
     assert!(node.core.repl_store().is_some(), "a wired node holds its replicating store");
     assert!(node.core.supervisor().is_some(), "a wired node runs a supervisor");
-    assert!(node.core.terminate_writer().is_some(), "a wired node drains through a writer");
+    assert!(node.core.router_ctx().state.repl_store().is_some(), "a wired node writes its store");
     assert!(node.core.fail_back_sender().is_some(), "a wired node's router polls fail-back");
 }

@@ -105,6 +105,22 @@ pub(super) fn echo_to(
     }
 }
 
+/// The `Timestamp` of a 100 Trying sent `delay` after `request` arrived
+/// (RFC 3261 §8.2.6.1): the request's timestamp with the delay value, in
+/// seconds, the UAS spent before answering. `None` when the request carries no
+/// `Timestamp`. Handed to [`generate_response`] in `extra_headers`, it
+/// replaces the undelayed echo.
+pub fn delayed_trying_timestamp(
+    request: &SipRequest,
+    delay: std::time::Duration,
+) -> Option<SipHeader> {
+    let stated = request.raw_text(HeaderName::Timestamp).next()?;
+    let value = stated.as_str().split_whitespace().next()?;
+    let ms = delay.as_millis();
+    let delayed = format!("{value} {}.{:03}", ms / 1000, ms % 1000);
+    Some(SipHeader::new(HeaderName::Timestamp.as_wire_str().to_string(), delayed))
+}
+
 /// Build a UAS response to `incoming_request`, echoing Via / From / To /
 /// Call-ID / CSeq (RFC 3261 §8.2.6.2).
 pub fn generate_response(
@@ -215,5 +231,26 @@ Content-Length: 0\r\n\r\n";
     fn a_200_gains_no_allow_here() {
         let resp = generate_response(&notify(), 200, "OK", &Default::default()).unwrap();
         assert_eq!(resp.raw_text(HeaderName::Allow).count(), 0);
+    }
+
+    /// RFC 3261 §8.2.6.1 — a 100 sent late states the delay it was sent
+    /// after, in seconds, beside the request's timestamp; one Timestamp line.
+    #[test]
+    fn a_late_100_states_its_delay_in_the_timestamp() {
+        let raw = String::from_utf8(notify().image().to_vec())
+            .unwrap()
+            .replace("Content-Length: 0", "Timestamp: 54.25\r\nContent-Length: 0");
+        let request = match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            crate::SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        };
+        let delayed =
+            delayed_trying_timestamp(&request, std::time::Duration::from_millis(1_234)).unwrap();
+        let opts = GenerateResponseOpts { extra_headers: vec![delayed], ..Default::default() };
+        let resp = generate_response(&request, 100, "Trying", &opts).unwrap();
+        let stamps: Vec<_> = resp.raw_text(HeaderName::Timestamp).collect();
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].as_str(), "54.25 1.234");
+        assert!(delayed_trying_timestamp(&notify(), std::time::Duration::ZERO).is_none());
     }
 }

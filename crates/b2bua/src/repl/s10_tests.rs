@@ -31,9 +31,7 @@ use super::{Changelog, Puller, ReplicatingCallStore};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
-use crate::store::{
-    BufferedTerminateWriter, CallState, CallStore, PartitionRole, PropagateDirection, PutOpts,
-};
+use crate::store::{CallState, CallStore, PartitionRole, PropagateDirection, PutOpts};
 
 const BAK: PartitionRole = PartitionRole::Backup;
 
@@ -71,8 +69,8 @@ fn src() -> SocketAddr {
 // (1) A replicating b2bua's CallState flush lands the call body on the peer.
 //
 // Two replicating nodes w0/w1 over a shared sim repl network. w1 pulls w0 (so it
-// backs w0 up). A CallState wired to w0's store + a terminate-writer draining to
-// that same store flushes a call whose topology = {pri:w0, bak:w1, gen:1}. The
+// backs w0 up). A CallState wired to w0's store flushes a call whose
+// topology = {pri:w0, bak:w1, gen:1}. The
 // flush rides the S8 write-side policy → changelog-for-w1 (partition=Bak) →
 // ReplServer streams it → w1's puller imports it as bak:w0. We assert w1 holds
 // the body, and that it decodes back to the same call.
@@ -91,14 +89,13 @@ async fn replicating_callstate_flush_lands_on_peer() {
     w1_sup.start(one_peer("w0", &clock));
     tick(50).await;
 
-    // The b2bua call path: a CallState over w0's store, draining to that store so
-    // the changelog bumps on the flush (exactly how B2buaCore wires it). `w0.store`
-    // is bare and clone-cheap (shares inner state); wrap once so the writer, the
-    // CallState, and the replication handle share one Arc over that same state.
+    // The b2bua call path: a CallState writing w0's store, so the changelog
+    // bumps on the flush (exactly how B2buaCore wires it). `w0.store` is bare and
+    // clone-cheap (shares inner state); wrap once so the CallState and the
+    // replication handle share one Arc over that same state.
     let store: Arc<ReplicatingCallStore> = Arc::new(w0.store.clone());
-    let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 1024);
     let state = CallState::new(store.clone() as Arc<dyn CallStore>, "w0", B2buaMetrics::new())
-        .with_replication(store.clone(), writer);
+        .with_replication(store.clone());
 
     // Build a call from an INVITE carrying the w_pri=w0;w_bak=w1 cookie. The
     // callRef encodes primary w0, so the write-side policy routes it Forward → w1.
@@ -115,7 +112,7 @@ async fn replicating_callstate_flush_lands_on_peer() {
 
     state.create(call.clone());
     state.flush(&call);
-    // Let the writer drain → changelog bump → ReplServer push → w1 import.
+    // Changelog bump → ReplServer push → w1 import.
     tick(150).await;
 
     let got = w1.store.get_call(BAK, "w0", &call_ref).await.unwrap();
@@ -208,10 +205,7 @@ async fn backup_held_counts_update_first_replica() {
 
     // w1's backup store + a puller pulling w0 — built directly so we hold the
     // metrics handle the supervisor would otherwise own privately.
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let metrics = B2buaMetrics::new();
     let (puller, _status) = Puller::new_at(
         "w0",

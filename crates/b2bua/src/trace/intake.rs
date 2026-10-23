@@ -133,13 +133,14 @@ fn header_rate(a_invite: &SipRequest) -> Option<f64> {
 }
 
 /// The two facts that precede any decision: the INVITE as it arrived, raw, and
-/// the auto-100 sip-txn sent for it (ADR-0022) — whose bytes this layer never
-/// held, so it is recorded as a note rather than a wire body.
+/// its 100 Trying, which the turn releases after the call's creation write
+/// and the transaction layer renders (ADR-0055 §3) — bytes this layer never
+/// holds, so it is recorded as a note rather than a wire body.
 fn backfill(call: &Call, invite_wire: &[u8]) {
     let src = sip_net::ip_socket_addr(&call.a_leg.source.address, call.a_leg.source.port)
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
     emit::sip_in(call, call.created_at, src, invite_wire);
-    emit::sip_out_note(call, call.created_at, "100 Trying (transaction layer)");
+    emit::sip_out_note(call, call.created_at, "100 Trying (released after the creation write)");
 }
 
 /// One decision treatment's name, for the round-trip event's outcome.

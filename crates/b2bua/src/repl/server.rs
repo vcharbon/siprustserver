@@ -6,27 +6,37 @@
 //! socket = one flow.
 //!
 //! ```text
-//! peer → us:  PullRequest{ partition, since }          # ONCE, opens one flow
-//! us → peer:  [bootstrap store-scan if since==(0,0)]    # snapshot, stamped at W=head
-//!             Data…(entries > W, batched) ; Noop(head)  # poll-drain, catch-up Noop
-//!             …sleep ~100ms; drain again; Noop only on the catch-up edge + idle interval…
-//! peer → us:  Position{ at }                            # what the peer has applied
+//! peer → us:  PullRequest{ proto_ver, partition, since } # ONCE, opens one flow
+//! us → peer:  StreamRefused{ proto_ver }                 # another version: closed
+//! us → peer:  [bootstrap store-scan if since==(0,0)]     # snapshot, stamped at W=head
+//!             Data…(entries > W, batched) ; Noop(head)   # drain, catch-up Noop
+//!             …wait for a write; drain again; Noop only on the catch-up edge + idle interval…
+//! peer → us:  Position{ at }                             # what the peer has applied
+//! peer → us:  ReplicaRefused{ at, call_ref }             # a replica the peer will not hold
 //! ```
+//!
+//! ## One protocol version
+//! A `PullRequest` announcing another [`PROTO_VER`] is answered with one
+//! [`Frame::StreamRefused`] and nothing else: no frame of either version could
+//! be read by the other.
 //!
 //! ## The peer's back-channel
 //! A separate per-connection task is the only reader past the opening request: it
-//! records each [`Frame::Position`] on the flow's sub-log (ADR-0031 D2) and, on a
-//! close, flags the serve loop to end. It exists because a real socket's `recv`
-//! is not cancel-safe mid-read, so it can never be an arm of the serve loop's
-//! `select!`. Any other frame from the client is ignored.
+//! records each [`Frame::Position`] on the flow's sub-log (ADR-0031 D2), hands
+//! each [`Frame::ReplicaRefused`] to the store (the call has no backup from
+//! then on, ADR-0055 §3) and, on a close, flags the serve loop to end. It exists
+//! because a real socket's `recv` is not cancel-safe mid-read, so it can never
+//! be an arm of the serve loop's `select!`. Any other frame from the client is
+//! ignored.
 //!
-//! ## Pure poll, no `Notify`
-//! The server is a `sleep`-poll loop (ADR-0014): every ~100ms it drains up to
-//! [`BATCH`] entries above its cursor. While a full batch comes back it loops
-//! immediately (fill the TCP buffer); below a batch it sleeps. A **`Noop`** is
-//! sent only on the **catch-up edge** (just finished draining a backlog) and
-//! every [`ServeConfig::noop_interval`] after the last one — the *first* one
-//! tells the puller it is current, the later ones tell it the stream is alive.
+//! ## Sent on write (ADR-0055 §3)
+//! The server drains up to [`BATCH`] entries above its cursor each time a write
+//! lands in the flow's sub-log. While a full batch comes back it loops
+//! immediately (fill the TCP buffer); below a batch it waits for the next write.
+//! A **`Noop`** is sent only on the **catch-up edge** (just finished draining a
+//! backlog) and every [`ServeConfig::noop_interval`] after the last one — the
+//! *first* one tells the puller it is current, the later ones tell it the stream
+//! is alive.
 //!
 //! ## A peer that stops reading (ADR-0045)
 //! Every send is bounded by [`ServeConfig::send_stall`]: a send still blocked
@@ -46,23 +56,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use repl_net::frame::{Frame, Partition, Watermark};
+use repl_net::frame::{Frame, Partition, Watermark, PROTO_VER};
 use repl_net::transport::{AcceptError, ReplicationConnection, ReplicationListener, SendError};
 
 use super::changelog::{BodySource, Changelog};
 use crate::abort_on_drop::AbortOnDrop;
 use crate::store::PartitionRole;
 
-/// Bootstrap store-scan batch size (bodies per `send_batch`).
-const BOOTSTRAP_CHUNK: usize = 128;
-
-/// Max entries drained + sent per poll tick. A full batch means "more pending" →
+/// Max entries drained + sent per drain. A full batch means "more pending" →
 /// the loop streams the next batch immediately (filling the TCP buffer); a short
-/// batch means caught-up → emit the catch-up Noop and sleep.
+/// batch means caught-up → emit the catch-up Noop and wait for a write.
 const BATCH: usize = 500;
-
-/// Poll cadence between drains when not back-to-back streaming (tunable lower).
-const POLL: Duration = Duration::from_millis(100);
 
 /// The pause after a failed accept before the next one.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
@@ -92,7 +96,7 @@ impl ServeConfig {
 
 /// Why a send did not complete.
 #[derive(Debug)]
-enum Unsent {
+pub(super) enum Unsent {
     /// The stream closed.
     Closed,
     /// The send stayed blocked past [`ServeConfig::send_stall`].
@@ -208,7 +212,24 @@ impl ReplServer {
     async fn serve_connection(self, conn: Box<dyn ReplicationConnection>) {
         let conn: Arc<dyn ReplicationConnection> = Arc::from(conn);
         let (caller, partition, since) = match conn.recv().await {
-            Some(Frame::PullRequest { caller, partition, since, .. }) => (caller, partition, since),
+            Some(Frame::PullRequest { proto_ver, caller, partition, since })
+                if proto_ver == PROTO_VER =>
+            {
+                (caller, partition, since)
+            }
+            Some(Frame::PullRequest { proto_ver, caller, .. }) => {
+                tracing::error!(
+                    node = observe::node(),
+                    peer = %caller,
+                    ours = PROTO_VER,
+                    theirs = proto_ver,
+                    "replication stream refused: the peer speaks another protocol"
+                );
+                let reason = format!("this node speaks replication protocol {PROTO_VER}");
+                let refused = Frame::StreamRefused { proto_ver: PROTO_VER, reason };
+                let _ = self.bounded(conn.send(refused), &caller, "refused").await;
+                return;
+            }
             // Anything other than an opening PullRequest, or a close → done.
             _ => return,
         };
@@ -234,17 +255,22 @@ impl ReplServer {
     ) {
         // Keep this peer's changelog reap-immune, and this partition's flow
         // marked connected, while we serve it.
-        let _guard = self.changelog.serving(caller, partition);
+        let mut guard = self.changelog.serving(caller, partition);
         // The peer's back-channel: positions in, and a close that ends us.
         let (closed_tx, mut closed) = tokio::sync::watch::channel(false);
         let _recv = AbortOnDrop(observe::spawn_keeping_node({
             let conn = conn.clone();
             let changelog = self.changelog.clone();
+            let source = self.source.clone();
             let peer = caller.to_string();
             async move {
                 while let Some(frame) = conn.recv().await {
-                    if let Frame::Position { at } = frame {
-                        changelog.note_applied(&peer, partition, at);
+                    match frame {
+                        Frame::Position { at } => changelog.note_applied(&peer, partition, at),
+                        Frame::ReplicaRefused { call_ref, .. } if partition == Partition::Bak => {
+                            source.backup_refused(&peer, &call_ref);
+                        }
+                        _ => {}
                     }
                 }
                 let _ = closed_tx.send(true);
@@ -275,7 +301,7 @@ impl ReplServer {
             }
         }
 
-        // ---- poll-tail ----
+        // ---- tail, drained on write ----
         let mut ever_caught_up = false;
         let mut streamed_full_batch = false;
         let mut next_noop = sip_clock::deadline::from_now(self.config.noop_interval);
@@ -329,101 +355,20 @@ impl ReplServer {
                 streamed_full_batch = false;
                 next_noop = sip_clock::deadline::from_now(self.config.noop_interval);
             }
-            // `sleep` is cancel-safe, so the peer's close can race it here.
+            // Each arm is cancel-safe, so the peer's close can race them here;
+            // polled in order, so a run is deterministic.
             tokio::select! {
-                _ = tokio::time::sleep(POLL) => {}
+                biased;
                 _ = closed.changed() => return,
+                () = guard.written() => {}
+                () = tokio::time::sleep_until(next_noop) => {}
             }
         }
-    }
-
-    /// Bulk store-scan bootstrap for one flow. Snapshots the flow's keyset under
-    /// brief locks, captures `W = head` at scan start, streams each live body as
-    /// `Data{ op: Put, partition, at: W }` in [`BOOTSTRAP_CHUNK`] batches (one
-    /// `send_batch` per chunk — never holding a lock across the socket), and
-    /// returns `W` so the tail resumes warm. A key whose body vanished between
-    /// the snapshot and the read is skipped (the call ended), and so is a body
-    /// the transport refuses ([`Self::send_or_skip`]). `Err` if the socket
-    /// dropped or a send stalled mid-pass.
-    async fn serve_bootstrap(
-        &self,
-        conn: &dyn ReplicationConnection,
-        caller: &str,
-        partition: Partition,
-        role: PartitionRole,
-        primary: &str,
-        flow: &'static str,
-    ) -> Result<Watermark, Unsent> {
-        // W = head at scan-START (ADR-0014 §8) — read BEFORE the key snapshot.
-        // The writer order is body/meta-insert → changelog bump, so a call that
-        // lands after this read necessarily bumps a counter > W and the tail
-        // drains it; at worst the scan ALSO carries it (harmless double-deliver,
-        // the apply side is idempotent). Reading head AFTER the scan opened the
-        // reverse window — a call inserted between the scan snapshot and the
-        // head read was in neither the scan nor the tail (`Bound::Excluded(W)`),
-        // and if it then quiesced the backup never held it.
-        let w = self.changelog.head();
-        let keys = match partition {
-            // Reclaim: the caller's own calls we hold as backup.
-            Partition::Pri => self.source.scan_refs(PartitionRole::Backup, caller),
-            // Backup: our own calls the caller backs up (Option B).
-            Partition::Bak => self.source.scan_refs_backed_by(&self.self_ordinal, caller),
-        };
-
-        for group in keys.chunks(BOOTSTRAP_CHUNK) {
-            let frames = self.bootstrap_frames(group, w, partition, role, primary).await;
-            match self.bounded(conn.send_batch(frames), caller, flow).await {
-                // A refused frame refuses its whole batch unsent: the chunk is
-                // read again and sent frame by frame, the refused one skipped.
-                Err(Unsent::Refused(_)) => {
-                    for frame in self.bootstrap_frames(group, w, partition, role, primary).await {
-                        self.send_or_skip(conn, frame, caller, flow).await?;
-                    }
-                }
-                sent => sent?,
-            }
-        }
-        Ok(w)
-    }
-
-    /// The bootstrap frames of the keys `group`, each a `Put` at `w`; a key
-    /// whose body vanished is left out.
-    async fn bootstrap_frames(
-        &self,
-        group: &[String],
-        w: Watermark,
-        partition: Partition,
-        role: PartitionRole,
-        primary: &str,
-    ) -> Vec<Frame> {
-        let mut frames = Vec::with_capacity(group.len());
-        for key in group {
-            match self.source.read_entry(role, primary, key).await {
-                Some((body, meta)) => frames.push(Frame::Data {
-                    at: w,
-                    op: repl_net::frame::Op::Put,
-                    partition,
-                    call_ref: key.clone(),
-                    call_gen: meta.call_gen,
-                    call_bgen: meta.call_bgen,
-                    body_ttl_ms: meta.body_ttl_ms,
-                    // Send-time stamp in the frame of the body's instants, as
-                    // `drain_since` stamps it.
-                    origin_now_ms: meta.origin_now_ms(self.changelog.now_ms()),
-                    indexes: meta.indexes,
-                    body: Some(body),
-                    answered: false,
-                    incarnation: meta.incarnation,
-                }),
-                _ => continue,
-            }
-        }
-        frames
     }
 
     /// Send `frame`; one the transport refuses is logged, counted and skipped,
     /// so the stream goes on past it.
-    async fn send_or_skip(
+    pub(super) async fn send_or_skip(
         &self,
         conn: &dyn ReplicationConnection,
         frame: Frame,
@@ -466,7 +411,7 @@ impl ReplServer {
 
     /// Await a send for at most [`ServeConfig::send_stall`]. A send still
     /// blocked then is a peer that stopped reading: the caller drops the stream.
-    async fn bounded(
+    pub(super) async fn bounded(
         &self,
         send: impl std::future::Future<Output = Result<(), repl_net::transport::SendError>>,
         caller: &str,
@@ -495,3 +440,5 @@ impl ReplServer {
         &self.self_ordinal
     }
 }
+
+mod bootstrap;

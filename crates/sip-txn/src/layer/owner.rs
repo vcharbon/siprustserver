@@ -20,7 +20,7 @@ use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
 use super::call_txns::CallTxns;
-use super::handle::{Command, TransactionConfig};
+use super::handle::TransactionConfig;
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
 use super::parse_refusal::ParseRefusals;
 use super::refusals::InviteRefusals;
@@ -91,6 +91,8 @@ pub(super) struct Owner {
     /// The TU's first-response deadline on an initial INVITE
     /// ([`TransactionConfig::invite_first_response_timeout_ms`](crate::TransactionConfig)).
     pub(super) invite_first_response_timeout_ms: u64,
+    /// [`TransactionConfig::trying_bound_ms`](crate::TransactionConfig).
+    pub(super) trying_bound_ms: u64,
     /// The To-tag this node bound to a dialog it answered as UAS, by
     /// (Call-ID, From-tag), kept for Timer L past the transaction so a
     /// CANCEL or a stray answered after the transaction is gone still carries
@@ -137,6 +139,7 @@ impl Owner {
             pending_quiesce: Vec::new(),
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
+            trying_bound_ms: config.trying_bound_ms,
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
             stateless_options: config.stateless_options,
@@ -390,6 +393,7 @@ impl Owner {
                 self.fire_timeout(&branch)
             }
             Timer::FirstResponse(branch) => self.fire_first_response(&branch),
+            Timer::Trying(key, opened) => self.fire_trying(endpoint, &key, opened).await,
             Timer::Cleanup(id) => {
                 if let Some(t) = self.txn_mut(id.as_ref()) {
                     t.cleanup_key = None;
@@ -436,65 +440,5 @@ impl Owner {
             })
             .sum();
         self.metrics.retransmit_buf_bytes.store(buf_bytes, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    // ── send API command handling ─────────────────────────────────────────────
-
-    pub(super) async fn handle_command(&mut self, endpoint: &dyn UdpEndpoint, cmd: Command) {
-        match cmd {
-            Command::SendRequest { msg, dest, txn_type, reply } => {
-                let handle = self.do_send_request(endpoint, *msg, dest, txn_type).await;
-                let _ = reply.send(handle);
-            }
-            Command::SendResponse { msg, dest, reply } => {
-                let sent = self.do_send_response(endpoint, *msg, dest).await;
-                let _ = reply.send(sent);
-            }
-            Command::SendRaw { buf, dest, reply } => {
-                // Bypasses transaction management; still counts a send failure.
-                self.metrics.count_send(endpoint.send_to(&buf, dest).await);
-                let _ = reply.send(());
-            }
-            Command::Seed { call_ref, seeds, reply } => {
-                let _ = reply.send(self.do_seed(endpoint, &call_ref, seeds).await);
-            }
-            Command::Reoffer { message, src, reply } => {
-                let disposition = self.do_reoffer(endpoint, *message, src).await;
-                let _ = reply.send(disposition);
-            }
-            Command::CancelTxnsForCall { call_ref, reply } => {
-                self.do_cancel_txns_for_call(&call_ref);
-                let _ = reply.send(());
-            }
-            Command::RelinquishCall { call_ref, reply } => self.relinquish_call(&call_ref, reply),
-            Command::RelinquishServer { key, reply } => self.relinquish_server(&key, reply),
-            Command::RelinquishAccepted { call_ref, reply } => {
-                let _ = reply.send(self.relinquish_accepted_of_call(&call_ref));
-            }
-            Command::ForgetUnansweredOfCall { call_ref, reply } => {
-                let _ = reply.send(self.forget_unanswered_of_call(&call_ref));
-            }
-            Command::AnswerUnansweredInvitesOfCall { call_ref, status, reason, reply } => {
-                let answered = self
-                    .answer_unanswered_invites_of_call(endpoint, &call_ref, status, &reason)
-                    .await;
-                let _ = reply.send(answered);
-            }
-            Command::ActiveTxnCount { call_ref, reply } => {
-                let on_books = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::on_books);
-                let _ = reply.send(on_books);
-            }
-            Command::WatchSelfRelease { call_ref, reply } => {
-                if self.has_txns_for(&call_ref) {
-                    // Live txns — arm the watch; the last `delete_txn` fires the
-                    // (lossless) CallQuiesced at end-of-turn.
-                    self.self_release_watch.insert(call_ref);
-                } else {
-                    // Already quiesced — capture CallQuiesced now (lossless path).
-                    self.notify_quiesced(call_ref);
-                }
-                let _ = reply.send(());
-            }
-        }
     }
 }

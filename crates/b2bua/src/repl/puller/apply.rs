@@ -40,9 +40,9 @@ pub(super) enum ApplyOutcome {
     Applied,
     Dominated,
     Refused,
-    /// A backup replica of a call not held yet, left unstored at a backup
-    /// ceiling (ADR-0037). Says nothing about the call; the next `Put` that
-    /// finds room stores it.
+    /// A backup replica of a call not held yet, refused at a backup ceiling,
+    /// or of a call whose replica this backup refused before (ADR-0037 item 4):
+    /// the call has no backup here for life.
     Shed,
     /// A reverse flush of a call incarnation other than the Element's: a
     /// takeover copy's view of a call the authority has since replaced on the
@@ -181,11 +181,12 @@ impl Puller {
                     && stored.is_none()
                     && role == PartitionRole::Backup
                     && !self.store.buries(call_ref, incarnation.as_deref())
-                    && self
-                        .capacity
-                        .as_ref()
-                        .and_then(|g| g.refuses_backup(self.store.backup_held()))
-                        .is_some()
+                    && (self.store.refused_replica(call_ref)
+                        || self
+                            .capacity
+                            .as_ref()
+                            .and_then(|g| g.refuses_backup(self.store.backup_held()))
+                            .is_some())
                 {
                     ApplyOutcome::Shed
                 } else {

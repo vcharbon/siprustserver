@@ -18,7 +18,7 @@ use crate::seed::{Reoffer, TxnSeed};
 use call::TxnKind;
 
 pub use super::config::TransactionConfig;
-use super::key::ServerTxnKey;
+use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::run::run;
 
@@ -107,6 +107,12 @@ pub(super) enum Command {
         status: u16,
         reason: String,
         reply: oneshot::Sender<usize>,
+    },
+    /// Send the 100 Trying of the server INVITE transaction `key` names if it
+    /// has sent nothing yet; replies whether the 100 left.
+    ReleaseTrying {
+        key: ServerTxnKey,
+        reply: oneshot::Sender<bool>,
     },
     /// Register `call_ref` for a one-shot [`TransactionEvent::CallQuiesced`] when
     /// its last transaction clears (ADR-0014 self-release). If it already has no
@@ -394,6 +400,20 @@ impl TransactionLayer {
             reply,
         })
         .await
+    }
+
+    /// Release the 100 Trying of the server INVITE transaction `invite`
+    /// opened (RFC 3261 §17.2.1): it leaves now if the transaction is still
+    /// `Trying` with nothing sent, and never after another response. `true`
+    /// when the 100 left; `false` too when no transaction holds `invite`.
+    pub async fn release_trying(
+        &self,
+        invite: &SipRequest,
+    ) -> Result<bool, TransactionLayerClosed> {
+        let Some(key) = ServerTxnId::of_request(invite).map(ServerTxnId::to_key) else {
+            return Ok(false);
+        };
+        self.roundtrip(|reply| Command::ReleaseTrying { key, reply }).await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last

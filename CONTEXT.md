@@ -248,8 +248,8 @@ refused at it) and an **emergency ceiling** (every new call is refused at it).
 A refused call draws a 503 with a jittered `Retry-After` and no `Reason`, and
 no call state is born. The **backup ceilings** (a count and an RSS value) keep a
 replica of a call not yet held out of the store; a replica left out this way
-is **shed**, and the call's next write that finds room stores it; until then
-the backup's flow reports no position past the shed write.
+is **shed**: the backup refuses it in a frame to the primary, its position
+moves past it, and the call is **unbacked** for life (ADR-0055 §3).
 _Avoid_: "overload" for these rejects (overload is the rate and loop shedding
 of the CPS bucket, the panic-ELU backstop and the queue brake); "limit" for a
 ceiling (the call limiter owns that word).
@@ -353,6 +353,26 @@ One replicated call replica — a `(partition, callRef)` entry in a backup's
 store. "Which elements do I back up" is not a separate retrieval: it *is* the
 contents of each peer's per-peer changelog (HRW 2nd-best backup, full mesh).
 _Avoid_: "shard", "partition key" (the partition is just pri/bak).
+
+**Unbacked call**:
+A call that has no backup for its whole life: admitted while the backlog
+toward its backup was over the high-water mark, or refused by its backup at
+its memory ceiling. It runs as on a non-HA B2BUA and is lost with its primary;
+`b2bua_repl_calls_unbacked` counts the live ones (ADR-0055 §3).
+_Avoid_: "degraded call" (degraded fallback is a same-zone backup).
+
+**Backlog** (toward a backup):
+The entries of the change log toward one backup above the position it
+reported applying, and the age of the oldest. Over a high-water mark new calls
+are admitted unbacked; under the low-water marks they get a backup again. No
+call is refused for it (ADR-0055 §3).
+
+**Hold** (of a turn's message):
+The ACK of a 2xx and the first provisional of an INVITE leave once the call's
+backup applied the call's current change-log entry, or at the **hold cap**,
+whichever comes first; a call with no live, bootstrapped backup holds nothing.
+Every other message leaves at once (ADR-0055 §3).
+_Avoid_: "sync replication" (only these two messages wait, at most the cap).
 
 **Silent stream**:
 A replication stream that has delivered nothing for the idle bound (15 s; a

@@ -58,6 +58,8 @@ pub struct ClusterRecipe {
     pub compose: ComposeOptions,
     pub adaptation_http: Option<AdaptationFn>,
     pub tune: TuneFn,
+    /// The workers' replication tunables (a backup ceiling, the reboot budget).
+    pub replica: b2bua::ReplicaConfig,
     /// HTTP servers the cluster serves on its fabric, beside the limiter.
     pub http: Vec<(SocketAddr, Arc<dyn HttpService>)>,
 }
@@ -79,6 +81,7 @@ impl ClusterRecipe {
             compose: ComposeOptions::default(),
             adaptation_http: None,
             tune: Arc::new(|_| {}),
+            replica: b2bua::ReplicaConfig::default(),
             http: Vec::new(),
         }
     }
@@ -130,7 +133,8 @@ impl Cluster {
         let mut fh = FailoverHarness::new(name, &ordinals)
             .with_worker_services(recipe.services)
             .with_worker_compose(recipe.compose.clone())
-            .with_worker_tune(move |c| tune(c));
+            .with_worker_tune(move |c| tune(c))
+            .with_worker_replica(recipe.replica);
         if let Some(port) = &recipe.adaptation_http {
             fh = fh.with_worker_adaptation_http(port(&http));
         }

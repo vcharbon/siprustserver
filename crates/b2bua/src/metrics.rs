@@ -110,28 +110,24 @@ struct Inner {
     // (cumulatively, via `repl_reclaimed_total`) ⇒ a materialise gap.
     repl_reclaim_scanned: AtomicU64,
     repl_reclaim_materialized: AtomicU64,
-    // Memory-attribution gauges (sampled, not counter-derived). `store_calls` is
-    // the TRUE live call-map length — compare to `active_calls`
-    // (creations-removals); a divergence localises a store-side leak the counter
-    // pair can't see. The sibling maps should track `store_calls`; one that grows
-    // while it stays flat names the leaking map (`locks` + `takeover_at` are the
-    // X11 fail-back suspects: a per-call lock or takeover-instant never released).
+    // Memory-attribution gauges (sampled). `store_calls` is the TRUE live
+    // call-map length; a divergence from `active_calls` (creations-removals)
+    // localises a store-side leak. A sibling map growing while it stays flat
+    // names the leaking map (`locks`, `takeover_at`: the X11 fail-back suspects).
     store_calls: AtomicU64,
     store_sip_index: AtomicU64,
     store_indexed: AtomicU64,
     store_locks: AtomicU64,
     store_takeover_at: AtomicU64,
     store_touched: AtomicU64,
-    // Replicating-store sizes: `repl_meta_total` = all replica metadata entries
-    // this node holds; `repl_meta_backup` = the BACKUP-partition subset (the
-    // replicas this node holds for its peers; a backup self-releases its *live*
-    // takeover copy on transaction completion but KEEPS the replica until its
-    // primary deletes it, so this tracks resident backup bodies, ADR-0014). The
-    // changelog gauges are the outbound replication buffer depth (entries across
-    // peers + live peer count); a peer whose entries grow without draining
-    // (slow/dead subscriber) is an outbound-side leak distinct from the call map.
+    // Replicating-store sizes: all replica metadata entries, the BACKUP-partition
+    // subset (resident backup bodies, kept past a takeover copy's self-release
+    // until the primary deletes them, ADR-0014), and the live calls with no
+    // backup (ADR-0055 §3). The changelog gauges are the outbound buffer depth
+    // (entries, peers); entries that grow without draining are an outbound leak.
     repl_meta_total: AtomicU64,
     repl_meta_backup: AtomicU64,
+    repl_calls_unbacked: AtomicU64,
     // Inner CallStore map sizes (bodies/idx) — the idx map is insert-only on
     // put_call, so a call whose index keys change across re-flushes (or whose
     // delete passes the wrong keys) strands `idx:*` entries. store_idx_entries
@@ -649,11 +645,13 @@ impl B2buaMetrics {
         &self,
         meta_total: u64,
         meta_backup: u64,
+        calls_unbacked: u64,
         changelog_entries: u64,
         changelog_peers: u64,
     ) {
         self.inner.repl_meta_total.store(meta_total, Ordering::Relaxed);
         self.inner.repl_meta_backup.store(meta_backup, Ordering::Relaxed);
+        self.inner.repl_calls_unbacked.store(calls_unbacked, Ordering::Relaxed);
         self.inner.repl_changelog_entries.store(changelog_entries, Ordering::Relaxed);
         self.inner.repl_changelog_peers.store(changelog_peers, Ordering::Relaxed);
     }
@@ -783,6 +781,8 @@ impl B2buaMetrics {
             .render_value(&mut s, self.inner.repl_meta_total.load(Ordering::Relaxed));
         catalogue::worker::REPL_META_BACKUP
             .render_value(&mut s, self.inner.repl_meta_backup.load(Ordering::Relaxed));
+        catalogue::capacity::REPL_CALLS_UNBACKED
+            .render_value(&mut s, self.inner.repl_calls_unbacked.load(Ordering::Relaxed));
         catalogue::worker::REPL_CHANGELOG_ENTRIES
             .render_value(&mut s, self.inner.repl_changelog_entries.load(Ordering::Relaxed));
         catalogue::worker::REPL_CHANGELOG_PEERS

@@ -382,7 +382,7 @@ async fn a_peer_that_stops_reading_is_dropped_after_15_s_and_its_log_becomes_rea
     let client = net.connect_from(a_local, b).await.unwrap();
     client
         .send(Frame::PullRequest {
-            proto_ver: 3,
+            proto_ver: repl_net::PROTO_VER,
             caller: "A".into(),
             partition: Partition::Pri,
             since: Watermark::new(0, 0),
@@ -455,7 +455,7 @@ async fn a_served_stream_carries_a_noop_at_least_every_noop_interval_during_and_
     let clock = Clock::test_at(0);
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let b = addr(8);
-    let changelog = Changelog::new(3, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(3, clock.clone());
     let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     for i in 0..300 {
         let call_ref = cref("A", &i.to_string());
@@ -484,7 +484,7 @@ async fn a_served_stream_carries_a_noop_at_least_every_noop_interval_during_and_
     let client = net.connect_from(addr(41), b).await.unwrap();
     client
         .send(Frame::PullRequest {
-            proto_ver: 3,
+            proto_ver: repl_net::PROTO_VER,
             caller: "A".into(),
             partition: Partition::Pri,
             since: Watermark::new(0, 0),

@@ -120,12 +120,12 @@ pub(super) async fn process_result(
     }
 
     // Replicate a non-terminated, backed-up call to its peer after each authoritative mutation
-    // (flush-on-mutation). The backup test here keeps a wired node from writing a call nobody backs
-    // up; `CallState::flush` itself is a no-op on a node with no replication store, so a backup
-    // peer stamped by the front proxy alone never opens the store. A backed-up call on a wired node
+    // (flush-on-mutation), into the change log before any effect of the turn leaves (ADR-0055
+    // §3). The backup test here keeps a wired node from writing a call nobody backs up;
+    // `CallState::flush` itself is a no-op on a node with no replication store, so a backup peer
+    // stamped by the front proxy alone never opens the store. A backed-up call on a wired node
     // routes through the write-side policy (Forward when primary, Reverse when acting-backup) so
-    // the backup holds the latest state. The flush rides the buffered terminate-writer
-    // (non-blocking).
+    // the backup holds the latest state.
     //
     // `Terminating` MUST flush too, not just `Active`: a teardown-in-progress
     // carries authoritative state the replica needs — the b-leg `ByeSent`
@@ -142,6 +142,12 @@ pub(super) async fn process_result(
         ctx.state.flush(&result.call);
     }
     reach(ctx, call_ref, TurnPoint::Logged, wrote).await;
+    // A re-INVITE's first provisional follows the write that records it.
+    if let Some(reinvite) =
+        received.filter(|r| *r.method() == Method::Invite && r.to().tag().is_some())
+    {
+        super::hold::first_provisional(ctx, call_ref, reinvite).await;
+    }
 
     // The terminal `RemoveCall` is interpreted LAST — after the buffered
     // `WriteCdr` enqueue (ADR-0020 X2): propagating the replica delete before
@@ -321,6 +327,9 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
     }
 
     for eff in &result.effects.outbound {
+        // A held ACK leaves before any later message of its call (RFC 3261
+        // §14.1), this turn's included.
+        super::hold::release(ctx, call_ref).await;
         let Some(dest) = sip_net::ip_socket_addr(&eff.destination.0, eff.destination.1) else {
             super::unaddressable::fail_unaddressable(ctx, call_ref, result, eff);
             continue;
@@ -391,7 +400,10 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
                 // txn allows it. An ACK goes through it too, raw: the Accepted
                 // INVITE client txn of its 2xx keeps it, and replays it to a
                 // repeat of that 2xx once this call is released (RFC 6026 §7.2).
-                if matches!(req.method(), Method::Cancel | Method::Ack) {
+                // The ACK of a 2xx is held for the call's backup (ADR-0055 §3).
+                if *req.method() == Method::Ack {
+                    super::hold::ack(ctx, call_ref, req, dest).await;
+                } else if *req.method() == Method::Cancel {
                     let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
                 } else {
                     let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;

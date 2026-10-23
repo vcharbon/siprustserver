@@ -37,18 +37,18 @@ kills it, and a kill drops every call it serves.
    `b2bua_new_calls_total`; a copy refused again is counted apart.
 4. **Backup replicas have their own ceilings:** a count and an RSS ceiling,
    set lower than the admission ones. At either, a replica of a call this node
-   does not hold yet is not stored. Updates and deletes of held replicas, and a
-   node's own calls coming back from a peer, always apply. A replica left out
-   is stored by the call's next write that finds room, since every write
-   carries the whole body. Until then the backup's flow reports no position
-   past the write it left out, so a draining primary never reads that call as
-   held (ADR-0031 D2).
+   does not hold yet is refused: the backup tells the primary in a frame, its
+   reported position moves past the refused write, and it refuses every later
+   write of that call. The call has no backup for its whole life (ADR-0055
+   §3). Updates and deletes of held replicas, and a node's own calls coming
+   back from a peer, always apply.
 5. **RSS is sampled, counts are exact.** RSS is read every 100 ms through an
    injectable `SystemProbe`; tests drive it through a simulated one.
 6. **The transaction layer's deferred backlog is an internal bound, always
    on.** It holds the critical events a full event queue keeps for a router
-   that stops draining, among them every INVITE whose 100 Trying already
-   left. No other rung sees that stall: the ingress brake reads a queue the
+   that stops draining, among them every INVITE the layer admitted, whose
+   100 Trying leaves at the §17.2.1 bound when no turn releases it
+   (ADR-0055 §3). No other rung sees that stall: the ingress brake reads a queue the
    transaction layer drains at parse speed, and the router's rungs (item 11)
    run behind it. No operator setting sizes the event queue, so the
    backlog's ceilings follow it: one queue of events for a new call, two for
@@ -162,10 +162,10 @@ kills it, and a kill drops every call it serves.
   ADR-0051 §5): a few KiB for ordinary traffic, and under about 200 KiB for a
   64 KiB datagram, since the parser refuses a header block past 100 lines.
   `base` in item 7 counts `queue_max` such slots per socket.
-- A call whose replica was left out has no backup until its next write lands;
-  a primary failure in that window loses it. The shed is counted
-  (`b2bua_repl_backup_shed_total`), never silent, and a drain in that window
-  runs to its grace instead of exiting caught up.
+- A call whose replica was refused has no backup for life; a primary failure
+  loses it as a non-HA B2BUA would. The refusal is counted
+  (`b2bua_repl_backup_shed_total`) and the live unbacked calls gauged
+  (`b2bua_repl_calls_unbacked`), never silent.
 - The counts are exact per decision: the router's run loop judges every new
   INVITE, and one it admits counts as a live call from its admission until
   its turn creates the call, so new calls never take the live calls past the

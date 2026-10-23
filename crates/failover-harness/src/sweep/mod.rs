@@ -2,7 +2,11 @@
 //! every turn point of its call — each turn's write handed to replication,
 //! its effects left, its write applied at the backup — by each [`Incident`].
 //! Every cell must end with an RFC-clean, fully terminated call, one CDR and
-//! nothing left on any node or in the limiter.
+//! nothing left on any node or in the limiter; an incident that loses the
+//! call states what the parties are left with instead
+//! ([`Incident::loses_the_call`]). A kill inside the replication window
+//! declares one window: a copy may re-use, once per dialog, an in-dialog CSeq
+//! the dead primary sent before its backup applied the write (ADR-0055 §11).
 //!
 //! A cell is named `<shape>/<incident>/t<k>-<point>`. The cells that fail
 //! before their correction lands are listed in a [`Ratchet`] with the decision
@@ -28,7 +32,7 @@ pub use parties::{Parties, ALICE, BOB, BOB2, CHARLIE, MEDIA, MEDIA_ROLE};
 pub use ratchet::Ratchet;
 
 use crate::cluster::ClusterRecipe;
-use crate::turn_points::TurnAt;
+use crate::turn_points::{TurnAt, TurnPoint};
 
 /// A call shape the sweep cuts.
 pub trait SweepShape: Send + Sync {
@@ -58,9 +62,10 @@ pub trait SweepShape: Send + Sync {
     fn call_env(&self, _env: &mut CallEnv<'_>) {}
 
     /// Whether the shape is cut by a split that never heals
-    /// ([`Incident::Split`]). A shape that answers `false` runs no such cell.
+    /// ([`Incident::Split`]): a representative few are, to check that the
+    /// degraded mode leaks nothing.
     fn splits_unhealed(&self) -> bool {
-        true
+        false
     }
 
     /// Check the call's one CDR beyond its count.
@@ -81,12 +86,24 @@ pub enum Incident {
     Split,
     /// A [`Split`](Self::Split) healed one second later.
     SplitHealed,
+    /// The replication from the primary to the backup stalls for longer than
+    /// the hold's cap, then the primary dies (ADR-0055 §3).
+    StalledKilled,
+    /// The call's backup refused its replica at its memory ceiling, so the
+    /// call has no backup; the primary dies (ADR-0055 §3).
+    UnbackedKilled,
 }
 
 impl Incident {
     /// Every incident, in lane order.
-    pub const ALL: [Incident; 4] =
-        [Incident::PrimaryKilled, Incident::BackupKilled, Incident::Split, Incident::SplitHealed];
+    pub const ALL: [Incident; 6] = [
+        Incident::PrimaryKilled,
+        Incident::BackupKilled,
+        Incident::Split,
+        Incident::SplitHealed,
+        Incident::StalledKilled,
+        Incident::UnbackedKilled,
+    ];
 
     /// The incident's name in a cell's name.
     pub fn label(self) -> &'static str {
@@ -95,7 +112,24 @@ impl Incident {
             Incident::BackupKilled => "backup-killed",
             Incident::Split => "split",
             Incident::SplitHealed => "split-healed",
+            Incident::StalledKilled => "stalled-killed",
+            Incident::UnbackedKilled => "unbacked-killed",
         }
+    }
+
+    /// Whether the incident may lose the call as a non-HA B2BUA loses it
+    /// (ADR-0055 §11): a caller whose INVITE drew nothing from a copy is
+    /// answered by its own Timer B, a callee whose dialog no copy holds keeps
+    /// it until its own timers end it, and the call leaves at most one CDR.
+    /// Nothing is left on any node or in the limiter either way.
+    pub fn loses_the_call(self) -> bool {
+        matches!(self, Incident::StalledKilled | Incident::UnbackedKilled)
+    }
+
+    /// Whether the incident is cut at a turn's applied sub-point: a call with
+    /// no backup has none, and a stall at it is a kill after the write.
+    fn cuts_applied(self) -> bool {
+        !self.loses_the_call()
     }
 }
 
@@ -127,7 +161,9 @@ pub fn sweep(shape: &dyn SweepShape, incident: Incident, ratchet: &Ratchet) {
     }
     let turns = baseline(shape);
     for (i, turn) in turns.iter().enumerate() {
-        for &point in turn.points() {
+        let points =
+            turn.points().iter().filter(|p| incident.cuts_applied() || **p != TurnPoint::Applied);
+        for &point in points {
             let at = TurnAt { turn: i + 1, point };
             let name = cell_name(shape.id(), incident, at);
             let cut = Some(Cut { at, incident });
@@ -244,6 +280,16 @@ macro_rules! failover_sweep {
                     #[test]
                     fn split_healed() {
                         run(Incident::SplitHealed);
+                    }
+
+                    #[test]
+                    fn stalled_killed() {
+                        run(Incident::StalledKilled);
+                    }
+
+                    #[test]
+                    fn unbacked_killed() {
+                        run(Incident::UnbackedKilled);
                     }
                 }
             )+

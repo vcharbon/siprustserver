@@ -2,8 +2,8 @@
 //! turn point by one incident, driven until the cluster holds nothing of it,
 //! and judged. Every check panics: the RFC audit and the model invariants when
 //! the harness drops; here, no node holding anything of the call, no limiter
-//! set left, its CDR count — exactly one, or up to two in a split cell — and
-//! the shape's check of it.
+//! set left, its CDR count — exactly one, up to two in a split cell, at most
+//! one where the incident may lose the call — and the shape's check of it.
 
 use std::time::Duration;
 
@@ -21,6 +21,9 @@ pub const PRIMARY: &str = "b1";
 
 /// How long a split lasts before it heals ([`Incident::SplitHealed`]).
 const HEAL_AFTER: Duration = Duration::from_secs(1);
+/// How long the replication stalls before the primary dies
+/// ([`Incident::StalledKilled`]): past the hold's cap, and the §17.2.1 bound.
+const STALL_FOR: Duration = Duration::from_millis(300);
 /// The step the cell's clock moves by once the parties are done, answering
 /// what the cluster still sends between steps.
 const SETTLE_STEP: Duration = Duration::from_millis(200);
@@ -45,7 +48,12 @@ pub async fn run_cell(
     cut: Option<Cut>,
     report: bool,
 ) -> Vec<Turn> {
-    let mut cluster = Cluster::start(name, &shape.recipe()).await;
+    let mut recipe = shape.recipe();
+    if cut.is_some_and(|c| c.incident == Incident::UnbackedKilled) {
+        // Every backup refuses every replica: each call has no backup.
+        recipe.replica.backup.calls = Some(0);
+    }
+    let mut cluster = Cluster::start(name, &recipe).await;
     if !report {
         cluster.fh.disarm_report_on_drop();
     }
@@ -62,6 +70,9 @@ pub async fn run_cell(
     tokio::pin!(run);
     let heal = tokio::time::sleep(Duration::MAX);
     tokio::pin!(heal);
+    let kill = tokio::time::sleep(Duration::MAX);
+    tokio::pin!(kill);
+    let mut kill_pending = false;
 
     let mut verdict = None;
     let mut heal_pending = false;
@@ -74,11 +85,19 @@ pub async fn run_cell(
                 reached = None;
                 let held = held.expect("the turn points keep the arm");
                 let cut = cut.expect("armed");
-                strike(&mut cluster, &placement, cut.incident, held);
+                strike(&mut cluster, &placement, cut.incident, held, &parties.names());
                 if cut.incident == Incident::SplitHealed {
                     heal.as_mut().reset(tokio::time::Instant::now() + HEAL_AFTER);
                     heal_pending = true;
                 }
+                if cut.incident == Incident::StalledKilled {
+                    kill.as_mut().reset(tokio::time::Instant::now() + STALL_FOR);
+                    kill_pending = true;
+                }
+            }
+            () = &mut kill, if kill_pending => {
+                kill_pending = false;
+                kill_inside_the_window(&mut cluster, &placement);
             }
             () = &mut heal, if heal_pending => {
                 heal_pending = false;
@@ -92,7 +111,8 @@ pub async fn run_cell(
                 settled += SETTLE_STEP;
                 let call = call_ref.get_or_insert_with(|| first_call(&cluster, name));
                 let clear = cluster.is_clear_of(call).await;
-                if (clear && reached.is_none() && !heal_pending) || settled >= SETTLE_BUDGET {
+                let pending = heal_pending || kill_pending;
+                if (clear && reached.is_none() && !pending) || settled >= SETTLE_BUDGET {
                     break;
                 }
             }
@@ -122,9 +142,10 @@ pub async fn run_cell(
     // A split call's two copies may each write its CDR, or neither: no CDR
     // is deduplicated, and its loss in a split is accepted.
     let split = cut.is_some_and(|c| matches!(c.incident, Incident::Split | Incident::SplitHealed));
-    match (cdrs.len(), split) {
-        (1, _) | (0..=2, true) => {}
-        (n, _) => panic!("[{name}] the call left {n} CDRs"),
+    let lost = cut.is_some_and(|c| c.incident.loses_the_call());
+    match (cdrs.len(), split, lost) {
+        (1, _, _) | (0..=2, true, _) | (0, _, true) => {}
+        (n, _, _) => panic!("[{name}] the call left {n} CDRs"),
     }
     if let Some(cdr) = cdrs.first() {
         if let Err(why) = shape.check_cdr(cdr) {
@@ -146,17 +167,43 @@ fn first_call(cluster: &Cluster, name: &str) -> String {
 
 /// Befall the call's owners with `incident` while `held` stands at its turn
 /// point. A node the incident kills stays frozen there; any other goes on.
-fn strike(cluster: &mut Cluster, placement: &Placement, incident: Incident, held: HeldTurn) {
+/// `names` are the parties' UAs, whose dialog verdicts a split that never
+/// heals declares.
+fn strike(
+    cluster: &mut Cluster,
+    placement: &Placement,
+    incident: Incident,
+    held: HeldTurn,
+    names: &[String],
+) {
     let victim = match incident {
         Incident::PrimaryKilled => {
+            kill_inside_the_window(cluster, placement);
+            Some(placement.primary.as_str())
+        }
+        Incident::UnbackedKilled => {
             cluster.kill(&placement.primary, &placement.backup);
             Some(placement.primary.as_str())
+        }
+        Incident::StalledKilled => {
+            cluster.fh.stall(&placement.primary, &placement.backup);
+            None
         }
         Incident::BackupKilled => {
             cluster.kill(&placement.backup, &placement.primary);
             Some(placement.backup.as_str())
         }
-        Incident::Split | Incident::SplitHealed => {
+        Incident::Split => {
+            cluster.split(placement);
+            cluster.fh.accept_dialog_verdicts(
+                scenario_harness::dialogs::DIALOG_ENDED,
+                names,
+                "ADR-0055 §11: a split that never heals sends the stale copy's requests \
+                 into a dialog the other copy ended, closed by the 481 they draw",
+            );
+            None
+        }
+        Incident::SplitHealed => {
             cluster.split(placement);
             None
         }
@@ -164,4 +211,17 @@ fn strike(cluster: &mut Cluster, placement: &Placement, incident: Incident, held
     if victim != Some(held.node.as_str()) {
         held.release();
     }
+}
+
+/// Kill the primary of `placement` inside the replication window: a copy may
+/// re-use, once per dialog, an in-dialog CSeq the dead primary sent before its
+/// backup applied the write, the request drawing its peer's reject (ADR-0055
+/// §11).
+fn kill_inside_the_window(cluster: &mut Cluster, placement: &Placement) {
+    cluster.fh.accept_rfc_deviations_once_per_dialog(
+        crate::RULE_CSEQ_IN_DIALOG_ORDER,
+        "ADR-0055 §11: a copy re-uses once per dialog a CSeq the dead primary sent \
+         inside the replication window",
+    );
+    cluster.kill(&placement.primary, &placement.backup);
 }

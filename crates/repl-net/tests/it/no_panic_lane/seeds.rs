@@ -60,6 +60,14 @@ pub fn all() -> Vec<Seed> {
             vec![Frame::ResetToBootstrap { reason: "since fell off the tail".into() }],
         ),
         seed(
+            "replica-refused",
+            vec![Frame::ReplicaRefused { at: Watermark::new(3, 20), call_ref: "w0|c|t".into() }],
+        ),
+        seed(
+            "stream-refused",
+            vec![Frame::StreamRefused { proto_ver: 3, reason: "another version".into() }],
+        ),
+        seed(
             "stream/noop-then-put",
             vec![Frame::Noop { at: Watermark::new(1, 1) }, data(Op::Put, Some(b""), None)],
         ),

@@ -339,30 +339,16 @@ impl Owner {
         };
         self.open_txn_with(head, |txn| txn.held = held);
 
-        // For INVITE, immediately send 100 Trying and move to proceeding.
+        // An INVITE's first provisional is its consumer's to release, or this
+        // layer's at the §17.2.1 bound (`layer::trying`).
         if is_invite {
-            // The recipe froze the 100 into its own image, which IS its wire
-            // form — send and cache that instead of rendering it twice. An
-            // INVITE whose lines no response can echo draws no 100.
-            let trying = generate_response(&req, 100, "Trying", &GenerateResponseOpts::default())
-                .map(|trying| trying.image().clone());
-            if let Ok(trying_buf) = &trying {
-                self.send_buffer(endpoint, trying_buf, src).await;
-            }
-            if let Some(txn) = self.server_mut(id) {
-                txn.state = TxnState::Proceeding;
-                // Cache the 100 as the latest provisional so a retransmitted INVITE
-                // replays it (RFC 3261 §17.2.1) instead of being absorbed silently —
-                // the auto-100 already silenced the UAC's own retransmission timer.
-                if let Ok(trying_buf) = trying {
-                    txn.last_response = Some(trying_buf);
-                    txn.last_response_status = Some(100);
-                }
+            if let Some(opened) = self.server(id).map(|t| t.created_at) {
+                self.arm_trying_bound(id.to_key(), opened);
             }
         }
 
-        // Critical for INVITE: the 100 we just sent stops the UAC retransmitting,
-        // so this Message is the app's ONLY notice of the call. A non-INVITE the
+        // Critical for INVITE: the 100 the bound sends stops the UAC
+        // retransmitting, so this Message is the app's ONLY notice of the call. A non-INVITE the
         // full queue drops is not admitted: its transaction is forgotten, so the
         // UAC's Timer E copy (§17.1.2.2; UDP-only, ADR-0027) is admitted afresh
         // rather than absorbed unanswered by a Trying transaction.

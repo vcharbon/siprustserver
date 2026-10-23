@@ -6,6 +6,11 @@
 //! than [`claim_ttl`](Changelog::set_claim_ttl) belongs to a peer that stopped
 //! answering, one that died without a FIN included, whose serve task (and
 //! claim) outlives it until the link bounds end it: it reads as unknown.
+//!
+//! The highest position a flow ever reported under this node's incarnation is
+//! kept apart from the claim, past a disconnect: it is what the peer holds for
+//! sure. It releases the messages a turn holds for the peer (ADR-0055 §3) and
+//! reaps the deletes it covers.
 
 use std::time::Duration;
 
@@ -38,9 +43,42 @@ impl Changelog {
     /// its earlier claim no longer vouches for it. Ignored for a peer with no
     /// log.
     pub fn note_applied(&self, peer: &str, partition: Partition, at: Watermark) {
+        let gen = self.gen;
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
         if let Some(log) = inner.peers.get_mut(peer) {
-            log.sub_mut(partition).applied = Some(Claim { at, made: Instant::now() });
+            let sub = log.sub_mut(partition);
+            sub.applied = Some(Claim { at, made: Instant::now() });
+            if at.gen == gen {
+                sub.acked.send_if_modified(|acked| {
+                    let raised = at > *acked;
+                    if raised {
+                        *acked = at;
+                    }
+                    raised
+                });
+            }
+        }
+    }
+
+    /// Whether `peer` is a live, bootstrapped holder of `partition`: its flow is
+    /// connected and has claimed a position within the claim TTL, which it does
+    /// only once its bootstrap is applied.
+    pub fn flow_live(&self, peer: &str, partition: Partition) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).map(|log| log.sub(partition)).is_some_and(|sub| {
+            sub.streams > 0 && sub.applied.is_some_and(|c| c.made.elapsed() <= inner.claim_ttl)
+        })
+    }
+
+    /// Resolves once `peer` reported applying `at` or past it on `partition`,
+    /// or once its log is gone: nothing then will ever report it.
+    pub async fn applied_reaches(&self, peer: &str, partition: Partition, at: Watermark) {
+        let acked = {
+            let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+            inner.peers.get(peer).map(|log| log.sub(partition).acked.subscribe())
+        };
+        if let Some(mut acked) = acked {
+            let _ = acked.wait_for(|applied| *applied >= at).await;
         }
     }
 

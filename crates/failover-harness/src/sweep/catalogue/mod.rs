@@ -73,6 +73,10 @@ impl SweepShape for Reinvite {
     fn scenario(&self) -> Box<dyn ActorScenario> {
         Box::new(callshapes::shapes::reinvite(default_binder()))
     }
+
+    fn splits_unhealed(&self) -> bool {
+        true
+    }
 }
 
 /// The caller's UPDATE on the established call (RFC 3311).
@@ -145,6 +149,10 @@ impl SweepShape for Refer {
 
     fn scenario(&self) -> Box<dyn ActorScenario> {
         Box::new(callshapes::shapes::refer(default_binder(), REFER_KEY))
+    }
+
+    fn splits_unhealed(&self) -> bool {
+        true
     }
 }
 

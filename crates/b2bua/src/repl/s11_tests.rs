@@ -33,8 +33,7 @@ use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
 use crate::store::{
-    BufferedTerminateWriter, CallState, CallStore, InMemoryCallStore, MaterialiseOrigin,
-    PartitionRole, PutOpts, ReplicaMiss,
+    CallState, CallStore, InMemoryCallStore, MaterialiseOrigin, PartitionRole, PutOpts, ReplicaMiss,
 };
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -104,8 +103,7 @@ fn call_state_metered(
     metrics: B2buaMetrics,
 ) -> CallState {
     let store = Arc::new(InMemoryCallStore::new()) as Arc<dyn CallStore>;
-    let writer = BufferedTerminateWriter::spawn(repl.clone() as Arc<dyn CallStore>, 1024);
-    CallState::new(store, ordinal, metrics).with_replication(repl, writer)
+    CallState::new(store, ordinal, metrics).with_replication(repl)
 }
 
 /// Seed a call body into `(role, primary)` of the replicating store.

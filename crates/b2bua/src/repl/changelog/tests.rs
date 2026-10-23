@@ -1,6 +1,9 @@
 use std::time::Duration;
 
+use repl_net::frame::Frame;
+
 use super::*;
+use crate::store::PartitionRole;
 
 fn changelog() -> Changelog {
     Changelog::new(7, Clock::test_at(0))
@@ -34,7 +37,7 @@ fn an_empty_sublog_is_caught_up_only_once_its_flow_reports() {
 
 #[test]
 fn a_reaped_peer_log_is_not_vacuously_current_on_return() {
-    let cl = changelog().with_ttls(1_000, 1_000);
+    let cl = changelog().with_dead_peer_ttl(1_000);
     {
         let _guard = cl.serving("A", Partition::Bak);
         cl.bump_put("A", "call-1", Partition::Bak);

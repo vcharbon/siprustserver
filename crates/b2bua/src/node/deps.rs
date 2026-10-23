@@ -55,6 +55,8 @@ pub struct ReplicationSetup {
     pub serve: crate::repl::ServeConfig,
     /// The replicas' TTL, the backup ceilings and the keepalive catch-up.
     pub replica: super::replica::ReplicaConfig,
+    /// The hold cap and the backlog marks (ADR-0055 §3).
+    pub write_path: crate::repl::WritePath,
 }
 
 /// Wiring inputs for [`B2buaCore::spawn`](super::B2buaCore::spawn).
@@ -69,8 +71,8 @@ pub struct B2buaDeps {
     /// in-dialog request fetch, keepalive/audit read) consult it before their
     /// sync map reads, and read the map unchanged while it is disarmed. A test
     /// retains a clone of the handle and flips per-path switches mid-call.
-    /// Sits ONLY on the live-serving sites — the HA reclaim/reconcile/
-    /// terminate-writer paths are deliberately un-probed.
+    /// Sits ONLY on the live-serving sites — the HA reclaim/reconcile paths
+    /// and the store write path are deliberately un-probed.
     pub store_faults: StoreFaults,
     /// Wire-fault seam: one named RFC deviation the core emits on purpose so
     /// the post-run audit gate can be proven live. Default = never armed.

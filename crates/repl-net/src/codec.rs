@@ -190,6 +190,19 @@ impl Encoder {
                 self.uint(at.gen);
                 self.uint(at.counter);
             }
+            Frame::ReplicaRefused { at, call_ref } => {
+                self.array(4, "ReplicaRefused")?;
+                self.uint(tag::REPLICA_REFUSED);
+                self.uint(at.gen);
+                self.uint(at.counter);
+                self.str(call_ref, "call_ref")?;
+            }
+            Frame::StreamRefused { proto_ver, reason } => {
+                self.array(3, "StreamRefused")?;
+                self.uint(tag::STREAM_REFUSED);
+                self.uint(u64::from(*proto_ver));
+                self.str(reason, "reason")?;
+            }
         }
         Ok(())
     }
@@ -216,6 +229,8 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, ReplCodecError> {
         tag::NOOP => decode_noop(&mut rd, len),
         tag::RESET_TO_BOOTSTRAP => decode_reset(&mut rd, len),
         tag::POSITION => decode_position(&mut rd, len),
+        tag::REPLICA_REFUSED => decode_replica_refused(&mut rd, len),
+        tag::STREAM_REFUSED => decode_stream_refused(&mut rd, len),
         other => Err(ReplCodecError::UnknownTag(other)),
     }
 }
@@ -295,6 +310,21 @@ fn decode_position(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
     let gen = read_u64(rd, "gen")?;
     let counter = read_u64(rd, "counter")?;
     Ok(Frame::Position { at: Watermark::new(gen, counter) })
+}
+
+fn decode_replica_refused(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
+    expect_len(len, 4, "ReplicaRefused")?;
+    let gen = read_u64(rd, "gen")?;
+    let counter = read_u64(rd, "counter")?;
+    let call_ref = read_str(rd, "call_ref")?;
+    Ok(Frame::ReplicaRefused { at: Watermark::new(gen, counter), call_ref })
+}
+
+fn decode_stream_refused(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
+    expect_len(len, 3, "StreamRefused")?;
+    let proto_ver = read_u16(rd, "proto_ver")?;
+    let reason = read_str(rd, "reason")?;
+    Ok(Frame::StreamRefused { proto_ver, reason })
 }
 
 fn decode_reset(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {

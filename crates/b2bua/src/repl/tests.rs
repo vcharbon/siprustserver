@@ -139,9 +139,9 @@ async fn compaction_under_churn_keeps_live_set_size() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn delete_emits_tombstone_then_reaped() {
+async fn delete_emits_a_tombstone_drained_as_a_bodiless_delete() {
     let clock = Clock::test_at(0);
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(60_000);
     let store = ReplicatingCallStore::with_changelog(cl, clock.clone());
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await;
     store.delete_call(PRI, SELF, "c1", &[], false, &fwd("A")).await.unwrap();
@@ -159,11 +159,6 @@ async fn delete_emits_tombstone_then_reaped() {
         }
         f => panic!("not Data: {f:?}"),
     }
-
-    // Advance past tombstone TTL + reap → gone.
-    tokio::time::advance(Duration::from_millis(1_001)).await;
-    store.changelog().reap(clock.now_ms());
-    assert_eq!(store.changelog().peer_len("A", BAK_P), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -274,7 +269,7 @@ async fn dead_peer_auto_clean_via_idle_reap() {
     // drop — a disconnected puller's pending log is kept until the TTL so a
     // quick reconnect resumes warm).
     let clock = Clock::test_at(0);
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 2_000);
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(2_000);
     let store = ReplicatingCallStore::with_changelog(cl, clock.clone());
 
     // Idle-reap: advance past dead-peer TTL with no activity → peer dropped.
@@ -363,13 +358,14 @@ async fn no_peer_stores_body_without_bump() {
 
 const BAK: PartitionRole = PartitionRole::Backup;
 
-/// A reaped delete-tombstone raises the per-(peer,partition) retention floor, so a
-/// warm puller whose `since` is below it is told to re-bootstrap (`needs_reset`),
-/// while one at/above the floor — or on a cold (lower-gen) pull — is not.
+/// A reaped delete-tombstone (one its peer reported applying) raises the
+/// per-(peer,partition) retention floor, so a warm puller whose `since` is
+/// below it is told to re-bootstrap (`needs_reset`), while one at/above the
+/// floor — or on a cold (lower-gen) pull — is not.
 #[tokio::test(start_paused = true)]
 async fn needs_reset_after_tombstone_reap_raises_floor() {
     let clock = Clock::test_at(0);
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(60_000);
     let store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // counter 1 (Bak)
@@ -379,9 +375,9 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
     // (the tombstone at counter 2 is still live and would be re-delivered).
     assert!(!cl.needs_reset("A", BAK_P, Watermark::new(1, 1)), "tombstone still live → no reset");
 
-    // Advance past the tombstone TTL and reap: the delete at counter 2 is gone,
-    // the floor rises to 2.
-    tokio::time::advance(Duration::from_millis(1_001)).await;
+    // The peer reports applying the delete; the reap drops it and the floor
+    // rises to 2.
+    cl.note_applied("A", BAK_P, Watermark::new(1, 2));
     cl.reap(clock.now_ms());
 
     assert!(cl.needs_reset("A", BAK_P, Watermark::new(1, 1)), "since below reaped tail → reset");
@@ -404,7 +400,7 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
 async fn gen_collision_or_backward_clock_forces_reset() {
     let clock = Clock::test_at(0);
     // "Restarted" changelog: same gen 1 as the previous life, counter back at 0.
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(60_000);
     let store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // head = (1, 1)
 
@@ -432,7 +428,7 @@ async fn gen_collision_or_backward_clock_forces_reset() {
 #[tokio::test(start_paused = true)]
 async fn served_peer_log_survives_reap_until_guard_dropped() {
     let clock = Clock::test_at(0);
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 2_000); // dead-peer TTL 2s
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(2_000); // dead-peer TTL 2s
     let _store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
     let guard = cl.serving("A", Partition::Bak);

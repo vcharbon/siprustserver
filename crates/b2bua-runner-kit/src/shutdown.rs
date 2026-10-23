@@ -13,8 +13,8 @@
 //!   drain and no limiter release flush; the CDR sink delivers what was
 //!   written before. Exit non-zero.
 //! - **A loop task ended** — the transaction owner, the router or a vital
-//!   task (the timer driver, the terminate writer, the CDR drainer, the
-//!   changelog server) returned, was aborted or panicked, before or during a
+//!   task (the timer driver, the CDR drainer, the changelog server)
+//!   returned, was aborted or panicked, before or during a
 //!   drain: nothing serves any more. The queued limiter releases are flushed within the same bound,
 //!   and the process exits non-zero; the orchestrator restarts it.
 //!

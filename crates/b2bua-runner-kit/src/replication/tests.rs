@@ -49,6 +49,7 @@ fn a_static_peer_list_selects_static_addressing() {
                 Peer::new("w1", "10.0.0.2"),
             ]),
             link: LinkSettings::default(),
+            write_path: Default::default(),
         }
     );
     assert_eq!(s.addressing(), ReplAddressing::Static);

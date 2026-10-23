@@ -536,7 +536,7 @@ async fn catchup_noop_carries_flow_cursor_not_global_head() {
     // Hand-rolled WARM Backup-flow pull as B (warm ⇒ no bootstrap scan).
     let conn = net.connect(a.addr).await.unwrap();
     conn.send(Frame::PullRequest {
-        proto_ver: 3,
+        proto_ver: repl_net::PROTO_VER,
         caller: "B".into(),
         partition: Partition::Bak,
         since: Watermark::new(1, 0),

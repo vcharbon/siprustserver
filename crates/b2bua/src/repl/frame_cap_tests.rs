@@ -32,7 +32,7 @@ async fn primary(
     net: &Arc<SimulatedReplicationNetwork>,
     clock: &Clock,
 ) -> (ReplicatingCallStore, B2buaMetrics) {
-    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(1, clock.clone());
     let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     let metrics = B2buaMetrics::new();
     let listener = net.listen(addr(1)).await.unwrap();

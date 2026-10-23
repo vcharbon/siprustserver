@@ -29,9 +29,7 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
-use super::{
-    BufferedTerminateWriter, CallState, CallStore, InMemoryCallStore, PartitionRole, PutOpts,
-};
+use super::{CallState, CallStore, InMemoryCallStore, PartitionRole, PutOpts};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
@@ -219,8 +217,7 @@ fn a_message_naming_an_outgoing_legs_own_tag_is_never_its_calls() {
 async fn backup_with_replicas(last: u8) -> (CallState, Arc<ReplicatingCallStore>, Call, Call) {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let store = Arc::new(InMemoryCallStore::new()) as Arc<dyn CallStore>;
-    let writer = BufferedTerminateWriter::spawn(repl.clone() as Arc<dyn CallStore>, 64);
-    let s = CallState::new(store, "w1", B2buaMetrics::new()).with_replication(repl.clone(), writer);
+    let s = CallState::new(store, "w1", B2buaMetrics::new()).with_replication(repl.clone());
     let (one, two) = (call_1(), call_2());
     let order: [&Call; 3] = if last == 1 { [&one, &two, &one] } else { [&two, &one, &two] };
     for call in order {

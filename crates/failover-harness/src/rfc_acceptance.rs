@@ -15,9 +15,11 @@
 //! A finding is placed in a window through its `RfcFinding::offending` wire-entry
 //! index; a finding the rule cannot pin to an entry is unattributable and gates.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use layer_harness::Stamped;
+use sip_message::parser::custom::CustomParser;
+use sip_message::{SipMessage, SipParser};
 use sip_net_testkit::{RecordedSipEntry, SignalingNetworkEvent};
 
 /// One RFC-audit rule accepted over a bounded slice of the run, in capture order.
@@ -29,6 +31,9 @@ struct AcceptanceWindow {
     from_seq: u64,
     /// Recording `seq` the window closed at; `None` ⇒ open to the end of the run.
     until_seq: Option<u64>,
+    /// At most one offending request per dialog is accepted when set; a
+    /// second request of a dialog the window already accepted one of gates.
+    once_per_dialog: bool,
 }
 
 impl AcceptanceWindow {
@@ -66,7 +71,26 @@ impl RfcAcceptance {
     /// Open an acceptance window for `rule` covering every message captured
     /// AFTER `from_seq` (the recording's high-water mark at the arm instant).
     pub fn open_window(&mut self, rule: &str, from_seq: u64) {
-        self.windows.push(AcceptanceWindow { rule: rule.to_string(), from_seq, until_seq: None });
+        let window = AcceptanceWindow {
+            rule: rule.to_string(),
+            from_seq,
+            until_seq: None,
+            once_per_dialog: false,
+        };
+        self.windows.push(window);
+    }
+
+    /// [`open_window`](Self::open_window), accepting at most one offending
+    /// request per dialog: the request is named by its dialog (Call-ID and
+    /// tags), method and CSeq, so its copies on every hop count once.
+    pub fn open_window_once_per_dialog(&mut self, rule: &str, from_seq: u64) {
+        let window = AcceptanceWindow {
+            rule: rule.to_string(),
+            from_seq,
+            until_seq: None,
+            once_per_dialog: true,
+        };
+        self.windows.push(window);
     }
 
     /// Close EVERY open window for `rule` at `until_seq`, so the rule gates in
@@ -99,6 +123,21 @@ impl RfcAcceptance {
         self.windows.iter().any(|w| w.rule == rule && w.covers(seq))
     }
 
+    /// Whether the window that covers the finding at `offending` accepts one
+    /// request per dialog only.
+    fn once_per_dialog(
+        &self,
+        rule: &str,
+        offending: Option<usize>,
+        entries: &[RecordedSipEntry],
+    ) -> bool {
+        let seq =
+            offending.and_then(|i| i.checked_sub(1)).and_then(|i| entries.get(i)).map(|e| e.seq);
+        seq.is_some_and(|seq| {
+            self.windows.iter().any(|w| w.rule == rule && w.covers(seq) && w.once_per_dialog)
+        })
+    }
+
     /// Run the cross-message audit over `events` (already the audit-visible,
     /// endpoint-scoped view, the binds of `scoped_out` taken out of it) and
     /// split its non-advisory findings into `(gating, accepted)`: a finding is
@@ -127,9 +166,14 @@ impl RfcAcceptance {
                 continue;
             }
             let has_window = self.windows.iter().any(|w| w.rule == rule.name());
+            let mut per_dialog = DialogRequests::default();
             for (lane, detail, offending, _charged) in rule.check_positioned(events) {
                 let finding = (rule.name().to_string(), lane, detail);
-                if has_window && self.accepts(rule.name(), offending, &entries) {
+                let accepted_here = has_window
+                    && self.accepts(rule.name(), offending, &entries)
+                    && (!self.once_per_dialog(rule.name(), offending, &entries)
+                        || per_dialog.first_of_its_dialog(offending, &entries));
+                if accepted_here {
                     accepted.push(finding);
                 } else {
                     gating.push(finding);
@@ -137,5 +181,34 @@ impl RfcAcceptance {
             }
         }
         (gating, accepted)
+    }
+}
+
+/// The one accepted request of each dialog: `(method, CSeq)` by `(Call-ID,
+/// From-tag, To-tag)`.
+#[derive(Default)]
+struct DialogRequests(HashMap<(String, String, String), (String, u32)>);
+
+impl DialogRequests {
+    /// Whether the request at `offending` is the first of its dialog accepted,
+    /// or a copy of it on another hop; an unreadable entry is not.
+    fn first_of_its_dialog(
+        &mut self,
+        offending: Option<usize>,
+        entries: &[RecordedSipEntry],
+    ) -> bool {
+        let entry = offending.and_then(|i| i.checked_sub(1)).and_then(|i| entries.get(i));
+        let Some(Ok(SipMessage::Request(req))) = entry.map(|e| CustomParser::new().parse(&e.raw))
+        else {
+            return false;
+        };
+        let dialog = (
+            req.call_id().as_str().to_string(),
+            req.from().tag().unwrap_or_default().to_string(),
+            req.to().tag().unwrap_or_default().to_string(),
+        );
+        let request = (req.method().as_str().to_string(), req.cseq().seq());
+        let first = self.0.entry(dialog).or_insert_with(|| request.clone());
+        *first == request
     }
 }

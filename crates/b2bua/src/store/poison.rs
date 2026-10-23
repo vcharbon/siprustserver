@@ -15,7 +15,7 @@ pub(crate) const REPLICA_METADATA: &str = "replica_metadata";
 pub(crate) const REPLICA_CHANGELOG: &str = "replica_changelog";
 pub(crate) const RESURRECTION_TOMBSTONES: &str = "resurrection_tombstones";
 pub(crate) const DISPLACED_BODIES: &str = "displaced_bodies";
-pub(crate) const SHED_MARKS: &str = "shed_marks";
+pub(crate) const REPLICA_REFUSALS: &str = "replica_refusals";
 
 /// Every lock name, in counter order: the `lock` label's values.
 pub const LOCKS: [&str; 7] = [
@@ -25,7 +25,7 @@ pub const LOCKS: [&str; 7] = [
     REPLICA_CHANGELOG,
     RESURRECTION_TOMBSTONES,
     DISPLACED_BODIES,
-    SHED_MARKS,
+    REPLICA_REFUSALS,
 ];
 
 /// The recoveries of the store's locks in this process.
@@ -40,7 +40,7 @@ pub(crate) fn locked<'a, T>(m: &'a Mutex<T>, name: &'static str) -> MutexGuard<'
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{locked, LOCK_RECOVERIES, SHED_MARKS};
+    use super::{locked, LOCK_RECOVERIES, REPLICA_REFUSALS};
 
     #[test]
     fn a_poisoned_lock_is_recovered_once_and_counted_under_its_name() {
@@ -51,10 +51,10 @@ mod tests {
             panic!("poison the lock");
         })
         .join();
-        let before = LOCK_RECOVERIES.count(SHED_MARKS);
-        assert_eq!(*locked(&m, SHED_MARKS), 1);
+        let before = LOCK_RECOVERIES.count(REPLICA_REFUSALS);
+        assert_eq!(*locked(&m, REPLICA_REFUSALS), 1);
         assert!(!m.is_poisoned(), "the poison is cleared");
-        assert_eq!(*locked(&m, SHED_MARKS), 1);
-        assert_eq!(LOCK_RECOVERIES.count(SHED_MARKS) - before, 1, "one recovery per panic");
+        assert_eq!(*locked(&m, REPLICA_REFUSALS), 1);
+        assert_eq!(LOCK_RECOVERIES.count(REPLICA_REFUSALS) - before, 1, "one recovery per panic");
     }
 }

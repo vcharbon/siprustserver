@@ -39,7 +39,7 @@ use super::ReplicatingCallStore;
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
-use crate::store::{BufferedTerminateWriter, CallState, CallStore, PartitionRole, PutOpts};
+use crate::store::{CallState, CallStore, PartitionRole, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
 const BAK: PartitionRole = PartitionRole::Backup;
@@ -624,9 +624,8 @@ async fn forward_delete_applies_once_the_authority_has_taken_the_answer() {
 /// store, the way a wired node builds it.
 fn call_state(ordinal: &str, store: &ReplicatingCallStore) -> CallState {
     let repl = Arc::new(store.clone());
-    let writer = BufferedTerminateWriter::spawn(repl.clone() as Arc<dyn CallStore>, 1024);
     CallState::new(repl.clone() as Arc<dyn CallStore>, ordinal, B2buaMetrics::new())
-        .with_replication(repl, writer)
+        .with_replication(repl)
 }
 
 // ---------------------------------------------------------------------------

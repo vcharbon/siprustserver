@@ -203,6 +203,7 @@ const WORKER_REST: &[Family] = &[
     worker::STORE_TOMBSTONES,
     worker::REPL_META,
     worker::REPL_META_BACKUP,
+    capacity::REPL_CALLS_UNBACKED,
     worker::REPL_CHANGELOG_ENTRIES,
     worker::REPL_CHANGELOG_PEERS,
     worker::WITHDRAWN_RUNNING,

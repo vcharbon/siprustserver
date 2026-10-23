@@ -517,7 +517,7 @@ async fn an_info_whose_handler_died_on_the_takeover_copy_draws_481_on_its_retran
 }
 
 /// Outranks the core re-INVITE relay and panics on an INVITE in a dialog:
-/// the handler dies after the layer's 100 Trying, before any answer.
+/// the handler dies before any answer, its 100 Trying included.
 fn panic_on_reinvite(ctx: &RuleContext) -> Option<RuleHandleResult> {
     if ctx.request().is_some_and(|r| r.to().tag().is_some()) {
         panic!("probe: handler panic on re-INVITE");
@@ -539,12 +539,11 @@ fn panic_on_reinvite_services() -> Vec<ServiceDef> {
 }
 
 /// A **re-INVITE whose handler died on the takeover copy**: the caller's
-/// re-INVITE takes the call over on the survivor, draws the layer's 100
-/// Trying, and its handler panics; the reaper tears the copy down on the
-/// wire — a BYE to each side — and the survivor sheds it
-/// (`SelfRelease { ended: true }`). The 100 stopped the caller's
-/// retransmissions, so the shed answers the re-INVITE 481 through its
-/// transaction instead of leaving it to the caller's Timer B.
+/// re-INVITE takes the call over on the survivor and its handler panics; the
+/// reaper tears the copy down on the wire — a BYE to each side — and the
+/// survivor sheds it (`SelfRelease { ended: true }`). No turn answers the
+/// re-INVITE, so the shed answers it 481 through its transaction instead of
+/// leaving it to the caller's Timer B.
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_whose_handler_died_on_the_takeover_copy_is_answered_481_at_its_release() {
     let mut fh = FailoverHarness::new("released-copy-reinvite-handler-died", &["b1", "b2"])
@@ -562,7 +561,6 @@ async fn a_reinvite_whose_handler_died_on_the_takeover_copy_is_answered_481_at_i
 
     // ── The caller's re-INVITE takes the call over; its handler dies ────────
     let mut reinvite = dialog.reinvite(Some(OFFER)).await;
-    reinvite.expect(100).await;
     alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);

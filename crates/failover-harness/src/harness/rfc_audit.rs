@@ -12,6 +12,29 @@ use super::FailoverHarness;
 use crate::rfc_acceptance::{lane_details, Finding};
 
 impl FailoverHarness {
+    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now),
+    /// accepting at most one offending request per dialog (ADR-0055 §11: a copy
+    /// re-uses once a CSeq the dead primary sent inside the replication
+    /// window).
+    pub fn accept_rfc_deviations_once_per_dialog(&mut self, rule: &str, justification: &str) {
+        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
+        let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
+        self.rfc_acceptance.open_window_once_per_dialog(rule, from.unwrap_or(0));
+    }
+
+    /// Accept the dialog verdicts of `rule` (a `dialog-…` rule) each UA of
+    /// `parties` records: a declared degraded mode, never a default.
+    pub fn accept_dialog_verdicts(&self, rule: &str, parties: &[String], justification: &str) {
+        if let Ok(guard) = self.harness.inner.lock() {
+            if let Some(harness) = guard.as_ref() {
+                for party in parties {
+                    let scope = scenario_harness::WaiverScope::rule(rule, justification);
+                    harness.waive(scope.on_party(party.as_str()).conditional());
+                }
+            }
+        }
+    }
+
     /// Run the FULL RFC audit suite — the per-bind **peer** rules (Via echo /
     /// response↔transaction correlation, tags, CANCEL/RAck correlation, …) on
     /// top of the cross-message rules — over the recorded trace and panic on

@@ -1,4 +1,4 @@
-//! The replication frame model — five positional-msgpack messages plus the
+//! The replication frame model — seven positional-msgpack messages plus the
 //! small value enums and the [`Watermark`] ordering they ride on.
 //!
 //! Field ORDER on the wire is the contract (ADR-0008 positional-msgpack ethos):
@@ -10,6 +10,14 @@
 //! share this one frame set (ADR-0014 §Stream topology).
 
 use std::sync::Arc;
+
+/// The protocol version a [`Frame::PullRequest`] announces: **v4**, the seven
+/// frames `{PullRequest, Data, Noop, ResetToBootstrap, Position,
+/// ReplicaRefused, StreamRefused}`, one socket = one flow, scan-then-tail,
+/// `Op` = `{Put, Delete}`. Bumped on every change to a frame's shape or to the
+/// frame set; a server refuses a stream announcing another version
+/// ([`Frame::StreamRefused`]), and no upgrade compatibility is kept.
+pub const PROTO_VER: u16 = 4;
 
 /// Discriminant outside the accepted range for an enum-coded byte field.
 ///
@@ -228,6 +236,30 @@ pub enum Frame {
         /// The highest position this client has applied on this flow.
         at: Watermark,
     },
+    /// `[5, gen, counter, call_ref]`
+    ///
+    /// Client → server: the client refuses to hold the replica of `call_ref`
+    /// the `Data` at `at` carried (a backup at its memory ceiling, ADR-0037
+    /// item 4). The call has no backup on this flow for its whole life; the
+    /// client's position moves past the refused write (ADR-0055 §3).
+    ReplicaRefused {
+        /// The position of the refused `Data`.
+        at: Watermark,
+        /// The call whose replica is refused.
+        call_ref: String,
+    },
+    /// `[6, proto_ver, reason]`
+    ///
+    /// Server → client: the server refuses the stream the opening
+    /// `PullRequest` asked for, stating the protocol version it speaks; it
+    /// sends nothing else and closes. The client does not pull again from this
+    /// peer before its backoff.
+    StreamRefused {
+        /// The protocol version the server speaks.
+        proto_ver: u16,
+        /// Human-readable cause (for logs).
+        reason: String,
+    },
 }
 
 /// Integer tags, element 0 of each frame array. Kept in one place so the
@@ -241,4 +273,6 @@ pub(crate) mod tag {
     pub const NOOP: u64 = 2;
     pub const RESET_TO_BOOTSTRAP: u64 = 3;
     pub const POSITION: u64 = 4;
+    pub const REPLICA_REFUSED: u64 = 5;
+    pub const STREAM_REFUSED: u64 = 6;
 }

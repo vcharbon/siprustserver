@@ -418,16 +418,15 @@ fn data(op: Op, call_ref: &str, gen: i64, counter: u64) -> Frame {
     }
 }
 
-/// Run a puller of `partition` from `w0` on `w1`, resuming from `start`,
-/// through `script`, its gate at the backup `ceilings`; the positions it
-/// reported.
-async fn reported_positions(
+/// Run a Backup or Reclaim puller from `start` over `script` against `store`
+/// under `capacity`; the frames it sent back after its `PullRequest`.
+async fn sent_back(
     start: Watermark,
     partition: Partition,
     store: &ReplicatingCallStore,
     ceilings: crate::capacity::BackupCeilings,
     script: Vec<Frame>,
-) -> Vec<Watermark> {
+) -> Vec<Frame> {
     let (probe, _control) = crate::capacity::simulated();
     let gate = crate::capacity::CapacityGate::new(Arc::new(probe));
     gate.configure_backup(&ceilings);
@@ -456,29 +455,36 @@ async fn reported_positions(
     }
     let _ = cancel_tx.send(true);
     task.abort();
-    let reported = sent
+    let back: Vec<Frame> = sent
         .lock()
         .unwrap()
         .iter()
-        .filter_map(|f| match f {
-            Frame::Position { at } => Some(*at),
-            _ => None,
-        })
+        .filter(|f| !matches!(f, Frame::PullRequest { .. }))
+        .cloned()
         .collect();
-    reported
+    back
 }
 
 fn at(counter: u64) -> Watermark {
     Watermark::new(1, counter)
 }
 
-/// While a shed replica stands, the flow reports no position past the last
-/// one it held everything up to, whatever else it applies; once the
-/// replica is stored, the report catches up (ADR-0031 D2 x ADR-0037).
+fn position(counter: u64) -> Frame {
+    Frame::Position { at: at(counter) }
+}
+
+fn refused(call_ref: &str, counter: u64) -> Frame {
+    Frame::ReplicaRefused { at: at(counter), call_ref: call_ref.into() }
+}
+
+/// A replica refused at the backup's ceiling is told to the primary, and the
+/// position the flow reports moves past it; the call's later writes are
+/// refused again whatever room the backup finds, until its delete
+/// (ADR-0037 item 4, ADR-0055 §3).
 #[tokio::test(start_paused = true)]
-async fn a_shed_replica_holds_the_reported_position_until_it_is_stored() {
+async fn a_refused_replica_is_told_and_the_position_moves_past_it() {
     let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-    let reported = reported_positions(
+    let sent = sent_back(
         Watermark::new(0, 0),
         Partition::Bak,
         &store,
@@ -487,47 +493,36 @@ async fn a_shed_replica_holds_the_reported_position_until_it_is_stored() {
             Frame::Noop { at: at(1) },
             data(Op::Put, "w0|a|t", 1, 2),
             data(Op::Put, "w0|b|t", 1, 3),
-            data(Op::Put, "w0|a|t", 2, 4),
-            Frame::Noop { at: at(4) },
-            data(Op::Delete, "w0|a|t", 3, 5),
-            data(Op::Put, "w0|b|t", 2, 6),
+            data(Op::Delete, "w0|a|t", 2, 4),
+            data(Op::Put, "w0|b|t", 2, 5),
+            data(Op::Delete, "w0|b|t", 3, 6),
             Frame::Noop { at: at(6) },
         ],
     )
     .await;
-    let want: Vec<Watermark> = [1, 2, 2, 2, 2, 2, 6, 6].into_iter().map(at).collect();
-    assert_eq!(reported, want, "positions reported per frame");
-    assert_eq!(store.shed_count(), 0, "the stored replica cleared its mark");
+    let want = vec![
+        position(1),
+        position(2),
+        refused("w0|b|t", 3),
+        position(3),
+        position(4),
+        refused("w0|b|t", 5),
+        position(5),
+        position(6),
+        position(6),
+    ];
+    assert_eq!(sent, want, "frames sent back per frame received");
+    assert_eq!(store.refused_count(), 0, "the delete cleared the refusal");
+    assert!(store.get_call(PartitionRole::Backup, "w0", "w0|b|t").await.unwrap().is_none());
 }
 
-/// A Delete of a shed replica's call releases the position it held.
+/// A Backup scan drops the refusals an earlier stream left: the primary
+/// offers again only what it still backs up here.
 #[tokio::test(start_paused = true)]
-async fn a_deleted_shed_replica_releases_the_position() {
+async fn a_backup_scan_drops_the_refusals_of_an_earlier_stream() {
     let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-    let reported = reported_positions(
-        Watermark::new(0, 0),
-        Partition::Bak,
-        &store,
-        crate::capacity::BackupCeilings { calls: Some(1), rss_bytes: None },
-        vec![
-            Frame::Noop { at: at(1) },
-            data(Op::Put, "w0|a|t", 1, 2),
-            data(Op::Put, "w0|b|t", 1, 3),
-            data(Op::Delete, "w0|b|t", 2, 4),
-        ],
-    )
-    .await;
-    let want: Vec<Watermark> = [1, 2, 2, 4].into_iter().map(at).collect();
-    assert_eq!(reported, want);
-}
-
-/// A Backup scan drops the marks an earlier stream left (an old
-/// incarnation of the primary): the scan re-sends every live body.
-#[tokio::test(start_paused = true)]
-async fn a_backup_scan_drops_the_marks_of_an_earlier_stream() {
-    let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-    store.note_shed("w0|x|t", "w0", 1, at(3), 0);
-    let reported = reported_positions(
+    store.refuse_replica("w0|x|t", "w0", 0);
+    let sent = sent_back(
         Watermark::new(0, 0),
         Partition::Bak,
         &store,
@@ -535,52 +530,8 @@ async fn a_backup_scan_drops_the_marks_of_an_earlier_stream() {
         vec![Frame::Noop { at: Watermark::new(2, 1) }],
     )
     .await;
-    assert_eq!(reported, vec![Watermark::new(2, 1)]);
-    assert_eq!(store.shed_count(), 0);
-}
-
-/// `frame` as the primary's next incarnation (gen 2) sends it.
-fn reborn(mut frame: Frame) -> Frame {
-    if let Frame::Data { at, .. } = &mut frame {
-        at.gen = 2;
-    }
-    frame
-}
-
-/// A rebooted primary is tailed warm, with no scan: the marks its old
-/// incarnation's writes left go at the first position of the new one.
-#[tokio::test(start_paused = true)]
-async fn a_warm_resume_past_a_reboot_drops_the_old_incarnations_marks() {
-    let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-    store.note_shed("w0|x|t", "w0", 1, at(3), 0);
-    let reported = reported_positions(
-        at(5),
-        Partition::Bak,
-        &store,
-        crate::capacity::BackupCeilings::default(),
-        vec![reborn(data(Op::Put, "w0|y|t", 1, 1)), Frame::Noop { at: Watermark::new(2, 1) }],
-    )
-    .await;
-    assert_eq!(reported, vec![Watermark::new(2, 1), Watermark::new(2, 1)]);
-    assert_eq!(store.shed_count(), 0);
-}
-
-/// A Reclaim flow sheds nothing, so a Backup flow's marks of the same
-/// peer never cap it.
-#[tokio::test(start_paused = true)]
-async fn a_reclaim_flow_is_never_capped_by_backup_marks() {
-    let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-    store.note_shed("w0|x|t", "w0", 1, at(1), 0);
-    let reported = reported_positions(
-        Watermark::new(0, 0),
-        Partition::Pri,
-        &store,
-        crate::capacity::BackupCeilings::default(),
-        vec![Frame::Noop { at: at(9) }],
-    )
-    .await;
-    assert_eq!(reported, vec![at(9)]);
-    assert_eq!(store.shed_count(), 1, "the Backup flow's mark stands");
+    assert_eq!(sent, vec![Frame::Position { at: Watermark::new(2, 1) }]);
+    assert_eq!(store.refused_count(), 0);
 }
 
 /// A re-delivered Put of a call deleted inside the tombstone window is

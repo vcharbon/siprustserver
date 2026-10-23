@@ -198,6 +198,14 @@ plain_counters! {
         "b2bua_repl_frames_refused_total",
         "replication frames the transport refused unsent (past the frame cap); each is skipped and the stream goes on — expected 0",
     ) => repl_frames_refused, bump_repl_frame_refused, repl_frames_refused_total;
+    REPL_STREAMS_REFUSED = (
+        "b2bua_repl_streams_refused_total",
+        "replication streams a peer refused at connect for another protocol version; the puller pulls again after its backoff — expected 0",
+    ) => repl_streams_refused, bump_repl_stream_refused, repl_streams_refused_total;
+    REPL_NEW_CALLS_UNBACKED = (
+        "b2bua_repl_new_calls_unbacked_total",
+        "new calls admitted with no backup, for life, while the backlog toward their backup was over its high-water mark (ADR-0055 §3)",
+    ) => repl_new_calls_unbacked, bump_repl_new_call_unbacked, repl_new_calls_unbacked_total;
     DEPARTURE_TAKEOVER_PANICS = (
         "b2bua_departure_takeover_panics_total",
         "departed-peer calls whose takeover panicked; the sweep goes on with the next call — expected 0",

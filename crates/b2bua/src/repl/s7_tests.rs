@@ -314,7 +314,7 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
 
     // Peer B serves a changelog; it already holds A's call in bak:A so our
     // node A can bootstrap it as pri:A and the tail keeps us current.
-    let b_changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let b_changelog = Changelog::new(1, clock.clone());
     let b_store = ReplicatingCallStore::with_changelog(b_changelog.clone(), clock.clone());
     let b_addr = addr(2);
     let b_listener = net.listen(b_addr).await.unwrap();
