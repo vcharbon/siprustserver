@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use b2bua::capacity::BackupBound;
+use b2bua::capacity::{BackupBound, BackupCeilings};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, Partition,
     PartitionRole, ReplicatedB2buaSut,
@@ -70,9 +70,12 @@ fn roles<'a>(
 
 #[tokio::test(start_paused = true)]
 async fn a_backup_above_its_rss_ceiling_is_stored_by_the_next_write_below_it() {
-    let mut fh = FailoverHarness::new("backup-capacity-rss", &["b1", "b2"]).with_worker_tune(|c| {
-        c.capacity.backup_rss_bytes = Some(1_000);
-    });
+    let mut fh = FailoverHarness::new("backup-capacity-rss", &["b1", "b2"]).with_worker_replica(
+        b2bua::ReplicaConfig {
+            backup: BackupCeilings { calls: None, rss_bytes: Some(1_000) },
+            ..Default::default()
+        },
+    );
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let proxy =

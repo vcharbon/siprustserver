@@ -23,7 +23,6 @@
 //! | `Cancelled` | PB | S | C | yes | yes | nothing | — |
 //! | `Timer` | A | S | C | no | yes | nothing | — |
 //! | `Internal` | A | S | C | no | yes | nothing | — |
-//! | `Quiesced` | A | S | C | no | yes | nothing | — |
 //!
 //! A normal new call's turn holds its permits across the decision round
 //! trip, so new calls hold at most their share of the shared pool and the
@@ -78,18 +77,15 @@ pub enum DispatchClass {
     /// A timer the call armed, fired once.
     Timer,
     /// An event the node raised itself: a reaper verdict, the answer to a
-    /// request the call sent off its turn, or a takeover copy's stand-down
-    /// notice.
+    /// request the call sent off its turn, or a takeover copy's stand-down or
+    /// self-release notice, the latter queued behind the turns of the
+    /// messages that cleared its transactions (ADR-0014).
     Internal,
-    /// The layer's notice that the last transaction of a takeover copy
-    /// cleared: queued behind the turns of the messages that cleared them
-    /// (ADR-0014 self-release).
-    Quiesced,
 }
 
 impl DispatchClass {
     /// Every class, in table order.
-    pub const ALL: [DispatchClass; 12] = [
+    pub const ALL: [DispatchClass; 11] = [
         DispatchClass::InitialInvite,
         DispatchClass::EmergencyInvite,
         DispatchClass::InDialogInvite,
@@ -101,14 +97,14 @@ impl DispatchClass {
         DispatchClass::Cancelled,
         DispatchClass::Timer,
         DispatchClass::Internal,
-        DispatchClass::Quiesced,
     ];
 
-    /// The class of `event`; `None` for a lifecycle event, which no queue
-    /// sees.
-    pub fn of(event: &CallEvent) -> Option<Self> {
+    /// The class of `event`, `matched_client_txn` when a response it carries
+    /// answered a client transaction the layer holds; `None` for a lifecycle
+    /// event, which no queue sees.
+    pub fn of(event: &CallEvent, matched_client_txn: bool) -> Option<Self> {
         Some(match event {
-            CallEvent::Sip { message, matched_client_txn, .. } => match message.as_ref() {
+            CallEvent::Sip { message, .. } => match message.as_ref() {
                 SipMessage::Request(req) => match req.method() {
                     Method::Invite => match crate::admission::class_of(req) {
                         Class::Normal => DispatchClass::InitialInvite,
@@ -119,7 +115,7 @@ impl DispatchClass {
                     Method::Cancel => DispatchClass::StrayCancel,
                     _ => DispatchClass::OtherRequest,
                 },
-                SipMessage::Response(resp) if *matched_client_txn && resp.status() >= 200 => {
+                SipMessage::Response(resp) if matched_client_txn && resp.status() >= 200 => {
                     DispatchClass::TxnOutcome
                 }
                 SipMessage::Response(_) => DispatchClass::Response,
@@ -128,7 +124,6 @@ impl DispatchClass {
             CallEvent::Cancelled { .. } => DispatchClass::Cancelled,
             CallEvent::Timer { .. } => DispatchClass::Timer,
             CallEvent::InternalEvent { .. } => DispatchClass::Internal,
-            CallEvent::CallQuiesced { .. } => DispatchClass::Quiesced,
             CallEvent::Lifecycle(_) => return None,
         })
     }
@@ -193,11 +188,10 @@ impl DispatchClass {
             // One fire per arm, the next arm taking a turn of the call.
             DispatchClass::Timer => Row::own_work(),
             // A reaper verdict (one per sweep, per failed handler body, or
-            // per call at its overflow ceiling or lifetime cap) or one answer
-            // per request the call sent off its turn.
+            // per call at its overflow ceiling or lifetime cap), one answer
+            // per request the call sent off its turn, or one notice per
+            // stand-down or clear of a takeover copy's last transaction.
             DispatchClass::Internal => Row::own_work(),
-            // One per clear of a takeover copy's last transaction.
-            DispatchClass::Quiesced => Row::own_work(),
         }
     }
 }

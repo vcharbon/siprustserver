@@ -10,6 +10,7 @@ mod lost_round_rules;
 mod media_leg_advertisement;
 mod rules;
 mod service_macro;
+mod timer_scope_rules;
 mod turn_lane;
 
 /// The caller's INVITE `call`'s record rebuilds.

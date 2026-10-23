@@ -41,11 +41,7 @@ fn create_leg(host: &str, port: u16) -> RuleAction {
 fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult {
     let call = test_call();
     let reinvite = invite();
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(reinvite)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(reinvite), "127.0.0.1:5060".parse().unwrap());
     let mut id_gen = scope(1);
     let now_ms = 1_700_000_000_000;
     let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms };

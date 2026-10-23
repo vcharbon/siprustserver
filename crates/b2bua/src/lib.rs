@@ -82,6 +82,7 @@ pub use ::b2bua_core::{
     turn_scope, wire_fault_set,
 };
 
+pub use node::replica::ReplicaConfig;
 pub use node::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use router::AdaptationHttpPort;
 

@@ -395,7 +395,7 @@ async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
     );
     uas.respond(480, "Temporarily Unavailable").await;
 
-    let budget = b2bua::B2buaConfig::default().reboot_budget_sec as u64;
+    let budget = b2bua::ReplicaConfig::default().reboot_budget_sec as u64;
     fh.advance(Duration::from_secs(budget + 120)).await;
     assert_eq!(rejections_to(&fh, &alice), 1, "the caller's one final is the backup's");
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
@@ -472,7 +472,7 @@ async fn an_undecided_call_of_a_node_that_never_returns_is_discharged_by_its_bac
         .await;
     assert!(released, "nothing of the call is left live or stored");
     assert!(
-        fh.now_ms() < b2bua::B2buaConfig::default().reboot_budget_sec * 1000,
+        fh.now_ms() < b2bua::ReplicaConfig::default().reboot_budget_sec * 1000,
         "released inside the replica TTL, not by its reap"
     );
     assert_eq!(survivor.metrics().repl_terminal_lost_total(), 0, "no ended call is lost");

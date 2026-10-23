@@ -19,3 +19,4 @@ mod lifecycle;
 mod model_helpers;
 mod round;
 mod sequence;
+mod timer_scope;

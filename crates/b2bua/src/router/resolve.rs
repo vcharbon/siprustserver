@@ -209,16 +209,14 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 indexed: None,
             }
         }
-        CallEvent::InternalEvent { call_ref, .. } | CallEvent::CallQuiesced { call_ref } => {
-            Resolution {
-                call_ref: Some(call_ref.clone()),
-                source_leg_id: "a".into(),
-                direction: Direction::FromA,
-                initial_invite: false,
-                incarnation: None,
-                indexed: None,
-            }
-        }
+        CallEvent::InternalEvent { call_ref, .. } => Resolution {
+            call_ref: Some(call_ref.clone()),
+            source_leg_id: "a".into(),
+            direction: Direction::FromA,
+            initial_invite: false,
+            incarnation: None,
+            indexed: None,
+        },
         // A lifecycle event is delivered, never dispatched: it names no call.
         CallEvent::Lifecycle(_) => Resolution {
             call_ref: None,

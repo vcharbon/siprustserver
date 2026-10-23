@@ -253,8 +253,6 @@ fn capacity_ceilings_are_off_by_default_and_validate() {
         calls: Ceilings { normal: Some(10), emergency: Some(12) },
         transactions: Ceilings { normal: Some(100), emergency: None },
         rss_bytes: Ceilings { normal: None, emergency: Some(1 << 30) },
-        backup_calls: Some(10),
-        backup_rss_bytes: Some(1 << 29),
     };
     assert_eq!(with_capacity(ok).validate(), Ok(()));
 }
@@ -288,15 +286,11 @@ fn a_lifetime_message_cap_of_zero_is_refused() {
 
 #[test]
 fn a_zero_ceiling_is_refused() {
-    for capacity in [
-        CapacityConfig {
-            rss_bytes: Ceilings { normal: Some(0), emergency: None },
-            ..Default::default()
-        },
-        CapacityConfig { backup_calls: Some(0), ..Default::default() },
-    ] {
-        assert!(with_capacity(capacity).validate().is_err(), "{capacity:?}");
-    }
+    let capacity = CapacityConfig {
+        rss_bytes: Ceilings { normal: Some(0), emergency: None },
+        ..Default::default()
+    };
+    assert!(with_capacity(capacity).validate().is_err(), "{capacity:?}");
 }
 
 #[test]

@@ -304,34 +304,23 @@ fn end_dialogs(leg: &mut Leg, state: DialogState) {
 }
 
 #[test]
-fn setup_timeout_fire_on_a_terminating_call_is_absorbed() {
+fn setup_timeout_fire_on_a_terminating_call_reaches_no_rule() {
     // A terminating call authors no new final on the a-leg's completed
-    // transaction: the fire is absorbed, no 408.
+    // transaction: the caller's wait ended with the termination, so the fire
+    // is screened out before any rule, the ledger holding it or not.
     let mut call = test_call();
     call.state = CallModelState::Terminating;
+    let key = TimerKey::until_answered(TimerType::SetupTimeout);
+    let armed = call::helpers::arm_timer(&mut call, key.clone(), 0);
     let event = CallEvent::Timer {
-        key: TimerKey::call(TimerType::SetupTimeout),
-        generation: 0,
+        key,
+        generation: armed.generation,
         call_ref: call.call_ref.clone(),
         incarnation: None,
     };
-    let ctx = RuleContext {
-        call: RuleCall::new(&call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 0,
-        config: &B2buaConfig::default(),
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
-    let rules = default_rules();
-    let ranked = pick_ranked(&rules, &call, &ctx);
-    let setup_timeout =
-        ranked.iter().find(|r| r.id == "setup-timeout").expect("setup-timeout is a candidate");
-    let actions = (setup_timeout.handle)(&ctx).expect("setup-timeout handles its timer").actions;
-    assert!(actions.is_empty(), "absorbed: no 408, got {actions:?}");
+    let mut notes = b2bua_core::turn_scope::TurnScope::of(sip_ids::TurnIds::fixed(1)).notes;
+    let screened = b2bua_core::rule_chain::timer_screen::screen(&mut call, &event, 0, &mut notes);
+    assert_eq!(screened, Err(b2bua_core::rule_chain::timer_screen::Dropped::ScopeEnded));
 }
 
 /// The `max-duration` rule's output for a `GlobalDuration` fire on `call`.
@@ -641,11 +630,7 @@ fn in_dialog_bye_selects_relay_bye() {
     // An in-dialog BYE (carries a To-tag) on the established call.
     confirm_a(&mut call);
     let bye = in_dialog_request(sip_message::Method::Bye);
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(bye)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(bye), "127.0.0.1:5060".parse().unwrap());
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,
@@ -672,11 +657,7 @@ fn in_dialog_bye_selects_relay_bye() {
 fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination() {
     let call = call_with_early_a_dialog("btag");
     let bye = in_dialog_request(sip_message::Method::Bye);
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(bye)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(bye), "127.0.0.1:5060".parse().unwrap());
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,
@@ -725,11 +706,7 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
     let mut call = call_with_early_a_dialog("btag");
     call.state = CallModelState::Terminating;
     let bye = in_dialog_request(sip_message::Method::Bye);
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(bye)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(bye), "127.0.0.1:5060".parse().unwrap());
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,
@@ -770,11 +747,7 @@ fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
     assert_eq!(call.state, CallModelState::Active, "only one leg was released");
 
     let bye = in_dialog_request(sip_message::Method::Bye);
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(bye)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(bye), "10.0.0.2:5070".parse().unwrap());
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,
@@ -821,11 +794,7 @@ Content-Length: 0\r\n\r\n";
         SipMessage::Response(r) => r,
         _ => panic!("expected a response"),
     };
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: true,
-    };
+    let event = CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap());
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,
@@ -1268,11 +1237,7 @@ Contact: <{CALLEE_RINGING_CONTACT}>\r\n\
         SipMessage::Response(r) => r,
         _ => panic!("expected a response"),
     };
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: true,
-    }
+    CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap())
 }
 
 /// The actions the first ranked default rule produces for `event` from `leg`.
@@ -1630,11 +1595,7 @@ fn sm_rule(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> RuleDefiniti
 
 fn info_event() -> CallEvent {
     let info = in_dialog_request(sip_message::Method::Info);
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Request(info)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    }
+    CallEvent::sip(SipMessage::Request(info), "127.0.0.1:5060".parse().unwrap())
 }
 
 fn ctx_for<'a>(
@@ -1868,11 +1829,7 @@ Content-Length: 0\r\n\r\n";
         SipMessage::Response(r) => r,
         _ => panic!("expected a response"),
     };
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: true,
-    };
+    let event = CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap());
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
@@ -1932,11 +1889,7 @@ Content-Length: 0\r\n\r\n";
         SipMessage::Response(r) => r,
         _ => panic!("expected a response"),
     };
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: true,
-    };
+    let event = CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap());
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
@@ -1983,11 +1936,7 @@ Content-Length: 0\r\n\r\n";
         SipMessage::Response(r) => r,
         _ => panic!("expected a response"),
     };
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: true,
-    };
+    let event = CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap());
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
@@ -2233,11 +2182,10 @@ mod media_primitives {
         for (method, status) in
             [(sip_message::Method::Subscribe, 489), (sip_message::Method::Info, 500)]
         {
-            let event = CallEvent::Sip {
-                message: Box::new(SipMessage::Request(super::in_dialog_request(method.clone()))),
-                src: "127.0.0.1:5060".parse().unwrap(),
-                matched_client_txn: false,
-            };
+            let event = CallEvent::sip(
+                SipMessage::Request(super::in_dialog_request(method.clone())),
+                "127.0.0.1:5060".parse().unwrap(),
+            );
             let result = exec_on(
                 &call,
                 &event,
@@ -2257,11 +2205,8 @@ mod media_primitives {
         let mut call = test_call();
         give_a_leg_dialog(&mut call);
         call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(in_dialog_info())),
-            src: "10.0.0.2:5070".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
         let result = exec_on(
@@ -2295,11 +2240,8 @@ mod media_primitives {
         let mut call = test_call();
         give_a_leg_dialog(&mut call);
         call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Destination));
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(in_dialog_info())),
-            src: "10.0.0.2:5070".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
         let result = exec_on(
@@ -2324,11 +2266,8 @@ mod media_primitives {
     fn send_request_to_leg_emits_info_with_mscml_body() {
         let mut call = test_call();
         call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(in_dialog_info())),
-            src: "10.0.0.2:5070".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
         let mscml = b"<MediaServerControl><request><play/></request></MediaServerControl>".to_vec();
@@ -2374,11 +2313,8 @@ mod media_primitives {
     fn send_request_to_leg_forwards_arbitrary_headers() {
         let mut call = test_call();
         call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(in_dialog_info())),
-            src: "10.0.0.2:5070".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
         let uui = "3030373946313233;encoding=hex"; // RFC 7433 User-To-User
@@ -2434,11 +2370,8 @@ mod media_primitives {
     #[test]
     fn send_provisional_to_leg_brokers_183_sdp_to_a() {
         let call = test_call();
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(in_dialog_info())),
-            src: "10.0.0.2:5070".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
         let sdp = b"v=0\r\no=mrf 1 1 IN IP4 10.0.0.50\r\n".to_vec();
@@ -2488,11 +2421,8 @@ mod media_primitives {
     #[test]
     fn send_provisional_rejects_non_provisional_status() {
         let call = test_call();
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(in_dialog_info())),
-            src: "10.0.0.2:5070".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
         let result = exec_on(
@@ -2530,11 +2460,7 @@ mod answer_a_leg_new_dialog {
     /// The action ignores the triggering event (it operates on the call), so any
     /// event drives it.
     fn some_event() -> CallEvent {
-        CallEvent::Sip {
-            message: Box::new(SipMessage::Request(super::invite())),
-            src: "127.0.0.1:5060".parse().unwrap(),
-            matched_client_txn: false,
-        }
+        CallEvent::sip(SipMessage::Request(super::invite()), "127.0.0.1:5060".parse().unwrap())
     }
 
     fn exec_on<'a>(
@@ -3320,11 +3246,8 @@ mod default_sdp_create_leg {
         let config = B2buaConfig { default_sdp: Some(sdp.clone()), ..Default::default() };
 
         let call = test_call();
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(invite())),
-            src: "127.0.0.1:5060".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(invite()), "127.0.0.1:5060".parse().unwrap());
         let ctx = RuleContext {
             call: RuleCall::new(&call),
             call_ref: &call.call_ref,
@@ -3422,11 +3345,7 @@ mod header_update_removal_withholds_a_relayed_name {
         let a_invite = invite_with_vendor_header();
         let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let call = build_initial_call(&a_invite, src, &config, &mut sip_ids::TurnIds::fixed(1), 0);
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(a_invite)),
-            src,
-            matched_client_txn: false,
-        };
+        let event = CallEvent::sip(SipMessage::Request(a_invite), src);
         let ctx = RuleContext {
             call: RuleCall::new(&call),
             call_ref: &call.call_ref,
@@ -4210,11 +4129,7 @@ fn discharge_ack(
     source_leg_id: &str,
 ) -> (Option<call::Obligation>, call::Call, b2bua_core::effects::HandlerEffects) {
     let ack = in_dialog_request(Method::Ack);
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(ack)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(ack), "127.0.0.1:5060".parse().unwrap());
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
@@ -4278,11 +4193,7 @@ fn callee_side_ack_leaves_the_retained_answered_2xx() {
 fn relay_ack_pushes_no_ladder_plumbing() {
     let call = call_with_retained_answered_2xx();
     let ack = in_dialog_request(Method::Ack);
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(ack)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(ack), "127.0.0.1:5060".parse().unwrap());
     let config = B2buaConfig::default();
     let ctx = RuleContext {
         call: RuleCall::new(&call),
@@ -4998,11 +4909,8 @@ mod sdp_body_author {
             session_id: Some("202".into()),
             ..Default::default()
         };
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(invite())),
-            src: "127.0.0.1:5060".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(invite()), "127.0.0.1:5060".parse().unwrap());
         let ctx = RuleContext {
             call: RuleCall::new(&call),
             call_ref: &call.call_ref,
@@ -5093,11 +5001,8 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
     };
     let config = B2buaConfig::default();
     let refusal = |call: &call::Call| {
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(req.clone())),
-            src: "127.0.0.1:5060".parse().unwrap(),
-            matched_client_txn: false,
-        };
+        let event =
+            CallEvent::sip(SipMessage::Request(req.clone()), "127.0.0.1:5060".parse().unwrap());
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,

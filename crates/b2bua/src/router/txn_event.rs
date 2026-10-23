@@ -3,12 +3,15 @@
 use b2bua_sdk::event::CallEvent;
 use sip_txn::TransactionEvent;
 
-/// `event`, the transaction layer's, as a [`CallEvent`]: a timeout names the
-/// incarnation its Via marked.
-pub(crate) fn call_event(event: TransactionEvent) -> CallEvent {
-    match event {
+/// `event`, the transaction layer's, as a [`CallEvent`], with whether a
+/// response it carries answered a client transaction the layer holds: a
+/// timeout names the incarnation its Via marked, and the notice that a
+/// watched call's last transaction cleared is the self-release notice
+/// ([`super::quiesced::notice`]).
+pub(crate) fn call_event(event: TransactionEvent) -> (CallEvent, bool) {
+    let event = match event {
         TransactionEvent::Message { message, src, matched_client_txn } => {
-            CallEvent::Sip { message, src, matched_client_txn }
+            return (CallEvent::Sip { message, src }, matched_client_txn);
         }
         TransactionEvent::Cancelled {
             call_id,
@@ -43,8 +46,9 @@ pub(crate) fn call_event(event: TransactionEvent) -> CallEvent {
                 incarnation,
             }
         }
-        TransactionEvent::CallQuiesced { call_ref } => CallEvent::CallQuiesced { call_ref },
-    }
+        TransactionEvent::CallQuiesced { call_ref } => super::quiesced::notice(call_ref),
+    };
+    (event, false)
 }
 
 #[cfg(test)]
@@ -54,7 +58,7 @@ mod tests {
     use super::*;
 
     fn timeout(call_ref: Option<&str>, mark: Option<&str>) -> CallEvent {
-        call_event(TransactionEvent::Timeout {
+        let (event, _) = call_event(TransactionEvent::Timeout {
             branch: "z9hG4bK-t".into(),
             call_ref: call_ref.map(str::to_string),
             leg_id: Some("b-1".into()),
@@ -63,7 +67,8 @@ mod tests {
             cseq: 1,
             destination: None,
             kind: TxnTimeoutKind::Response,
-        })
+        });
+        event
     }
 
     #[test]

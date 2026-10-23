@@ -1,5 +1,5 @@
-//! The worker's memory bounds (ADR-0037): the admission ceilings on each
-//! measured quantity and the backup ceilings.
+//! The worker's memory bounds on new calls (ADR-0037): the admission
+//! ceilings on each measured quantity.
 
 /// A pair of admission ceilings on one measured quantity. At or above
 /// `normal` a new non-emergency call is refused; at or above `emergency`
@@ -40,22 +40,17 @@ impl Ceilings {
     }
 }
 
-/// The worker's memory bounds (ADR-0037). Live calls and transactions are
-/// counted exactly; RSS is the process resident set, sampled. The backup
-/// ceilings bound the replica bodies this node holds for its peers: at either
-/// one a replica of a call not yet held is not stored.
+/// The worker's memory bounds on new calls (ADR-0037). Live calls and
+/// transactions are counted exactly; RSS is the process resident set,
+/// sampled.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CapacityConfig {
-    /// Live calls this worker serves, takeover copies included.
+    /// Live calls this worker serves.
     pub calls: Ceilings,
     /// Live SIP transactions, every role and state.
     pub transactions: Ceilings,
     /// Process resident set size, in bytes.
     pub rss_bytes: Ceilings,
-    /// Backup replica bodies held for peers.
-    pub backup_calls: Option<u64>,
-    /// Process RSS above which a new backup replica is not stored.
-    pub backup_rss_bytes: Option<u64>,
 }
 
 impl CapacityConfig {
@@ -63,10 +58,6 @@ impl CapacityConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.calls.validate("calls")?;
         self.transactions.validate("transactions")?;
-        self.rss_bytes.validate("rss_bytes")?;
-        if self.backup_calls == Some(0) || self.backup_rss_bytes == Some(0) {
-            return Err("capacity: a backup ceiling of 0 stores no backup; unset it".to_string());
-        }
-        Ok(())
+        self.rss_bytes.validate("rss_bytes")
     }
 }

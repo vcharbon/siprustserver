@@ -114,11 +114,7 @@ fn test_call() -> Call {
 
 fn info_event() -> CallEvent {
     let info = in_dialog_request(sip_message::Method::Info);
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Request(info)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    }
+    CallEvent::sip(SipMessage::Request(info), "127.0.0.1:5060".parse().unwrap())
 }
 
 fn ctx_for<'a>(call: &'a Call, event: &'a CallEvent, config: &'a B2buaConfig) -> RuleContext<'a> {

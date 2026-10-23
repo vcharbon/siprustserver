@@ -9,6 +9,32 @@ use std::sync::Arc;
 
 use super::release::{release_call, ReleaseKind};
 use super::RouterCtx;
+use b2bua_sdk::event::CallEvent;
+
+/// The topic of the self-release notice, an internal event the router raises
+/// itself and its turn consumes before any rule reads it.
+pub(super) const TOPIC: &str = "takeover-self-release";
+
+/// The self-release notice of `call_ref`: the transaction layer reports the
+/// last transaction of the call it watches cleared.
+pub(super) fn notice(call_ref: String) -> CallEvent {
+    CallEvent::InternalEvent {
+        call_ref,
+        topic: TOPIC.to_string(),
+        outcome: String::new(),
+        payload: serde_json::Value::Null,
+        body: Vec::new(),
+        incarnation: None,
+    }
+}
+
+/// Whether `event` is the self-release notice ([`notice`]), and of which call.
+pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
+    match event {
+        CallEvent::InternalEvent { call_ref, topic, .. } if topic == TOPIC => Some(call_ref),
+        _ => None,
+    }
+}
 
 /// The self-release turn of `call_ref`. Re-checked under the per-call lock,
 /// and the guard is held ACROSS the release — dropping it between the re-check

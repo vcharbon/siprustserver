@@ -160,13 +160,13 @@ async fn spawn_reclaimer_core(
         incarnation_gen: 2,
         puller: PullerConfig::default(),
         serve: ServeConfig::default(),
+        replica: crate::node::replica::ReplicaConfig::default(),
     };
     let config = B2buaConfig {
         self_ordinal: self_ordinal.into(),
         sip_local_ip: "127.0.0.1".into(),
         sip_local_port: sip_port,
         keepalive_interval_sec: 300,
-        reboot_budget_sec: 600,
         ..Default::default()
     };
     let deps = B2buaDeps {

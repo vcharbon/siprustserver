@@ -133,11 +133,8 @@ fn the_level_follows_the_sample() {
 
 #[test]
 fn the_backup_ceilings_refuse_and_count() {
-    let (g, control) = gate(CapacityConfig {
-        backup_calls: Some(3),
-        backup_rss_bytes: Some(1000),
-        ..Default::default()
-    });
+    let (g, control) = gate(CapacityConfig::default());
+    g.configure_backup(&BackupCeilings { calls: Some(3), rss_bytes: Some(1000) });
     assert_eq!(g.refuses_backup(2), None);
     assert_eq!(g.refuses_backup(3), Some(BackupBound::Calls));
     control.set_rss_bytes(Some(1000));
@@ -156,11 +153,8 @@ fn the_rss_reading_is_nan_before_the_first_sample() {
 
 #[test]
 fn the_exposition_names_every_series() {
-    let (g, control) = gate(CapacityConfig {
-        calls: ceilings(10, 12),
-        backup_calls: Some(7),
-        ..Default::default()
-    });
+    let (g, control) = gate(CapacityConfig { calls: ceilings(10, 12), ..Default::default() });
+    g.configure_backup(&BackupCeilings { calls: Some(7), rss_bytes: None });
     control.set_rss_bytes(Some(4096));
     g.sample(occ(10, 0));
     let txt = g.prometheus_text();

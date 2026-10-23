@@ -21,6 +21,21 @@ use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, Provenance};
 use b2bua_sdk::event::CallEvent;
 
+/// What the layer handed the call, as the turn read it.
+pub struct Received<'a> {
+    pub event: &'a CallEvent,
+    /// A response answered a client transaction the layer holds.
+    pub matched_client_txn: bool,
+    /// The engine's verdict that the message is a reliable provisional it
+    /// already recorded (RFC 3262 §3).
+    pub repeat: bool,
+    /// The obligation the received request retired: the executor's own
+    /// verdict on whether an ACK is the first of its 2xx.
+    pub discharged: Option<&'a Obligation>,
+    /// The dialog the dialog gate resolved the message to.
+    pub dialog: Option<&'a DialogId>,
+}
+
 /// The ring's configuration for one turn: the cap and the header names
 /// resolved once. `None` while the ring is off, so an unconfigured stack pays
 /// for nothing.
@@ -49,25 +64,11 @@ impl Ring {
     /// message, or a CANCEL it answered itself — with the messages it sent
     /// autonomously for it: the 100 Trying every INVITE server transaction
     /// answers with, the hop-by-hop ACK of a non-2xx INVITE final on a client
-    /// transaction this node holds, the 200 and 487 a matched CANCEL draws.
-    /// `repeat` is the engine's verdict that the message is a reliable
-    /// provisional it already recorded (RFC 3262 §3); `discharged` is the
-    /// obligation the received request retired, the executor's own verdict on
-    /// whether an ACK is the first of its 2xx; `dialog` is the dialog the
-    /// dialog gate resolved the message to.
-    #[allow(clippy::too_many_arguments)]
-    pub fn received(
-        &self,
-        call: Call,
-        leg_id: &str,
-        event: &CallEvent,
-        repeat: bool,
-        discharged: Option<&Obligation>,
-        dialog: Option<&DialogId>,
-        now_ms: i64,
-    ) -> Call {
+    /// transaction it holds, the 200 and 487 a matched CANCEL draws.
+    pub fn received(&self, call: Call, leg_id: &str, received: Received<'_>, now_ms: i64) -> Call {
+        let Received { event, matched_client_txn, repeat, discharged, dialog } = received;
         match event {
-            CallEvent::Sip { message, matched_client_txn, .. } => {
+            CallEvent::Sip { message, .. } => {
                 let named = dialog.and_then(|id| {
                     find_leg(&call, leg_id)?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
                 });
@@ -85,7 +86,7 @@ impl Ring {
                         self.record(call, leg_id, self.request_entry(req, now_ms))
                     }
                     SipMessage::Response(resp)
-                        if *matched_client_txn
+                        if matched_client_txn
                             && resp.status() >= 300
                             && resp.cseq().method() == Method::Invite =>
                     {

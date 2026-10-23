@@ -8,10 +8,10 @@
 //! - when the primary dies before the callee's first 18x, that 18x reaches the
 //!   survivor, which arms the deadline from it (`a_first_18x_reaching_…`);
 //! - when the turn that took the first 18x dies with the primary before the
-//!   backup holds it, the copy the departure hands the survivor presumes the
-//!   callee ringing since its INVITE (`a_first_18x_lost_with_the_primary_…`),
-//!   and an 18x it later takes runs the ring from that 18x
-//!   (`a_later_18x_on_the_survivor_…`).
+//!   backup holds it, the copy the departure hands the survivor runs the ring
+//!   from the callee's INVITE while the leg reads as not having rung
+//!   (`a_first_18x_lost_with_the_primary_…`), and an 18x it later takes runs
+//!   the ring from that 18x (`a_later_18x_on_the_survivor_…`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -299,8 +299,8 @@ async fn ring_lost_with_the_primary(
 }
 
 /// Bob's 180 dies with the primary, whose departure hands the call to the
-/// survivor: the copy it takes over shows no ring, so it presumes bob ringing
-/// since his INVITE and gives the ring up `no_answer_ms` after that INVITE —
+/// survivor: the copy it takes over shows no ring, so it runs bob's ring from
+/// his INVITE and gives the ring up `no_answer_ms` after that INVITE —
 /// not at the setup deadline. Its INVITE transaction holds no provisional on
 /// record, so the CANCEL waits for one (RFC 3261 §9.1) and has the INVITE
 /// re-sent once; bob's transaction answers that retransmission with his latest
@@ -317,7 +317,7 @@ async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
         if primary_is_b1 { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     let taken = survivor.live_call(&call_ref).expect("the departure handed the call over");
-    assert_eq!(taken.b_legs[0].ring, Ring::Presumed, "bob is presumed ringing");
+    assert_eq!(taken.b_legs[0].ring, Ring::Silent, "no 18x of bob's is on record");
     let fire_at = sent_at + LOST_RING_MS;
     assert_eq!(ring_deadline(&taken), Some(fire_at), "the ring runs from the INVITE");
 

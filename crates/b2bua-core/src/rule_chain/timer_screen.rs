@@ -1,9 +1,10 @@
 //! The timer screen, before anything reads a timer fire: a fire reaches the
-//! call only while the call's ledger holds its key under its generation, and
-//! a delivered fire takes that entry off the ledger — a timer that fired is no
-//! longer armed. A fire the ledger no longer holds (its key re-armed under a
-//! later generation, disarmed, or retired with its scope) is stale and reaches
-//! no rule.
+//! call only while the call's ledger holds its key under its generation and
+//! the scope it guards has not ended, and a delivered fire takes that entry off
+//! the ledger — a timer that fired is no longer armed. A fire the ledger no
+//! longer holds (its key re-armed under a later generation, disarmed, or
+//! retired with its scope), or one whose scope ended whatever the ledger holds
+//! (ADR-0055 §10), reaches no rule; a rule never re-checks for either.
 
 use call::Call;
 
@@ -17,6 +18,8 @@ pub enum Dropped {
     Superseded,
     /// The ledger holds no entry under the key.
     Disarmed,
+    /// The scope the timer guards ended ([`call::helpers::scope_ended`]).
+    ScopeEnded,
 }
 
 impl Dropped {
@@ -25,13 +28,14 @@ impl Dropped {
         match self {
             Dropped::Superseded => "superseded",
             Dropped::Disarmed => "disarmed",
+            Dropped::ScopeEnded => "scope ended",
         }
     }
 }
 
 /// Screen `event` against `call`'s ledger: `Ok` for any event but a timer
-/// fire, and for a fire the ledger holds, whose entry leaves the ledger;
-/// `Err` for a stale fire, the call untouched. The fire's trace fact goes to
+/// fire, and for a fire the ledger holds under a live scope, whose entry
+/// leaves the ledger; `Err` for a stale fire, the call untouched. The fire's trace fact goes to
 /// `notes`.
 pub fn screen(
     call: &mut Call,
@@ -49,6 +53,10 @@ pub fn screen(
     if call.timers.get(at).is_some_and(|t| t.generation != *generation) {
         trace_drop(call, now_ms, event, Dropped::Superseded, notes);
         return Err(Dropped::Superseded);
+    }
+    if call::helpers::scope_ended(call, key) {
+        trace_drop(call, now_ms, event, Dropped::ScopeEnded, notes);
+        return Err(Dropped::ScopeEnded);
     }
     #[expect(clippy::disallowed_methods, reason = "at is the position just found")]
     call.timers.remove(at);

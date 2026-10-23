@@ -144,6 +144,8 @@ impl AdaptationHttpPort {
 /// Everything a handler body + the interpreter need. Shared via `Arc`.
 pub struct RouterCtx {
     pub config: B2buaConfig,
+    /// The replication tunables; their defaults on an unwired node.
+    pub replica: crate::node::replica::ReplicaConfig,
     pub state: CallState,
     /// Live-path store-fault probe (ADR-0023). Consulted BEFORE the sync map
     /// reads at the three live lookup sites in `process`; default = no
@@ -296,9 +298,11 @@ pub enum PrimaryWrite {
     Delete(Option<String>),
 }
 
-/// What one turn of the router took.
+/// What one turn of the router took: an event, with whether a response it
+/// carries answered a client transaction the layer holds, or a replication
+/// command.
 enum Work {
-    Event(CallEvent),
+    Event(CallEvent, bool),
     Repl(ReplCommand),
 }
 
@@ -320,18 +324,21 @@ pub async fn run(
     loop {
         let work = tokio::select! {
             ev = txn_rx.recv() => match ev {
-                Some(ev) => Work::Event(txn_event::call_event(ev)),
+                Some(ev) => {
+                    let (ev, matched_client_txn) = txn_event::call_event(ev);
+                    Work::Event(ev, matched_client_txn)
+                }
                 None => break,
             },
             ev = timer_rx.recv(), if timers_open => match ev {
-                Some(ev) => Work::Event(ev),
+                Some(ev) => Work::Event(ev, false),
                 None => {
                     timers_open = false;
                     continue;
                 }
             },
             ev = reentry_rx.recv(), if reentry_open => match ev {
-                Some(ev) => Work::Event(ev),
+                Some(ev) => Work::Event(ev, false),
                 None => {
                     reentry_open = false;
                     continue;
@@ -350,7 +357,9 @@ pub async fn run(
         };
         pulse.turning();
         match work {
-            Work::Event(ev) => ingress::on_event(&ctx, ev).await,
+            Work::Event(ev, matched_client_txn) => {
+                ingress::on_event(&ctx, ev, matched_client_txn).await
+            }
             Work::Repl(cmd) => on_repl_command(&ctx, cmd).await,
         }
         pulse.waiting();

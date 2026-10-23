@@ -26,7 +26,7 @@ fn adopted_body(adopted: bool) -> Arc<[u8]> {
 #[tokio::test]
 async fn the_authoritys_call_replaces_an_element_whose_p_was_adopted() {
     for (marked, expected) in [(true, ApplyOutcome::Applied), (false, ApplyOutcome::Dominated)] {
-        let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
         assert_eq!(forward(&p, (6, 3), adopted_body(marked)).await, ApplyOutcome::Applied);
         assert_eq!(forward(&p, (6, 3), adopted_body(false)).await, expected, "marked {marked}");
     }
@@ -38,7 +38,7 @@ async fn the_authoritys_call_replaces_an_element_whose_p_was_adopted() {
 #[tokio::test]
 async fn a_reverse_flush_on_an_adopted_p_never_replaces_our_call() {
     for (marked, expected) in [(true, ApplyOutcome::Refused), (false, ApplyOutcome::Applied)] {
-        let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
         let reverse = |body| {
             p.apply_to_store(
                 Op::Put,

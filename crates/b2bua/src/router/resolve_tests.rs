@@ -63,7 +63,7 @@ fn bye_to(request_uri: &str, call_id: &str, from_tag: &str, to_tag: &str) -> Cal
     );
     let message = CustomParser::new().parse(raw.as_bytes()).unwrap();
     assert!(matches!(message, SipMessage::Request(_)));
-    CallEvent::Sip { message: Box::new(message), src: src(), matched_client_txn: false }
+    CallEvent::sip(message, src())
 }
 
 fn callee_bye() -> CallEvent {

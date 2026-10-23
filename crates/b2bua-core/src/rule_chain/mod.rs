@@ -44,6 +44,10 @@ pub struct TurnInput<'a> {
     pub direction: Direction,
     /// What the dialog gate resolved the event's message to.
     pub resolved: Resolved,
+    /// A response: whether it answered a client transaction the transaction
+    /// layer holds, which ACKs a non-2xx INVITE final hop-by-hop itself (RFC
+    /// 3261 §17.1.1.3). `false` for a request.
+    pub matched_client_txn: bool,
     pub now_ms: i64,
 }
 
@@ -86,7 +90,15 @@ pub fn rule_chain_turn(
     input: TurnInput<'_>,
     turn: &mut TurnScope,
 ) -> HandlerResult {
-    let TurnInput { event, call_ref, source_leg_id, direction, resolved, now_ms } = input;
+    let TurnInput {
+        event,
+        call_ref,
+        source_leg_id,
+        direction,
+        resolved,
+        matched_client_txn,
+        now_ms,
+    } = input;
     // The cap budget is a PER-LIVENESS-INTERVAL rate, not a lifetime total: the
     // keepalive tick RESETS the counter, opening a fresh window. A runaway
     // dialog still lands >cap events inside one window and is torn down; a
@@ -178,8 +190,14 @@ pub fn rule_chain_turn(
     if let Some(ring) = crate::message_ring::Ring::of(fw.config) {
         let dialog = resolved.dialog.as_ref();
         let repeat = arrival == Some(Arrival::Repeat);
-        call =
-            ring.received(call, source_leg_id, event, repeat, discharged.as_ref(), dialog, now_ms);
+        let received = crate::message_ring::Received {
+            event,
+            matched_client_txn,
+            repeat,
+            discharged: discharged.as_ref(),
+            dialog,
+        };
+        call = ring.received(call, source_leg_id, received, now_ms);
     }
     // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
     // opens an exchange on that leg, counted once as it is received, before

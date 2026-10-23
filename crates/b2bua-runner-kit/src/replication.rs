@@ -168,6 +168,7 @@ impl ReplicationSettings {
             incarnation_gen,
             puller: self.link.puller(),
             serve: self.link.serve(),
+            replica: b2bua::ReplicaConfig::default(),
         })
     }
 }

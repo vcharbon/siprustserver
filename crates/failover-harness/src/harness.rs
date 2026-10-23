@@ -782,20 +782,15 @@ impl ReplicatedB2buaSut {
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/helm/siprust/values-kind.yaml`.
-            // The keepalive cells must be representative: a long quiescent call is
-            // flushed (and its backup TTL refreshed) only by its in-dialog OPTIONS,
-            // so the dead-peer/limiter-refresh/backup-TTL cadence only matches
-            // production at the real 300 s interval. Under a `start_paused` clock
-            // advancing 300 s costs nothing in wall-time, so every cell pays the
-            // full interval. `reboot_budget_sec` (600 s) ≥ `keepalive_interval_sec`
-            // (300 s) keeps the backup TTL alive across one keepalive gap
-            // (config.rs validate). `keepalive_timeout_sec` (45 s, B2BUA_KEEPALIVE_
-            // TIMEOUT_SEC) is the reboot-recovery grace before a reclaimed dialog's
-            // re-armed OPTIONS is declared dead — the code default (32 s) is NOT the
-            // cluster value, so set it explicitly here for parity.
+            // A long quiescent call is flushed (its backup TTL refreshed) only by its
+            // in-dialog OPTIONS, so the dead-peer/limiter-refresh/backup-TTL cadence
+            // matches production only at the real 300 s interval, free under a paused
+            // clock; the replicas' 600 s reboot budget outlasts one such gap.
+            // `keepalive_timeout_sec` (45 s, B2BUA_KEEPALIVE_TIMEOUT_SEC) is the
+            // cluster's grace before a re-armed OPTIONS is declared dead, not the
+            // code default (32 s), so it is set here for parity.
             config.keepalive_interval_sec = 300;
             config.keepalive_timeout_sec = 45;
-            config.reboot_budget_sec = 600;
             config.self_identity = identity.clone();
             // The scenario tune runs LAST so it can override any parity
             // default above — on this spawn and on every reboot re-spawn.
@@ -884,6 +879,8 @@ pub struct FailoverHarness {
     /// (after the parity defaults) — set via
     /// [`with_worker_tune`](Self::with_worker_tune) BEFORE spawning workers.
     worker_tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
+    /// Every later-spawned worker's replication tunables ([`Self::with_worker_replica`]).
+    worker_replica: b2bua::ReplicaConfig,
     /// The callflow services every worker spawned after
     /// [`with_worker_services`](Self::with_worker_services) registers, on each
     /// of its incarnations. None by default.
@@ -1056,6 +1053,7 @@ impl FailoverHarness {
             worker_clock_offsets: HashMap::new(),
             rfc_acceptance: RfcAcceptance::default(),
             worker_tune: Arc::new(|_| {}),
+            worker_replica: b2bua::ReplicaConfig::default(),
             worker_services: Vec::new,
             worker_adaptation_http: None,
             worker_compose: b2bua::rules::ComposeOptions::default(),
@@ -1538,6 +1536,7 @@ impl FailoverHarness {
             peers: peer_list,
             listen_addr,
             ttls: DEFAULT_TTLS,
+            replica: self.worker_replica,
         };
 
         // This node's own wall clock (shared monotonic timeline + per-node anchor

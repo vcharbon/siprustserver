@@ -27,7 +27,7 @@
 //!    frame by the persisted skew offset (ADR-0055 §9), right after the read;
 //!    then `sanitize_restored_timers` drops the stale `KeepaliveTimeout` and
 //!    cohort-smooths on the bulk sweep only, and
-//!    `ring_deadline::presume_after_restore` arms the ring deadline of an
+//!    `ring_deadline::arm_unrung_after_restore` arms the ring deadline of an
 //!    unanswered leg with no ring on record from its INVITE;
 //! 5. the residency insert through the store, then `timers.restore`;
 //! 6. **seed** — the in-flight INVITE transactions the record names, and the
@@ -173,7 +173,7 @@ pub(super) async fn materialise(
         ctx.config.keepalive_interval_sec * 1000,
         smoothing,
     );
-    crate::ring_deadline::presume_after_restore(&ctx.config, &mut call);
+    crate::ring_deadline::arm_unrung_after_restore(&ctx.config, &mut call);
     let timers = call.timers.clone();
     if !ctx.state.materialize_if_absent(call.clone(), origin.into()) {
         return Materialised::Resident(ctx.state.peek(call_ref).unwrap_or(call));
@@ -226,8 +226,9 @@ pub(super) async fn reoffer_trigger(
     ctx: &Arc<RouterCtx>,
     call: &Call,
     event: &CallEvent,
+    matched_client_txn: bool,
 ) -> Reoffer {
-    let CallEvent::Sip { message, src, matched_client_txn } = event else {
+    let CallEvent::Sip { message, src } = event else {
         return Reoffer::Unmatched;
     };
     let offer = match message.as_ref() {

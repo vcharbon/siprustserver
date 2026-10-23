@@ -115,10 +115,10 @@ impl Rig {
         }
     }
 
-    /// Offer `body` for `event` on call `c`, as the router does: a
-    /// discard is paid what it owes.
+    /// Offer `body` for the request `event` on call `c`, as the router does:
+    /// a discard is paid what it owes.
     async fn offer(&self, event: &CallEvent, body: DispatchBody) {
-        let class = DispatchClass::of(event).expect("a classed event");
+        let class = DispatchClass::of(event, false).expect("a classed event");
         let offer = self.dispatcher.offer("c", body, class);
         if let Outcome::Discarded(d) = offer.outcome {
             self.answer().render(event, d.why, d.owed, self.admitted).await;
@@ -138,7 +138,7 @@ async fn next_event(rig: &mut Rig, wait: u64) -> Option<CallEvent> {
         .await
         .ok()
         .flatten()
-        .map(crate::router::txn_event::call_event)
+        .map(|event| crate::router::txn_event::call_event(event).0)
 }
 
 /// Park a body on call `c` until the returned gate opens, with the call's
@@ -418,6 +418,6 @@ async fn an_ack_is_owed_nothing() {
     let ack = String::from_utf8(bye("z9hG4bK-ack")).unwrap().replace("BYE", "ACK");
     rig.peer.send_to(ack.as_bytes(), addr(LAYER)).await.unwrap();
     let event = next_event(&mut rig, 100).await.expect("the ACK reaches the router");
-    let row = DispatchClass::of(&event).expect("classed").row();
+    let row = DispatchClass::of(&event, false).expect("classed").row();
     assert_eq!((row.unrun, row.ended, row.capped), (Owed::Nothing, Owed::Nothing, Owed::Nothing));
 }

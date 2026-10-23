@@ -23,7 +23,9 @@ use super::RouterCtx;
 use crate::dispatch::{Discarded, DispatchClass, Outcome};
 use b2bua_sdk::event::CallEvent;
 
-pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
+/// Take `event` in; `matched_client_txn`: a response it carries answered a
+/// client transaction the transaction layer holds.
+pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_client_txn: bool) {
     // Per-method / per-(method,code) data-path counters. Every inbound SIP
     // message lands here once, so this is the single chokepoint to meter them.
     if let CallEvent::Sip { message, .. } = &event {
@@ -60,7 +62,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     // A self-release notice for a call this node holds no takeover copy of
     // has nothing to shed.
-    if let CallEvent::CallQuiesced { call_ref } = &event {
+    if let Some(call_ref) = super::quiesced::notice_of(&event) {
         if !ctx.state.is_takeover(call_ref) {
             return;
         }
@@ -154,7 +156,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         }
     }
 
-    let Some(class) = DispatchClass::of(&event) else { return };
+    let Some(class) = DispatchClass::of(&event, matched_client_txn) else { return };
     // A copy of a replicated call's INVITE opens no call: it queues as a
     // request of that call.
     let class = if class.is_new_call() && !res.initial_invite {
@@ -179,7 +181,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         }
     }
     let admitted = unborn.is_some();
-    let turn = Turn { ctx: ctx.clone(), event, res, class, unborn };
+    let turn = Turn { ctx: ctx.clone(), event, matched_client_txn, res, class, unborn };
     let offer = ctx.dispatcher.offer(&call_ref, turn, class);
     if admitted && matches!(offer.outcome, Outcome::Queued) {
         admit::queued(ctx);

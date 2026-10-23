@@ -961,19 +961,23 @@ How long a dialled leg may ring unanswered: its attempt's statement, run
 from the first 180–189 the leg's INVITE draws, to the millisecond, and held
 inside that INVITE's transaction bound. A leg answered or failed before any
 18x never arms it; a later 18x, on any of its early dialogs, does not move it.
-A copy materialised from a replica that shows no 18x on an unanswered leg
-**presumes** it ringing since its INVITE (`Ring::Presumed`): the turn that
-took its first 18x may not have replicated. An 18x it then takes re-arms the
-deadline from that 18x.
+A call restored on another node that shows no 18x on an unanswered leg runs
+the deadline from its INVITE inside the core, the leg's ring state staying
+`Ring::Silent`: the turn that took its first 18x may not have reached that
+node, and a service reads the leg as not having rung. An 18x it then takes
+re-arms the deadline from that 18x.
 _Avoid_: "no-answer timeout" for the time since the INVITE (that is the
 **setup** deadline's, or a service's own watchdog).
 
 **Timer scope** (ADR-0042, `TimerScope`):
-What a timer guards — the call, an attempt, a leg, or a retransmission
-obligation — and so when it dies: leaving the scope retires every timer of
-it, with no rule cancelling one. A timer is named by its type and its scope
-(`TimerKey`) and armed under the call's next **generation**; a fire the
-ledger no longer holds under that generation is stale and reaches no rule.
+What a timer guards — the call, an attempt, a leg, a retransmission
+obligation, or the caller's wait for the final to its INVITE
+(`UntilAnswered`, the **setup** deadline's) — and so when it dies: leaving
+the scope retires every timer of it, with no rule cancelling one. A timer is
+named by its type and its scope (`TimerKey`) and armed under the call's next
+**generation**; a fire the ledger no longer holds under that generation, or
+whose scope ended whatever the ledger holds, is stale and reaches no rule, so
+no rule re-checks for a stale ledger (ADR-0055 §10).
 _Avoid_: "timer id" (there is no string name); "cancel" for what a scope's
 end does (it **retires** the scope).
 

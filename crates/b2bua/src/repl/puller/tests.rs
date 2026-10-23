@@ -142,9 +142,10 @@ async fn bootstrap_frames_sharing_watermark_all_rehydrate() {
 
 // ---- backup ceilings (ADR-0037) ----
 
-/// A Backup-flow puller on `w1` pulling `w0`, its gate at `capacity`.
+/// A Backup-flow puller on `w1` pulling `w0`, its gate at the backup
+/// `ceilings`.
 fn backup_puller(
-    capacity: crate::config::CapacityConfig,
+    ceilings: crate::capacity::BackupCeilings,
 ) -> (
     Puller,
     ReplicatingCallStore,
@@ -154,7 +155,7 @@ fn backup_puller(
     let store = ReplicatingCallStore::new(1, Clock::test_at(0));
     let (probe, control) = crate::capacity::simulated();
     let gate = crate::capacity::CapacityGate::new(Arc::new(probe));
-    gate.configure(&capacity);
+    gate.configure_backup(&ceilings);
     let net: Arc<dyn ReplicationNetwork> =
         Arc::new(PacedNet { n: 0, gap_ms: 100, w_scan: Watermark::new(1, 1) });
     let (puller, _status) = Puller::new_at(
@@ -199,10 +200,8 @@ async fn held(store: &ReplicatingCallStore, call_ref: &str) -> bool {
 /// of the shed call in.
 #[tokio::test]
 async fn the_backup_count_ceiling_sheds_new_replicas_only() {
-    let (p, store, gate, _) = backup_puller(crate::config::CapacityConfig {
-        backup_calls: Some(2),
-        ..Default::default()
-    });
+    let (p, store, gate, _) =
+        backup_puller(crate::capacity::BackupCeilings { calls: Some(2), rss_bytes: None });
     assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
     assert_eq!(put(&p, Partition::Bak, "w0|b|t", 1).await, ApplyOutcome::Applied);
     assert_eq!(store.backup_held(), 2);
@@ -242,10 +241,8 @@ async fn the_backup_count_ceiling_sheds_new_replicas_only() {
 /// At the backup RSS ceiling a replica of a new call is not stored.
 #[tokio::test]
 async fn the_backup_rss_ceiling_sheds_new_replicas() {
-    let (p, store, gate, control) = backup_puller(crate::config::CapacityConfig {
-        backup_rss_bytes: Some(1000),
-        ..Default::default()
-    });
+    let (p, store, gate, control) =
+        backup_puller(crate::capacity::BackupCeilings { calls: None, rss_bytes: Some(1000) });
     assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
     control.set_rss_bytes(Some(1000));
     gate.sample(crate::capacity::Occupancy::default());
@@ -259,10 +256,8 @@ async fn the_backup_rss_ceiling_sheds_new_replicas() {
 /// are live calls, not backups.
 #[tokio::test]
 async fn a_reclaimed_own_call_is_never_shed() {
-    let (p, store, _, _) = backup_puller(crate::config::CapacityConfig {
-        backup_calls: Some(1),
-        ..Default::default()
-    });
+    let (p, store, _, _) =
+        backup_puller(crate::capacity::BackupCeilings { calls: Some(1), rss_bytes: None });
     assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
     assert_eq!(put(&p, Partition::Pri, "w1|mine|t", 1).await, ApplyOutcome::Applied);
     assert_eq!(store.backup_held(), 1);
@@ -271,7 +266,7 @@ async fn a_reclaimed_own_call_is_never_shed() {
 /// A shed replica is not a split: nothing rides up to the router.
 #[tokio::test]
 async fn a_shed_replica_signals_nothing() {
-    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let p = p.with_repl_sink(tx);
     p.signal(ApplyMode::Forward, ApplyOutcome::Shed, true, "w0|a|t", bodyless(), 0);
@@ -294,7 +289,7 @@ async fn an_applied_forward_write_rides_up_for_a_live_takeover_copy_alone() {
     use crate::router::PrimaryWrite::{Delete, Put};
     let (copy, other) = ("w0|copy|t", "w0|other|t");
     let body: Arc<[u8]> = Arc::from(b"primary".to_vec().into_boxed_slice());
-    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let probe: crate::store::TakeoverProbe = Arc::new(move |r: &str| r == copy);
     let p = p.with_repl_sink(RouterSink::new(tx, probe));
@@ -322,7 +317,7 @@ async fn an_applied_forward_write_rides_up_for_a_live_takeover_copy_alone() {
     p.signal(forward, ApplyOutcome::Refused, true, copy, Delete(None), 0);
     assert!(rx.try_recv().is_err(), "nothing else rides up");
 
-    let (unprobed, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (unprobed, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let unprobed = unprobed.with_repl_sink(tx);
     unprobed.signal(forward, applied, true, copy, Put(body), 0);
@@ -337,7 +332,7 @@ async fn an_applied_forward_write_rides_up_for_a_live_takeover_copy_alone() {
 async fn an_applied_reverse_delete_rides_up_for_any_call() {
     use crate::router::PrimaryWrite::Delete;
     let call = "w0|ended|t";
-    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let p = p.with_repl_sink(tx);
     for mode in [ApplyMode::Reverse, ApplyMode::Bootstrap] {
@@ -424,17 +419,18 @@ fn data(op: Op, call_ref: &str, gen: i64, counter: u64) -> Frame {
 }
 
 /// Run a puller of `partition` from `w0` on `w1`, resuming from `start`,
-/// through `script`, its gate at `capacity`; the positions it reported.
+/// through `script`, its gate at the backup `ceilings`; the positions it
+/// reported.
 async fn reported_positions(
     start: Watermark,
     partition: Partition,
     store: &ReplicatingCallStore,
-    capacity: crate::config::CapacityConfig,
+    ceilings: crate::capacity::BackupCeilings,
     script: Vec<Frame>,
 ) -> Vec<Watermark> {
     let (probe, _control) = crate::capacity::simulated();
     let gate = crate::capacity::CapacityGate::new(Arc::new(probe));
-    gate.configure(&capacity);
+    gate.configure_backup(&ceilings);
     let sent = Arc::new(Mutex::new(Vec::new()));
     let net: Arc<dyn ReplicationNetwork> = Arc::new(RecordingNet {
         script: Mutex::new(Some(VecDeque::from(script))),
@@ -486,7 +482,7 @@ async fn a_shed_replica_holds_the_reported_position_until_it_is_stored() {
         Watermark::new(0, 0),
         Partition::Bak,
         &store,
-        crate::config::CapacityConfig { backup_calls: Some(1), ..Default::default() },
+        crate::capacity::BackupCeilings { calls: Some(1), rss_bytes: None },
         vec![
             Frame::Noop { at: at(1) },
             data(Op::Put, "w0|a|t", 1, 2),
@@ -512,7 +508,7 @@ async fn a_deleted_shed_replica_releases_the_position() {
         Watermark::new(0, 0),
         Partition::Bak,
         &store,
-        crate::config::CapacityConfig { backup_calls: Some(1), ..Default::default() },
+        crate::capacity::BackupCeilings { calls: Some(1), rss_bytes: None },
         vec![
             Frame::Noop { at: at(1) },
             data(Op::Put, "w0|a|t", 1, 2),
@@ -535,7 +531,7 @@ async fn a_backup_scan_drops_the_marks_of_an_earlier_stream() {
         Watermark::new(0, 0),
         Partition::Bak,
         &store,
-        crate::config::CapacityConfig::default(),
+        crate::capacity::BackupCeilings::default(),
         vec![Frame::Noop { at: Watermark::new(2, 1) }],
     )
     .await;
@@ -561,7 +557,7 @@ async fn a_warm_resume_past_a_reboot_drops_the_old_incarnations_marks() {
         at(5),
         Partition::Bak,
         &store,
-        crate::config::CapacityConfig::default(),
+        crate::capacity::BackupCeilings::default(),
         vec![reborn(data(Op::Put, "w0|y|t", 1, 1)), Frame::Noop { at: Watermark::new(2, 1) }],
     )
     .await;
@@ -579,7 +575,7 @@ async fn a_reclaim_flow_is_never_capped_by_backup_marks() {
         Watermark::new(0, 0),
         Partition::Pri,
         &store,
-        crate::config::CapacityConfig::default(),
+        crate::capacity::BackupCeilings::default(),
         vec![Frame::Noop { at: at(9) }],
     )
     .await;
@@ -591,10 +587,8 @@ async fn a_reclaim_flow_is_never_capped_by_backup_marks() {
 /// ignored by the store, never shed: it marks nothing.
 #[tokio::test]
 async fn a_tombstoned_put_is_not_shed() {
-    let (p, _store, gate, _) = backup_puller(crate::config::CapacityConfig {
-        backup_calls: Some(1),
-        ..Default::default()
-    });
+    let (p, _store, gate, _) =
+        backup_puller(crate::capacity::BackupCeilings { calls: Some(1), rss_bytes: None });
     assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
     let delete = p
         .apply_to_store(
@@ -659,7 +653,7 @@ async fn body_of(store: &ReplicatingCallStore, role: PartitionRole, call_ref: &s
 #[tokio::test]
 async fn a_new_call_on_the_ref_replaces_an_element_its_version_does_not_dominate() {
     for mode in [ApplyMode::Forward, ApplyMode::Bootstrap] {
-        let (p, store, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
         let r = "w0|a|t";
         assert_eq!(
             put_of(&p, Partition::Bak, r, (5, 0), "w0|a|t#1", mode).await,
@@ -688,7 +682,7 @@ async fn a_new_call_on_the_ref_replaces_an_element_its_version_does_not_dominate
 /// would end or rewrite the new call.
 #[tokio::test]
 async fn a_reverse_flush_of_a_replaced_call_folds_into_nothing() {
-    let (p, store, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let p = p.with_repl_sink(tx);
     let r = "w0|a|t";
@@ -711,7 +705,7 @@ async fn a_reverse_flush_of_a_replaced_call_folds_into_nothing() {
 /// stored, while a new call on the same ref is.
 #[tokio::test]
 async fn a_deleted_call_is_not_resurrected_and_a_new_one_on_its_ref_is_stored() {
-    let (p, store, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let r = "w0|a|t";
     let forward = ApplyMode::Forward;
     put_of(&p, Partition::Bak, r, (3, 0), "w0|a|t#1", forward).await;
@@ -772,7 +766,7 @@ async fn an_unanswered_ending_never_outranks_an_answered_call_in_a_split_element
     use call::CallModelState::{Active, Terminated};
     let (answered, ended) = (Some(200), Some(480));
     for at in [(7, 3), (6, 3)] {
-        let (p, store, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
         let r = "w0|split|t";
         assert_eq!(forward(&p, (6, 3), body_at(ended, Terminated)).await, ApplyOutcome::Applied);
         let outcome = forward(&p, at, body_at(answered, Active)).await;
@@ -782,14 +776,14 @@ async fn an_unanswered_ending_never_outranks_an_answered_call_in_a_split_element
         assert_eq!(again, ApplyOutcome::Dominated, "and a re-delivery of it is one");
     }
 
-    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     assert_eq!(forward(&p, (6, 3), body_at(answered, Active)).await, ApplyOutcome::Applied);
     let outcome = forward(&p, (7, 3), body_at(ended, Terminated)).await;
     assert_eq!(outcome, ApplyOutcome::Refused, "an unanswered ending is a branch");
     let outcome = forward(&p, (6, 3), body_at(ended, Terminated)).await;
     assert_eq!(outcome, ApplyOutcome::Dominated, "at the Element's version too");
 
-    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     assert_eq!(forward(&p, (6, 3), body_at(answered, Terminated)).await, ApplyOutcome::Applied);
     let outcome = forward(&p, (7, 3), body_at(answered, Active)).await;
     assert_eq!(outcome, ApplyOutcome::Refused, "the backup's end of the answered call stays");

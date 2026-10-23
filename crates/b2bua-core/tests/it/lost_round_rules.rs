@@ -117,11 +117,7 @@ Contact: <sip:bob@10.0.0.2:5070>\r\n\
     let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("a response")
     };
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: false,
-    }
+    CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap())
 }
 
 /// The callee's dialog, as the engine resolves a response on it.

@@ -46,8 +46,8 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     let smoothing = Smoothing {
         now_ms,
         l_max,
-        speedup: ctx.config.keepalive_catchup_speedup.max(1),
-        cap_ms: ctx.config.max_catchup_window_sec.map(|s| s * 1000),
+        speedup: ctx.replica.keepalive_catchup_speedup.max(1),
+        cap_ms: ctx.replica.max_catchup_window_sec.map(|s| s * 1000),
     };
     let mut materialized = 0u64;
     for (call, _skew) in calls {

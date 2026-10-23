@@ -20,6 +20,9 @@ use b2bua_sdk::event::CallEvent;
 pub(crate) struct Turn {
     pub(super) ctx: Arc<RouterCtx>,
     pub(super) event: CallEvent,
+    /// A response the event carries answered a client transaction the
+    /// transaction layer holds.
+    pub(super) matched_client_txn: bool,
     pub(super) res: Resolution,
     pub(super) class: DispatchClass,
     /// A new call admitted at ingress, counted until its turn creates it.
@@ -31,11 +34,11 @@ impl Runnable for Turn {
         let unpolled = UnpolledForget::arm(&self.ctx.txn, &self.event, self.class);
         Box::pin(async move {
             unpolled.disarm();
+            if let Some(call_ref) = super::quiesced::notice_of(&self.event) {
+                super::quiesced::self_release_turn(&self.ctx, call_ref).await;
+                return;
+            }
             match (&self.event, self.res.call_ref.as_deref()) {
-                (CallEvent::CallQuiesced { call_ref }, _) => {
-                    super::quiesced::self_release_turn(&self.ctx, call_ref).await;
-                    return;
-                }
                 (CallEvent::InternalEvent { call_ref, topic, outcome, payload, body, .. }, _)
                     if topic == super::stand_down::TOPIC =>
                 {
@@ -56,7 +59,8 @@ impl Runnable for Turn {
                 }
                 _ => {}
             }
-            process(&self.ctx, self.event, self.res, self.unborn).await;
+            let matched = self.matched_client_txn;
+            process(&self.ctx, self.event, matched, self.res, self.unborn).await;
         })
     }
 }
@@ -146,15 +150,11 @@ mod tests {
         let raw = bye(branch);
         peer.send_to(&raw, SocketAddr::from(NODE_SIP_ADDR)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let event = CallEvent::Sip {
-            message: Box::new(CustomParser::new().parse(&raw).unwrap()),
-            src: PEER.parse().unwrap(),
-            matched_client_txn: false,
-        };
-        let class = DispatchClass::of(&event).expect("a classed event");
+        let event = CallEvent::sip(CustomParser::new().parse(&raw).unwrap(), PEER.parse().unwrap());
+        let class = DispatchClass::of(&event, false).expect("a classed event");
         let res = resolve(&ctx, &event);
         assert_eq!(res.call_ref.as_deref(), Some("c"));
-        (node, peer, held, Turn { ctx, event, res, class, unborn: None })
+        (node, peer, held, Turn { ctx, event, matched_client_txn: false, res, class, unborn: None })
     }
 
     /// A production turn of a BYE aborted before its first poll never ran:
@@ -248,14 +248,11 @@ mod tests {
         let raw = new_invite();
         peer.send_to(&raw, SocketAddr::from(NODE_SIP_ADDR)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let event = CallEvent::Sip {
-            message: Box::new(CustomParser::new().parse(&raw).unwrap()),
-            src: PEER.parse().unwrap(),
-            matched_client_txn: false,
-        };
-        let class = DispatchClass::of(&event).expect("a classed event");
+        let event = CallEvent::sip(CustomParser::new().parse(&raw).unwrap(), PEER.parse().unwrap());
+        let class = DispatchClass::of(&event, false).expect("a classed event");
         let res = resolve(&ctx, &event);
-        let turn = Turn { ctx: ctx.clone(), event, res, class, unborn: None };
+        let turn =
+            Turn { ctx: ctx.clone(), event, matched_client_txn: false, res, class, unborn: None };
         turn.into_body().await;
         assert_eq!(ctx.state.active_count(), 0, "no call is born");
         let counts = crate::new_calls::NewCallCounts::compose(

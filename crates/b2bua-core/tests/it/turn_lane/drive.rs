@@ -232,10 +232,8 @@ fn line(name: &str, value: &str) -> SipHeader {
 
 /// The SIP text `raw` arriving from `leg`'s peer.
 fn sip(raw: Vec<u8>, leg: &'static str) -> Option<(CallEvent, &'static str)> {
-    let message = Box::new(parsed(&raw)?);
     let src = (if leg == "a" { ALICE } else { BOB }).parse().ok()?;
-    let matched_client_txn = matches!(message.as_ref(), SipMessage::Response(_));
-    Some((CallEvent::Sip { message, src, matched_client_txn }, leg))
+    Some((CallEvent::sip(parsed(&raw)?, src), leg))
 }
 
 /// The step as it reaches the call standing as `call`: the event and the
@@ -412,11 +410,11 @@ fn resolve(call: Call, leg: &str, event: &CallEvent) -> Option<(Resolved, Call)>
 /// The SIP text of `event` with `mutations` applied, read back; `None` when
 /// the parser refuses it, as the shell drops what does not parse.
 fn mutated(event: CallEvent, mutations: &[Mutation]) -> Option<CallEvent> {
-    let CallEvent::Sip { message, src, matched_client_txn } = event else {
+    let CallEvent::Sip { message, src } = event else {
         return Some(event);
     };
     let raw = mutations.iter().fold(message.image().to_vec(), |acc, m| mutate::apply(&acc, m));
-    Some(CallEvent::Sip { message: Box::new(parsed(&raw)?), src, matched_client_txn })
+    Some(CallEvent::sip(parsed(&raw)?, src))
 }
 
 /// Run `script` over the dialled call, the step `mutated_at` taking
@@ -468,6 +466,9 @@ pub fn run(dialled: &Dialled, script: &[Step], mutated_at: usize, mutations: &[M
             source_leg_id: leg,
             direction: if leg == "a" { Direction::FromA } else { Direction::FromB },
             resolved,
+            // Every response a peer sends answers a request the stack sent.
+            matched_client_txn: matches!(&event, CallEvent::Sip { message, .. }
+                if matches!(message.as_ref(), SipMessage::Response(_))),
             now_ms: NOW,
         };
         let result: HandlerResult =

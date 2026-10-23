@@ -86,9 +86,10 @@ pub struct RunnerEnv {
     /// declaring the leg dead and BYE-ing (default 32 s so a reclaimed dialog's
     /// keepalive can round-trip across the post-reboot recovery window).
     pub keepalive_timeout_sec: i64,
-    /// `B2BUA_REBOOT_BUDGET_SEC` — replicated-backup TTL / reboot budget
-    /// (default 600; `config.validate()` forces it to outlast the keepalive).
-    pub reboot_budget_sec: i64,
+    /// The replication tunables: `B2BUA_REBOOT_BUDGET_SEC`, the replica TTL /
+    /// reboot budget (default 600, held past one keepalive at boot), and the
+    /// backup ceilings `B2BUA_REPL_BACKUP_MAX_*` (grammar in `capacity_env`).
+    pub replica: b2bua::ReplicaConfig,
     /// `B2BUA_SETUP_TIMEOUT_MS` — a-leg total setup deadline, reroutes
     /// included, in ms (default 150000; must stay strictly below
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`, enforced at boot; <= 0 disables).
@@ -269,7 +270,11 @@ impl RunnerEnv {
             max_messages_per_call_lifetime: knob("B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME", "100000")?,
             keepalive_sec: knob("B2BUA_KEEPALIVE_SEC", "300")?,
             keepalive_timeout_sec: knob("B2BUA_KEEPALIVE_TIMEOUT_SEC", "32")?,
-            reboot_budget_sec: knob("B2BUA_REBOOT_BUDGET_SEC", "600")?,
+            replica: b2bua::ReplicaConfig {
+                reboot_budget_sec: knob("B2BUA_REBOOT_BUDGET_SEC", "600")?,
+                backup: capacity_env::backup_from_lookup(lookup).map_err(invalid)?,
+                ..Default::default()
+            },
             setup_timeout_ms: knob("B2BUA_SETUP_TIMEOUT_MS", "150000")?,
             invite_txn_timeout_sec: knob("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")?,
             invite_first_response_timeout_sec: knob(

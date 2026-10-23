@@ -25,6 +25,18 @@ pub(super) struct ReplWiring {
     /// This node's repl listen address (stable across reboots).
     pub(super) listen_addr: SocketAddr,
     pub(super) ttls: (i64, i64),
+    /// The node's replication tunables, the same on every incarnation.
+    pub(super) replica: b2bua::ReplicaConfig,
+}
+
+impl super::FailoverHarness {
+    /// Set the replication tunables of every worker spawned from now on, on
+    /// each of its incarnations (a backup ceiling, the reboot budget); the
+    /// defaults until then. Returns `self` for chaining.
+    pub fn with_worker_replica(mut self, replica: b2bua::ReplicaConfig) -> Self {
+        self.worker_replica = replica;
+        self
+    }
 }
 
 impl ReplWiring {
@@ -65,6 +77,7 @@ impl ReplWiring {
             incarnation_gen: gen,
             puller: PullerConfig::default(),
             serve: ServeConfig::default(),
+            replica: self.replica,
         };
         (setup, store, sim_membership)
     }

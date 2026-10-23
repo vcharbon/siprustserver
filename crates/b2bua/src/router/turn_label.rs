@@ -44,7 +44,6 @@ impl fmt::Display for EventSummary<'_> {
             CallEvent::InternalEvent { topic, outcome, .. } => {
                 write!(f, "internal event {topic}/{outcome}")?
             }
-            CallEvent::CallQuiesced { .. } => write!(f, "call quiesced")?,
             CallEvent::Lifecycle(e) => write!(f, "lifecycle {}", e.kind())?,
         }
         write!(f, " on call {}", self.call_ref)

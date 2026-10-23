@@ -36,6 +36,27 @@ impl BackupBound {
     }
 }
 
+/// The ceilings of the backup replicas this node holds for its peers: at
+/// either one a replica of a call not yet held is not stored. `None` leaves
+/// that bound off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackupCeilings {
+    /// Backup replica bodies held for peers.
+    pub calls: Option<u64>,
+    /// Process RSS above which a new backup replica is not stored.
+    pub rss_bytes: Option<u64>,
+}
+
+impl BackupCeilings {
+    /// Refuses a ceiling of 0, which would store no backup.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.calls == Some(0) || self.rss_bytes == Some(0) {
+            return Err("a backup ceiling of 0 stores no backup; unset it".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// What the gate shed at its last sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -95,6 +116,7 @@ const NO_READING: u64 = u64::MAX;
 struct Inner {
     probe: Arc<dyn SystemProbe>,
     limits: Mutex<CapacityConfig>,
+    backup: Mutex<BackupCeilings>,
     rss: AtomicU64,
     /// The [`Level`] of the last sample.
     level: AtomicU8,
@@ -119,6 +141,7 @@ impl CapacityGate {
             inner: Arc::new(Inner {
                 probe,
                 limits: Mutex::new(CapacityConfig::default()),
+                backup: Mutex::new(BackupCeilings::default()),
                 rss: AtomicU64::new(NO_READING),
                 level: AtomicU8::new(Level::Open as u8),
                 backup_shed: Default::default(),
@@ -140,6 +163,16 @@ impl CapacityGate {
     /// The installed ceilings.
     pub fn limits(&self) -> CapacityConfig {
         *locked(&self.inner.limits, CAPACITY_LIMITS)
+    }
+
+    /// Install the ceilings of the backup replicas this node holds.
+    pub fn configure_backup(&self, ceilings: &BackupCeilings) {
+        *locked(&self.inner.backup, CAPACITY_LIMITS) = *ceilings;
+    }
+
+    /// The installed backup ceilings.
+    pub fn backup_ceilings(&self) -> BackupCeilings {
+        *locked(&self.inner.backup, CAPACITY_LIMITS)
     }
 
     /// Read the probe's RSS and recompute the level from `occupancy`.
@@ -186,10 +219,10 @@ impl CapacityGate {
     /// different peers decide concurrently, so the count ceiling may be passed
     /// by one replica per other peer.
     pub fn refuses_backup(&self, held: u64) -> Option<BackupBound> {
-        let limits = self.limits();
-        let bound = if limits.backup_calls.is_some_and(|max| held >= max) {
+        let ceilings = self.backup_ceilings();
+        let bound = if ceilings.calls.is_some_and(|max| held >= max) {
             Some(BackupBound::Calls)
-        } else if reached(limits.backup_rss_bytes, self.rss_bytes()) {
+        } else if reached(ceilings.rss_bytes, self.rss_bytes()) {
             Some(BackupBound::Rss)
         } else {
             None

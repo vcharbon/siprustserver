@@ -5,12 +5,13 @@
 //! CANCEL it fires and the 487 that CANCEL draws complete inside the live
 //! transaction (RFC 3261 §9.1).
 //!
-//! A copy materialised from a replica may lack the turn that took a leg's
-//! first 18x (replication is asynchronous): an unanswered leg with no ring on
-//! record is presumed ringing since its INVITE ([`presume_after_restore`]),
-//! until an 18x it takes re-arms the deadline from that 18x.
+//! A call restored on another node may lack the turn that took a leg's first
+//! 18x: an unanswered leg with no 18x on record runs its ring deadline from
+//! its INVITE ([`arm_unrung_after_restore`]) until an 18x it takes re-arms the
+//! deadline from that 18x. The leg's ring state stays as the record states
+//! it: a service reads such a leg as not having rung.
 
-use call::{Call, Leg, LegState, Ring, TimerKey, TimerType};
+use call::{Call, Leg, LegState, TimerKey, TimerType};
 
 use crate::config::B2buaConfig;
 use crate::effects::HandlerEffects;
@@ -21,7 +22,8 @@ use crate::timer_arm::arm;
 /// `now_ms`, held under the transaction bound. Nothing for a leg that rang
 /// before, one no attempt dialled, one already answered or being cancelled,
 /// an 18x to any other INVITE, or an attempt whose ring deadline is off. A leg
-/// presumed ringing since a restore takes its real 18x here.
+/// whose deadline runs from its INVITE since a restore takes its real 18x
+/// here.
 pub fn arm_at_first_18x(
     config: &B2buaConfig,
     call: &mut Call,
@@ -52,18 +54,19 @@ pub fn arm_at_first_18x(
     arm(call, fx, TimerKey::leg(TimerType::NoAnswer, leg_id), held);
 }
 
-/// Presume the unrung legs of a copy materialised from a replica ringing; the
-/// copy's instants are already in this node's clock frame. A leg whose INVITE
-/// is still unanswered and uncancelled, with no 18x on record and no ring
-/// deadline armed, under an attempt whose ring deadline is on, is marked
-/// [`Ring::Presumed`] and armed from its INVITE, held under the transaction
-/// bound: the turn that took its first 18x may have died with the writer.
-/// Its ledger entry rides `call.timers`, which the caller restores.
-pub fn presume_after_restore(config: &B2buaConfig, call: &mut Call) {
-    let presumed: Vec<(String, i64)> = call
+/// Run the ring deadline of every unrung leg of a restored call from its
+/// INVITE; the call's instants are already in this node's clock frame. A leg
+/// whose INVITE is still unanswered and uncancelled, with no 18x on record and
+/// no ring deadline armed, under an attempt whose ring deadline is on, is
+/// armed from its INVITE, held under the transaction bound: the turn that took
+/// its first 18x may not have reached this node. Its ring state stays
+/// [`call::Ring::Silent`]; its ledger entry rides `call.timers`, which the
+/// caller restores.
+pub fn arm_unrung_after_restore(config: &B2buaConfig, call: &mut Call) {
+    let unrung: Vec<(String, i64)> = call
         .b_legs
         .iter()
-        .filter(|leg| leg.ring == Ring::Silent && rings_unanswered(leg))
+        .filter(|leg| !leg.ring.rang() && rings_unanswered(leg))
         .filter_map(|leg| {
             let invite = leg.outbound_invite.as_ref()?;
             if invite.final_received.is_some() || invite.cancel_sent {
@@ -78,10 +81,7 @@ pub fn presume_after_restore(config: &B2buaConfig, call: &mut Call) {
             Some((leg.leg_id.clone(), held_under_bound(config, invite.sent_at_ms, wanted)))
         })
         .collect();
-    for (leg_id, fire_at) in presumed {
-        if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
-            leg.ring = Ring::Presumed;
-        }
+    for (leg_id, fire_at) in unrung {
         call::helpers::arm_timer(call, TimerKey::leg(TimerType::NoAnswer, &leg_id), fire_at);
     }
 }

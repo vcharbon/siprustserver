@@ -61,11 +61,7 @@ Content-Length: 0\r\n\r\n"
     let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(raw.as_bytes()) else {
         panic!("a response")
     };
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: true,
-    }
+    CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap())
 }
 
 /// One real turn of `event` from `b-1` over `call`.
@@ -79,6 +75,7 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         source_leg_id: "b-1",
         direction: Direction::FromB,
         resolved: Default::default(),
+        matched_client_txn: true,
         now_ms: 1_000,
     };
     rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)

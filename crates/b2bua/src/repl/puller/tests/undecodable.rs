@@ -22,7 +22,7 @@ fn nested_body(depth: usize) -> Arc<[u8]> {
 
 #[tokio::test]
 async fn a_forward_body_nested_past_the_bound_is_counted() {
-    let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+    let (p, _, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     forward(&p, (1, 0), nested_body(4)).await;
     assert_eq!(p.metrics.repl_body_undecodable_total(), 0, "a body within the bound decodes");
     forward(&p, (2, 0), nested_body(call::codec::MAX_DEPTH)).await;

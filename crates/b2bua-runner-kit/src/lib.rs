@@ -348,7 +348,6 @@ impl RunnerEnv {
             max_messages_per_call_lifetime: self.max_messages_per_call_lifetime,
             keepalive_interval_sec: self.keepalive_sec,
             keepalive_timeout_sec: self.keepalive_timeout_sec,
-            reboot_budget_sec: self.reboot_budget_sec,
             limiter_refresh_sec: self.limiter_refresh_sec,
             limiter_refresh_batch_ms: self.limiter_refresh_batch_ms,
             limiter_refresh_batch_max: self.limiter_refresh_batch_max,
@@ -373,12 +372,12 @@ impl RunnerEnv {
             capacity: self.capacity,
             ..Default::default()
         };
-        // Forbid booting with a config that would silently break HA (too-short a
-        // keepalive, a reboot budget that cannot outlast a primary reboot or a
-        // keepalive refresh gap) or call setup (an INVITE transaction bound
-        // outside its supported range, an app setup deadline / reaper idle
-        // window that does not sit strictly under that bound).
+        // Forbid booting with a config that would silently break a call (a
+        // too-short keepalive, an INVITE transaction bound outside its range,
+        // a setup deadline or reaper idle window not under that bound) or the
+        // replicas (a reboot budget under its floor or one keepalive gap).
         config.validate().map_err(|e| invalid(e.to_string()))?;
+        self.replica.validate(&config).map_err(invalid)?;
         let call_control =
             Duration::from_millis(u64::try_from(config.call_control_timeout_ms).unwrap_or(0));
         liveness_env::check_loop_stall(self.loop_stall, call_control).map_err(invalid)?;
@@ -519,9 +518,10 @@ impl RunnerBase {
     /// the boot refusal of a malformed replication variable or a replication
     /// listener that cannot be bound.
     pub async fn replication_setup_from_env(&self) -> Result<Option<ReplicationSetup>, String> {
-        replication_setup_from_lookup(|k| env::var(k).ok(), self.clock.clone())
+        let setup = replication_setup_from_lookup(|k| env::var(k).ok(), self.clock.clone())
             .await
-            .map_err(|e| format!("invalid B2BUA config: {e}"))
+            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
+        Ok(setup.map(|setup| ReplicationSetup { replica: self.env.replica, ..setup }))
     }
 
     /// Production-shaped [`B2buaDeps`] defaults around the injected decision

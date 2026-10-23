@@ -114,13 +114,13 @@ pub async fn node_on(
         incarnation_gen: 1,
         puller: PullerConfig::default(),
         serve: ServeConfig::default(),
+        replica: crate::node::replica::ReplicaConfig::default(),
     };
     let config = B2buaConfig {
         self_ordinal: ordinal.into(),
         sip_local_ip: sip_addr.ip().to_string(),
         sip_local_port: sip_addr.port(),
         keepalive_interval_sec: 300,
-        reboot_budget_sec: 600,
         ..Default::default()
     };
     let mut config = config;

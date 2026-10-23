@@ -29,7 +29,7 @@ pub enum LegKind {
     TransferTarget,
 }
 
-/// Whether a dialled leg's callee rang.
+/// Whether a dialled leg's callee rang, as the call record states it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Ring {
@@ -38,10 +38,6 @@ pub enum Ring {
     Silent,
     /// The leg's INVITE received a 180–189 provisional.
     Rang,
-    /// A restore found none on record for the leg's unanswered INVITE, though
-    /// the turn that took one may not have replicated: its ring deadline runs
-    /// from the INVITE until an 18x arrives.
-    Presumed,
 }
 
 impl Ring {

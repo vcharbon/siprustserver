@@ -23,6 +23,7 @@ impl CapacityGate {
         c::CAPACITY_LEVEL.render_value(&mut s, self.level() as u8);
         c::CAPACITY_RSS_BYTES.render_value(&mut s, Reading(self.rss_bytes(), "NaN"));
         let limits = self.limits();
+        let backup = self.backup_ceilings();
         c::CAPACITY_CEILING.render(&mut s, |series| {
             let ceiling = if series.block() == 0 {
                 let bound = match series.index(&c::CEILING_BOUND) {
@@ -36,8 +37,8 @@ impl CapacityGate {
                 }
             } else {
                 match BackupBound::ALL.get(series.index(&c::BACKUP_BOUND)) {
-                    Some(BackupBound::Calls) => limits.backup_calls,
-                    Some(BackupBound::Rss) => limits.backup_rss_bytes,
+                    Some(BackupBound::Calls) => backup.calls,
+                    Some(BackupBound::Rss) => backup.rss_bytes,
                     None => None,
                 }
             };

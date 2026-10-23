@@ -7,11 +7,10 @@ use b2bua_core::rules::lifecycle_delivery::{close_turn, TurnStart};
 use b2bua_sdk::model::LifecycleEvent;
 
 fn bye_event() -> CallEvent {
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Request(in_dialog_request(sip_message::Method::Bye))),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    }
+    CallEvent::sip(
+        SipMessage::Request(in_dialog_request(sip_message::Method::Bye)),
+        "127.0.0.1:5060".parse().unwrap(),
+    )
 }
 
 fn ext_write(key: &str, value: serde_json::Value) -> RuleAction {

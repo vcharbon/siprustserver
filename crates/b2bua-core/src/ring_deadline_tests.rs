@@ -70,57 +70,59 @@ fn an_ended_leg_arms_nothing() {
 }
 
 #[test]
-fn a_leg_presumed_ringing_takes_its_real_18x() {
+fn a_leg_ringing_from_its_invite_since_a_restore_takes_its_real_18x() {
     let mut call = call(ringing(), LegState::Trying);
-    presume(&mut call);
-    assert_eq!(deadline(&call), Some(RING_MS as i64), "presumed from the INVITE");
+    restore(&mut call);
+    assert_eq!(deadline(&call), Some(RING_MS as i64), "run from the INVITE");
     arm(&mut call, 1, 4_000);
     assert_eq!(deadline(&call), Some(4_000 + RING_MS as i64), "re-armed from the 18x");
 }
 
-fn presume(call: &mut Call) {
-    presume_after_restore(&B2buaConfig::default(), call);
+fn restore(call: &mut Call) {
+    arm_unrung_after_restore(&B2buaConfig::default(), call);
 }
 
+/// A restored leg with no 18x on record runs its ring deadline from its
+/// INVITE, and reads as not having rung.
 #[test]
-fn a_restore_presumes_an_unrung_leg_ringing_since_its_invite() {
+fn a_restore_runs_an_unrung_legs_deadline_from_its_invite_and_leaves_it_silent() {
     let mut call = call(ringing(), LegState::Early);
     call.b_legs[0].outbound_invite.as_mut().expect("dialled").sent_at_ms = 6_000;
-    presume(&mut call);
+    restore(&mut call);
     assert_eq!(call.b_legs[0].outbound_invite.as_ref().map(|i| i.sent_at_ms), Some(6_000));
-    assert_eq!(call.b_legs[0].ring, Ring::Presumed);
+    assert_eq!(call.b_legs[0].ring, Ring::Silent, "no 18x is on record");
     assert_eq!(deadline(&call), Some(6_000 + RING_MS as i64));
 }
 
 #[test]
-fn a_restore_presumes_nothing_of_a_leg_that_rang_or_holds_its_deadline() {
+fn a_restore_arms_nothing_of_a_leg_that_rang_or_holds_its_deadline() {
     let mut rang = call(ringing(), LegState::Early);
     rang.b_legs[0].ring = Ring::Rang;
-    presume(&mut rang);
+    restore(&mut rang);
     assert_eq!(deadline(&rang), None);
     assert_eq!(rang.b_legs[0].ring, Ring::Rang);
 
     let mut armed = call(ringing(), LegState::Early);
     arm(&mut armed, 1, 700);
     armed.b_legs[0].ring = Ring::Silent;
-    presume(&mut armed);
+    restore(&mut armed);
     assert_eq!(deadline(&armed), Some(700 + RING_MS as i64), "the armed deadline stands");
 }
 
 #[test]
-fn a_restore_presumes_nothing_of_an_answered_cancelled_or_ended_leg_or_one_ringing_under_none() {
+fn a_restore_arms_nothing_of_an_answered_cancelled_or_ended_leg_or_one_ringing_under_none() {
     for state in [LegState::Confirmed, LegState::Terminated] {
         let mut call = call(ringing(), state);
-        presume(&mut call);
+        restore(&mut call);
         assert_eq!(deadline(&call), None, "{state:?}");
     }
     let mut cancelled = call(ringing(), LegState::Trying);
     cancelled.b_legs[0].outbound_invite.as_mut().expect("dialled").cancel_sent = true;
-    presume(&mut cancelled);
+    restore(&mut cancelled);
     assert_eq!(deadline(&cancelled), None, "a CANCEL is on record");
 
     let mut off = call(Deadline::Off, LegState::Trying);
-    presume(&mut off);
+    restore(&mut off);
     assert_eq!(deadline(&off), None, "the attempt rings under no deadline");
     assert_eq!(off.b_legs[0].ring, Ring::Silent);
 }

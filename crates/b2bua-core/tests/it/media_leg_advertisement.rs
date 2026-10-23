@@ -64,11 +64,7 @@ fn originate(
         features.relay_first_18x_to_180 =
             Some(RelayFirst18xTo180Feature { strategy, messages: Default::default() });
     }
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(invite())),
-        src,
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(invite()), src);
     let mut id_gen = TurnScope::of(TurnIds::fixed(2));
     let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 0 };
     let ctx = RuleContext {

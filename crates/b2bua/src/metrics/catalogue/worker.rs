@@ -159,7 +159,7 @@ pub const UNROUTABLE_INTERNAL: Family = Family::counter(
     Labels::Union(&[
         &[Dim::new("event", &["timeout"]), ANSWERED_METHOD],
         &[
-            Dim::new("event", &["timeout", "timer", "cancelled", "internal-event", "call-quiesced"]),
+            Dim::new("event", &["timeout", "timer", "cancelled", "internal-event"]),
             Dim::new("method", &[""]),
         ],
     ]),

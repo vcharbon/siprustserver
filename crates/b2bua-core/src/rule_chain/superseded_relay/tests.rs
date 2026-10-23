@@ -30,11 +30,7 @@ fn request_on(call_id: &str, method: &str, cseq: u32, sent_by: &str, branch: &st
          Content-Length: 0\r\n\r\n"
     );
     let message = CustomParser::new().parse(raw.as_bytes()).expect("a request");
-    CallEvent::Sip {
-        message: Box::new(message),
-        src: test_support::src(),
-        matched_client_txn: false,
-    }
+    CallEvent::sip(message, test_support::src())
 }
 
 /// What the b-leg's confirmed dialog holds of the caller's `method` request

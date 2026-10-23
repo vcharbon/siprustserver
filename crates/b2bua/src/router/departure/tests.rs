@@ -186,11 +186,7 @@ async fn the_router_serves_its_own_calls_while_a_departed_partition_is_swept() {
     let own = invite("w1", "w0", "own");
     let own_ref =
         build_initial_call(&own, src(), &config, &mut sip_ids::TurnIds::fixed(1), 0).call_ref;
-    let event = CallEvent::Sip {
-        message: Box::new(sip_message::SipMessage::Request(own)),
-        src: src(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(sip_message::SipMessage::Request(own), src());
     ctx.reentry_tx.send(event).unwrap();
     let mut rounds = 0;
     while ctx.state.peek(&own_ref).is_none() {

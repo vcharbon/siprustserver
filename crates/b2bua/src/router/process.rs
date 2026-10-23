@@ -31,11 +31,13 @@ use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
 /// The per-call handler body: check the call out, run the handler, interpret.
-/// `unborn` holds a new call admitted at ingress until its call is created;
-/// every other exit drops it.
+/// `matched_client_txn`: a response `event` carries answered a client
+/// transaction the transaction layer holds. `unborn` holds a new call
+/// admitted at ingress until its call is created; every other exit drops it.
 pub(super) async fn process(
     ctx: &Arc<RouterCtx>,
     event: CallEvent,
+    matched_client_txn: bool,
     mut res: Resolution,
     unborn: Option<UnbornCall>,
 ) {
@@ -182,7 +184,7 @@ pub(super) async fn process(
         // materialisation — this turn's or an earlier one's, whose seeds went in
         // after the datagram was emitted — may hold one now. Re-offered, a match
         // is the layer's to answer and re-emit; this turn ends.
-        if reoffer_trigger(ctx, &call, &event).await == Reoffer::Matched {
+        if reoffer_trigger(ctx, &call, &event, matched_client_txn).await == Reoffer::Matched {
             return;
         }
         // A CANCEL reaches the router only when the transaction layer matched
@@ -216,6 +218,7 @@ pub(super) async fn process(
                 source_leg_id: &res.source_leg_id,
                 direction: res.direction,
                 resolved,
+                matched_client_txn,
                 now_ms,
             };
             rule_chain_turn(&ctx.framework(), call, input, &mut turn)

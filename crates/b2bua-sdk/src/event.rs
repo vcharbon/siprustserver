@@ -13,16 +13,7 @@ use sip_message::{SipHeader, SipMessage};
 #[derive(Debug, Clone)]
 pub enum CallEvent {
     /// A SIP request/response that survived the transaction layer.
-    Sip {
-        message: Box<SipMessage>,
-        src: SocketAddr,
-        /// A response: whether it answered a client transaction this node's
-        /// txn layer holds — so a non-2xx INVITE final it carries is already
-        /// ACKed hop-by-hop (RFC 3261 §17.1.1.3). `false` for a response to a
-        /// request another node sent (a call taken over from it), and always
-        /// for a request.
-        matched_client_txn: bool,
-    },
+    Sip { message: Box<SipMessage>, src: SocketAddr },
     /// A B2BUA timer fired (keepalive, no-answer, max-duration, …): its key
     /// and the generation it was armed under. The router delivers it only
     /// while the call's ledger holds that key under that generation.
@@ -92,16 +83,17 @@ pub enum CallEvent {
         /// answers ([`Self::incarnation`]).
         incarnation: Option<String>,
     },
-    /// The transaction layer reports the last transaction for a *watched* call has
-    /// cleared (ADR-0014). The router uses it to self-release an acting-backup
-    /// takeover copy whose served transaction(s) are done.
-    CallQuiesced { call_ref: String },
     /// A lifecycle event of the call the turn caused, as the engine delivers
     /// it to the active services after the turn's claim. Never dispatched.
     Lifecycle(crate::lifecycle::LifecycleEvent),
 }
 
 impl CallEvent {
+    /// `message`, received from `src`.
+    pub fn sip(message: SipMessage, src: SocketAddr) -> Self {
+        CallEvent::Sip { message: Box::new(message), src }
+    }
+
     /// The incarnation of the call this event belongs to
     /// (`call::Call::incarnation`): a timer fire, a transaction timeout and an
     /// internal event carry the one of the call they were armed, sent or
@@ -113,10 +105,7 @@ impl CallEvent {
             CallEvent::Timer { incarnation, .. }
             | CallEvent::Timeout { incarnation, .. }
             | CallEvent::InternalEvent { incarnation, .. } => incarnation.as_deref(),
-            CallEvent::Sip { .. }
-            | CallEvent::Cancelled { .. }
-            | CallEvent::CallQuiesced { .. }
-            | CallEvent::Lifecycle(_) => None,
+            CallEvent::Sip { .. } | CallEvent::Cancelled { .. } | CallEvent::Lifecycle(_) => None,
         }
     }
 
@@ -152,7 +141,6 @@ impl CallEvent {
             CallEvent::Cancelled { .. } => "cancelled",
             CallEvent::Timeout { .. } => "timeout",
             CallEvent::InternalEvent { .. } => "internal-event",
-            CallEvent::CallQuiesced { .. } => "call-quiesced",
             CallEvent::Lifecycle(_) => "lifecycle",
         }
     }

@@ -65,11 +65,7 @@ Contact: <sip:bob@10.0.0.2:5070>\r\n\
     let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("a response")
     };
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: true,
-    }
+    CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap())
 }
 
 /// The requests `result` sends toward the callee.
@@ -218,11 +214,7 @@ Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{sdp}",
     let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("a response")
     };
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: true,
-    }
+    CallEvent::sip(SipMessage::Response(resp), "127.0.0.1:5060".parse().unwrap())
 }
 
 /// The same on the caller's leg: the stack's offerless re-INVITE toward her

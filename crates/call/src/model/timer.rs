@@ -26,12 +26,11 @@ use super::sm::MachineId;
 #[serde(rename_all = "snake_case")]
 pub enum TimerType {
     NoAnswer,
-    /// Call-level a-leg setup deadline: armed at route time, cancelled at
-    /// answer, untouched by reroutes (each reroute gets its own per-leg
-    /// `NoAnswer`; this caps the *whole* setup). Rides the replicated
-    /// `call.timers` ledger, so unlike the configured sip-txn initial-INVITE
-    /// bound (which dies with a crashed node's transactions) it survives
-    /// crash → reclaim and still reaps a stuck-in-setup call.
+    /// The caller's setup deadline: armed at route time under
+    /// [`TimerScope::UntilAnswered`], untouched by reroutes (each reroute gets
+    /// its own per-leg `NoAnswer`; this caps the *whole* setup). It rides the
+    /// call record's ledger, so a call whose transactions are gone is still
+    /// ended at the deadline.
     SetupTimeout,
     GlobalDuration,
     LimiterRefresh,
@@ -240,12 +239,16 @@ pub enum TimerScope {
     Leg(String),
     /// One retransmission obligation (ADR-0032 X4): retired with its ladder.
     Obligation(Obligation),
+    /// The caller's wait for the final to its INVITE: retired once that final
+    /// is sent, 2xx or not, or when the call's termination begins.
+    UntilAnswered,
 }
 
 impl std::fmt::Debug for TimerScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TimerScope::Call => f.write_str("call"),
+            TimerScope::UntilAnswered => f.write_str("until answered"),
             TimerScope::Attempt(id) => write!(f, "{id:?}"),
             TimerScope::Leg(leg) => write!(f, "leg {leg}"),
             TimerScope::Obligation(o) => write!(f, "{o:?}"),
@@ -261,6 +264,7 @@ pub enum TimerScopeKind {
     Attempt,
     Leg,
     Obligation,
+    UntilAnswered,
 }
 
 impl TimerScope {
@@ -271,6 +275,7 @@ impl TimerScope {
             TimerScope::Attempt(_) => TimerScopeKind::Attempt,
             TimerScope::Leg(_) => TimerScopeKind::Leg,
             TimerScope::Obligation(_) => TimerScopeKind::Obligation,
+            TimerScope::UntilAnswered => TimerScopeKind::UntilAnswered,
         }
     }
 }
@@ -288,6 +293,11 @@ impl TimerKey {
     /// `timer_type` guarding the call.
     pub const fn call(timer_type: TimerType) -> Self {
         TimerKey { timer_type, scope: TimerScope::Call }
+    }
+
+    /// `timer_type` guarding the caller until its INVITE is answered.
+    pub const fn until_answered(timer_type: TimerType) -> Self {
+        TimerKey { timer_type, scope: TimerScope::UntilAnswered }
     }
 
     /// `timer_type` guarding attempt `id`.

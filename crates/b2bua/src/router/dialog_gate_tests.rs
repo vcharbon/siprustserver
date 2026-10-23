@@ -168,11 +168,7 @@ fn last_cseq_after(call: Call, req: SipRequest) -> Option<i64> {
     let Verdict::Pass(resolved) = request_verdict(&call, "a", &req) else {
         panic!("the gate passes {}", req.method());
     };
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(req)),
-        src: src(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(req), src());
     let call = note_in_order(call, "a", &resolved, &event);
     call.a_leg.dialogs.by_tags("ours", CALLER_TAG).expect("the dialog").peer_cseq
 }

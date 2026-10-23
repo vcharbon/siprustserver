@@ -4,25 +4,21 @@ use sip_message::SipParser;
 
 use super::*;
 
-fn sip(raw: &str, matched_client_txn: bool) -> CallEvent {
-    CallEvent::Sip {
-        message: Box::new(CustomParser::new().parse(raw.as_bytes()).unwrap()),
-        src: "10.0.0.2:5060".parse().unwrap(),
-        matched_client_txn,
-    }
+fn sip(raw: &str) -> CallEvent {
+    CallEvent::sip(
+        CustomParser::new().parse(raw.as_bytes()).unwrap(),
+        "10.0.0.2:5060".parse().unwrap(),
+    )
 }
 
 /// `status` to an INVITE, as the layer hands it up.
-fn invite_response(status: u16, matched_client_txn: bool) -> CallEvent {
-    sip(
-        &format!(
-            "SIP/2.0 {status} X\r\n\
+fn invite_response(status: u16) -> CallEvent {
+    sip(&format!(
+        "SIP/2.0 {status} X\r\n\
                  Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-out\r\n\
                  From: <sip:a@127.0.0.1>;tag=a\r\nTo: <sip:b@10.0.0.2>;tag=b\r\n\
                  Call-ID: outcome@unit\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
-        ),
-        matched_client_txn,
-    )
+    ))
 }
 
 /// A `method` request from a peer, in the dialog `a`/`b` when `to_tag`.
@@ -33,15 +29,12 @@ fn request(method: &str, to_tag: bool) -> CallEvent {
 /// [`request`] carrying the header lines `extra`.
 fn request_with(method: &str, to_tag: bool, extra: &str) -> CallEvent {
     let to_tag = if to_tag { ";tag=b" } else { "" };
-    sip(
-        &format!(
-            "{method} sip:b2bua@127.0.0.1 SIP/2.0\r\n\
+    sip(&format!(
+        "{method} sip:b2bua@127.0.0.1 SIP/2.0\r\n\
                  Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-peer\r\n\
                  From: <sip:a@10.0.0.1>;tag=a\r\nTo: <sip:b@127.0.0.1>{to_tag}\r\n\
                  Call-ID: peer@unit\r\nCSeq: 2 {method}\r\n{extra}Content-Length: 0\r\n\r\n"
-        ),
-        false,
-    )
+    ))
 }
 
 /// Every final the layer matched to a transaction is its outcome, the
@@ -51,14 +44,14 @@ fn request_with(method: &str, to_tag: bool, extra: &str) -> CallEvent {
 fn every_matched_final_is_an_outcome_and_a_provisional_or_a_repeat_is_not() {
     for status in [200, 486, 503] {
         assert_eq!(
-            DispatchClass::of(&invite_response(status, true)),
+            DispatchClass::of(&invite_response(status), true),
             Some(DispatchClass::TxnOutcome),
             "{status}"
         );
     }
     for (status, matched) in [(180, true), (200, false)] {
         assert_eq!(
-            DispatchClass::of(&invite_response(status, matched)),
+            DispatchClass::of(&invite_response(status), matched),
             Some(DispatchClass::Response)
         );
     }
@@ -76,7 +69,7 @@ fn a_request_is_classed_by_its_method_and_dialog() {
         ("INFO", true, DispatchClass::OtherRequest),
         ("OPTIONS", false, DispatchClass::OtherRequest),
     ] {
-        assert_eq!(DispatchClass::of(&request(method, to_tag)), Some(class), "{method}");
+        assert_eq!(DispatchClass::of(&request(method, to_tag), false), Some(class), "{method}");
     }
 }
 
@@ -91,7 +84,7 @@ fn a_new_invite_with_an_emergency_priority_is_an_emergency_call() {
         ("esnet.0", true, DispatchClass::InDialogInvite),
     ] {
         let invite = request_with("INVITE", to_tag, &format!("Resource-Priority: {rph}\r\n"));
-        assert_eq!(DispatchClass::of(&invite), Some(class), "{rph} to_tag={to_tag}");
+        assert_eq!(DispatchClass::of(&invite, false), Some(class), "{rph} to_tag={to_tag}");
     }
 }
 
@@ -124,7 +117,7 @@ fn every_timer_fire_is_the_nodes_own_work() {
             call_ref: "c".into(),
             incarnation: None,
         };
-        assert_eq!(DispatchClass::of(&fire), Some(DispatchClass::Timer), "{timer_type:?}");
+        assert_eq!(DispatchClass::of(&fire, false), Some(DispatchClass::Timer), "{timer_type:?}");
     }
     let row = DispatchClass::Timer.row();
     assert_eq!((row.room, row.counted), (Room::Always, false));
@@ -151,7 +144,7 @@ fn every_answer_to_a_request_the_call_sent_is_the_nodes_own_work() {
             body: Vec::new(),
             incarnation: None,
         };
-        assert_eq!(DispatchClass::of(&answer), Some(DispatchClass::Internal), "{topic}");
+        assert_eq!(DispatchClass::of(&answer, false), Some(DispatchClass::Internal), "{topic}");
     }
     let row = DispatchClass::Internal.row();
     assert_eq!((row.room, row.counted), (Room::Always, false));

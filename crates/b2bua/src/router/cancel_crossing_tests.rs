@@ -82,6 +82,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         source_leg_id: &source_leg_id,
         direction: Direction::FromA,
         resolved: Default::default(),
+        matched_client_txn: false,
         now_ms: 1_000,
     };
     let fw = node.core.router_ctx().framework();

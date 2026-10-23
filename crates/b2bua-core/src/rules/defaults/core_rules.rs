@@ -475,7 +475,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // Nothing is composed here.
                 actions.extend(vec![
                     RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
-                    RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
                     RuleAction::arm(
                         TimerKey::call(TimerType::GlobalDuration),
                         TimerDelay::millis(max_duration(ctx)),
@@ -1308,30 +1307,14 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ok(actions)
         })
         .runs_while_terminating(),
-        // Call-level a-leg setup deadline (armed at route time, cancelled at
-        // answer). Deliberately NOT per-b-leg: reroute/failover creates fresh
-        // b-legs (each with its own optional NoAnswer), while this caps the
-        // caller's TOTAL wait for a final response. It rides the replicated
-        // `call.timers` ledger, so a crash → reclaim restores it and a
-        // stuck-in-setup call is torn down at the deadline instead of holding
-        // its limiter slots until GlobalDuration — the sip-txn setup timeout
-        // is process-local and dies with a crashed node; this one survives.
+        // The caller's setup deadline, armed at route time under the scope
+        // that ends with the caller answered or the call's termination (a
+        // fire past either reaches no rule). Deliberately NOT per-b-leg:
+        // reroute/failover creates fresh b-legs (each with its own optional
+        // NoAnswer), while this caps the caller's TOTAL wait for a final
+        // response, so a stuck-in-setup call is torn down at the deadline
+        // instead of holding its limiter slots until GlobalDuration.
         rule("setup-timeout", &[], Match::timer().timer_type(TimerType::SetupTimeout), |ctx| {
-            // Answer raced the fire (e.g. a reclaim restored a stale ledger
-            // entry whose cancel was lost with the crashed node), or the call
-            // is already going away (a terminating call authors no new final
-            // on the a-leg's completed transaction): absorb, and scrub the
-            // spent entry so a later reclaim cannot re-fire it.
-            let answered = ctx.call.a_leg().state() == LegState::Confirmed
-                || ctx.call.b_legs().iter().any(|b| b.state() == LegState::Confirmed);
-            let spent = answered
-                || matches!(
-                    ctx.call.state(),
-                    CallModelState::Terminating | CallModelState::Terminated
-                );
-            if spent {
-                return ok(vec![]);
-            }
             ok(vec![
                 RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Timeout,
@@ -1354,8 +1337,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     by_leg: None,
                 },
             ])
-        })
-        .runs_while_terminating(),
+        }),
         rule("max-duration", &[], Match::timer().filter(release_event_due), |ctx| {
             // A **subscribed** max-call-duration on an ANSWERED
             // call with a callback_context consults the engine (`call_release`
@@ -1375,12 +1357,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // → the `release-result-release` rule performs exactly this local
             // teardown, so the fail-safe is this same path.
             //
-            // A cap crossing the terminating window (the caller BYE'd just
-            // before it, or a reclaim restored a stale entry) is SPENT: the
-            // call is already going away, so no `call_release` consult (a
-            // `reroute` outcome would dial a fresh b-leg on a terminating
-            // call) and no BeginTermination re-arm of the safety timer —
-            // absorb, and scrub the entry so a later reclaim cannot re-fire it.
+            // A release consult's deadline outlives the start of the
+            // termination (its answer still settles what the consult holds),
+            // so its expiry can reach a call already going away: the release
+            // event is spent there — no `call_release` consult (a `reroute`
+            // outcome would dial a fresh b-leg on a terminating call) and no
+            // BeginTermination re-arm of the safety timer.
             if matches!(ctx.call.state(), CallModelState::Terminating | CallModelState::Terminated)
             {
                 return ok(vec![]);

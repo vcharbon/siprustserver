@@ -53,6 +53,8 @@ pub struct ReplicationSetup {
     pub puller: crate::repl::PullerConfig,
     /// The serve loop's link bounds (ADR-0045).
     pub serve: crate::repl::ServeConfig,
+    /// The replicas' TTL, the backup ceilings and the keepalive catch-up.
+    pub replica: super::replica::ReplicaConfig,
 }
 
 /// Wiring inputs for [`B2buaCore::spawn`](super::B2buaCore::spawn).

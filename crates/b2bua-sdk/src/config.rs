@@ -97,35 +97,12 @@ pub struct B2buaConfig {
     pub keepalive_interval_sec: i64,
     /// **Keepalive-timeout grace**, seconds — how long the B2BUA waits for the
     /// in-dialog OPTIONS `200` before declaring the leg dead and tearing the call
-    /// down (`keepalive-timeout` rule → BYE). Production default **32 s**. A 5 s
-    /// grace is unsound across a worker reboot: a
-    /// reclaimed dialog re-arms its keepalive and fires OPTIONS into a path still
-    /// settling (smoothed reclaim burst draining over `L_max/speedup`, the proxy
-    /// EndpointSlice re-discovering the rebooted worker's new pod IP), so the
-    /// round-trip can momentarily exceed 5 s and the worker BYEs thousands of
-    /// healthy reclaimed long-hold calls. A generous grace rides that recovery
-    /// window out; it must stay well under `keepalive_interval_sec` so two
-    /// keepalives never overlap. Overridable via `B2BUA_KEEPALIVE_TIMEOUT_SEC`.
+    /// down (`keepalive-timeout` rule → BYE). Production default **32 s**: wide
+    /// enough to ride out a signalling path that is still settling (a worker
+    /// restarting, a proxy learning a new address) without ending healthy
+    /// calls, and well under `keepalive_interval_sec` so two keepalives never
+    /// overlap. Overridable via `B2BUA_KEEPALIVE_TIMEOUT_SEC`.
     pub keepalive_timeout_sec: i64,
-    /// **Reboot budget**, seconds — the TTL stamped on every *replicated* backup
-    /// `Element` (ADR-0011 X11). It is how long a backup copy survives without a
-    /// refresh from its primary, i.e. how long a primary may be down/rebooting
-    /// before its backups give up and self-evict. Decoupled from the OPTIONS
-    /// keepalive (which is leg-liveness, a different concern); default **600 s**.
-    ///
-    /// Under reactive-only takeover (ADR-0014) reclaim is the sole
-    /// quiescent-recovery path, so this TTL must comfortably outlast the
-    /// keepalive interval plus the 120 s reboot+rehydrate+smoothed-drain slack
-    /// (§3 of the reactive-takeover plan): `600 ≥ 300 + 120` with margin.
-    ///
-    /// Correctness coupling — the backup's TTL is *refreshed* only when the
-    /// primary flushes the call, and a quiescent established call is flushed only
-    /// by its keepalive OPTIONS. So this budget MUST outlast one keepalive gap
-    /// (`reboot_budget_sec >= keepalive_interval_sec`) or a healthy-but-idle
-    /// call's backup expires between pokes, silently dropping its failover
-    /// coverage. [`validate`](Self::validate) enforces both this and the absolute
-    /// floors. The non-replicating path ignores this (TTL stays `CALL_TTL_MS`).
-    pub reboot_budget_sec: i64,
     /// Limiter-refresh cadence, seconds — how often a counted call extends its
     /// lease on the limiter. The lease is the limiter's own, stated in its
     /// answers; this period plus one refresh tick must stay below it by a
@@ -144,21 +121,6 @@ pub struct B2buaConfig {
     pub limiter_refresh_batch_ms: u64,
     /// Most keys one limiter refresh request carries. Default 1000.
     pub limiter_refresh_batch_max: usize,
-    /// **Keepalive catch-up speed-up** (ADR-0014, performance-only). On reboot a
-    /// primary's `ReclaimAll` re-materialises its whole `pri:{self}` partition;
-    /// many keepalive timers are past-due. Firing them all at once floods a
-    /// freshly-rehydrated node, so the reclaim handler *smooths* the backlog: the
-    /// oldest-overdue keepalive fires first and the rest are staggered to drain
-    /// over `L_max / speedup` (bounded to `speedup`× the normal cadence), where
-    /// `L_max` is the largest overdue gap. This is pure load management with **no**
-    /// correctness role (`(p,b)` reconciliation makes any incidental keepalive
-    /// overlap non-corrupting), so it carries no timing assumption. Default **10**.
-    /// `<= 1` disables smoothing (every past-due keepalive fires immediately).
-    pub keepalive_catchup_speedup: i64,
-    /// Optional cap (seconds) on the keepalive catch-up drain window for a
-    /// pathological `L_max` (a very long reboot). `None` = no cap (drain over the
-    /// full `L_max / speedup`). See [`keepalive_catchup_speedup`](Self::keepalive_catchup_speedup).
-    pub max_catchup_window_sec: Option<i64>,
     /// **Call reaper** master switch (ADR-0020 X1). ON by default; `false` is a
     /// debugging escape hatch only — the in-process "released exactly once, one
     /// CDR" promise does not hold without it.
@@ -186,15 +148,14 @@ pub struct B2buaConfig {
     /// [`validate`](Self::validate)). Liveness derives ONLY from the stamp —
     /// never `created_at`, never timer deadlines.
     pub reaper_idle_max_sec: i64,
-    /// **Setup timeout**, milliseconds — the call-level a-leg initial-INVITE deadline:
-    /// armed at route time, cancelled at answer, deliberately NOT reset by
-    /// reroute/failover (each new b-leg that rings gets its own `NoAnswer`; this caps the
-    /// caller's *total* wait for a final response). It rides the replicated
-    /// `call.timers` ledger, so it survives a crash → reclaim — the sip-txn
-    /// transaction bound
-    /// ([`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)) cannot (the
-    /// transactions die with the node), so without it a worker kill strands
-    /// mid-setup calls holding limiter slots for the full 1 h GlobalDuration.
+    /// **Setup timeout**, milliseconds — the caller's initial-INVITE deadline:
+    /// armed at route time, ended by the caller's answer, deliberately NOT reset
+    /// by reroute/failover (each new b-leg that rings gets its own `NoAnswer`;
+    /// this caps the caller's *total* wait for a final response). It rides the
+    /// call record's timer ledger, which outlives the transactions that bound
+    /// ([`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)) lives in, so
+    /// a call whose transactions are gone is still ended at the deadline rather
+    /// than holding its limiter slots for the full 1 h GlobalDuration.
     /// Default **150 000 ms**: strictly below the configured transaction bound
     /// (enforced by [`validate`](Self::validate)) so the rules path owns the
     /// teardown (408 to the caller, CANCEL to pending b-legs, obligations
@@ -378,8 +339,8 @@ pub struct B2buaConfig {
     /// headers it captures. Off by default: the runner turns it on.
     pub cdr: CdrConfig,
     /// **Capacity admission** (ADR-0037): the live-call, transaction and RSS
-    /// ceilings above which a new call is refused, and the backup-copy
-    /// ceilings. Every bound is off by default.
+    /// ceilings above which a new call is refused. Every bound is off by
+    /// default.
     pub capacity: CapacityConfig,
     /// **Service parameters.** Product services carry their own parameters
     /// here, one value per type; their rules read them through `ctx.config`.
@@ -427,13 +388,10 @@ impl Default for B2buaConfig {
             release_reroute_guard_sec: 120,
             keepalive_interval_sec: 300,
             keepalive_timeout_sec: 32,
-            reboot_budget_sec: 600,
             limiter_refresh_sec: 40,
             limiter_release_queue_cap: 100_000,
             limiter_refresh_batch_ms: 1_000,
             limiter_refresh_batch_max: 1_000,
-            keepalive_catchup_speedup: 10,
-            max_catchup_window_sec: None,
             reaper_enabled: true,
             model_invariants: cfg!(debug_assertions),
             reaper_sweep_interval_sec: 30,
@@ -483,9 +441,6 @@ impl B2buaConfig {
     /// **production** floor only — the paused-clock test harness builds configs
     /// directly and skips [`validate`](Self::validate) to use a faster cadence.
     pub const MIN_KEEPALIVE_SEC: i64 = 120;
-    /// Absolute minimum reboot budget (s): a backup must survive a primary's
-    /// reboot. The effective floor is usually higher — see [`validate`](Self::validate).
-    pub const MIN_REBOOT_BUDGET_SEC: i64 = 60;
     /// Floor for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
     /// the out-of-dialog bound must stay above the 32 s in-dialog Timer B.
     pub const MIN_INVITE_TXN_TIMEOUT_SEC: i64 = 33;
@@ -577,26 +532,6 @@ impl B2buaConfig {
                  OPTIONS cadence breaks long-hold traffic",
                 self.keepalive_interval_sec,
                 Self::MIN_KEEPALIVE_SEC
-            ));
-        }
-        if self.reboot_budget_sec < Self::MIN_REBOOT_BUDGET_SEC {
-            return Err(format!(
-                "reboot_budget_sec={} < min {} s (1 min): a replicated backup must \
-                 survive a primary reboot",
-                self.reboot_budget_sec,
-                Self::MIN_REBOOT_BUDGET_SEC
-            ));
-        }
-        // The backup `Element` TTL is refreshed only on a primary flush, and a
-        // quiescent established call is flushed only by its keepalive OPTIONS. So
-        // the budget must outlast one keepalive gap or an idle call's backup
-        // self-evicts before its next refresh, silently losing failover coverage.
-        if self.reboot_budget_sec < self.keepalive_interval_sec {
-            return Err(format!(
-                "reboot_budget_sec={} < keepalive_interval_sec={}: the backup TTL is \
-                 refreshed each keepalive flush, so the budget must outlast one \
-                 keepalive gap (an idle call is flushed only by its keepalive)",
-                self.reboot_budget_sec, self.keepalive_interval_sec
             ));
         }
         // The reaper's staleness verdict is only provable when a healthy call is

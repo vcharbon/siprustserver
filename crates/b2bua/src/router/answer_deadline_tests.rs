@@ -160,6 +160,7 @@ fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::Handl
         source_leg_id: &source_leg_id,
         direction: Direction::FromA,
         resolved: Default::default(),
+        matched_client_txn: false,
         now_ms: NOW,
     };
     rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)

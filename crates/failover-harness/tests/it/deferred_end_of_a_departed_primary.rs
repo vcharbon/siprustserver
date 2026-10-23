@@ -53,7 +53,7 @@ async fn an_end_deferred_to_a_primary_that_departs_is_discharged_by_the_sweep() 
     assert_eq!(backup.metrics().repl_terminal_lost_total(), 0, "no ended call is lost");
     assert!(released, "the ended call is deleted");
     assert!(
-        fh.now_ms() < b2bua::B2buaConfig::default().reboot_budget_sec * 1000,
+        fh.now_ms() < b2bua::ReplicaConfig::default().reboot_budget_sec * 1000,
         "discharged by the sweep, not reaped at the replica TTL"
     );
     assert_call_fully_released(&[backup], &call_ref).await;

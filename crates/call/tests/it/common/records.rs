@@ -34,7 +34,7 @@ pub(super) fn arb_attempt() -> impl Strategy<Value = Attempt> {
 }
 
 pub(super) fn arb_ring() -> impl Strategy<Value = Ring> {
-    prop_oneof![Just(Ring::Silent), Just(Ring::Rang), Just(Ring::Presumed)]
+    prop_oneof![Just(Ring::Silent), Just(Ring::Rang)]
 }
 
 fn arb_message_direction() -> impl Strategy<Value = MessageDirection> {
@@ -180,6 +180,7 @@ pub(super) fn arb_message_ring() -> impl Strategy<Value = MessageRing> {
 pub(super) fn arb_timer() -> impl Strategy<Value = TimerEntry> {
     let scope = prop_oneof![
         Just(TimerScope::Call),
+        Just(TimerScope::UntilAnswered),
         (0usize..4).prop_map(|id| TimerScope::Attempt(AttemptId(id))),
         arb_tag().prop_map(TimerScope::Leg),
     ];

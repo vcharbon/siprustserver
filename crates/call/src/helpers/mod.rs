@@ -35,6 +35,7 @@
 //!   - [`termination`] — the termination record and its message-ring cut
 //!   - [`timer`] — the timer ledger (`arm_timer`, `disarm_timer`, terminating cap,
 //!     the keepalive one-interval ceiling)
+//!   - [`timer_scope`] — whether the scope a timer guards has ended
 
 pub mod attempt;
 pub mod decision_log;
@@ -56,6 +57,7 @@ pub mod sequence;
 pub mod services;
 pub mod termination;
 pub mod timer;
+pub mod timer_scope;
 
 pub use attempt::{
     dialled_leg_ended, end_attempt, find_attempt, join_attempt, next_attempt_id, open_attempt,
@@ -121,3 +123,4 @@ pub use timer::{
     arm_timer, cap_keepalive_fire_at, disarm_timer, holds_timer, retire_timers,
     TERMINATING_TIMEOUT_MS,
 };
+pub use timer_scope::scope_ended;

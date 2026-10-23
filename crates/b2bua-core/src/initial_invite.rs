@@ -256,11 +256,7 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
     let src =
         sip_message::ip_literal::ip_socket_addr(&call.a_leg.source.address, call.a_leg.source.port)
             .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Request(a_invite.clone())),
-        src,
-        matched_client_txn: false,
-    }
+    CallEvent::sip(SipMessage::Request(a_invite.clone()), src)
 }
 
 /// Answer the a-leg with a final failure / redirect the decision layer authors,

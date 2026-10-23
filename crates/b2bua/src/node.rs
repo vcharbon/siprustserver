@@ -24,6 +24,7 @@ use crate::store::{BufferedTerminateWriter, CallState, CallStore};
 use crate::timers::TimerService;
 
 mod deps;
+pub mod replica;
 pub use deps::{B2buaDeps, ReplicationSetup};
 
 mod drain;
@@ -180,8 +181,10 @@ impl B2buaCore {
         // constructs none of these: no writer task, no channel, no receiver for
         // the router to poll.
         let repl_store = replication.as_ref().map(|s| s.store.clone());
+        let replica = replication.as_ref().map(|s| s.replica).unwrap_or_default();
         let capacity = capacity.unwrap_or_else(CapacityGate::live);
         capacity.configure(&config.capacity);
+        capacity.configure_backup(&replica.backup);
         let (readiness, supervisor, fail_back) = match replication {
             Some(setup) => {
                 let self_ordinal = config.self_ordinal.clone();
@@ -192,14 +195,10 @@ impl B2buaCore {
                 vital.push(("terminate_writer", writer.task()));
                 let (repl_tx, repl_rx) =
                     tokio::sync::mpsc::unbounded_channel::<router::ReplCommand>();
-                // Route flushes/removes for backed-up calls through the policy, and
-                // stamp the replicated-body TTL with the operator's **reboot budget**
-                // (ADR-0011 X11): an orphaned backup Element self-evicts after the
-                // budget rather than the 1 h max_duration backstop. The budget is a
-                // config knob in its own right (decoupled from the keepalive, though
-                // `config.validate()` guarantees it outlasts one keepalive refresh
-                // gap so a healthy idle call's backup is never evicted prematurely).
-                let replicated_ttl_ms = config.reboot_budget_sec.saturating_mul(1000);
+                // Stamp the replicated-body TTL with the **reboot budget** (ADR-0011
+                // X11): an orphaned backup Element self-evicts after it, not after the
+                // 1 h max_duration backstop (`ReplicaConfig` outlasts one keepalive).
+                let replicated_ttl_ms = replica.reboot_budget_sec.saturating_mul(1000);
                 state = state
                     .with_replication(setup.store.clone(), writer)
                     .with_replicated_ttl_ms(replicated_ttl_ms);
@@ -354,6 +353,7 @@ impl B2buaCore {
         let ctx = Arc::new(RouterCtx {
             outbound_proxy: crate::router::outbound_proxy_target(&config),
             config,
+            replica,
             state,
             store_faults,
             wire_faults,

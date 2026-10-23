@@ -49,7 +49,7 @@ pub(super) async fn offer(ctx: &Arc<RouterCtx>, call_ref: String, write: Primary
         body,
         incarnation: None,
     };
-    super::ingress::on_event(ctx, event).await;
+    super::ingress::on_event(ctx, event, false).await;
 }
 
 /// The stand-down turn of `call_ref` on the notice `outcome` / `payload` /
