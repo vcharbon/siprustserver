@@ -181,7 +181,7 @@ impl Puller {
                     && stored.is_none()
                     && role == PartitionRole::Backup
                     && !self.store.buries(call_ref, incarnation.as_deref())
-                    && (self.store.refused_replica(call_ref)
+                    && (self.store.refused_replica(call_ref, incarnation.as_deref())
                         || self
                             .capacity
                             .as_ref()

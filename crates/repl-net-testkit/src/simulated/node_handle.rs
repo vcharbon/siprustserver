@@ -38,7 +38,7 @@ impl ReplicationNetwork for NodeReplicationNetwork {
         &self,
         dst: SocketAddr,
     ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
-        let local = synth_local(dst);
+        let local = synth_local(&self.shared, dst);
         self.shared.stream_owner.lock().unwrap().insert(local, self.owner);
         let fabric = SimulatedReplicationNetwork { shared: self.shared.clone() };
         let conn = fabric.connect_from(local, dst).await;

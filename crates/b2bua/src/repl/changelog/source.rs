@@ -78,6 +78,10 @@ pub trait BodySource: Send + Sync {
     /// §3): the call has no backup from here on.
     fn backup_refused(&self, _backup: &str, _call_ref: &str) {}
 
+    /// A write of this node's call `call_ref` cannot reach `backup` (its frame
+    /// is refused unsent): the call has no backup from here on (ADR-0055 §3).
+    fn abandon_backup(&self, _backup: &str, _call_ref: &str) {}
+
     /// Snapshot the live callRef KEYS this node is **primary** for whose **backup
     /// is `backup`** (ADR-0014 Option B). The **Backup** bootstrap uses this to
     /// scan `pri:{self}` filtered to the calls `caller` backs up.

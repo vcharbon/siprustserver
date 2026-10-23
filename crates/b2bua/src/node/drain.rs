@@ -117,7 +117,8 @@ impl B2buaCore {
 fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> bool {
     use repl_net::frame::Partition;
     let me = &ctx.config.self_ordinal;
-    // A call naming no topology names no holder: nothing can be holding it.
+    // A call naming no topology, or with no backup, names no holder: nothing
+    // can be holding it.
     let Some(topologies) = ctx.state.live_topologies() else {
         return false;
     };

@@ -17,14 +17,20 @@ use sip_message::SipRequest;
 use super::RouterCtx;
 use crate::poison::{locked, HELD_ACKS};
 
-/// An ACK waiting for its call's backup: taken once, by whichever comes first
-/// of its hold's end and a later message of its call.
+/// An ACK waiting for its call's backup: sent once, by whichever comes first
+/// of its hold's end and a later message of its call. The take and the send
+/// are one step under the slot's lock, so a later message that finds the slot
+/// empty leaves after the ACK, whatever thread sent it.
 #[derive(Default)]
-struct HeldAck(Mutex<Option<(SipRequest, SocketAddr)>>);
+struct HeldAck(tokio::sync::Mutex<Option<(SipRequest, SocketAddr)>>);
 
 impl HeldAck {
-    fn take(&self) -> Option<(SipRequest, SocketAddr)> {
-        locked(&self.0, HELD_ACKS).take()
+    /// Send the ACK unless it already left.
+    async fn send(&self, ctx: &RouterCtx) {
+        let mut slot = self.0.lock().await;
+        if let Some((ack, dest)) = slot.take() {
+            send_ack(ctx, &ack, dest).await;
+        }
     }
 }
 
@@ -64,18 +70,16 @@ impl Holds {
 /// Send the ACK `ack` of `call_ref` toward `dest`: held for the call's backup,
 /// or at once when the call holds nothing.
 pub(super) async fn ack(ctx: &Arc<RouterCtx>, call_ref: &str, ack: &SipRequest, dest: SocketAddr) {
-    let Some(target) = ctx.state.hold_target(call_ref) else {
+    if ctx.state.hold_target(call_ref).is_none() {
         send_ack(ctx, ack, dest).await;
         return;
-    };
-    let held = Arc::new(HeldAck(Mutex::new(Some((ack.clone(), dest)))));
+    }
+    let held = Arc::new(HeldAck(tokio::sync::Mutex::new(Some((ack.clone(), dest)))));
     ctx.holds.acks().entry(call_ref.to_string()).or_default().push(held.clone());
     let (ctx, call_ref) = (ctx.clone(), call_ref.to_string());
     observe::spawn_keeping_node(async move {
-        let _ = tokio::time::timeout(ctx.holds.cap, ctx.state.applied(&target)).await;
-        if let Some((ack, dest)) = held.take() {
-            send_ack(&ctx, &ack, dest).await;
-        }
+        let _ = tokio::time::timeout(ctx.holds.cap, ctx.state.applied_current(&call_ref)).await;
+        held.send(&ctx).await;
         ctx.holds.forget(&call_ref, &held);
     });
 }
@@ -84,9 +88,7 @@ pub(super) async fn ack(ctx: &Arc<RouterCtx>, call_ref: &str, ack: &SipRequest, 
 /// of the call is about to leave (RFC 3261 §14.1).
 pub(super) async fn release(ctx: &RouterCtx, call_ref: &str) {
     for held in ctx.holds.take_all(call_ref) {
-        if let Some((ack, dest)) = held.take() {
-            send_ack(ctx, &ack, dest).await;
-        }
+        held.send(ctx).await;
     }
 }
 
@@ -95,13 +97,13 @@ pub(super) async fn release(ctx: &RouterCtx, call_ref: &str) {
 /// when the call holds nothing. The transaction layer sends it only while the
 /// INVITE has drawn no response, and itself at the §17.2.1 bound.
 pub(super) async fn first_provisional(ctx: &Arc<RouterCtx>, call_ref: &str, invite: &SipRequest) {
-    let Some(target) = ctx.state.hold_target(call_ref) else {
+    if ctx.state.hold_target(call_ref).is_none() {
         let _ = ctx.txn.release_trying(invite).await;
         return;
-    };
-    let (ctx, invite) = (ctx.clone(), invite.clone());
+    }
+    let (ctx, invite, call_ref) = (ctx.clone(), invite.clone(), call_ref.to_string());
     observe::spawn_keeping_node(async move {
-        let _ = tokio::time::timeout(ctx.holds.cap, ctx.state.applied(&target)).await;
+        let _ = tokio::time::timeout(ctx.holds.cap, ctx.state.applied_current(&call_ref)).await;
         let _ = ctx.txn.release_trying(&invite).await;
     });
 }

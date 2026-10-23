@@ -767,10 +767,10 @@ impl CallState {
         }
         .or_else(|| call.topology.clone());
         let (call_gen, call_bgen) = stored.as_ref().map(|t| (t.gen, t.bak_gen)).unwrap_or((0, 0));
-        let Some(body) = flush_body::encode(&self.codec, &self.metrics, call, &stored) else {
-            return;
-        };
         let (role, primary, mut opts) = self.store_target(&call.call_ref);
+        let Some(body) = flush_body::encode(&self.codec, &self.metrics, call, &stored) else {
+            return self.abandon_backup(&opts, &call.call_ref);
+        };
         opts.incarnation = Some(call.incarnation().to_string());
         opts.adopted = adopted;
         // Observability: a propagating flush is one whose call carries a backup

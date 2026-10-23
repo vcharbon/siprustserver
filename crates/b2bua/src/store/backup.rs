@@ -1,13 +1,14 @@
 //! Which backup a call's writes go to, and what a turn's held messages wait
 //! for (ADR-0055 §3): a new call is admitted with no backup, for life, while
-//! the backlog toward the backup the proxy named is over its high-water mark;
+//! the backlog toward the backup the proxy named is over its high-water mark,
+//! and a call whose write cannot reach its backup has none from then on;
 //! the ACK and the first provisional of an INVITE wait for the backup to apply
 //! the call's current change-log entry, when it has a live one.
 
 use call::Call;
 use repl_net::frame::{Partition, Watermark};
 
-use super::{CallState, PropagateDirection};
+use super::{CallState, PropagateDirection, PutOpts};
 
 /// What a turn's held message waits for: `peer` applying `at` on `partition`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,11 +30,22 @@ impl CallState {
             return false;
         };
         if repl.changelog().admits_backup(bak) {
+            repl.admit_backed(&call.call_ref);
             return true;
         }
         repl.leave_unbacked(&call.call_ref);
         self.metrics.bump_repl_new_call_unbacked();
         false
+    }
+
+    /// A write of `call_ref` toward `opts`' backup cannot reach it (its body
+    /// does not encode): the call has no backup from here on, never a backup
+    /// silently behind it.
+    pub(super) fn abandon_backup(&self, opts: &PutOpts, call_ref: &str) {
+        let (Some(repl), Some(peer)) = (self.repl_store(), &opts.peer) else { return };
+        if opts.direction == Some(PropagateDirection::Forward) {
+            repl.abandon_backup(peer, call_ref);
+        }
     }
 
     /// What a message the turn of `call_ref` holds waits for: its backup applying
@@ -55,11 +67,21 @@ impl CallState {
         Some(HoldTarget { peer, partition, at })
     }
 
-    /// Resolves once `target` is reached: its peer applied the entry, or its
-    /// log is gone. Resolves at once on an unwired node.
-    pub async fn applied(&self, target: &HoldTarget) {
-        if let Some(repl) = self.repl_store() {
+    /// Resolves once the call's backup applied the call's current change-log
+    /// entry, re-read on every wake: a later write of the call moves its entry
+    /// past the position awaited, and the wait goes on to the new one, so
+    /// another call's applied write never stands for this one. Resolves at
+    /// once when the call has no live, bootstrapped backup or no entry toward
+    /// it, and when the backup's log is gone.
+    pub async fn applied_current(&self, call_ref: &str) {
+        let Some(repl) = self.repl_store() else { return };
+        let mut awaited = None;
+        while let Some(target) = self.hold_target(call_ref) {
+            if awaited == Some(target.at) {
+                return;
+            }
             repl.changelog().applied_reaches(&target.peer, target.partition, target.at).await;
+            awaited = Some(target.at);
         }
     }
 }

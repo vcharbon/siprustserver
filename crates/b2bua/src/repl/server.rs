@@ -56,7 +56,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use repl_net::frame::{Frame, Partition, Watermark, PROTO_VER};
+use repl_net::frame::{Frame, Op, Partition, Watermark, PROTO_VER};
 use repl_net::transport::{AcceptError, ReplicationConnection, ReplicationListener, SendError};
 
 use super::changelog::{BodySource, Changelog};
@@ -367,7 +367,8 @@ impl ReplServer {
     }
 
     /// Send `frame`; one the transport refuses is logged, counted and skipped,
-    /// so the stream goes on past it.
+    /// so the stream goes on past it, and the call of a refused Backup `Put`
+    /// has no backup from then on.
     pub(super) async fn send_or_skip(
         &self,
         conn: &dyn ReplicationConnection,
@@ -375,9 +376,11 @@ impl ReplServer {
         caller: &str,
         flow: &'static str,
     ) -> Result<(), Unsent> {
-        let call_ref = match &frame {
-            Frame::Data { call_ref, .. } => call_ref.clone(),
-            _ => String::new(),
+        let (call_ref, backed_up) = match &frame {
+            Frame::Data { call_ref, partition, op, .. } => {
+                (call_ref.clone(), *partition == Partition::Bak && *op == Op::Put)
+            }
+            _ => (String::new(), false),
         };
         match self.send(conn, frame, caller, flow).await {
             Err(Unsent::Refused(why)) => {
@@ -392,6 +395,11 @@ impl ReplServer {
                     why,
                     "replication frame refused unsent; the stream goes on past it"
                 );
+                // A call whose write cannot reach its backup has none from
+                // here on, never a backup that silently lacks it.
+                if backed_up {
+                    self.source.abandon_backup(caller, &call_ref);
+                }
                 Ok(())
             }
             sent => sent,

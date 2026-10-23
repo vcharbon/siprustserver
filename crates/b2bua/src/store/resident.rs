@@ -30,11 +30,15 @@ impl CallState {
     }
 
     /// The distinct `(primary, backup)` ordinal pairs the resident calls'
-    /// topologies name; `None` when a resident call names no topology.
+    /// topologies name; `None` when a resident call names no topology or has no
+    /// backup (ADR-0055 §3): no peer can be holding it.
     pub fn live_topologies(&self) -> Option<Vec<(String, String)>> {
         let inner = self.locked();
         let mut pairs: Vec<(String, String)> = Vec::new();
-        for call in inner.calls.values() {
+        for (call_ref, call) in inner.calls.iter() {
+            if self.repl_store().is_some_and(|repl| repl.unbacked(call_ref)) {
+                return None;
+            }
             let t = call.topology.as_ref()?;
             if !pairs.iter().any(|(pri, bak)| *pri == t.pri && *bak == t.bak) {
                 pairs.push((t.pri.clone(), t.bak.clone()));

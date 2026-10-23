@@ -12,7 +12,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use repl_net::frame::{Partition, Watermark};
+use repl_net::frame::{Frame, Partition, Watermark, PROTO_VER};
+use repl_net::transport::ReplicationNetwork;
 use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 
@@ -184,6 +185,19 @@ async fn a_call_admitted_over_high_water_writes_to_no_backup_for_life() {
     assert_eq!(repl.changelog().peer_len("w1", Partition::Bak), 1, "its delete went nowhere");
 }
 
+/// **A new call on a ref is not unbacked for an earlier call's mark.** The
+/// earlier call on the identity had no backup and its delete ended it alone;
+/// the retry admitted with its backup has one.
+#[tokio::test(start_paused = true)]
+async fn a_backed_retry_on_the_ref_clears_the_earlier_calls_mark() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = wired(&repl);
+    let retry = backed_call(1);
+    repl.leave_unbacked(&retry.call_ref);
+    assert!(state.admit_backup(&retry));
+    assert!(!repl.unbacked(&retry.call_ref), "the retry has its backup");
+}
+
 /// **A replica refused by the backup.** The call's entry toward it goes, no
 /// scan offers it again, and the call has no backup from then on.
 #[tokio::test(start_paused = true)]
@@ -221,13 +235,118 @@ async fn a_hold_waits_for_the_backup_to_apply_the_calls_entry() {
     repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 0));
     let target = state.hold_target(&call.call_ref).expect("a live, bootstrapped backup");
     assert_eq!(target.at, Watermark::new(1, 1), "the call's current entry");
-    let waiting = {
-        let state = state.clone();
-        tokio::spawn(async move { state.applied(&target).await })
-    };
+    let waiting = held(&state, &call.call_ref);
     tokio::task::yield_now().await;
     assert!(!waiting.is_finished(), "not applied yet");
     repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 1));
     let resolved = tokio::time::timeout(Duration::from_millis(1), waiting).await;
     assert!(resolved.is_ok(), "applied: the hold resolves");
+}
+
+/// A task waiting for `call_ref`'s backup to apply its current entry.
+fn held(state: &CallState, call_ref: &str) -> tokio::task::JoinHandle<()> {
+    let (state, call_ref) = (state.clone(), call_ref.to_string());
+    tokio::spawn(async move { state.applied_current(&call_ref).await })
+}
+
+/// **Another call's applied write never releases a hold.** A is held at its
+/// entry 1; B writes at 2; A writes again and moves to 3 before the serve task
+/// drains. The backup reports 2 (B applied, A not yet): A's hold stays; it
+/// resolves at 3.
+#[tokio::test(start_paused = true)]
+async fn a_hold_follows_its_calls_entry_past_another_calls_applied_write() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = wired(&repl);
+    let _serving = repl.changelog().serving("w1", Partition::Bak);
+    repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 0));
+    let (a, b) = (backed_call(1), backed_call(2));
+    state.create(a.clone());
+    state.create(b.clone());
+    state.flush(&a);
+    let waiting = held(&state, &a.call_ref);
+    tokio::task::yield_now().await;
+    state.flush(&b);
+    state.flush(&a);
+    assert_eq!(
+        repl.changelog().position_of("w1", Partition::Bak, &a.call_ref),
+        Some(Watermark::new(1, 3))
+    );
+    repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 2));
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!waiting.is_finished(), "B's applied write does not stand for A's");
+    repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 3));
+    let resolved = tokio::time::timeout(Duration::from_millis(1), waiting).await;
+    assert!(resolved.is_ok(), "A's current entry applied: the hold resolves");
+}
+
+/// **A refusal frame reaches the primary's store.** The backup's
+/// `ReplicaRefused` on its Backup flow leaves the primary's call without a
+/// backup: its entry toward the backup goes and no scan offers it again.
+#[tokio::test(start_paused = true)]
+async fn a_backups_refusal_frame_leaves_the_primarys_call_without_a_backup() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let a = Node::spawn("A", addr(5), 1, &net, &clock).await;
+    let c = cref("A", "refused");
+    let fwd_b = fwd("B");
+    let body = b"v".to_vec();
+    a.store.put_call(PartitionRole::Primary, "A", &c, body, &[], 0, 1, 0, &fwd_b).await.unwrap();
+    let conn = net.connect(a.addr).await.unwrap();
+    let pull = Frame::PullRequest {
+        proto_ver: PROTO_VER,
+        caller: "B".into(),
+        partition: Partition::Bak,
+        since: Watermark::new(1, 0),
+    };
+    conn.send(pull).await.unwrap();
+    let at = loop {
+        match conn.recv().await {
+            Some(Frame::Data { at, call_ref, .. }) if call_ref == c => break at,
+            Some(_) => continue,
+            None => panic!("the stream closed before the call's write"),
+        }
+    };
+    conn.send(Frame::ReplicaRefused { at, call_ref: c.clone() }).await.unwrap();
+    tick(50).await;
+    assert!(a.store.unbacked(&c), "the primary's call has no backup");
+    assert_eq!(a.store.changelog().peer_len("B", Partition::Bak), 0, "its entry went");
+    assert!(a.store.scan_refs_backed_by("A", "B").is_empty(), "no scan offers it again");
+}
+
+/// **A body that does not encode gives up the call's backup.** The call's
+/// earlier write reached the change log; a later one nests past the bound
+/// every peer decodes under: the call has no backup from then on, and its entry
+/// toward the backup becomes a delete of the earlier replica.
+#[tokio::test(start_paused = true)]
+async fn a_body_that_does_not_encode_leaves_the_call_without_a_backup() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = wired(&repl);
+    let call = backed_call(1);
+    state.create(call.clone());
+    state.flush(&call);
+    let deep = (0..200).fold(serde_json::Value::Null, |v, _| serde_json::json!([v]));
+    let deep = call::helpers::set_call_ext(call.clone(), "svc", Some(deep));
+    state.update(deep.clone());
+    state.flush(&deep);
+    assert!(repl.unbacked(&call.call_ref), "the call has no backup");
+    let frames = repl
+        .changelog()
+        .drain_since(
+            "w1",
+            Partition::Bak,
+            Watermark::new(1, 0),
+            10,
+            &*repl,
+            PartitionRole::Primary,
+            "w0",
+        )
+        .await;
+    assert!(
+        matches!(frames.as_slice(), [Frame::Data { op: repl_net::frame::Op::Delete, .. }]),
+        "the entry toward the backup is a delete: {frames:?}"
+    );
+    state.remove(&call.call_ref);
+    assert_eq!(repl.unbacked_count(), 0);
 }

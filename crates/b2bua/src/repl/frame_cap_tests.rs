@@ -1,6 +1,7 @@
 //! A body past the frame cap is refused by the transport unsent: the server
 //! logs it, counts it and skips it, and the flow it rides goes on — in the
-//! poll tail and in the bootstrap scan alike.
+//! tail and in the bootstrap scan alike. The call has no backup from then on
+//! (ADR-0055 §3): a replica of an earlier write of it is deleted.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -69,12 +70,16 @@ async fn an_oversized_frame_in_the_tail_is_counted_and_skipped() {
     tick(100).await;
 
     put(&a, "before", b"before".to_vec()).await;
+    put(&a, "huge", b"small at first".to_vec()).await;
+    tick(200).await;
+    assert!(held(&b, "huge").await, "the call's first write is backed up");
     put(&a, "huge", oversized()).await;
     put(&a, "after", b"after".to_vec()).await;
     tick(200).await;
 
     assert!(held(&b, "before").await, "the call before the refused frame arrives");
-    assert!(!held(&b, "huge").await, "the refused frame never left");
+    assert!(!held(&b, "huge").await, "the refused write never left; the earlier replica went");
+    assert!(a.unbacked(&cref("A", "huge")), "the call has no backup from then on");
     assert!(held(&b, "after").await, "the stream went on past it");
     assert_eq!(metrics.repl_frames_refused_total(), 1, "the refusal is counted");
     put(&a, "later", b"later".to_vec()).await;
@@ -96,6 +101,7 @@ async fn an_oversized_frame_in_the_bootstrap_is_counted_and_skipped() {
 
     assert!(held(&b, "before").await, "the bootstrap carries the call before");
     assert!(!held(&b, "huge").await, "the refused frame never left");
+    assert!(a.unbacked(&cref("A", "huge")), "the call has no backup from then on");
     assert!(held(&b, "after").await, "the bootstrap went on past it");
     assert_eq!(metrics.repl_frames_refused_total(), 1, "the refusal is counted once");
     put(&a, "later", b"later".to_vec()).await;

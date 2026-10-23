@@ -521,7 +521,7 @@ async fn a_refused_replica_is_told_and_the_position_moves_past_it() {
 #[tokio::test(start_paused = true)]
 async fn a_backup_scan_drops_the_refusals_of_an_earlier_stream() {
     let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-    store.refuse_replica("w0|x|t", "w0", 0);
+    store.refuse_replica("w0|x|t", "w0", None);
     let sent = sent_back(
         Watermark::new(0, 0),
         Partition::Bak,

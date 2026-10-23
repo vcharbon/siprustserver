@@ -38,9 +38,9 @@ kills it, and a kill drops every call it serves.
 4. **Backup replicas have their own ceilings:** a count and an RSS ceiling,
    set lower than the admission ones. At either, a replica of a call this node
    does not hold yet is refused: the backup tells the primary in a frame, its
-   reported position moves past the refused write, and it refuses every later
-   write of that call. The call has no backup for its whole life (ADR-0055
-   §3). Updates and deletes of held replicas, and a node's own calls coming
+   reported position moves past the refused write, and it refuses the later
+   writes of that call until its delete or the refusal's TTL. The call has no
+   backup for its whole life (ADR-0055 §3). Updates and deletes of held replicas, and a node's own calls coming
    back from a peer, always apply.
 5. **RSS is sampled, counts are exact.** RSS is read every 100 ms through an
    injectable `SystemProbe`; tests drive it through a simulated one.

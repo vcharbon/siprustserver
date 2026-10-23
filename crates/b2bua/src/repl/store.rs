@@ -261,63 +261,6 @@ impl ReplicatingCallStore {
         self.backups.load(Ordering::Relaxed)
     }
 
-    /// Refuse the replica of `call_ref` of `primary` at this backup's ceiling
-    /// (ADR-0037 item 4): its writes are refused from here on, the mark
-    /// expiring with the backstop a stored body of `ttl_ms` would have.
-    pub fn refuse_replica(&self, call_ref: &str, primary: &str, ttl_ms: i64) {
-        let expiry = self.expiry_for(self.clock.now_ms(), ttl_ms);
-        locked(&self.refusals, REPLICA_REFUSALS).replicas.refuse(call_ref, primary, expiry);
-    }
-
-    /// Whether this backup refused the replica of `call_ref`.
-    pub fn refused_replica(&self, call_ref: &str) -> bool {
-        locked(&self.refusals, REPLICA_REFUSALS).replicas.contains(call_ref)
-    }
-
-    /// Drop every refusal of `primary`'s replicas: a new scan of it states
-    /// every call it backs up here.
-    pub fn clear_refusals_of(&self, primary: &str) {
-        locked(&self.refusals, REPLICA_REFUSALS).replicas.clear_primary(primary);
-    }
-
-    /// Standing replica refusals, all primaries.
-    pub fn refused_count(&self) -> usize {
-        locked(&self.refusals, REPLICA_REFUSALS).replicas.len()
-    }
-
-    /// Admit the new call `call_ref` with no backup, for its whole life.
-    pub fn leave_unbacked(&self, call_ref: &str) {
-        locked(&self.refusals, REPLICA_REFUSALS).unbacked.insert(call_ref);
-    }
-
-    /// `backup` refused the replica of this node's call `call_ref`: the call has
-    /// no backup from here on, its entry toward `backup` goes, and no scan of
-    /// this node offers it to `backup` again. A call this node does not hold
-    /// with `backup` as its backup (gone, or another call on the ref) is left
-    /// alone.
-    pub fn backup_refused(&self, backup: &str, call_ref: &str) {
-        {
-            let mut meta = locked(&self.meta, REPLICA_METADATA);
-            let Some(m) = meta.get_mut(call_ref) else { return };
-            if m.role != PartitionRole::Primary || m.backup.as_deref() != Some(backup) {
-                return;
-            }
-            m.backup = None;
-            locked(&self.refusals, REPLICA_REFUSALS).unbacked.insert(call_ref);
-        }
-        self.changelog.forget(backup, Partition::Bak, call_ref);
-    }
-
-    /// Whether this node's call `call_ref` has no backup.
-    pub fn unbacked(&self, call_ref: &str) -> bool {
-        locked(&self.refusals, REPLICA_REFUSALS).unbacked.contains(call_ref)
-    }
-
-    /// This node's live calls with no backup.
-    pub fn unbacked_count(&self) -> usize {
-        locked(&self.refusals, REPLICA_REFUSALS).unbacked.len()
-    }
-
     /// Whether a `Put` of `incarnation` of `call_ref` would resurrect a call
     /// deleted or replaced inside the tombstone window, so
     /// [`put_call`](CallStore::put_call) would ignore it.
@@ -549,6 +492,10 @@ impl BodySource for ReplicatingCallStore {
         ReplicatingCallStore::backup_refused(self, backup, call_ref);
     }
 
+    fn abandon_backup(&self, backup: &str, call_ref: &str) {
+        ReplicatingCallStore::abandon_backup(self, backup, call_ref);
+    }
+
     /// Live `pri:{primary}` refs whose captured `backup == backup` — the
     /// **Backup**-flow bootstrap snapshot (ADR-0014 Option B). Expired-but-not-
     /// yet-reaped refs are filtered out (the body would read `None` anyway).
@@ -572,6 +519,7 @@ struct Refusals {
 }
 
 mod admission;
+mod backing;
 #[cfg(test)]
 mod backup_count_tests;
 mod refusals;

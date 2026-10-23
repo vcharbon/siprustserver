@@ -1,8 +1,9 @@
 //! What a puller is handed beside its stream: the router's command sink, the
-//! memory admission gate, and the turn-point seam it reports applied writes
-//! to.
+//! memory admission gate and the refusal it tells the primary there, and the
+//! turn-point seam it reports applied writes to.
 
-use repl_net::frame::Op;
+use repl_net::frame::{Frame, Op, Watermark};
+use repl_net::transport::ReplicationConnection;
 
 use super::apply::{ApplyMode, ApplyOutcome};
 use super::{Puller, RouterSink};
@@ -53,5 +54,20 @@ impl Puller {
                 removed: matches!(op, Op::Delete),
             })
             .await;
+    }
+
+    /// Refuse the replica of call `incarnation` on `call_ref` at this backup's
+    /// ceiling and tell the primary, whose write at `at` it was (ADR-0037 item
+    /// 4). `false` when the frame could not be sent.
+    pub(super) async fn refuse(
+        &self,
+        conn: &dyn ReplicationConnection,
+        at: Watermark,
+        call_ref: &str,
+        incarnation: Option<&str>,
+    ) -> bool {
+        self.store.refuse_replica(call_ref, self.peer_ordinal(), incarnation);
+        let frame = Frame::ReplicaRefused { at, call_ref: call_ref.to_string() };
+        self.send(conn, frame).await
     }
 }

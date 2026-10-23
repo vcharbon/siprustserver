@@ -14,6 +14,8 @@
 //!   replication stalled                  the ACK leaves at the cap, never later
 //!   stalled, the caller's BYE            the callee reads the ACK before the BYE,
 //!     right behind her ACK               and the BYE is not held
+//!   the primary dies after its backup    the callee's 2xx repeat draws the
+//!     applied, the ACK still held        copy's ACK (§13.2.2.4)
 //! ```
 
 use std::sync::Arc;
@@ -23,10 +25,11 @@ use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness,
-    ReplicatedB2buaSut,
+    ReplicatedB2buaSut, WorkerHealth,
 };
 use scenario_harness::{Agent, Dialog};
-use sip_message::{Method, SipMessage};
+use sip_message::parser::custom::CustomParser;
+use sip_message::{Method, SipMessage, SipParser};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -207,4 +210,73 @@ async fn a_held_ack_leaves_before_the_bye_behind_it() {
     let cdrs: Vec<_> = primary_node.cdr_records();
     assert_eq!(cdrs.len(), 1, "exactly one CDR");
     assert_call_fully_released(&[&c.w_b1, &c.w_b2], &cdrs[0].call_ref).await;
+}
+
+/// The last 2xx to an INVITE `from` put on the wire, and where it went.
+fn last_invite_2xx(
+    fh: &FailoverHarness,
+    from: std::net::SocketAddr,
+) -> (Vec<u8>, std::net::SocketAddr) {
+    let parser = CustomParser::new();
+    fh.sip_entries()
+        .into_iter()
+        .rev()
+        .find(|e| {
+            e.from == from
+                && matches!(parser.parse(&e.raw), Ok(SipMessage::Response(r))
+                    if r.status() == 200 && *r.cseq().method() == Method::Invite)
+        })
+        .map(|e| (e.raw, e.to))
+        .expect("the callee answered")
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ack_the_kill_takes_is_resent_by_the_copy_to_the_2xx_repeat() {
+    let mut c = cluster("held-ack-killed").await;
+    let mut call = c.alice.invite(&c.bob).with_sdp(OFFER).through(c._proxy.addr()).send().await;
+    let mut uas = c.bob.receive("INVITE").await;
+    let (primary, backup) = worker_ordinals(uas.request());
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    c.fh.advance(Duration::from_millis(300)).await;
+    c.fh.delay(&primary, &backup, 20);
+    c.fh.delay(&backup, &primary, 20);
+    let primary_node = if primary == "b1" { &c.w_b1 } else { &c.w_b2 };
+    let call_ref = primary_node.scan_primary(&primary).pop().expect("the primary holds the call");
+
+    // ── the backup applies the ACK's write; the primary dies before it learns ─
+    let dialog = call.ack().await;
+    assert!(bob_reads(&c, Duration::from_millis(30)).await.is_none(), "the ACK is still held");
+    c.fh.mark(&primary, None, "crash", "the ACK held, its write applied at the backup");
+    if primary == "b1" {
+        c.w_b1.crash()
+    } else {
+        c.w_b2.crash()
+    };
+    c._proxy.set_health(&primary, WorkerHealth::Dead);
+    c.fh.heal(&backup, &primary);
+
+    // ── the callee repeats its 2xx; the copy ACKs it ─────────────────────────
+    let (repeat, dst) = last_invite_2xx(&c.fh, c.bob.addr());
+    c.bob.try_send_datagram(&repeat, dst).await.expect("the 2xx repeat leaves");
+    let (method, _) = bob_reads(&c, Duration::from_millis(200)).await.expect("bob reads an ACK");
+    assert_eq!(method, Method::Ack, "the copy ACKs the 2xx repeat");
+
+    // ── the primary's replacement reclaims the call and discharges its CDR ───
+    let replacement = c.fh.spawn_replacement(&primary).await;
+    let reclaimed =
+        c.fh.pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
+            replacement.is_ready() && replacement.serves(&call_ref)
+        })
+        .await;
+    assert!(reclaimed, "the replacement reclaimed the call");
+    c.fh.readmit(&primary, replacement.sip_addr());
+    c._proxy.set_health(&primary, WorkerHealth::Alive);
+    if primary == "b1" {
+        c.w_b1 = replacement
+    } else {
+        c.w_b2 = replacement
+    };
+    c.fh.advance(Duration::from_millis(500)).await;
+    ends(c, dialog, &call_ref).await;
 }

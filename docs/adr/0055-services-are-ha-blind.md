@@ -159,8 +159,13 @@ record's image under its branch (§17.1.2.2).
 - **Calls without a backup.** A call has no backup, for its whole life, when it
   is admitted while the backlog toward its backup is above a high-water mark,
   or when its backup refuses the replica at its own memory ceiling (ADR-0037
-  item 4); the refusal is a frame to the primary, and the backup's applied
-  position moves past it. The backlog is measured per backup peer: the entries
+  item 4), or when a write of it cannot reach the backup (its body does not
+  encode, or the transport refuses its frame): its entry toward the backup
+  then becomes a delete. The refusal is a frame to the primary, and the
+  backup's applied position moves past it. The backup refuses that call
+  incarnation's later writes until the call's delete or a TTL that outlives
+  the writes in flight (10 s); it keeps a bounded number of refusals, the
+  oldest evicted first, and a new call on the same identity is not refused. The backlog is measured per backup peer: the entries
   above that peer's applied position and the age of the oldest. New calls get a
   backup again once the backlog is under a low-water mark. No call is refused
   for the backlog. A gauge counts the live calls with no backup; such a call
@@ -190,9 +195,12 @@ record's image under its branch (§17.1.2.2).
   low mark not under its high one.
 
 A graceful drain is transparent: it exits once the backup has caught up. A
-kill is not: a final or a relay that left inside the replication window is
-evidence §4 ends the call on. Full transparency is not the goal; the window is
-the transport delay.
+call with no backup has no peer holding it, so while one lives the drain waits
+for its calls or its grace, as a non-HA B2BUA does. A kill is not transparent:
+a held ACK the kill takes after the backup applied its write is re-sent by the
+copy to the callee's 2xx repeat (RFC 3261 §13.2.2.4), and a final or a relay
+that left inside the replication window is evidence §4 ends the call on. Full
+transparency is not the goal; the window is the transport delay.
 
 ### 4. Evidence the call record cannot explain: one rule, any method
 
@@ -368,7 +376,9 @@ number of takeovers unshifted.
     other copy ended, each closed by the 481 it draws;
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
-    request per dialog; the call still ends or continues cleanly.
+    request per dialog; the call still ends or continues cleanly. A kill at an
+    applied sub-point is inside the window only when the primary already wrote
+    a later turn.
 
   A consumer adds shapes through the plug-in base (ADR-0049) and nothing else;
   a consumer shape that needs HA code of its own is a defect of this layer.

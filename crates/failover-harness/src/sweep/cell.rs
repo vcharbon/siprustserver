@@ -14,7 +14,7 @@ use super::parties::Parties;
 use super::{Incident, SweepShape};
 use crate::cluster::Cluster;
 use crate::roles::Placement;
-use crate::turn_points::{HeldTurn, Turn, TurnAt};
+use crate::turn_points::{HeldTurn, Turn, TurnAt, TurnPoint};
 
 /// The worker every cell places its call on; the other is its backup.
 pub const PRIMARY: &str = "b1";
@@ -85,7 +85,7 @@ pub async fn run_cell(
                 reached = None;
                 let held = held.expect("the turn points keep the arm");
                 let cut = cut.expect("armed");
-                strike(&mut cluster, &placement, cut.incident, held, &parties.names());
+                strike(&mut cluster, &placement, cut, held, &parties.names());
                 if cut.incident == Incident::SplitHealed {
                     heal.as_mut().reset(tokio::time::Instant::now() + HEAL_AFTER);
                     heal_pending = true;
@@ -165,18 +165,27 @@ fn first_call(cluster: &Cluster, name: &str) -> String {
         .unwrap_or_else(|| panic!("[{name}] no call took a turn"))
 }
 
-/// Befall the call's owners with `incident` while `held` stands at its turn
+/// Befall the call's owners with `cut`'s incident while `held` stands at its turn
 /// point. A node the incident kills stays frozen there; any other goes on.
 /// `names` are the parties' UAs, whose dialog verdicts a split that never
 /// heals declares.
 fn strike(
     cluster: &mut Cluster,
     placement: &Placement,
-    incident: Incident,
+    cut: Cut,
     held: HeldTurn,
     names: &[String],
 ) {
-    let victim = match incident {
+    let victim = match cut.incident {
+        // At an applied sub-point the backup holds the turn's write: the kill is
+        // inside a replication window only when the primary already wrote a
+        // later turn of the call, and declares nothing otherwise.
+        Incident::PrimaryKilled
+            if cut.at.point == TurnPoint::Applied && !wrote_past(cluster, &held, cut) =>
+        {
+            cluster.kill(&placement.primary, &placement.backup);
+            Some(placement.primary.as_str())
+        }
         Incident::PrimaryKilled => {
             kill_inside_the_window(cluster, placement);
             Some(placement.primary.as_str())
@@ -211,6 +220,12 @@ fn strike(
     if victim != Some(held.node.as_str()) {
         held.release();
     }
+}
+
+/// Whether the primary wrote a turn of `held`'s call after the cut's turn.
+fn wrote_past(cluster: &Cluster, held: &HeldTurn, cut: Cut) -> bool {
+    let turns = cluster.fh.turn_points().turns(&held.call_ref);
+    turns.iter().skip(cut.at.turn).any(|t| t.wrote)
 }
 
 /// Kill the primary of `placement` inside the replication window: a copy may

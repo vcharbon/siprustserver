@@ -142,7 +142,7 @@ pub fn cell_name(shape: &str, incident: Incident, at: TurnAt) -> String {
 /// least one turn. Its turns are the sweep's turn points.
 pub fn baseline(shape: &dyn SweepShape) -> Vec<crate::turn_points::Turn> {
     let name = format!("{}/baseline", shape.id());
-    let turns = in_cell(|| run_cell(shape, &name, None, false))
+    let turns = in_cell(&name, || run_cell(shape, &name, None, false))
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
     assert!(!turns.is_empty(), "[{name}] the call took no turn at its primary");
     turns
@@ -167,7 +167,7 @@ pub fn sweep(shape: &dyn SweepShape, incident: Incident, ratchet: &Ratchet) {
             let at = TurnAt { turn: i + 1, point };
             let name = cell_name(shape.id(), incident, at);
             let cut = Some(Cut { at, incident });
-            if let Err(payload) = in_cell(|| run_cell(shape, &name, cut, false)) {
+            if let Err(payload) = in_cell(&name, || run_cell(shape, &name, cut, false)) {
                 failed.insert(name.clone(), panic_text(payload.as_ref()));
             }
             ran.push(name);
@@ -182,7 +182,7 @@ pub fn sweep(shape: &dyn SweepShape, incident: Incident, ratchet: &Ratchet) {
 /// Panics on any finding.
 pub fn replay(shape: &dyn SweepShape, incident: Incident, at: TurnAt) {
     let name = cell_name(shape.id(), incident, at);
-    in_cell(|| run_cell(shape, &name, Some(Cut { at, incident }), true))
+    in_cell(&name, || run_cell(shape, &name, Some(Cut { at, incident }), true))
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
 }
 
@@ -190,9 +190,11 @@ pub fn replay(shape: &dyn SweepShape, incident: Incident, at: TurnAt) {
 const CELL_STACK: usize = 256 * 1024 * 1024;
 
 /// Drive the future `cell` builds to its end on a thread of its own, on a
-/// fresh current-thread runtime whose clock is paused: a cell's tasks die with
-/// its runtime, and its panic is handed back.
+/// fresh current-thread runtime whose clock is paused and whose random source
+/// is seeded by the cell's name: a cell's tasks die with its runtime, every
+/// unbiased `select!` draws alike on every run, and its panic is handed back.
 fn in_cell<F: std::future::Future>(
+    name: &str,
     cell: impl FnOnce() -> F + Send,
 ) -> std::thread::Result<F::Output>
 where
@@ -206,6 +208,7 @@ where
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .start_paused(true)
+                    .rng_seed(tokio::runtime::RngSeed::from_bytes(name.as_bytes()))
                     .build()
                     .expect("a paused runtime")
                     .block_on(Box::pin(cell()))

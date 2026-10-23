@@ -633,6 +633,7 @@ impl Puller {
                         (false, _) => ApplyMode::Forward,
                     };
                     let write = apply::written(op, &body, &incarnation);
+                    let refused = incarnation.clone();
                     let outcome = self
                         .apply_to_store(
                             op,
@@ -651,12 +652,10 @@ impl Puller {
                         .await;
                     // A replica refused at this backup's ceiling: the primary is
                     // told, and the call has no backup for life (ADR-0055 §3).
-                    if outcome == ApplyOutcome::Shed {
-                        self.store.refuse_replica(&call_ref, self.peer_ordinal(), body_ttl_ms);
-                        let refused = Frame::ReplicaRefused { at, call_ref: call_ref.clone() };
-                        if !self.send(conn.as_ref(), refused).await {
-                            return self.ended(connected_at);
-                        }
+                    if outcome == ApplyOutcome::Shed
+                        && !self.refuse(conn.as_ref(), at, &call_ref, refused.as_deref()).await
+                    {
+                        return self.ended(connected_at);
                     }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
