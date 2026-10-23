@@ -116,7 +116,7 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
                 emitted_ack,
                 awaited_ack_cseq,
                 answered_2xx,
-                bye_behind_ack: bye_reason.map(|reason| HeldRequest::Bye {
+                bye_behind_ack: bye_reason.map(|reason| QueuedRequest::Bye {
                     reason,
                     headers: Vec::new(),
                     body: Vec::new(),

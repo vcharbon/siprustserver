@@ -159,6 +159,19 @@ acknowledging peer, the 2xx it answered awaiting its ACK (§13.3.1.4) and the
 BYE queued behind that ACK (§15), the dialling facts of a leg's dialling
 INVITE, and the final sent on a received one.
 
+**Subscription record** (ADR-0055 §2, `call::Subscription`):
+A subscription this stack is the notifier of on a dialog, a usage of its own
+(RFC 5057 §3): its event package and `id` (RFC 6665 §4.5), the state its
+NOTIFYs reported, and its NOTIFY awaiting a final. It opens with its first
+NOTIFY and is **terminated** for good once a NOTIFY stating `terminated` is
+asked for, or once a final that removes it or its NOTIFY's timeout ends it
+(RFC 6665 §4.2.2): no NOTIFY leaves on it after, whoever asks. This stack's
+NOTIFYs and BYE asked for while one of its NOTIFYs on the dialog awaits its
+final are **queued** on the dialog, in order, and leave on that final or 8·T1
+after the NOTIFY left.
+_Avoid_: "own NOTIFY" for the record; "held" for a queued request (held is a
+received request owed a final).
+
 **Method table** (`b2bua_core::rules::method_table`):
 What differs by method for a request record: what a dialog this side is
 ending makes of it, the final a relay toward an ended leg owes, and whether

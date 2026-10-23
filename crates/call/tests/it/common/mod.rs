@@ -16,13 +16,16 @@ use call::model::*;
 use proptest::prelude::*;
 use sip_retransmit::Class;
 
+mod dialog;
 mod emission;
 mod provisional;
 mod request_record;
 mod sdp_session;
-use emission::{arb_own_notify, arb_retained_emission};
-use provisional::{arb_owed_answer, arb_provisional};
-use request_record::{arb_invite_record, arb_pending_request};
+mod subscription;
+use dialog::arb_dialog;
+use emission::arb_retained_emission;
+use provisional::arb_provisional;
+use request_record::arb_invite_record;
 use sdp_session::arb_sdp_session;
 
 // ── Representative fixture (port of fixture.ts) ─────────────────────────────
@@ -443,92 +446,6 @@ fn arb_cdr_type() -> impl Strategy<Value = CdrEventType> {
 }
 fn arb_direction() -> impl Strategy<Value = Direction> {
     prop_oneof![Just(Direction::FromA), Just(Direction::FromB)]
-}
-
-/// Boxed, as [`arb_leg`] is: a debug build otherwise holds the whole value tree
-/// of a call on the test thread's stack.
-fn arb_dialog() -> BoxedStrategy<Dialog> {
-    let sip = (
-        arb_tag(),
-        arb_tag(),
-        arb_dialog_state(),
-        arb_uri(),
-        any::<i64>(),
-        proptest::collection::vec("[a-z0-9 /.:;=<>-]{1,40}", 0..3),
-        proptest::collection::vec(
-            ("(a|b-[0-9]{1,2})", arb_tag())
-                .prop_map(|(leg_id, peer_tag)| PeerDialog { leg_id, peer_tag }),
-            0..2,
-        ),
-    );
-    let ext = (
-        proptest::option::of(any::<i64>()),
-        proptest::collection::vec(arb_pending_request(), 0..3),
-        proptest::option::of(arb_invite_record()),
-        proptest::option::of(arb_invite_record()),
-        proptest::option::of(arb_bytes(80)),
-        (
-            proptest::option::of(arb_sdp_session()),
-            proptest::option::of(arb_owed_answer()),
-            proptest::option::of(arb_own_notify()),
-        ),
-        (any::<bool>(), proptest::option::of(arb_tag())),
-    );
-    (sip, ext)
-        .prop_map(
-            |(
-                (our_tag, peer_tag, state, remote_target, our_cseq, route_set, fronts),
-                (
-                    peer_cseq,
-                    requests,
-                    sent_invite,
-                    answered_invite,
-                    cached_sdp,
-                    (sdp_session, owed_answer, own_notify),
-                    (shown, shows_media),
-                ),
-            )| Dialog {
-                our_tag,
-                peer_tag,
-                state,
-                our_cseq,
-                peer_cseq,
-                remote_target,
-                route_set,
-                fronts,
-                shown,
-                shows_media,
-                requests,
-                sent_invite,
-                answered_invite,
-                cached_sdp,
-                sdp_session,
-                owed_answer,
-                own_notify,
-            },
-        )
-        .boxed()
-}
-
-/// Any dialog state, a retired one with open requests.
-fn arb_dialog_state() -> impl Strategy<Value = DialogState> {
-    let end = prop_oneof![
-        any::<u16>().prop_map(DialogEnd::Rejected),
-        Just(DialogEnd::PeerBye),
-        Just(DialogEnd::EarlyPeerBye),
-        proptest::option::of(any::<u16>())
-            .prop_map(|final_status| DialogEnd::OurBye { final_status }),
-    ];
-    let retired = proptest::collection::vec(arb_pending_request(), 0..2)
-        .prop_map(|open_requests| RetiredDialog { open_requests });
-    prop_oneof![
-        Just(DialogState::Early),
-        Just(DialogState::Confirmed),
-        Just(DialogState::Ending(EndingBy::Bye)),
-        Just(DialogState::Ending(EndingBy::Cancel)),
-        end.prop_map(DialogState::Ended),
-        retired.prop_map(DialogState::Retired),
-    ]
 }
 
 /// Boxed: a value tree this size, held by value in every enclosing tuple, is

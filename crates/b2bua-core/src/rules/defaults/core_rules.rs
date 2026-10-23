@@ -713,11 +713,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // reliably, or a REFER-progress NOTIFY — records as this stack's own,
         // and denies one transaction or one subscription, never the
         // dialog: a PRACK's 481 is RFC 3262 §3's ordinary answer once the
-        // responder no longer holds that provisional unacknowledged. A refer
-        // NOTIFY's 481 is the transfer machine's (`transfer-notify-481` ends
-        // the subscription, RFC 6665 §4.4.1); this rule keeps the remainder,
-        // where nothing is owed and nothing moves. A RELAYED request's failure
-        // is `relay-non-invite-failure`'s to relay.
+        // responder no longer holds that provisional unacknowledged; a
+        // NOTIFY's that removes its subscription ended it before the rules
+        // (RFC 6665 §4.2.2). Nothing is owed and nothing moves. A RELAYED
+        // request's failure is `relay-non-invite-failure`'s to relay.
         rule(
             "absorb-own-request-failure",
             &[],

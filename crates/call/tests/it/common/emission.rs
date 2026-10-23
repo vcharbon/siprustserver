@@ -1,6 +1,6 @@
 //! What a dialog keeps of the messages this stack sent, for the round-trip
-//! property: the retained emissions its ladders repeat, the 2xx awaiting its
-//! ACK, and this stack's unanswered NOTIFY with the requests held behind it.
+//! property: the retained emissions its ladders repeat and the 2xx awaiting
+//! its ACK.
 
 use call::model::*;
 use proptest::prelude::*;
@@ -33,31 +33,4 @@ pub(super) fn arb_retained_emission() -> impl Strategy<Value = RetainedEmission>
 pub(super) fn arb_unacked_2xx() -> impl Strategy<Value = Unacked2xx> {
     (arb_tag(), any::<i64>(), arb_retained_emission())
         .prop_map(|(dialog_tag, cseq, emission)| Unacked2xx { dialog_tag, cseq, emission })
-}
-
-/// Any unanswered NOTIFY of this stack, with up to two requests held behind it.
-pub(super) fn arb_own_notify() -> impl Strategy<Value = OwnNotify> {
-    let headers = proptest::collection::vec((arb_tag(), arb_tag()), 0..3);
-    let held = prop_oneof![
-        (arb_tag(), arb_tag(), proptest::option::of(arb_tag()), arb_bytes(80)).prop_map(
-            |(event, subscription_state, content_type, body)| HeldRequest::Notify {
-                event,
-                subscription_state,
-                content_type,
-                body,
-            }
-        ),
-        (
-            proptest::option::of(arb_tag()),
-            headers,
-            arb_bytes(80),
-            proptest::option::of(arb_tag()),
-            proptest::option::of(any::<u32>()),
-        )
-            .prop_map(|(reason, headers, body, content_type, max_forwards)| {
-                HeldRequest::Bye { reason, headers, body, content_type, max_forwards }
-            }),
-    ];
-    (any::<i64>(), any::<i64>(), proptest::collection::vec(held, 0..3))
-        .prop_map(|(cseq, sent_at_ms, held)| OwnNotify { cseq, sent_at_ms, held })
 }

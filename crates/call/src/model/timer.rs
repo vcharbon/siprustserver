@@ -62,11 +62,11 @@ pub enum TimerType {
     ReferReinviteAnswer,
     /// Overall REFER safety timer covering the full transfer state machine.
     ReferOverallSafety,
-    /// The earliest end of a wait of this stack's requests held behind its own
-    /// NOTIFY on a dialog ([`crate::OwnNotify::ANSWER_CAP_MS`] after that
-    /// NOTIFY left): they leave though it is unanswered. Call-scoped, armed
-    /// exactly while a request is held; it outlives the start of the
-    /// termination, whose BYE may be the request held.
+    /// The earliest end of a wait of this stack's requests queued behind its
+    /// own NOTIFY on a dialog ([`crate::NotifyInFlight::ANSWER_CAP_MS`] after
+    /// that NOTIFY left): they leave though it is unanswered. Call-scoped,
+    /// armed exactly while a request is queued; it outlives the start of the
+    /// termination, whose BYE may be the request queued.
     NotifyAnswerCap,
     /// The earliest deadline of a received request held for a final a service
     /// gives later ([`crate::RequestRecord::HELD_ANSWER_MS`] after it

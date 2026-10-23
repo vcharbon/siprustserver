@@ -1,11 +1,11 @@
 //! The BYE this stack sends on a confirmed dialog (RFC 3261 §15): what the
 //! leg is owed before it, its composition with the `Reason` and the lines of
 //! the peer's it restates, and its order behind the ACK of the dialog's own
-//! 2xx and behind this stack's own NOTIFY there ([`super::own_notify`]).
+//! 2xx and behind this stack's own NOTIFY there ([`super::subscription`]).
 
 use call::helpers::TERMINATING_TIMEOUT_MS;
 use call::TxnKind;
-use call::{Call, Dialog, DialogId, HeldRequest, Leg, Obligation, TimerKey, TimerType};
+use call::{Call, Dialog, DialogId, Leg, Obligation, QueuedRequest, TimerKey, TimerType};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
 use sip_message::{Method, SipHeader};
@@ -56,28 +56,28 @@ impl ActionExecutor<'_> {
         let Some(id) = leg.dialogs.confirmed().map(|d| d.id()) else { return };
         let row = row(&Method::Bye);
         if row.waits_behind_unacked_answer && answer_unacked(call, leg_id) {
-            hold_behind_ack(call, leg_id, &id, relayed.held_bye(reason, hops));
+            hold_behind_ack(call, leg_id, &id, relayed.queued_bye(reason, hops));
             return;
         }
-        if row.waits_behind_own_notify && self.held_behind_notify(call, leg_id, &id) {
-            self.hold(call, fx, leg_id, &id, relayed.held_bye(reason, hops));
+        if row.waits_behind_own_notify && self.waits_behind_notify(call, leg_id, &id) {
+            self.queue(call, fx, leg_id, &id, relayed.queued_bye(reason, hops));
             return;
         }
         self.bye_now(call, fx, leg_id, &id, reason, relayed, hops);
     }
 
-    /// Send `bye`, a BYE held on `leg_id`'s dialog `id` behind an ACK or this
+    /// Send `bye`, a BYE queued on `leg_id`'s dialog `id` behind an ACK or this
     /// stack's NOTIFY, composed now. A terminating call's backstop runs again
     /// from this BYE, so its transaction has its whole bound.
-    pub(super) fn send_held_bye(
+    pub(super) fn send_queued_bye(
         &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
         id: &DialogId,
-        bye: HeldRequest,
+        bye: QueuedRequest,
     ) {
-        let HeldRequest::Bye { reason, headers, body, content_type, max_forwards } = bye else {
+        let QueuedRequest::Bye { reason, headers, body, content_type, max_forwards } = bye else {
             return;
         };
         let headers = headers
@@ -192,7 +192,7 @@ fn answer_unacked(call: &Call, leg_id: &str) -> bool {
 
 /// Hold `bye` behind the ACK of the 2xx `leg_id`'s dialog `id` answered
 /// the leg's dialog-creating INVITE with (RFC 3261 §15).
-fn hold_behind_ack(call: &mut Call, leg_id: &str, id: &DialogId, bye: HeldRequest) {
+fn hold_behind_ack(call: &mut Call, leg_id: &str, id: &DialogId, bye: QueuedRequest) {
     *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| {
         if let Some(x) = d.answered_invite.as_mut().and_then(|r| r.invite.as_mut()) {
             x.bye_behind_ack = Some(bye);

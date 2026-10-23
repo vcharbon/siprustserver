@@ -164,17 +164,26 @@ pub fn rule_chain_turn(
             let fx = &mut ladder_fx;
             response_facts::record(&mut exec, &mut call, fx, leg, resp, screened);
             // Only the final on this stack's NOTIFY's own transaction ends
-            // the wait behind it: a final to another request reusing its
-            // number (a dead owner's) answers nothing here.
-            let own = resolved.record.as_deref().is_some_and(|(_, r)| r.is_own());
-            if own {
-                exec.release_answered_notify(&mut call, &mut ladder_fx, leg, resp);
+            // the wait behind it and speaks for its subscription: a final to
+            // another request reusing its number (a dead owner's) answers
+            // nothing here.
+            if let Some((holder, record)) = resolved.record.as_deref() {
+                if resp.status() >= 200 {
+                    let status = Some(resp.status());
+                    exec.notify_settled(&mut call, fx, leg, holder, record, status);
+                }
             }
         }
     }
     // The request record a final or a timeout settles is settled before the
     // rules read the event, which they read on `resolved` (ADR-0055 §2).
     exec.settle_before_rules(&mut call, event, source_leg_id, &mut resolved);
+    // This stack's NOTIFY that timed out ends its subscription (RFC 6665
+    // §4.2.2) and no longer holds the requests behind it.
+    if let (CallEvent::Timeout { .. }, Some((holder, record))) = (event, resolved.record.as_deref())
+    {
+        exec.notify_settled(&mut call, &mut ladder_fx, source_leg_id, holder, record, None);
+    }
     // The transaction layer answered an out-of-dialog CANCEL itself — 200 to
     // the CANCEL, 487 to the initial INVITE (RFC 3261 §9.2): the record
     // carries that transaction's one final before the rules read it, over a

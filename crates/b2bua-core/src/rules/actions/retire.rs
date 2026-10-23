@@ -9,7 +9,7 @@
 //! that BYE.
 
 use call::helpers::Scope;
-use call::{Call, DialogId, HeldRequest, Obligation, TimerType};
+use call::{Call, DialogId, Obligation, QueuedRequest, TimerType};
 
 use crate::effects::HandlerEffects;
 
@@ -64,7 +64,7 @@ impl ActionExecutor<'_> {
             // Discharged — its ACK arrived — the BYE behind it leaves; with its
             // leg the dialog it would end is gone.
             if let (Scope::Obligation(_), Some((leg_id, id, bye))) = (&scope, bye) {
-                self.send_held_bye(call, fx, &leg_id, &id, bye);
+                self.send_queued_bye(call, fx, &leg_id, &id, bye);
             }
         }
         match scope {
@@ -94,7 +94,7 @@ impl ActionExecutor<'_> {
     ) {
         if let Some((leg_id, id, bye)) = bye_behind(call, obligation) {
             *call = call::helpers::clear_retained(call.clone(), obligation);
-            self.send_held_bye(call, fx, &leg_id, &id, bye);
+            self.send_queued_bye(call, fx, &leg_id, &id, bye);
         }
     }
 }
@@ -104,7 +104,7 @@ impl ActionExecutor<'_> {
 pub(super) fn bye_behind(
     call: &Call,
     obligation: &Obligation,
-) -> Option<(String, DialogId, HeldRequest)> {
+) -> Option<(String, DialogId, QueuedRequest)> {
     let Obligation::AckOf2xx { leg, dialog_tag, cseq } = obligation else { return None };
     let d = call::helpers::find_leg(call, leg)?.dialogs.iter().find(|d| {
         call::helpers::answered_2xx(d)
@@ -115,7 +115,7 @@ pub(super) fn bye_behind(
 }
 
 /// Whether a timer outlives the start of the call's termination: the
-/// teardown's own safety net, the wait of a BYE held behind this stack's own
+/// teardown's own safety net, the wait of a BYE queued behind this stack's own
 /// NOTIFY, the limiter refresh of a call that holds its
 /// admission until it ends, and the deadline of an answer the call awaits off
 /// its turn (ADR-0039), whose answer still settles what the request holds.

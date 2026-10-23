@@ -19,8 +19,9 @@
 //! - `create_leg` — the new leg's INVITE, opening the attempt it dials
 //! - `originate` — requests the B2BUA sends itself (re-INVITE,
 //!   NOTIFY, in-dialog probes)
-//! - `own_notify` — this stack's requests held behind its own unanswered
-//!   NOTIFY on a dialog
+//! - `subscription` — this stack as the notifier of a dialog's subscriptions:
+//!   a NOTIFY refused once its subscription is terminated, and this stack's
+//!   requests queued behind its own unanswered NOTIFY
 //! - `prack` — the PRACKs this stack owes responders, settled in one step
 //! - `provisional_arrival` — the engine's record of a reliable provisional
 //!   as it arrives, before the rules
@@ -46,7 +47,6 @@ mod dispatch;
 mod ladder;
 mod lost_round;
 mod originate;
-mod own_notify;
 mod peer_bye;
 mod prack;
 mod provisional_arrival;
@@ -63,6 +63,7 @@ mod select;
 mod show_provisional;
 mod snapshot_answer;
 mod straggler;
+mod subscription;
 mod teardown;
 mod unrelayed;
 
@@ -75,9 +76,9 @@ use crate::turn_scope::TurnScope;
 
 use b2bua_sdk::model::{RuleAction, RuleContext};
 
-pub(crate) use own_notify::holds_requests;
 pub use prack::{Owed, Settle};
 pub use provisional_arrival::invite_open;
+pub(crate) use subscription::holds_requests;
 
 /// Executes rule actions against a working copy of the call, drawing every
 /// identifier it mints from its turn and noting there what it reports.

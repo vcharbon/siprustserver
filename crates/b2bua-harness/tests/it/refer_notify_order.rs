@@ -12,7 +12,9 @@
 //! 6. a held NOTIFY still leaves once the referrer's own BYE ended the dialog,
 //!    and the call ends only after it;
 //! 7. a request relayed to the referrer meanwhile never overtakes the held
-//!    NOTIFY's number: a held request is numbered when it leaves.
+//!    NOTIFY's number: a held request is numbered when it leaves;
+//! 8. a held NOTIFY never leaves once the answer to the one ahead of it ended
+//!    their subscription (RFC 6665 §4.2.2), and the BYE ending the call does.
 //!
 //! Each referrer request arrives numbered right after the one before it.
 
@@ -318,6 +320,33 @@ async fn a_request_relayed_meanwhile_never_overtakes_the_held_notify_s_number() 
     let mut last = bob.receive("NOTIFY").await;
     assert_eq!(cseq(&last), cseq(&bob_info) + 1, "the held NOTIFY is numbered as it leaves");
     last.respond(200, "OK").await;
+
+    alice_dialog.bye().await.expect(200).await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_notify_never_leaves_once_the_answer_ahead_ended_the_subscription() {
+    let h = Harness::with_transit_delay("refer-held-notify-after-481", 1);
+    let alice = h.agent("alice", "127.0.0.1:6271").await;
+    let bob = h.agent("bob", "127.0.0.1:6272").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6272)
+        .start(&h, "b2bua", "127.0.0.1:6274")
+        .await;
+    let (mut alice_dialog, _) = bob_refers(&alice, &bob, &b2bua, &x_api_reject()).await;
+
+    // The reject's final NOTIFY waits behind the unanswered immediate one.
+    let mut immediate = bob.receive("NOTIFY").await;
+    h.advance(Duration::from_secs(1)).await;
+    immediate.respond(481, "Call/Transaction Does Not Exist").await;
+    h.advance(ANSWER_CAP).await;
+    assert!(
+        bob.try_receive_tolerating("NOTIFY", &[]).await.is_none(),
+        "a 481 to a NOTIFY ends its subscription: the NOTIFY held behind it never leaves"
+    );
 
     alice_dialog.bye().await.expect(200).await;
     bob.receive("BYE").await.respond(200, "OK").await;

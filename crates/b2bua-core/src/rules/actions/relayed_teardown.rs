@@ -1,7 +1,7 @@
 //! What a BYE or CANCEL this stack mints carries of the peer that asked for
 //! the teardown: its relayable headers, a BYE's body, its hop count.
 
-use call::HeldRequest;
+use call::QueuedRequest;
 use sip_message::generators::{self, RelayScope, RelaySituation, RelayedMessage};
 use sip_message::header::{q850_cause_alone, readable_reasons, HeaderName, MediaType};
 use sip_message::{hops, Method, SipHeader};
@@ -29,9 +29,9 @@ impl Relayed {
         Self { headers, body: Vec::new(), content_type: None }
     }
 
-    /// The BYE carrying these and `reason`, `hops`, held as what it says.
-    pub(super) fn held_bye(self, reason: Option<&str>, hops: Option<u32>) -> HeldRequest {
-        HeldRequest::Bye {
+    /// The BYE carrying these and `reason`, `hops`, queued as what it says.
+    pub(super) fn queued_bye(self, reason: Option<&str>, hops: Option<u32>) -> QueuedRequest {
+        QueuedRequest::Bye {
             reason: reason.map(str::to_string),
             headers: self
                 .headers

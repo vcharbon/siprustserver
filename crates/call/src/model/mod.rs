@@ -38,8 +38,9 @@
 //!     and the key that discharges it (ADR-0032)
 //!   - [`provisional`] — one reliable provisional the call received (RFC 3262)
 //!   - [`owed_answer`] — the offer a dialog's responder awaits an answer to
-//!   - [`own_notify`] — this stack's unanswered NOTIFY on a dialog and the
-//!     requests held behind it
+//!   - [`subscription`] — a subscription this stack notifies on a dialog, its
+//!     state and its NOTIFY awaiting a final (RFC 6665)
+//!   - [`queued_request`] — a request of this stack waiting on a dialog
 //!   - [`timer`] — serializable timer intents ([`TimerType`], [`TimerScope`],
 //!     [`TimerKey`], [`TimerEntry`])
 //!   - [`deadline`] — a configured wait that may be off ([`Deadline`])
@@ -66,14 +67,15 @@ pub mod message_ring;
 pub mod obligation;
 pub mod outbound_invite;
 pub mod owed_answer;
-pub mod own_notify;
 pub mod provisional;
+pub mod queued_request;
 pub mod record;
 pub mod relay_owner;
 pub mod request_record;
 pub mod sdp_session;
 pub mod services;
 pub mod sm;
+pub mod subscription;
 pub mod termination;
 pub mod timer;
 
@@ -97,10 +99,10 @@ pub use message_ring::{MessageDirection, MessageEntry, MessageRing};
 pub use obligation::{Obligation, ObligationKind};
 pub use outbound_invite::OutboundInvite;
 pub use owed_answer::OwedAnswer;
-pub use own_notify::{HeldRequest, OwnNotify};
 pub use provisional::{
     CSeq, Ceased, Ladder, Provisional, ProvisionalId, RSeq, ResponderAck, Shown,
 };
+pub use queued_request::QueuedRequest;
 pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology,
     PolicyUpdateBody, SipHeader,
@@ -113,5 +115,6 @@ pub use services::{
     TransferPhase, TransferState,
 };
 pub use sm::{MachineId, StateLabel};
+pub use subscription::{NotifyInFlight, Subscription, SubscriptionState};
 pub use termination::{Termination, TerminationCause, TimeoutKind};
 pub use timer::{TimerEntry, TimerKey, TimerScope, TimerScopeKind, TimerType};

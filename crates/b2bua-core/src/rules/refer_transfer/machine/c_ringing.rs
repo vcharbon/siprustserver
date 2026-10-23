@@ -103,7 +103,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                 RuleAction::ConfirmDialog { leg_id: c_leg_id.clone() },
                 RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: None },
             ];
-            actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
+            actions.push(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
             actions.extend([
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
                 RuleAction::cancel(TimerKey::leg(call::TimerType::NoAnswer, &c_leg_id)),
@@ -155,7 +155,7 @@ pub(super) fn c_fail_initial() -> RuleDefinition {
             let st = state(ctx)?.clone();
             let resp = ctx.response()?;
             let mut actions = Vec::new();
-            actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, resp.status(), resp.reason()));
+            actions.push(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, resp.status(), resp.reason()));
             actions.extend([
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
@@ -202,7 +202,7 @@ pub(super) fn c_no_answer() -> RuleDefinition {
             let st = state(ctx)?.clone();
             let c_leg_id = st.c_leg_id.clone()?;
             let mut actions = Vec::new();
-            actions.extend(notify(&st, SUB_STATE_TERMINATED_TIMEOUT, 408, "Request Timeout"));
+            actions.push(notify(&st, SUB_STATE_TERMINATED_TIMEOUT, 408, "Request Timeout"));
             actions.extend([
                 RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Timeout,

@@ -5,7 +5,7 @@
 
 use call::helpers::bump_our_cseq;
 use call::TxnKind;
-use call::{Call, DialogId, HeldRequest};
+use call::{Call, DialogId};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{Event, HeaderValue, SubscriptionState};
 use sip_message::{Method, SipStr};
@@ -14,50 +14,16 @@ use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::rules::capabilities;
-use crate::rules::method_table::row;
 use crate::rules::relay;
 
 use super::select::{in_dialog_method, leg_at};
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    /// Originate a NOTIFY on `leg_id`'s confirmed dialog (toward the referrer)
-    /// carrying the REFER implicit-subscription state (RFC 3515 §2.4.4): `Event:
-    /// refer`, `Subscription-State`, and a `message/sipfrag` body. The B2BUA is
-    /// the UAS of the referrer leg, so the NOTIFY rides that dialog's local
-    /// sequence.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn send_notify(
-        &mut self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-        leg_id: &str,
-        event: &str,
-        subscription_state: &str,
-        content_type: Option<&str>,
-        body: &[u8],
-    ) {
-        let Some(id) =
-            leg_at(call, leg_id).and_then(call::helpers::carrying_dialog).map(|d| d.id())
-        else {
-            return;
-        };
-        let waits = row(&Method::Notify).waits_behind_own_notify;
-        if waits && self.held_behind_notify(call, leg_id, &id) {
-            let notify = HeldRequest::Notify {
-                event: event.to_string(),
-                subscription_state: subscription_state.to_string(),
-                content_type: content_type.map(str::to_string),
-                body: body.to_vec(),
-            };
-            self.hold(call, fx, leg_id, &id, notify);
-            return;
-        }
-        self.notify_now(call, fx, leg_id, &id, event, subscription_state, content_type, body);
-    }
-
     /// Compose and send the NOTIFY on `leg_id`'s dialog `id`, the dialog's next
-    /// CSeq: what this stack asks for there next waits for its final.
+    /// CSeq, carrying `event`'s subscription state (RFC 6665 §8.1.2) and
+    /// `body`: what this stack asks for there next waits for its final. The
+    /// subscription's gate and order are [`super::subscription`]'s.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn notify_now(
         &mut self,
@@ -123,7 +89,7 @@ impl ActionExecutor<'_> {
         };
         self.record_own_effect(call, leg_id, id, &notify);
         fx.outbound.push(notify);
-        self.notify_left(call, leg_id, id, outbound_cseq);
+        self.notify_left(call, leg_id, id, event, outbound_cseq);
     }
 
     /// Originate a re-INVITE on `leg_id` carrying `body` as the new offer, typed

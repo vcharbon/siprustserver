@@ -9,9 +9,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::owed_answer::OwedAnswer;
-use super::own_notify::OwnNotify;
+use super::queued_request::QueuedRequest;
 use super::request_record::RequestRecord;
 use super::sdp_session::LegSdpSession;
+use super::subscription::Subscription;
 
 /// Direction of an original relayed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,11 +172,15 @@ pub struct Dialog {
     /// transaction and its answer may ride another (ADR-0055 §2).
     #[serde(default)]
     pub owed_answer: Option<OwedAnswer>,
-    /// This stack's NOTIFY on the dialog that awaits its final, and its
-    /// requests held behind it; `None` when no NOTIFY of this stack is
-    /// unanswered.
+    /// The subscriptions this stack notifies on the dialog (RFC 6665, RFC
+    /// 5057 §3), each opened by its first NOTIFY and kept once terminated.
     #[serde(default)]
-    pub own_notify: Option<OwnNotify>,
+    pub subscriptions: Vec<Subscription>,
+    /// This stack's NOTIFYs and BYE asked for while one of its NOTIFYs on the
+    /// dialog awaits its final, oldest first: each leaves in turn once nothing
+    /// ahead of it is in flight (RFC 3261 §12.2.2).
+    #[serde(default)]
+    pub queued: Vec<QueuedRequest>,
 }
 
 impl Dialog {
@@ -204,8 +209,21 @@ impl Dialog {
             cached_sdp: None,
             sdp_session: None,
             owed_answer: None,
-            own_notify: None,
+            subscriptions: Vec::new(),
+            queued: Vec::new(),
         }
+    }
+
+    /// The subscription of the dialog `event` and `id` name.
+    pub fn subscription(&self, event: &str, id: Option<&str>) -> Option<&Subscription> {
+        self.subscriptions.iter().find(|s| s.is_named(event, id))
+    }
+
+    /// When this stack's next request on the dialog may leave though its
+    /// NOTIFYs there are unanswered: the latest end of their waits; `None`
+    /// while none awaits a final.
+    pub fn notify_wait_ends_at_ms(&self) -> Option<i64> {
+        self.subscriptions.iter().filter_map(|s| s.notify.map(|n| n.cap_at_ms())).max()
     }
 
     /// The tags that name the dialog.

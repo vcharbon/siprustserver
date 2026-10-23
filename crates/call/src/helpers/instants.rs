@@ -5,7 +5,7 @@ use crate::model::{Call, Leg};
 
 /// Move every absolute instant `call` holds by `offset_ms` (the reading
 /// clock minus the writing clock): the timer ledger's deadlines, the creation
-/// time, each dialled INVITE's send time, each own NOTIFY's send time, each
+/// time, each dialled INVITE's send time, each NOTIFY in flight's send time, each
 /// request record's deadline, the CDR events, the message rings, the decision log, the termination record and the
 /// start of a transfer or reroute. Durations and counters are left as they
 /// are, and so is the opaque service `ext`. A zero offset changes nothing.
@@ -40,7 +40,7 @@ pub fn shift_instants(call: &mut Call, offset_ms: i64) {
 }
 
 /// The instants one leg holds: its INVITE's send time, its message ring, each
-/// dialog's own NOTIFY and the deadline of each request record.
+/// dialog's NOTIFYs in flight and the deadline of each request record.
 fn shift_leg(leg: &mut Leg, offset_ms: i64) {
     if let Some(invite) = leg.outbound_invite_mut() {
         invite.sent_at_ms = invite.sent_at_ms.saturating_add(offset_ms);
@@ -49,7 +49,7 @@ fn shift_leg(leg: &mut Leg, offset_ms: i64) {
         entry.at_ms = entry.at_ms.saturating_add(offset_ms);
     }
     for dialog in leg.dialogs.iter_mut() {
-        if let Some(notify) = dialog.own_notify.as_mut() {
+        for notify in dialog.subscriptions.iter_mut().filter_map(|s| s.notify.as_mut()) {
             notify.sent_at_ms = notify.sent_at_ms.saturating_add(offset_ms);
         }
         for record in dialog.requests.iter_mut() {

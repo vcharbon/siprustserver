@@ -1380,7 +1380,6 @@ fn a_repeated_transfer_target_provisional_is_accounted_once() {
         started_at_ms: 0,
         last_c_leg_provisional_status: Some(180),
         c_initial_sdp: None,
-        subscription_terminated: false,
     });
     b2bua_core::rules::refer_transfer::project_cursor(&mut call);
 
@@ -3202,6 +3201,7 @@ mod ack_leg_body {
 
 mod bye_order;
 mod create_leg_admission;
+mod subscription_record;
 mod txn_timeouts;
 
 // ── default_sdp config → CreateLeg body_override (service fake-offer source) ──

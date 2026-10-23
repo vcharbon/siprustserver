@@ -25,7 +25,6 @@ fn every_instant_present() -> Call {
         started_at_ms: 1_779_440_060_000,
         last_c_leg_provisional_status: None,
         c_initial_sdp: None,
-        subscription_terminated: false,
     });
     call.termination = Some(Termination {
         at_ms: 1_779_440_070_000,
@@ -35,8 +34,10 @@ fn every_instant_present() -> Call {
     });
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         let dialog = leg.dialogs.confirmed_mut().expect("each fixture leg holds its dialog");
-        dialog.own_notify =
-            Some(OwnNotify { cseq: 9000, sent_at_ms: 1_779_440_065_000, held: Vec::new() });
+        dialog.subscriptions = vec![Subscription {
+            notify: Some(NotifyInFlight { cseq: 9000, sent_at_ms: 1_779_440_065_000 }),
+            ..Subscription::new("refer", None)
+        }];
         leg.messages.entries.push(MessageEntry {
             seq: 1,
             at_ms: 1_779_440_042_005,
@@ -113,7 +114,7 @@ fn every_instant_moves_by_the_offset_and_nothing_else_moves() {
         "transfer",
         "reroute",
         "sent_at_ms",
-        "own_notify",
+        "subscriptions",
         "messages",
     ] {
         assert!(

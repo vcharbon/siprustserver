@@ -12,22 +12,20 @@ pub(super) const SUB_STATE_TERMINATED_TIMEOUT: &str = "terminated;reason=timeout
 const SIPFRAG_CT: &str = "message/sipfrag;version=2.0";
 
 /// A refer-event NOTIFY toward the referrer carrying `code reason` as a sipfrag
-/// status line — or nothing once the subscription has ended
-/// (`subscription_terminated`, RFC 6665 §4.4.1).
+/// status line. The core sends none once the subscription is terminated (RFC
+/// 6665 §4.2.2): after a terminating NOTIFY, or a final or timeout that ended
+/// it.
 pub(super) fn notify(
     st: &TransferState,
     subscription_state: &str,
     code: u16,
     reason: &str,
-) -> Option<RuleAction> {
-    if st.subscription_terminated {
-        return None;
-    }
-    Some(RuleAction::SendNotify {
+) -> RuleAction {
+    RuleAction::SendNotify {
         leg_id: st.referrer_leg_id.clone(),
         event: "refer".to_string(),
         subscription_state: subscription_state.to_string(),
         content_type: Some(SIPFRAG_CT.to_string()),
         body: sipfrag_from_status(code, reason),
-    })
+    }
 }

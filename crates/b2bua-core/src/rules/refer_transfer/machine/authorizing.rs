@@ -43,7 +43,7 @@ fn to_bare_uri(refer_to: &str) -> Result<String, relay::UnreadableAddress> {
 fn refuse_transfer(ctx: &RuleContext, field: &str, reason: &str) -> Option<RuleHandleResult> {
     let st = state(ctx)?;
     let mut actions = Vec::new();
-    actions.extend(notify(
+    actions.push(notify(
         st,
         SUB_STATE_TERMINATED_NORESOURCE,
         502,
@@ -109,7 +109,7 @@ pub(super) fn http_reject() -> RuleDefinition {
             let st = state(ctx)?;
             let (code, reason) = reject_code_reason(ctx);
             let mut actions = Vec::new();
-            actions.extend(notify(st, SUB_STATE_TERMINATED_NORESOURCE, code, &reason));
+            actions.push(notify(st, SUB_STATE_TERMINATED_NORESOURCE, code, &reason));
             actions.extend([
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
@@ -245,7 +245,7 @@ pub(super) fn http_timeout() -> RuleDefinition {
         handle: |ctx| {
             let st = state(ctx)?;
             let mut actions = Vec::new();
-            actions.extend(notify(st, SUB_STATE_TERMINATED_TIMEOUT, 500, "Server Internal Error"));
+            actions.push(notify(st, SUB_STATE_TERMINATED_TIMEOUT, 500, "Server Internal Error"));
             actions.extend([
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
                 RuleAction::SetTransfer { state: None },

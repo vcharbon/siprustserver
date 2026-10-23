@@ -10,7 +10,7 @@
 //! |---|---|---|---|
 //! | BYE | ends the dialog; leaves behind the ACK of this stack's 2xx to the dialog's creating INVITE (§15) and behind this stack's NOTIFY in flight | passes | — |
 //! | PRACK | the session | passes | 200 (RFC 3262 §3) |
-//! | NOTIFY | carries a subscription's state; leaves behind this stack's NOTIFY in flight | 200 | 481 |
+//! | NOTIFY | carries a subscription's state; this stack's leaves behind its NOTIFY in flight, and never on a subscription that is terminated (RFC 6665 §4.2.2) | 200 | 481 |
 //! | REFER | opens an implicit subscription (RFC 3515 §2.4.4) | 487 | 481 |
 //! | INFO, MESSAGE, OPTIONS | the session | 200 | 481 |
 //! | UPDATE, SUBSCRIBE, any other | the session | 487 (§21.4.25) | 481 |
@@ -98,12 +98,19 @@ pub fn usage_of(req: &SipRequest) -> DialogUsage {
             id: Some(req.cseq().seq().to_string()),
         },
         Method::Notify => match req.header::<Event>().and_then(Result::ok) {
-            Some(event) => DialogUsage::Subscription {
-                event: event.token().to_ascii_lowercase(),
-                id: event.param("id").and_then(|v| v.as_str()).map(str::to_string),
-            },
+            Some(event) => {
+                let (event, id) = subscription_key(&event);
+                DialogUsage::Subscription { event, id }
+            }
             None => DialogUsage::Session,
         },
         _ => DialogUsage::Session,
     }
+}
+
+/// The subscription an `Event` names (RFC 6665 §4.5): its package,
+/// lower-case, and its `id` parameter.
+pub fn subscription_key(event: &Event) -> (String, Option<String>) {
+    let id = event.param("id").and_then(|v| v.as_str()).map(str::to_string);
+    (event.token().to_ascii_lowercase(), id)
 }

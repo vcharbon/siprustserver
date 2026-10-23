@@ -180,7 +180,6 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                     started_at_ms: ctx.now_ms,
                     last_c_leg_provisional_status: None,
                     c_initial_sdp: None,
-                    subscription_terminated: false,
                 };
 
                 // Build the /call/refer request JSON the interpreter reposts.
@@ -215,7 +214,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                         TimerDelay::secs(ctx.config.refer_overall_safety_sec),
                     ),
                 ];
-                actions.extend(first_notify);
+                actions.push(first_notify);
                 actions.push(RuleAction::ReferAsyncHttp {
                     request: serde_json::Value::Object(request),
                 });
